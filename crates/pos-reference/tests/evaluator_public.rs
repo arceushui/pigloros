@@ -545,6 +545,33 @@ fn evaluator_rejects_empty_archives_and_mismatched_trust_snapshots() -> TestResu
 }
 
 #[test]
+fn evaluator_returns_typed_nonpass_for_an_unsupported_request_version() -> TestResult {
+    let corpus = support::corpus()?;
+    let mut request: ciborium::value::Value = ciborium::from_reader(corpus.request.as_slice())?;
+    let ciborium::value::Value::Array(fields) = &mut request else {
+        return Err("request is not an array".into());
+    };
+    fields[1] = ciborium::value::Value::Integer(2_u64.into());
+    let mut request_bytes = Vec::new();
+    ciborium::into_writer(&request, &mut request_bytes)?;
+    let mut adapter = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+    };
+    assert_eq!(
+        evaluate(
+            &request_bytes,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        ),
+        Err(EvaluatorError::UnsupportedVersion)
+    );
+    Ok(())
+}
+
+#[test]
 fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestResult {
     let corpus = support::air_gapped_corpus()?;
     let mut adapter = RecordingAdapter {

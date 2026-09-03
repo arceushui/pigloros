@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use pos_reference::evaluator::{evaluate, EvaluatorIdentity};
-use pos_reference::evaluator_protocol::{EvaluationRequest, IndependenceEvidence};
+use pos_reference::evaluator_protocol::{EvaluationRequest, IndependenceEvidence, ProtocolError};
 use pos_reference::process_adapter::ProcessAdapter;
 
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -21,6 +21,8 @@ enum CommandError {
     Arguments,
     #[error("an input artifact cannot be read within its bound")]
     Input,
+    #[error("the evaluator protocol version is unsupported")]
+    UnsupportedVersion,
     #[error("the evaluator identity is invalid")]
     Identity,
     #[error("the subject adapter configuration is invalid")]
@@ -69,8 +71,13 @@ fn run() -> Result<(), CommandError> {
     let request_bytes = read_bounded(&options.request, MAX_REQUEST_BYTES)?;
     let archive_bytes = read_bounded(&options.archive, MAX_ARCHIVE_BYTES)?;
     let trust_policy_bytes = read_bounded(&options.trust_policy, MAX_TRUST_POLICY_BYTES)?;
-    let request =
-        EvaluationRequest::from_canonical_cbor(&request_bytes).map_err(|_| CommandError::Input)?;
+    let request = EvaluationRequest::from_canonical_cbor(&request_bytes).map_err(|error| {
+        if error == ProtocolError::UnsupportedVersion {
+            CommandError::UnsupportedVersion
+        } else {
+            CommandError::Input
+        }
+    })?;
     let executable = env::current_exe().map_err(|_| CommandError::Identity)?;
     let binary_digest = digest_bounded(&executable, MAX_EVALUATOR_BINARY_BYTES)?;
     let identity = EvaluatorIdentity {
@@ -99,7 +106,13 @@ fn run() -> Result<(), CommandError> {
         &identity,
         &mut adapter,
     )
-    .map_err(|_| CommandError::Evaluation)?;
+    .map_err(|error| {
+        if error == pos_reference::evaluator::EvaluatorError::UnsupportedVersion {
+            CommandError::UnsupportedVersion
+        } else {
+            CommandError::Evaluation
+        }
+    })?;
     io::stdout()
         .lock()
         .write_all(&artifacts.report_bytes)
