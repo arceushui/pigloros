@@ -5,7 +5,7 @@ use super::{
     acknowledgement_inventory_reference, acknowledgements_close_frozen_obligations,
     derived_outcome_owners_for_obligations, erasure_evidence_set_reference,
     inventories_match_frozen_obligations, reference_zero, selected_obligations_reference,
-    sort_inventories, weakest_inventory_claim, BTreeMap, BTreeSet, ErasureAcknowledgementOutcomeV1,
+    sort_inventories, BTreeMap, BTreeSet, ErasureAcknowledgementOutcomeV1,
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionV1, ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1,
     ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureAuthorizationDecisionV1,
@@ -518,7 +518,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         input.pending_owners = record.state.pending_owners().to_vec();
         input.failed_owners = record.state.failed_owners().to_vec();
         sort_inventories(&mut input.inventories);
-        input.replay_claim = weakest_inventory_claim(&input.inventories);
         input.policy = policy;
         input.trust = trust;
         input.provenance = provenance;
@@ -528,9 +527,13 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
 
     /// Admit and atomically persist one destruction attempt.
     ///
+    /// The durable outbox is committed before host delivery. If delivery is
+    /// rejected, the committed active attempt remains available for an exact
+    /// retry.
+    ///
     /// # Errors
     ///
-    /// Returns a closed lifecycle, quota, dispatch, or CAS error.
+    /// Returns a closed admission, persistence, or host-delivery error.
     pub fn dispatch_attempt(
         &mut self,
         request: ErasureReferenceV1,
@@ -542,6 +545,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .as_ref()
             .is_some_and(|active| active.admission == *admission)
         {
+            let commands = Self::commands_for_admission(&record, admission)?;
+            self.port.dispatch_destruction(request, &commands)?;
             return Ok(record.state);
         }
         if record.active.is_some() {
@@ -597,7 +602,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             Vec::new(),
             ErasureCasEffectV1::AttemptAdmission {
                 reservation,
-                commands,
+                commands: commands.clone(),
             },
         )?;
         let next_digest = prepared.next_manifest().digest();
@@ -605,13 +610,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         record.manifest_digest = next_digest;
         let state = record.state.clone();
         self.cache(record);
+        self.port.dispatch_destruction(request, &commands)?;
         Ok(state)
     }
     /// Dispatch destruction through the stable coordinator operation.
     ///
     /// # Errors
     ///
-    /// Returns a closed attempt-admission or CAS error.
+    /// Returns a closed admission, persistence, or host-delivery error.
     pub fn dispatch_destruction(
         &mut self,
         request: ErasureReferenceV1,
@@ -800,7 +806,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             } else {
                 Vec::new()
             },
-            replay_claim: weakest_inventory_claim(&input.inventories),
+            replay_claim: input.replay_claim,
             provenance: outcome.reference(),
         })?;
         let receipt_provenance =
@@ -854,7 +860,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         input.pending_owners = record.state.pending_owners().to_vec();
         input.failed_owners = record.state.failed_owners().to_vec();
         sort_inventories(&mut input.inventories);
-        input.replay_claim = weakest_inventory_claim(&input.inventories);
         input.policy = terminal.admission.policy();
         input.trust = terminal.admission.trust();
         input.provenance = terminal.receipt_provenance.reference();

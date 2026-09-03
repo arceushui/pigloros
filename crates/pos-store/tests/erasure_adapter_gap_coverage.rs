@@ -204,7 +204,7 @@ fn receipt_input(target: ErasureRequiredTargetV1, issue_position: u64) -> Erasur
             replicas: Vec::new(),
             backups: Vec::new(),
         },
-        replay_claim: ErasureReplayClaimV1::Exact,
+        replay_claim: ErasureReplayClaimV1::StructuralOnly,
         policy: reference(0),
         trust: reference(0),
         provenance: reference(0),

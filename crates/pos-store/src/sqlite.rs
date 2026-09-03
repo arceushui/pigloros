@@ -4510,10 +4510,16 @@ fn apply_sqlite_erasure_cas(
         )
         .optional()
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-    let current_digest = current
+    let current_manifest = current
         .as_ref()
-        .map(|(digest, _)| reference_from_sql(digest.clone()))
+        .map(|(digest, bytes)| {
+            reference_from_sql(digest.clone())
+                .and_then(|digest| StoredErasureManifestV1::new(digest, bytes.clone()))
+        })
         .transpose()?;
+    let current_digest = current_manifest
+        .as_ref()
+        .map(StoredErasureManifestV1::digest);
     if current_digest == Some(mutation.next_manifest().digest())
         && current
             .as_ref()

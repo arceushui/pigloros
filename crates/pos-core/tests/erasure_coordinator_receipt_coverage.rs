@@ -421,7 +421,7 @@ fn complete_receipt_input(
                 replicas: vec![entries[2]],
                 backups: vec![entries[3]],
             },
-            replay_claim: ErasureReplayClaimV1::Exact,
+            replay_claim: ErasureReplayClaimV1::IncompatibleProfile,
             policy: reference(4),
             trust: reference(5),
             provenance: reference(103),
@@ -589,7 +589,7 @@ fn coordinator_receipt_input(
             replicas: Vec::new(),
             backups: Vec::new(),
         },
-        replay_claim: ErasureReplayClaimV1::Exact,
+        replay_claim: ErasureReplayClaimV1::StructuralOnly,
         policy: reference(0),
         trust: reference(0),
         provenance: reference(0),
@@ -1364,6 +1364,51 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
     assert_eq!(api.finalize(request.reference(), terminal_input)?, receipt);
 
     verify_rejection_path(&request)
+}
+
+#[test]
+fn coordinator_retries_delivery_after_durable_dispatch_commit() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let request = coordinator_request()?;
+    let port = coordinator_port(vec![target], None).with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::DispatchDestruction,
+        occurrence: 0,
+    });
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    submit_authorize_and_freeze(&mut coordinator, &request)?;
+    let admission = coordinator_admission(request.reference(), target, 0, None)?;
+
+    assert_eq!(
+        coordinator.dispatch_attempt(request.reference(), &admission),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    assert_eq!(adapter.dispatch_call_count(), 1);
+    let manifest_digest = adapter
+        .current_manifest(request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    assert_eq!(
+        adapter.effect_manifest(admission.reference())?,
+        Some(manifest_digest)
+    );
+    assert_eq!(
+        coordinator
+            .existing(request.reference())
+            .map(ErasureStateV1::lifecycle),
+        Some(ErasureLifecycleV1::AwaitingAcknowledgements)
+    );
+
+    let retried = coordinator.dispatch_attempt(request.reference(), &admission)?;
+    assert_eq!(
+        retried,
+        coordinator
+            .existing(request.reference())
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+    );
+    assert_eq!(adapter.dispatch_call_count(), 2);
+    Ok(())
 }
 
 #[test]
@@ -2262,6 +2307,7 @@ fn coordinator_propagates_every_host_dependency_fault() -> Result<(), ErasureErr
         PublicCoordinatorOperation::AdmitAuthorization,
         PublicCoordinatorOperation::AdmitAtomicFreeze,
         PublicCoordinatorOperation::AdmitAttempt,
+        PublicCoordinatorOperation::DispatchDestruction,
         PublicCoordinatorOperation::AdmitAcknowledgement,
         PublicCoordinatorOperation::AdmitReceipt,
         PublicCoordinatorOperation::AdmitScopeExtension,
@@ -3642,7 +3688,7 @@ fn partial_receipt_closes_pending_owner_contract() -> Result<(), ErasureErrorV1>
             replicas: Vec::new(),
             backups: Vec::new(),
         },
-        replay_claim: ErasureReplayClaimV1::Exact,
+        replay_claim: ErasureReplayClaimV1::StructuralOnly,
         policy: reference(4),
         trust: reference(5),
         provenance: reference(203),
@@ -3696,7 +3742,7 @@ fn negative_receipt_closes_failed_owner_contract() -> Result<(), ErasureErrorV1>
             replicas: Vec::new(),
             backups: Vec::new(),
         },
-        replay_claim: ErasureReplayClaimV1::Exact,
+        replay_claim: ErasureReplayClaimV1::UnverifiableArtifactsMissing,
         policy: reference(4),
         trust: reference(5),
         provenance: reference(223),

@@ -274,7 +274,7 @@ pub enum ErasureLifecycleV1 {
     Authorized,
     /// Future access frozen at a Tick Boundary.
     AccessFrozen,
-    /// Idempotent destruction commands dispatched.
+    /// Durable idempotent destruction intent committed for dispatch.
     DestructionDispatched,
     /// Owner acknowledgements pending.
     AwaitingAcknowledgements,
@@ -2865,7 +2865,7 @@ pub struct ErasureStateTransitionV1 {
     /// This evidence is consumed by the core coordinator; it is not caller
     /// permission to skip host dispatch or durable commit.
     pub acknowledged_targets: Vec<ErasureRequiredTargetV1>,
-    /// Evidence-derived replay claim.
+    /// Replay claim supplied by the artifact-disposition boundary.
     pub replay_claim: ErasureReplayClaimV1,
     /// Transition provenance digest.
     pub provenance: ErasureReferenceV1,
@@ -2919,11 +2919,11 @@ pub enum ErasureAcknowledgementOutcomeV1 {
 /// Structural evidence used to construct an ERC1 terminal receipt.
 ///
 /// Request identity, terminal state, lifecycle, freeze position, target and
-/// acknowledgement closures, owner sets, replay claim, and the receipt digest
-/// are descriptive at this boundary. The coordinator replaces them with the
-/// durable ERS1-derived values before host admission. Caller-owned inventories,
-/// policy, trust, provenance, issue position, and signature remain part of the
-/// admitted retry identity.
+/// acknowledgement closures, and the receipt digest are descriptive at this
+/// boundary. The coordinator replaces them with the durable ERS1-derived
+/// values before host admission. The artifact-disposition boundary supplies
+/// the replay claim; caller-owned inventories, policy, trust, provenance, issue
+/// position, and signature remain part of the admitted retry identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureReceiptInputV1 {
     /// Request and terminal state.
@@ -2946,7 +2946,7 @@ pub struct ErasureReceiptInputV1 {
     pub failed_owners: Vec<ErasureReferenceV1>,
     /// Ordered, payload-free artifact/key/replica/backup evidence.
     pub inventories: ErasureReceiptInventoriesV1,
-    /// Replay claim and policy/trust/provenance evidence.
+    /// Artifact-disposition replay claim and policy/trust/provenance evidence.
     pub replay_claim: ErasureReplayClaimV1,
     /// Policy version digest.
     pub policy: ErasureReferenceV1,
@@ -3566,11 +3566,16 @@ pub trait ErasureCoordinator {
         request: ErasureReferenceV1,
         transition: ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1>;
-    /// Dispatch idempotent destruction work.
+    /// Admit, durably enqueue, and deliver idempotent destruction work.
+    ///
+    /// The coordinator commits the durable outbox intent before asking the host
+    /// to deliver it. A delivery failure therefore leaves the active attempt
+    /// retryable; the host must accept the exact commands idempotently.
     ///
     /// # Errors
     ///
-    /// Returns a closed error if dispatch cannot advance ERS1.
+    /// Returns a closed error if admission, persistence, or host delivery
+    /// fails. A delivery failure leaves the active attempt retryable.
     fn dispatch_destruction(
         &mut self,
         request: ErasureReferenceV1,
@@ -3692,13 +3697,16 @@ pub trait ErasureCoordinatorPortV1:
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1>;
-    /// Dispatch idempotent destruction commands for a frozen closure.
+    /// Deliver idempotent destruction commands for a durable outbox intent.
     ///
-    /// The host must retain one durable intent per admitted obligation. Stable
-    /// command identities may repeat when distinct category-scoped owners act
-    /// on the same target; deduplication uses `(attempt, obligation)` rather
-    /// than command identity alone. The core state machine never advances to
-    /// `DestructionDispatched` unless this call succeeds.
+    /// The coordinator commits one durable outbox intent per admitted
+    /// obligation before calling this method. `DestructionDispatched` records
+    /// that durable intent; it does not claim that external work has
+    /// completed. Stable command identities may repeat when distinct
+    /// category-scoped owners act on the same target; deduplication uses
+    /// `(attempt, obligation)` rather than command identity alone. If delivery
+    /// is rejected, the active attempt remains retryable and an exact retry
+    /// calls this method again.
     ///
     /// # Errors
     ///
@@ -4012,7 +4020,7 @@ use evidence::{
     request_from_fields, request_value, retry_admission_from_fields, retry_admission_value,
     scope_commitment_from_fields, scope_commitment_value, scope_extension_from_fields,
     scope_extension_value, sort_inventories, state_core_value, state_from_fields, state_value,
-    strictly_increasing, weakest_inventory_claim,
+    strictly_increasing,
 };
 
 #[cfg(test)]

@@ -1209,21 +1209,6 @@ pub(super) fn inventory_transitions_preserve_or_weaken(
             .preserves_or_weakens(entry.transition.to)
     })
 }
-pub(super) fn weakest_inventory_claim(
-    inventories: &ErasureReceiptInventoriesV1,
-) -> ErasureReplayClaimV1 {
-    [
-        &inventories.artifacts,
-        &inventories.keys,
-        &inventories.replicas,
-        &inventories.backups,
-    ]
-    .into_iter()
-    .flatten()
-    .map(|entry| entry.transition.to)
-    .max_by_key(|claim| claim.rank())
-    .unwrap_or(ErasureReplayClaimV1::UnverifiableArtifactsMissing)
-}
 pub(super) fn inventories_are_within_closure(
     frozen_targets: &[ErasureRequiredTargetV1],
     inventories: &ErasureReceiptInventoriesV1,

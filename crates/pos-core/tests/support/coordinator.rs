@@ -66,6 +66,7 @@ pub enum PublicCoordinatorOperation {
     AdmitCorrectedSubmission,
     AdmitAtomicFreeze,
     AdmitAttempt,
+    DispatchDestruction,
     AdmitAcknowledgement,
     AdmitReceipt,
     AdmitScopeExtension,
@@ -87,7 +88,7 @@ struct RawStorage {
     attempts: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     scopes: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
-    effects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
 }
 
@@ -223,6 +224,7 @@ pub struct PublicCoordinatorPort {
     storage: Rc<RefCell<RawStorage>>,
     last_mutation: Rc<RefCell<Option<pos_core::PreparedErasureCasV1>>>,
     attempt_admissions: Rc<RefCell<u64>>,
+    dispatch_calls: Rc<RefCell<u64>>,
     operation_fault_hits: Rc<Cell<u64>>,
     config: PublicCoordinatorPortConfig,
 }
@@ -234,6 +236,7 @@ impl PublicCoordinatorPort {
             storage: Rc::new(RefCell::new(RawStorage::default())),
             last_mutation: Rc::new(RefCell::new(None)),
             attempt_admissions: Rc::new(RefCell::new(0)),
+            dispatch_calls: Rc::new(RefCell::new(0)),
             operation_fault_hits: Rc::new(Cell::new(0)),
             config,
         }
@@ -301,13 +304,22 @@ impl PublicCoordinatorPort {
             .borrow()
             .effects
             .get(&manifest)
-            .and_then(|bytes| pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes).ok())
+            .and_then(|(digest, bytes)| {
+                pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes)
+                    .ok()
+                    .filter(|effect| effect.identity() == *digest)
+            })
             .map(|effect| effect.identity())
     }
 
     #[must_use]
     pub fn attempt_admission_count(&self) -> u64 {
         *self.attempt_admissions.borrow()
+    }
+
+    #[must_use]
+    pub fn dispatch_call_count(&self) -> u64 {
+        *self.dispatch_calls.borrow()
     }
 
     pub fn remove_effect_for_subject(&self, subject: ErasureReferenceV1) {
@@ -332,9 +344,10 @@ impl PublicCoordinatorPort {
             .effect_subjects
             .get(&subject)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let bytes = replacement.to_canonical_cbor()?;
         storage
             .effects
-            .insert(manifest, replacement.to_canonical_cbor()?);
+            .insert(manifest, (replacement.identity(), bytes));
         Ok(())
     }
 
@@ -809,7 +822,13 @@ impl PublicCoordinatorPort {
             .effects
             .get(&mutation.next_manifest().digest())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .and_then(|bytes| pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes))?;
+            .and_then(|(digest, bytes)| {
+                pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes).and_then(|effect| {
+                    (effect.identity() == *digest)
+                        .then_some(effect)
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                })
+            })?;
         if &effect != mutation.effect()
             || mutation.effect().subject().is_some_and(|subject| {
                 storage.effect_subjects.get(&subject) != Some(&mutation.next_manifest().digest())
@@ -831,6 +850,25 @@ fn insert_exact(
         Some(_) => Ok(()),
         None => {
             map.insert(reference, bytes.to_vec());
+            Ok(())
+        }
+    }
+}
+
+fn insert_effect_exact(
+    map: &mut BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
+    manifest: ErasureReferenceV1,
+    effect: &pos_core::ErasureCasEffectV1,
+    bytes: &[u8],
+) -> Result<(), ErasureErrorV1> {
+    match map.get(&manifest) {
+        Some((digest, _)) if *digest != effect.identity() => Err(ErasureErrorV1::ProvenanceMissing),
+        Some((_, existing)) if existing.as_slice() != bytes => {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+        Some(_) => Ok(()),
+        None => {
+            map.insert(manifest, (effect.identity(), bytes.to_vec()));
             Ok(())
         }
     }
@@ -914,7 +952,13 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             .effects
             .get(&manifest)
             .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .and_then(|bytes| pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes))
+            .and_then(|(digest, bytes)| {
+                pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes).and_then(|effect| {
+                    (effect.identity() == *digest)
+                        .then_some(effect)
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                })
+            })
     }
 
     fn effect_manifest(
@@ -997,6 +1041,14 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         let request = mutation.request();
         let next = mutation.next_manifest();
         let mut storage = self.storage.borrow_mut();
+        let current_digest = storage
+            .manifests
+            .get(&mutation.request())
+            .map(|(digest, bytes)| {
+                pos_core::StoredErasureManifestV1::new(*digest, bytes.clone())
+                    .map(|stored| stored.digest())
+            })
+            .transpose()?;
         if storage
             .manifests
             .get(&request)
@@ -1007,9 +1059,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             Self::verify_delta_exists(&storage, &mutation)?;
             return Ok(ErasureCasOutcomeV1::ExactRetry);
         }
-        if storage.manifests.get(&request).map(|value| value.0)
-            != mutation.expected_manifest_digest()
-        {
+        if current_digest != mutation.expected_manifest_digest() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
 
@@ -1062,10 +1112,12 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         staged
             .manifests
             .insert(request, (next.digest(), next.canonical_cbor().to_vec()));
-        insert_exact(
+        let effect_bytes = mutation.effect().to_canonical_cbor()?;
+        insert_effect_exact(
             &mut staged.effects,
             next.digest(),
-            &mutation.effect().to_canonical_cbor()?,
+            mutation.effect(),
+            &effect_bytes,
         )?;
         if let Some(subject) = mutation.effect().subject() {
             match staged.effect_subjects.get(&subject) {
@@ -1227,7 +1279,8 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
         _request: ErasureReferenceV1,
         _commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        *self.dispatch_calls.borrow_mut() += 1;
+        self.maybe_fail(PublicCoordinatorOperation::DispatchDestruction)
     }
 
     fn admit_attempt(

@@ -161,7 +161,7 @@ pub struct MemoryStore {
     erasure_attempt_pages: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_scope_nodes: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_administrative_resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
-    erasure_effects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    erasure_effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     erasure_effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
@@ -1190,7 +1190,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
         self.erasure_effects
             .get(&manifest)
             .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .and_then(|bytes| pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes))
+            .and_then(decode_memory_effect)
     }
     fn effect_manifest(
         &self,
@@ -1240,6 +1240,13 @@ impl ErasurePersistencePortV1 for MemoryStore {
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         let request = mutation.request();
         let next = mutation.next_manifest();
+        let current_digest = self
+            .erasure_records
+            .get(&request)
+            .map(|(digest, bytes)| {
+                StoredErasureManifestV1::new(*digest, bytes.clone()).map(|stored| stored.digest())
+            })
+            .transpose()?;
         if self
             .erasure_records
             .get(&request)
@@ -1251,9 +1258,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
                 .then_some(ErasureCasOutcomeV1::ExactRetry)
                 .ok_or(ErasureErrorV1::PolicyConflict);
         }
-        if self.erasure_records.get(&request).map(|value| value.0)
-            != mutation.expected_manifest_digest()
-        {
+        if current_digest != mutation.expected_manifest_digest() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let mut evidence = self.erasure_evidence.clone();
@@ -1292,7 +1297,12 @@ impl ErasurePersistencePortV1 for MemoryStore {
             insert_index(map, request, ordinal, reference)?;
         }
         let effect_bytes = mutation.effect().to_canonical_cbor()?;
-        insert_exact(&mut effects, next.digest(), &effect_bytes)?;
+        insert_effect_exact(
+            &mut effects,
+            next.digest(),
+            mutation.effect(),
+            &effect_bytes,
+        )?;
         if let Some(subject) = mutation.effect().subject() {
             match effect_subjects.get(&subject) {
                 Some(existing) if *existing != next.digest() => {
@@ -1348,13 +1358,21 @@ fn memory_mutation_is_exact(store: &MemoryStore, mutation: &PreparedErasureCasV1
     }) && store
         .erasure_effects
         .get(&mutation.next_manifest().digest())
-        .is_some_and(|bytes| {
-            pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes).as_ref()
-                == Ok(mutation.effect())
-        })
+        .and_then(|stored| decode_memory_effect(stored).ok())
+        .as_ref()
+        == Some(mutation.effect())
         && mutation.effect().subject().is_none_or(|subject| {
             store.erasure_effect_subjects.get(&subject) == Some(&mutation.next_manifest().digest())
         })
+}
+
+fn decode_memory_effect(
+    (digest, bytes): &(ErasureReferenceV1, Vec<u8>),
+) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+    let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes)?;
+    (effect.identity() == *digest)
+        .then_some(effect)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
 
 fn insert_exact(
@@ -1367,6 +1385,26 @@ fn insert_exact(
         Some(_) => Ok(()),
         None => {
             map.insert(reference, bytes.to_vec());
+            Ok(())
+        }
+    }
+}
+
+fn insert_effect_exact(
+    map: &mut BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
+    manifest: ErasureReferenceV1,
+    effect: &pos_core::ErasureCasEffectV1,
+    bytes: &[u8],
+) -> Result<(), ErasureErrorV1> {
+    match map.get(&manifest) {
+        Some(existing) => {
+            let stored = decode_memory_effect(existing)?;
+            (stored == *effect && existing.1.as_slice() == bytes)
+                .then_some(())
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+        }
+        None => {
+            map.insert(manifest, (effect.identity(), bytes.to_vec()));
             Ok(())
         }
     }
@@ -5186,6 +5224,18 @@ mod tests {
             .test_err();
         assert!(error.to_string().contains("changed during signing"));
         assert!(!callback_called);
+    }
+
+    #[test]
+    fn memory_effect_read_rejects_a_mismatched_stored_digest() {
+        let mut store = MemoryStore::new();
+        let manifest = ErasureReferenceV1::from_digest([1; 32]);
+        let effect = pos_core::ErasureCasEffectV1::None;
+        let bytes = effect.to_canonical_cbor().test_ok();
+        store
+            .erasure_effects
+            .insert(manifest, (ErasureReferenceV1::from_digest([2; 32]), bytes));
+        expect_err(store.read_effect(manifest));
     }
 
     #[test]

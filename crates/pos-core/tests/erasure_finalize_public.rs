@@ -173,7 +173,7 @@ fn public_lifecycle_persists_raw_manifest_objects_and_attempt_index() -> Result<
                 replicas: Vec::new(),
                 backups: Vec::new(),
             },
-            replay_claim: ErasureReplayClaimV1::Exact,
+            replay_claim: ErasureReplayClaimV1::StructuralOnly,
             policy: reference(0),
             trust: reference(0),
             provenance: reference(0),

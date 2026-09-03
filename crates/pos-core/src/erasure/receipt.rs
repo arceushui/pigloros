@@ -5,10 +5,10 @@ use super::{
     inventories_exceed_bound, inventories_have_duplicate_targets, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, receipt_core_value, receipt_from_fields,
     receipt_value, reference_zero, sort_inventories, state_core_value, state_from_fields,
-    state_value, verify_predecessor_chain, weakest_inventory_claim, BTreeMap, BTreeSet,
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureErrorV1, ErasureLifecycleV1,
-    ErasureObligationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureStateResolverV1,
+    state_value, verify_predecessor_chain, BTreeMap, BTreeSet, ErasureAcknowledgementOutcomeV1,
+    ErasureAcknowledgementV1, ErasureErrorV1, ErasureLifecycleV1, ErasureObligationV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, Ordering, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
     ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_RECEIPT_MAX_BYTES,
     ERASURE_RECEIPT_TAG_V1, ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERS1,
@@ -69,7 +69,7 @@ impl ErasureStateV1 {
     pub const fn freeze_position(&self) -> Option<u64> {
         self.freeze_position
     }
-    /// Return the evidence-derived replay claim.
+    /// Return the replay claim supplied by the artifact-disposition boundary.
     #[must_use]
     pub const fn replay_claim(&self) -> ErasureReplayClaimV1 {
         self.replay_claim
@@ -309,7 +309,7 @@ impl ErasureReceiptV1 {
     pub const fn lifecycle(&self) -> ErasureLifecycleV1 {
         self.0.lifecycle
     }
-    /// Return the weakest claim derived from the recorded inventory evidence.
+    /// Return the claim supplied by the artifact-disposition boundary.
     #[must_use]
     pub const fn replay_claim(&self) -> ErasureReplayClaimV1 {
         self.0.replay_claim
@@ -402,9 +402,6 @@ impl ErasureReceiptV1 {
         if !inventories_are_within_closure(&input.frozen_targets, &input.inventories) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        // The caller's claim is descriptive input only.  ERC1 records the
-        // weakest claim disclosed by the per-artifact transitions.
-        input.replay_claim = weakest_inventory_claim(&input.inventories);
         let complete =
             acknowledgements_cover_inventory_entries(&input.inventories, &input.acknowledgements)
                 && input
