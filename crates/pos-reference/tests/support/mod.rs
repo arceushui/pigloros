@@ -581,11 +581,26 @@ fn mutate_support_members(
         );
     }
     if let Some(ProfileMutation::MatrixBoundary(index)) = mutation {
-        mutate_execution_matrix(members, index)?;
+        match index {
+            45 => replace_matrix_bytes(members, b"{".to_vec())?,
+            46 => replace_matrix_bytes(members, b"[]".to_vec())?,
+            _ => mutate_execution_matrix(members, index)?,
+        }
     }
     if matches!(mutation, Some(ProfileMutation::MatrixExecutedCase)) {
         mutate_execution_matrix(members, u8::MAX)?;
     }
+    Ok(())
+}
+
+fn replace_matrix_bytes(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    replacement: Vec<u8>,
+) -> TestResult<()> {
+    let (bytes, _) = members
+        .get_mut("authority/execution-matrix.json")
+        .ok_or_else(|| io::Error::other("execution matrix member missing"))?;
+    *bytes = replacement;
     Ok(())
 }
 
@@ -635,6 +650,18 @@ fn mutate_matrix_root(
         32..=42 => mutate_matrix_case(root, index - 32)?,
         43 => set_json(root, "executed_case_count", serde_json::json!(1)),
         44 => set_nested_json(root, "rows", 0, "executed_case_count", serde_json::json!(1))?,
+        47 => set_json(root, "lifecycle", serde_json::Value::Null),
+        48 => set_json(root, "row_count", serde_json::json!("12")),
+        49 => set_json(root, "variant_count", serde_json::json!("4")),
+        50 => set_json(root, "mode_count", serde_json::json!("4")),
+        51 => set_json(root, "case_count", serde_json::json!("192")),
+        52 => set_json(root, "matrix_id", serde_json::Value::Null),
+        53 => set_json(root, "source", serde_json::Value::Null),
+        54 => set_json(root, "expected_result_policy", serde_json::Value::Null),
+        55 => set_json(root, "executed_case_count", serde_json::Value::Null),
+        56..=65 => mutate_matrix_row(root, index - 48)?,
+        66..=72 => mutate_matrix_predicate(root, index - 62)?,
+        73..=84 => mutate_matrix_case(root, index - 62)?,
         u8::MAX => make_first_matrix_case_executed(root)?,
         _ => return Err(io::Error::other("unknown execution matrix mutation").into()),
     }
@@ -660,6 +687,34 @@ fn mutate_matrix_row(
             "observable_surfaces",
             serde_json::json!([]),
         )?,
+        8 => set_nested_json(root, "rows", 0, "fixture_id", serde_json::Value::Null)?,
+        9 => set_nested_json(root, "rows", 0, "variants", serde_json::Value::Null)?,
+        10 => set_nested_json(root, "rows", 0, "modes", serde_json::Value::Null)?,
+        11 => set_nested_json(root, "rows", 0, "case_count", serde_json::json!("16"))?,
+        12 => set_nested_json(root, "rows", 0, "classification", serde_json::json!(""))?,
+        13 => set_nested_json(root, "rows", 0, "equality", serde_json::json!(""))?,
+        14 => set_nested_json(
+            root,
+            "rows",
+            0,
+            "sole_unauthorized_delta",
+            serde_json::json!(""),
+        )?,
+        15 => set_nested_json(
+            root,
+            "rows",
+            0,
+            "observable_surfaces",
+            serde_json::Value::Null,
+        )?,
+        16 => set_nested_json(
+            root,
+            "rows",
+            0,
+            "executed_case_count",
+            serde_json::json!("0"),
+        )?,
+        17 => set_nested_json(root, "rows", 0, "extra", serde_json::json!(true))?,
         _ => return Err(io::Error::other("unknown matrix row mutation").into()),
     }
     Ok(())
@@ -685,6 +740,55 @@ fn mutate_matrix_predicate(
             0,
             "AuthEq",
             serde_json::json!(""),
+        )?,
+        4 => set_nested_json(
+            root,
+            "equality_predicates",
+            0,
+            "fixture_id",
+            serde_json::Value::Null,
+        )?,
+        5 => set_nested_json(
+            root,
+            "equality_predicates",
+            0,
+            "AuthEq",
+            serde_json::Value::Null,
+        )?,
+        6 => set_nested_json(
+            root,
+            "equality_predicates",
+            0,
+            "PublicEq",
+            serde_json::json!(""),
+        )?,
+        7 => set_nested_json(
+            root,
+            "equality_predicates",
+            0,
+            "OpEq",
+            serde_json::json!(""),
+        )?,
+        8 => set_nested_json(
+            root,
+            "equality_predicates",
+            0,
+            "PublicEq",
+            serde_json::Value::Null,
+        )?,
+        9 => set_nested_json(
+            root,
+            "equality_predicates",
+            0,
+            "OpEq",
+            serde_json::Value::Null,
+        )?,
+        10 => set_nested_json(
+            root,
+            "equality_predicates",
+            0,
+            "extra",
+            serde_json::json!(true),
         )?,
         _ => return Err(io::Error::other("unknown matrix predicate mutation").into()),
     }
@@ -719,9 +823,46 @@ fn mutate_matrix_case(
         )?,
         9 => set_executed_case(root, serde_json::Value::Null)?,
         10 => set_executed_case(root, serde_json::json!("invalid"))?,
+        11 => set_nested_json(root, "cases", 0, "case_id", serde_json::Value::Null)?,
+        12 => set_nested_json(root, "cases", 0, "fixture_id", serde_json::Value::Null)?,
+        13 => set_nested_json(root, "cases", 0, "variant", serde_json::Value::Null)?,
+        14 => set_nested_json(root, "cases", 0, "mode", serde_json::Value::Null)?,
+        15 => set_nested_json(
+            root,
+            "cases",
+            0,
+            "authority_fixture_id",
+            serde_json::json!("authority-case"),
+        )?,
+        16 => set_nested_json(
+            root,
+            "cases",
+            0,
+            "authority_result_digest",
+            serde_json::json!("0".repeat(64)),
+        )?,
+        17 => set_executed_case_without_result(root)?,
+        18 => set_executed_case(root, serde_json::json!(1))?,
+        19 => set_executed_case(root, serde_json::json!("A".repeat(64)))?,
+        20 => set_nested_json(root, "cases", 0, "extra", serde_json::json!(true))?,
+        21 => drop_nested_json_field(root, "cases", 0, "expected_result")?,
+        22 => drop_nested_json_field(root, "cases", 0, "expected_result_digest")?,
         _ => return Err(io::Error::other("unknown matrix case mutation").into()),
     }
     Ok(())
+}
+
+fn set_executed_case_without_result(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+) -> TestResult<()> {
+    set_nested_json(root, "cases", 0, "executed", serde_json::json!(true))?;
+    set_nested_json(
+        root,
+        "cases",
+        0,
+        "expected_result_digest",
+        serde_json::json!("0".repeat(64)),
+    )
 }
 
 fn set_executed_case(
