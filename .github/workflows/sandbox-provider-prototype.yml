@@ -29,6 +29,9 @@ jobs:
       - name: Run unprivileged typed-interface probe
         working-directory: prototypes/sandbox-provider-feasibility
         run: cargo run --locked
+      - name: Run ephemeral-host privileged lifecycle probe
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: sudo ./target/debug/sandbox-provider-feasibility --privileged
       - name: Record dependency tree
         working-directory: prototypes/sandbox-provider-feasibility
         run: cargo tree --locked | tee dependency-tree.txt
