@@ -2955,7 +2955,7 @@ impl ErasureVerifiedStateV1 {
     }
 
     /// Return the admitted future-Fork identities in extension order.
-    #[must_use]
+    #[must_use = "iterate over the verified future-Fork identities"]
     pub fn scope_forks(&self) -> impl Iterator<Item = ErasureReferenceV1> + '_ {
         self.scope_extensions
             .iter()
