@@ -984,10 +984,7 @@ fn insert_profile_member(
         Some(ProfileMutation::ArtifactShape(0)) => canonical(&Value::Null)?,
         _ => canonical(&array(profile_fields))?,
     };
-    members.insert(
-        "profile/CPF1.cbor".to_owned(),
-        (profile_bytes, 2),
-    );
+    members.insert("profile/CPF1.cbor".to_owned(), (profile_bytes, 2));
     if let Some(ProfileMutation::MemberClosureBoundary(index)) = mutation {
         mutate_member_closure(members, index);
     }
@@ -1328,10 +1325,7 @@ fn add_provider_contracts(
         Some(ProfileMutation::ArtifactShape(3)) => canonical(&Value::Null)?,
         _ => canonical(&array(package_fields))?,
     };
-    members.insert(
-        package_path.to_owned(),
-        (package_bytes, 13),
-    );
+    members.insert(package_path.to_owned(), (package_bytes, 13));
 
     add_provider_registry(
         members,
