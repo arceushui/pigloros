@@ -9,7 +9,7 @@ use crate::evaluator_protocol::{
     array, array_values, bool_value, contract_digest, decode_canonical, encode, fixed_bytes, text,
     uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
-use crate::signed_bundle::{VerifiedBundle, VerifiedMember};
+use crate::signed_bundle::{ExpectedResultKey, VerifiedBundle, VerifiedMember};
 
 const MAX_FIXTURES: usize = 65_536;
 const MAX_AUXILIARY: usize = 64;
@@ -461,27 +461,29 @@ fn validate_release_admissions(
 ) -> Result<(), ProfileError> {
     let selected = fixtures
         .iter()
-        .filter(|fixture| fixture.family == 5 && fixture.modes.contains(&bundle.mode))
-        .map(|fixture| {
+        .filter(|fixture| fixture.modes.contains(&bundle.mode))
+        .filter_map(|fixture| {
             fixture
                 .release_admission
                 .as_ref()
                 .map(|binding| (fixture, binding))
-                .ok_or(ProfileError::ClosureIncomplete)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
     let expected = selected
         .iter()
         .map(|(_, binding)| binding.release_admission_digest)
         .collect::<BTreeSet<_>>();
-    let actual = bundle
+    let actual_members = bundle
         .members
         .values()
         .filter(|member| member.role == 16)
+        .collect::<Vec<_>>();
+    let actual = actual_members
+        .iter()
         .map(|member| (member.digest, member))
         .collect::<BTreeMap<_, _>>();
     if expected.len() != selected.len()
-        || actual.len() != selected.len()
+        || actual_members.len() != selected.len()
         || actual.keys().copied().collect::<BTreeSet<_>>() != expected
     {
         return Err(ProfileError::ClosureIncomplete);
@@ -553,7 +555,7 @@ fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture
     let fixture_digest = validate_fixture_digest(fields)?;
     let header = decode_fixture_header(fields)?;
     let evidence = decode_fixture_evidence(fields)?;
-    let policy = decode_fixture_policy(fields, hard_caps)?;
+    let policy = decode_fixture_policy(fields, header.family, hard_caps)?;
     let fixture = Fixture {
         case_id: header.case_id,
         mandatory: header.mandatory,
@@ -653,6 +655,7 @@ fn decode_fixture_evidence(fields: &[Value]) -> Result<FixtureEvidence, ProfileE
 
 fn decode_fixture_policy(
     fields: &[Value],
+    family: u8,
     hard_caps: EvaluatorHardCaps,
 ) -> Result<FixturePolicy, ProfileError> {
     let deterministic_budget = DeterministicBudget::from_value(&fields[16])?;
@@ -663,19 +666,21 @@ fn decode_fixture_policy(
     if capability_ids.len() > MAX_CAPABILITIES {
         return Err(ProfileError::FieldOutOfBounds);
     }
-    let release_admission = match (
+    let release_fields = (
         optional_digest(&fields[19])?,
         optional_digest(&fields[20])?,
         optional_transition(&fields[22])?,
-    ) {
-        (None, None, None) => None,
-        (Some(trust_policy_snapshot_digest), Some(release_admission_digest), Some(transition)) => {
-            Some(ReleaseAdmissionBinding {
-                trust_policy_snapshot_digest,
-                release_admission_digest,
-                transition,
-            })
-        }
+    );
+    let release_admission = match (family, release_fields) {
+        (_, (None, None, None)) if family != 5 => None,
+        (
+            5,
+            (Some(trust_policy_snapshot_digest), Some(release_admission_digest), Some(transition)),
+        ) => Some(ReleaseAdmissionBinding {
+            trust_policy_snapshot_digest,
+            release_admission_digest,
+            transition,
+        }),
         _ => return Err(ProfileError::ClosureIncomplete),
     };
     Ok(FixturePolicy {
@@ -995,11 +1000,7 @@ fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
 
 fn validate_downgrade_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
     if fixture.family != 5 {
-        return if fixture.release_admission.is_none() {
-            Ok(())
-        } else {
-            Err(ProfileError::ClosureIncomplete)
-        };
+        return Ok(());
     }
     let valid = fixture.release_admission.as_ref().is_some_and(|binding| {
         binding.trust_policy_snapshot_digest != [0; 32]
@@ -1069,19 +1070,23 @@ fn validate_selected_caps(
     }
     let mut member_count = 1_u64;
     let mut total_bytes = registry.byte_length;
-    validate_artifact_caps(registry, caps, &mut member_count, &mut total_bytes, false)?;
+    let mut artifacts_within_caps =
+        account_artifact_caps(registry, caps, &mut member_count, &mut total_bytes, false);
     for fixture in fixtures {
         for artifact in [&fixture.schema, &fixture.payload]
             .into_iter()
             .chain(&fixture.auxiliary)
         {
-            validate_artifact_caps(artifact, caps, &mut member_count, &mut total_bytes, true)?;
+            artifacts_within_caps &=
+                account_artifact_caps(artifact, caps, &mut member_count, &mut total_bytes, true);
         }
         if let StrictOracle::Output(output) = &fixture.oracle {
-            validate_artifact_caps(output, caps, &mut member_count, &mut total_bytes, true)?;
+            artifacts_within_caps &=
+                account_artifact_caps(output, caps, &mut member_count, &mut total_bytes, true);
         }
     }
-    if member_count > caps.max_bundle_members
+    if !artifacts_within_caps
+        || member_count > caps.max_bundle_members
         || total_bytes > caps.max_total_bundle_bytes
         || allowed
             .iter()
@@ -1093,13 +1098,13 @@ fn validate_selected_caps(
     }
 }
 
-const fn validate_artifact_caps(
+const fn account_artifact_caps(
     artifact: &ArtifactDescriptor,
     caps: EvaluatorHardCaps,
     member_count: &mut u64,
     total_bytes: &mut u64,
     increment: bool,
-) -> Result<(), ProfileError> {
+) -> bool {
     if increment {
         *member_count = member_count.saturating_add(1);
     }
@@ -1108,13 +1113,8 @@ const fn validate_artifact_caps(
     } else {
         *total_bytes
     };
-    if artifact.member_path.len() as u64 > caps.max_member_path_bytes
-        || artifact.byte_length > caps.max_member_bytes
-    {
-        Err(ProfileError::FieldOutOfBounds)
-    } else {
-        Ok(())
-    }
+    artifact.member_path.len() as u64 <= caps.max_member_path_bytes
+        && artifact.byte_length <= caps.max_member_bytes
 }
 
 fn value_depth(value: &Value) -> usize {
@@ -1770,23 +1770,25 @@ fn validate_expected_results(
     let selected = fixtures
         .iter()
         .filter(|fixture| fixture.modes.contains(&bundle.mode))
-        .count();
-    if bundle.expected_results.len() != selected {
+        .map(|fixture| {
+            (
+                ExpectedResultKey {
+                    case_id: fixture.case_id.clone(),
+                    claim_layer: fixture.claim_layer,
+                    execution_profile_digest: fixture.execution_profile_digest,
+                    mode: bundle.mode,
+                },
+                fixture,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if bundle.expected_results.len() != selected.len()
+        || bundle.expected_results.keys().ne(selected.keys())
+    {
         return Err(ProfileError::ClosureIncomplete);
     }
     for (key, path) in &bundle.expected_results {
-        let fixture = fixtures
-            .iter()
-            .find(|fixture| {
-                fixture.case_id == key.case_id
-                    && fixture.claim_layer == key.claim_layer
-                    && fixture.execution_profile_digest == key.execution_profile_digest
-                    && fixture.modes.contains(&key.mode)
-            })
-            .ok_or(ProfileError::ClosureIncomplete)?;
-        if key.mode != bundle.mode {
-            return Err(ProfileError::ClosureIncomplete);
-        }
+        let fixture = selected[key];
         let member = bundle.member(path).ok_or(ProfileError::ClosureIncomplete)?;
         let member_length = member.bytes.len() as u64;
         let bound = fixture.auxiliary.iter().any(|artifact| {

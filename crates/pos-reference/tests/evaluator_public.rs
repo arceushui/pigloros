@@ -896,7 +896,7 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
 
 #[test]
 fn evaluator_rejects_each_execution_matrix_contract_boundary() -> TestResult {
-    for index in 0..=84 {
+    for index in 0..=85 {
         let corpus = support::corpus_with_profile_mutation(ProfileMutation::MatrixBoundary(index))?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
@@ -1095,7 +1095,7 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
 
 #[test]
 fn evaluator_rejects_deeply_malformed_profile_values() -> TestResult {
-    for mutation in (0..40).map(ProfileMutation::DeepTypeBoundary) {
+    for mutation in (0..41).map(ProfileMutation::DeepTypeBoundary) {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,

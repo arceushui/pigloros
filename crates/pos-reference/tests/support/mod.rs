@@ -684,6 +684,7 @@ fn mutate_matrix_root(
         56..=65 => mutate_matrix_row(root, index - 48)?,
         66..=72 => mutate_matrix_predicate(root, index - 62)?,
         73..=84 => mutate_matrix_case(root, index - 62)?,
+        85 => mutate_matrix_row(root, 18)?,
         u8::MAX => make_first_matrix_case_executed(root)?,
         _ => return Err(io::Error::other("unknown execution matrix mutation").into()),
     }
@@ -737,6 +738,7 @@ fn mutate_matrix_row(
             serde_json::json!("0"),
         )?,
         17 => set_nested_json(root, "rows", 0, "extra", serde_json::json!(true))?,
+        18 => set_nested_json(root, "rows", 0, "classification", serde_json::Value::Null)?,
         _ => return Err(io::Error::other("unknown matrix row mutation").into()),
     }
     Ok(())
@@ -1781,6 +1783,10 @@ fn mutate_deep_profile_field(fields: &mut [Value], mutation: ProfileMutation) ->
             let providers = array_fields_mut(&mut binding[1])?;
             array_fields_mut(&mut providers[0])?[2] = Value::Null;
         }
+        40 => {
+            let binding = array_fields_mut(&mut fields[8])?;
+            array_fields_mut(&mut binding[0])?[1] = text("application/json");
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -1955,7 +1961,7 @@ fn mutate_deep_fixture_field(fields: &mut [Value], mutation: ProfileMutation) ->
         return Ok(false);
     };
     match index {
-        0..=2 | 6 | 7 | 18 | 22..=38 => {}
+        0..=2 | 6 | 7 | 18 | 22..=38 | 40 => {}
         3 => array_fields_mut(&mut fields[7])?[0] = Value::Null,
         4 => fields[19] = Value::Bool(false),
         5 => fields[20] = Value::Bool(false),
