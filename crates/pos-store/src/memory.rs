@@ -1396,17 +1396,14 @@ fn insert_effect_exact(
     effect: &pos_core::ErasureCasEffectV1,
     bytes: &[u8],
 ) -> Result<(), ErasureErrorV1> {
-    match map.get(&manifest) {
-        Some(existing) => {
-            let stored = decode_memory_effect(existing)?;
-            (stored == *effect && existing.1.as_slice() == bytes)
-                .then_some(())
-                .ok_or(ErasureErrorV1::ProvenanceMissing)
-        }
-        None => {
-            map.insert(manifest, (effect.identity(), bytes.to_vec()));
-            Ok(())
-        }
+    if let Some(existing) = map.get(&manifest) {
+        let stored = decode_memory_effect(existing)?;
+        (stored == *effect && existing.1.as_slice() == bytes)
+            .then_some(())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    } else {
+        map.insert(manifest, (effect.identity(), bytes.to_vec()));
+        Ok(())
     }
 }
 
@@ -5235,7 +5232,7 @@ mod tests {
         store
             .erasure_effects
             .insert(manifest, (ErasureReferenceV1::from_digest([2; 32]), bytes));
-        expect_err(store.read_effect(manifest));
+        assert!(store.read_effect(manifest).is_err());
     }
 
     #[test]
