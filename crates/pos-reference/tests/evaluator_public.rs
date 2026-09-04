@@ -13,7 +13,9 @@ use pos_reference::evaluator_protocol::{
 use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
 };
-use pos_reference::signed_bundle::{preflight_signed_bundle, SelectedBundleCaps};
+use pos_reference::signed_bundle::{
+    preflight_signed_bundle, verify_signed_bundle, SelectedBundleCaps,
+};
 use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -1510,6 +1512,23 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         member[0] = Value::Text("../outside".to_owned());
         Ok(())
     })?;
+    let invalid_member_path_request = request_for_archive(&corpus.request, &invalid_member_path)?;
+    assert!(verify_signed_bundle(
+        &invalid_member_path,
+        &corpus.trust_policy,
+        &invalid_member_path_request,
+    )
+    .is_err());
+
+    let mut noncanonical_manifest = corpus.archive.clone();
+    let canonical_prefix = [0x84, 0x86, 0x64, b'C', b'F', b'B', b'1', 0x00];
+    let version_offset = noncanonical_manifest
+        .windows(canonical_prefix.len())
+        .position(|window| window == canonical_prefix)
+        .ok_or("canonical CFB1 prefix is absent")?
+        + canonical_prefix.len()
+        - 1;
+    noncanonical_manifest.splice(version_offset..=version_offset, [0x18, 0x00]);
     let substituted_profile = archive_with(&corpus.archive, |archive| {
         let Value::Array(members) = &mut archive[1] else {
             return Err("archive members are not an array".into());
@@ -1541,6 +1560,7 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         oversized_member,
         long_member_path,
         invalid_member_path,
+        noncanonical_manifest,
         substituted_profile,
     ] {
         let request = request_for_archive(&corpus.request, &archive)?;
