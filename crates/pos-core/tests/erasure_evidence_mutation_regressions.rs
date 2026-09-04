@@ -1,7 +1,7 @@
 //! Evidence codec mutation regressions for the direct V1 records.
 
-#[path = "support/erasure.rs"]
-pub mod erasure_support;
+#[path = "support/erasure_codec.rs"]
+mod erasure_support;
 
 use ciborium::value::Value;
 use erasure_support::{reference, replay_target, request as fixture_request, RequestFixtureInput};

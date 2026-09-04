@@ -557,6 +557,24 @@ impl PublicCoordinatorPort {
         &self,
         request: ErasureReferenceV1,
         lifecycle: pos_core::ErasureLifecycleV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.replace_manifest_with_state_lifecycle_digest(request, lifecycle)
+            .map(|_| ())
+    }
+
+    /// Point the manifest at an earlier valid ERS1 state and return its digest.
+    ///
+    /// This variant lets recovery-integrity tests assert which tampered state
+    /// was retained without changing the public helper's unit-like result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provenance or encoding error when no suitable state
+    /// or manifest exists.
+    pub fn replace_manifest_with_state_lifecycle_digest(
+        &self,
+        request: ErasureReferenceV1,
+        lifecycle: pos_core::ErasureLifecycleV1,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         let mut storage = self.storage.borrow_mut();
         let state = storage

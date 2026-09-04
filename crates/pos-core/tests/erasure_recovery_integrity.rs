@@ -600,7 +600,7 @@ fn public_state_chain_query_requires_the_complete_predecessor_chain() -> Result<
 fn recovery_rejects_manifest_state_rollback_after_a_completed_attempt() -> Result<(), ErasureErrorV1>
 {
     let graph = completed_graph(vec![target(10)], None)?;
-    let changed_state = graph.adapter.replace_manifest_with_state_lifecycle(
+    let changed_state = graph.adapter.replace_manifest_with_state_lifecycle_digest(
         graph.request.reference(),
         ErasureLifecycleV1::AwaitingAcknowledgements,
     )?;
