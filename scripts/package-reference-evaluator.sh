@@ -41,12 +41,14 @@ trap cleanup EXIT
 package_directory=${work_directory}/reference-evaluator
 mkdir -p -- "${package_directory}/bin" "${package_directory}/source"
 
-git archive --format=tar "${commit}" | gzip -n >"${package_directory}/source/pigloros-source.tar.gz"
-archived_commit=$(gzip -dc -- "${package_directory}/source/pigloros-source.tar.gz" | git get-tar-commit-id)
+source_tar=${work_directory}/pigloros-source.tar
+git archive --format=tar "${commit}" >"${source_tar}"
+archived_commit=$(git get-tar-commit-id <"${source_tar}")
 if [[ ${archived_commit} != "${commit}" ]]; then
   printf '%s\n' 'source archive commit identity does not match the selected commit' >&2
   exit 2
 fi
+gzip -n <"${source_tar}" >"${package_directory}/source/pigloros-source.tar.gz"
 source_directory=${work_directory}/source-checkout
 mkdir -p -- "${source_directory}"
 tar -xzf "${package_directory}/source/pigloros-source.tar.gz" -C "${source_directory}"

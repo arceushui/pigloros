@@ -150,7 +150,7 @@ fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
     header[156] = kind;
     header[257..263].copy_from_slice(b"ustar\0");
     header[263..265].copy_from_slice(b"00");
-    let checksum = header.iter().map(|byte| u64::from(*byte)).sum();
+    let checksum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
     let encoded = format!("{checksum:06o}\0 ");
     header[148..156].copy_from_slice(encoded.as_bytes());
     header

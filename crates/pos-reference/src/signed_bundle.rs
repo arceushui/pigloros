@@ -117,7 +117,7 @@ impl AuthenticatedBundlePreflight {
     ///
     /// # Errors
     /// Returns a bound failure when the indexed closure exceeds a selected cap.
-    pub fn enforce_selected_caps(&self, caps: SelectedBundleCaps) -> Result<(), BundleError> {
+    pub const fn enforce_selected_caps(&self, caps: SelectedBundleCaps) -> Result<(), BundleError> {
         if self.profile_bytes.len() as u64 > caps.max_profile_bytes
             || self.member_count > caps.max_bundle_members
             || self.maximum_path_bytes > caps.max_member_path_bytes
