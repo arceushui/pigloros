@@ -272,11 +272,11 @@ pub fn run_local_and_air_gapped(
         compare_authoritative_outputs(&local.baseline, &air_gapped.baseline)
             .map_err(MoatProofError::from) => |comparison|;
         comparison.equal.then_some(())
-            .ok_or(MoatProofError::ExecutionModesDiverged(comparison.clone())) => |()|;
+            .ok_or_else(|| MoatProofError::ExecutionModesDiverged(comparison.clone())) => |()|;
         compare_authoritative_outputs(&local.counterfactual, &air_gapped.counterfactual)
             .map_err(MoatProofError::from) => |counterfactual_comparison|;
         counterfactual_comparison.equal.then_some(())
-            .ok_or(MoatProofError::ExecutionModesDiverged(counterfactual_comparison)) => |()|;
+            .ok_or_else(|| MoatProofError::ExecutionModesDiverged(counterfactual_comparison)) => |()|;
         Ok((
             local,
             air_gapped,
