@@ -875,6 +875,12 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     let mut invalid_closure = evidence.clone();
     invalid_closure.host_closure.closure_event_type = "other".to_owned();
     expect_err(&verify_evidence(&invalid_closure));
+    let mut overstated_counterfactual = evidence.clone();
+    overstated_counterfactual.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+    assert_eq!(
+        verify_evidence(&overstated_counterfactual),
+        Err(EvidenceError::InvalidDependencyGraph)
+    );
     let value = decode_value(ok(evidence.to_canonical_cbor()));
     let mut paths = Vec::new();
     structural_paths(&value, &mut Vec::new(), &mut paths);

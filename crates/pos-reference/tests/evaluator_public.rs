@@ -1307,6 +1307,29 @@ fn evaluator_accepts_exact_authenticated_closure_caps() -> TestResult {
 }
 
 #[test]
+fn public_evaluator_enforces_selected_caps_before_full_materialization() -> TestResult {
+    let corpus = support::corpus_with_selected_closure_cap_and_secret(
+        0,
+        br#"{"client_secret":"must-not-be-materialized"}"#,
+    )?;
+    let mut adapter = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+    };
+    assert_eq!(
+        evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut adapter,
+        ),
+        Err(EvaluatorError::Profile)
+    );
+    Ok(())
+}
+
+#[test]
 fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> TestResult {
     for mutation in (0..4).map(ProfileMutation::SelectedClosureCapBoundary) {
         let corpus = support::corpus_with_profile_mutation(mutation)?;

@@ -1,6 +1,7 @@
 //! Resource-bounded black-box evaluation behind one public operation.
 
 use std::cmp::Ordering;
+use std::io::Cursor;
 
 use crate::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use crate::evaluator_protocol::{
@@ -10,7 +11,9 @@ use crate::evaluator_protocol::{
 use crate::profile::{
     DeterministicBudget, Fixture, NamespacedFailure, Profile, ProfileError, StrictOracle,
 };
-use crate::signed_bundle::{verify_signed_bundle, BundleError, VerifiedBundle};
+use crate::signed_bundle::{
+    preflight_signed_bundle, verify_signed_bundle, BundleError, SelectedBundleCaps, VerifiedBundle,
+};
 
 /// Deterministic resource consumption reported by a public subject adapter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -175,6 +178,7 @@ pub fn evaluate(
     {
         return Err(EvaluatorError::AdapterIdentity);
     }
+    enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, &request)?;
     let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
     let profile = Profile::from_bundle(&bundle, &request)?;
     let requirements = profile.independence_requirements;
@@ -239,6 +243,25 @@ pub fn evaluate(
         report_bytes,
         diagnostic_bytes,
     })
+}
+
+fn enforce_authenticated_selected_caps(
+    archive_bytes: &[u8],
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<(), EvaluatorError> {
+    let mut archive = Cursor::new(archive_bytes);
+    let preflight = preflight_signed_bundle(&mut archive, trust_policy_bytes, request)?;
+    let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)?;
+    preflight
+        .enforce_selected_caps(SelectedBundleCaps {
+            max_profile_bytes: caps.max_profile_bytes,
+            max_bundle_members: caps.max_bundle_members,
+            max_member_path_bytes: caps.max_member_path_bytes,
+            max_member_bytes: caps.max_member_bytes,
+            max_total_bundle_bytes: caps.max_total_bundle_bytes,
+        })
+        .map_err(|_| EvaluatorError::Profile)
 }
 
 fn evaluate_cases(

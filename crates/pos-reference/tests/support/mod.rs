@@ -676,6 +676,21 @@ pub fn corpus_with_profile_mutation(mutation: ProfileMutation) -> TestResult<Cor
     })
 }
 
+/// Build a signed corpus that combines a selected-cap violation with secret material.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_selected_closure_cap_and_secret(
+    cap_index: u8,
+    secret: &[u8],
+) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        extra: Some(secret),
+        profile_mutation: Some(ProfileMutation::SelectedClosureCapBoundary(cap_index)),
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a request-bound corpus containing one signed CFB1 attack shape.
 ///
 /// # Errors

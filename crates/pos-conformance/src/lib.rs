@@ -4739,7 +4739,10 @@ fn verify_knowledge_boundary(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
 fn verify_counterfactual_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
     let contract = &evidence.contract;
     let counterfactual = &contract.counterfactual;
-    if counterfactual.contract_digest == [0; 32]
+    if !counterfactual
+        .replay_claim
+        .is_no_stronger_than(evidence.manifest.replay_claim)
+        || counterfactual.contract_digest == [0; 32]
         || counterfactual.frontier.frontier_digest == [0; 32]
         || counterfactual.invalidation.invalidation_digest == [0; 32]
         || counterfactual.frontier.unknown_edge_policy != UnknownEdgePolicyV1::Reject

@@ -372,6 +372,9 @@ fn embedded_git_commit(reader: &mut impl Read) -> Result<String, EvaluatorBuildI
             .iter()
             .position(|required| path == *required)
         {
+            if required_entries[index] || !matches!(header[156], 0 | b'0') {
+                return Err(EvaluatorBuildIdentityError::Invalid);
+            }
             required_entries[index] = true;
         }
         skip_exact(&mut archive, size)?;

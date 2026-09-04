@@ -1414,18 +1414,40 @@ fn command_rejects_incomplete_or_ambiguous_source_archives() -> TestResult {
     let mut missing_source_entry = valid;
     missing_source_entry.drain(1024..1536);
 
+    let valid = source_tar(&commit);
+    let mut duplicate_required_entry = valid.clone();
+    duplicate_required_entry.splice(1536..1536, valid[1024..1536].iter().copied());
+
+    let mut required_directory = valid.clone();
+    set_tar_entry_kind(&mut required_directory, 1024, b'5')?;
+
+    let mut required_symlink = valid;
+    set_tar_entry_kind(&mut required_symlink, 1024, b'2')?;
+
     for tar in [
         duplicate_commit,
         interrupted_termination,
         trailing_nonzero,
         unsupported_type,
         missing_source_entry,
+        duplicate_required_entry,
+        required_directory,
+        required_symlink,
     ] {
         let directory = tempfile::tempdir()?;
         let mut command = complete_command(directory.path())?;
         rebind_source_archive(directory.path(), &gzip_bytes(&tar)?)?;
         assert!(!command.output()?.status.success());
     }
+    Ok(())
+}
+
+fn set_tar_entry_kind(tar: &mut [u8], offset: usize, kind: u8) -> TestResult {
+    let end = offset + 512;
+    let mut header = <[u8; 512]>::try_from(&tar[offset..end])?;
+    header[156] = kind;
+    write_tar_checksum(&mut header);
+    tar[offset..end].copy_from_slice(&header);
     Ok(())
 }
 
