@@ -39,12 +39,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{atomic::AtomicU64, Arc};
 
+// Keep fallible proof orchestration linear without the compiler-generated
+// unmapped coverage regions introduced by repeated `?` propagation.
 macro_rules! result_pipeline {
-    (let mut $binding:ident = $value:expr_2021; $($remaining:tt)+) => {{
-        let mut $binding = $value;
-        result_pipeline!($($remaining)+)
-    }};
-    (let $binding:ident = $value:expr_2021; $($remaining:tt)+) => {{
+    (let $binding:pat = $value:expr_2021; $($remaining:tt)+) => {{
         let $binding = $value;
         result_pipeline!($($remaining)+)
     }};
@@ -183,7 +181,8 @@ impl MoatProofRun {
             child.source_events_with_control().map_err(MoatProofError::from) => |counterfactual_events|;
             parent.run_to_completion().map_err(MoatProofError::from) => |parent_result|;
             child.run_to_completion().map_err(MoatProofError::from) => |child_result|;
-            let suffix_audit = suffix_audit(&baseline_events, &counterfactual_events, fork_cut_seq);
+            let (prefix_identical_through_fork, suffix_recomputed) =
+                suffix_audit(&baseline_events, &counterfactual_events, fork_cut_seq);
             evidence(&EvidenceContext {
                 input: &input,
                 mode,
@@ -238,8 +237,8 @@ impl MoatProofRun {
                 physical_reaction: physical_reaction.into(),
                 agent_reaction: agent_reaction.into(),
                 society_signal_changed: society_signal_changed.into(),
-                prefix_identical_through_fork: suffix_audit.0.into(),
-                suffix_recomputed: suffix_audit.1.into(),
+                prefix_identical_through_fork: prefix_identical_through_fork.into(),
+                suffix_recomputed: suffix_recomputed.into(),
                 failure_probes,
                 host_closure,
             };
