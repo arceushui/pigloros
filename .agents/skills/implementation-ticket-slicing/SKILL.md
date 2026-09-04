@@ -61,7 +61,7 @@ This skill incorporates the recurring lessons that most directly prevent oversiz
 - keep expensive validation attributable and avoid duplicating expensive deterministic work in hooks or CI; and
 - keep review evidence tied to the authoritative worktree, fixed point, and exact revision under review.
 
-When later work reveals a repeatable decomposition failure, update this skill with the generalized lesson rather than accumulating a one-off ticket note.
+When later work reveals a repeatable decomposition failure, record it as a candidate maintenance lesson rather than changing this skill during ordinary implementation. Update the skill only through a separately authorized maintenance ticket and pull request, with the generalized lesson replacing any one-off ticket note.
 
 ## Final verification
 
