@@ -1277,9 +1277,9 @@ impl ErasurePersistencePortV1 for MemoryStore {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if !self.erasure_evidence.contains_key(&reference) {
-            self.erasure_evidence.insert(reference, bytes.to_vec());
-        }
+        self.erasure_evidence
+            .entry(reference)
+            .or_insert_with(|| bytes.to_vec());
         self.erasure_recovery_errors
             .entry(request)
             .or_default()
