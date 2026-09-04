@@ -867,6 +867,114 @@ fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_recovery_error_retention_fails_closed_at_backend_boundaries(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+    drop(shared);
+
+    let mut read_only = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(SqliteStore::open_read_only(path)?)),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        read_only.verified_state(request.reference()),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+    let raw = rusqlite::Connection::open(path)?;
+    raw.execute_batch(
+        "DROP TABLE erasure_recovery_errors;
+         CREATE TABLE erasure_recovery_errors (request_digest BLOB NOT NULL)",
+    )?;
+    drop(raw);
+    let mut query_failure = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: shared,
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        query_failure.verified_state(request.reference()),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+    let raw = rusqlite::Connection::open(path)?;
+    raw.execute_batch(
+        "CREATE TRIGGER deny_recovery_error_index_insert
+         BEFORE INSERT ON erasure_recovery_errors
+         BEGIN SELECT RAISE(ABORT, 'recovery error index denied'); END;",
+    )?;
+    drop(raw);
+    let mut index_failure = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: shared,
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        index_failure.verified_state(request.reference()),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+    let raw = rusqlite::Connection::open(path)?;
+    raw.execute_batch(
+        "CREATE TRIGGER deny_recovery_evidence_insert
+         BEFORE INSERT ON erasure_evidence
+         BEGIN SELECT RAISE(ABORT, 'recovery evidence denied'); END;",
+    )?;
+    drop(raw);
+    let mut evidence_failure = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: shared,
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        evidence_failure.verified_state(request.reference()),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dyn std::error::Error>>
 {
     let database = tempfile::NamedTempFile::new()?;
