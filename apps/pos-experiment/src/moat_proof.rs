@@ -40,18 +40,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{atomic::AtomicU64, Arc};
 
 macro_rules! result_pipeline {
-    (let mut $binding:ident = $value:expr; $($remaining:tt)+) => {{
+    (let mut $binding:ident = $value:expr_2021; $($remaining:tt)+) => {{
         let mut $binding = $value;
         result_pipeline!($($remaining)+)
     }};
-    (let $binding:ident = $value:expr; $($remaining:tt)+) => {{
+    (let $binding:ident = $value:expr_2021; $($remaining:tt)+) => {{
         let $binding = $value;
         result_pipeline!($($remaining)+)
     }};
-    ($result:expr => |$binding:pat_param|; $($remaining:tt)+) => {
+    ($result:expr_2021 => |$binding:pat_param|; $($remaining:tt)+) => {
         $result.and_then(|$binding| result_pipeline!($($remaining)+))
     };
-    ($result:expr $(;)?) => {
+    ($result:expr_2021 $(;)?) => {
         $result
     };
 }
@@ -174,7 +174,7 @@ impl MoatProofRun {
             events.last().map(|event| event.seq.as_u64()).ok_or(MoatProofError::MissingForkCut) => |fork_cut_seq|;
             parent.fork("counterfactual").map_err(MoatProofError::from) => |mut child|;
             intervention(topology.body, topology.agent, &input, 1) => |proposal|;
-            child.submit_action(&proposal).map_err(MoatProofError::from) => |()|;
+            child.submit_action(&proposal).map_err(MoatProofError::from) => |_seq|;
             finish(&mut parent).map_err(MoatProofError::from) => |()|;
             finish(&mut child).map_err(MoatProofError::from) => |()|;
             commit_host_closure(&mut parent, "proof-subject") => |host_closure|;
