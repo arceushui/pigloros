@@ -52,8 +52,7 @@ struct Options {
     request: PathBuf,
     archive: PathBuf,
     trust_policy: PathBuf,
-    evaluator_source: PathBuf,
-    evaluator_provenance: PathBuf,
+    evaluator_evidence: EvaluatorEvidence,
     declaration_digest: [u8; 32],
     shared_code_audit_digest: [u8; 32],
     reviewer_ids: Vec<String>,
@@ -68,8 +67,7 @@ struct OptionsBuilder {
     request: Option<PathBuf>,
     archive: Option<PathBuf>,
     trust_policy: Option<PathBuf>,
-    evaluator_source: Option<PathBuf>,
-    evaluator_provenance: Option<PathBuf>,
+    evaluator_evidence: EvaluatorEvidenceBuilder,
     declaration_digest: Option<[u8; 32]>,
     shared_code_audit_digest: Option<[u8; 32]>,
     reviewer_ids: Vec<String>,
@@ -77,6 +75,17 @@ struct OptionsBuilder {
     organizational_independent: bool,
     adapter: Option<PathBuf>,
     adapter_arguments: Vec<OsString>,
+}
+
+struct EvaluatorEvidence {
+    source: PathBuf,
+    provenance: PathBuf,
+}
+
+#[derive(Default)]
+struct EvaluatorEvidenceBuilder {
+    source: Option<PathBuf>,
+    provenance: Option<PathBuf>,
 }
 
 fn main() -> Result<(), CommandError> {
@@ -150,16 +159,13 @@ fn parse_option(
     arguments: &mut impl Iterator<Item = OsString>,
     argument: &OsString,
 ) -> Result<(), CommandError> {
+    if parse_evaluator_evidence_option(&mut builder.evaluator_evidence, arguments, argument)? {
+        return Ok(());
+    }
     match argument.to_str().ok_or(CommandError::Arguments)? {
         "--request" => set_once(&mut builder.request, next_path(arguments)?)?,
         "--bundle" => set_once(&mut builder.archive, next_path(arguments)?)?,
         "--trust-policy" => set_once(&mut builder.trust_policy, next_path(arguments)?)?,
-        "--evaluator-source" => {
-            set_once(&mut builder.evaluator_source, next_path(arguments)?)?;
-        }
-        "--evaluator-provenance" => {
-            set_once(&mut builder.evaluator_provenance, next_path(arguments)?)?;
-        }
         "--declaration-digest" => {
             set_once(&mut builder.declaration_digest, next_digest(arguments)?)?;
         }
@@ -183,6 +189,24 @@ fn parse_option(
     Ok(())
 }
 
+fn parse_evaluator_evidence_option(
+    builder: &mut EvaluatorEvidenceBuilder,
+    arguments: &mut impl Iterator<Item = OsString>,
+    argument: &OsString,
+) -> Result<bool, CommandError> {
+    match argument.to_str().ok_or(CommandError::Arguments)? {
+        "--evaluator-source" => {
+            set_once(&mut builder.source, next_path(arguments)?)?;
+            Ok(true)
+        }
+        "--evaluator-provenance" => {
+            set_once(&mut builder.provenance, next_path(arguments)?)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 impl OptionsBuilder {
     fn finish(self) -> Result<Options, CommandError> {
         if self.reviewer_ids.is_empty()
@@ -197,8 +221,7 @@ impl OptionsBuilder {
             request: self.request.ok_or(CommandError::Arguments)?,
             archive: self.archive.ok_or(CommandError::Arguments)?,
             trust_policy: self.trust_policy.ok_or(CommandError::Arguments)?,
-            evaluator_source: self.evaluator_source.ok_or(CommandError::Arguments)?,
-            evaluator_provenance: self.evaluator_provenance.ok_or(CommandError::Arguments)?,
+            evaluator_evidence: self.evaluator_evidence.finish()?,
             declaration_digest: self.declaration_digest.ok_or(CommandError::Arguments)?,
             shared_code_audit_digest: self
                 .shared_code_audit_digest
@@ -212,12 +235,24 @@ impl OptionsBuilder {
     }
 }
 
+impl EvaluatorEvidenceBuilder {
+    fn finish(self) -> Result<EvaluatorEvidence, CommandError> {
+        Ok(EvaluatorEvidence {
+            source: self.source.ok_or(CommandError::Arguments)?,
+            provenance: self.provenance.ok_or(CommandError::Arguments)?,
+        })
+    }
+}
+
 fn verified_evaluator_digests(options: &Options) -> Result<([u8; 32], [u8; 32]), CommandError> {
-    let source_digest = digest_bounded(&options.evaluator_source, MAX_EVALUATOR_SOURCE_BYTES)?;
+    let source_digest = digest_bounded(
+        &options.evaluator_evidence.source,
+        MAX_EVALUATOR_SOURCE_BYTES,
+    )?;
     let executable = env::current_exe().map_err(|_| CommandError::Identity)?;
     let binary_digest = digest_bounded(&executable, MAX_EVALUATOR_BINARY_BYTES)?;
     let provenance_bytes = read_bounded(
-        &options.evaluator_provenance,
+        &options.evaluator_evidence.provenance,
         MAX_EVALUATOR_PROVENANCE_BYTES,
     )?;
     let (bound_source, bound_binary) = parse_build_provenance(&provenance_bytes)?;
