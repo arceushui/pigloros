@@ -24,6 +24,22 @@ fn evaluator() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pos-reference-evaluator"))
 }
 
+#[cfg(unix)]
+fn replacing_argument(command: &Command, option: &str, value: &Path) -> TestResult<Command> {
+    let mut arguments: Vec<OsString> = command.get_args().map(OsString::from).collect();
+    let index = arguments
+        .iter()
+        .position(|argument| argument.to_str() == Some(option))
+        .ok_or("command option is absent")?;
+    let target = arguments
+        .get_mut(index + 1)
+        .ok_or("command option has no value")?;
+    *target = value.as_os_str().to_owned();
+    let mut replacement = evaluator();
+    replacement.args(arguments);
+    Ok(replacement)
+}
+
 fn complete_command(directory: &Path) -> TestResult<Command> {
     complete_command_with_adapter(directory, "/bin/cat")
 }
@@ -664,12 +680,70 @@ fn command_closes_remaining_public_io_and_identity_boundaries() -> TestResult {
     assert!(!substituted_binary.output()?.status.success());
 
     let directory = tempfile::tempdir()?;
+    let complete = complete_command(directory.path())?;
+    let alternate_source = directory.path().join("alternate-source.tar.gz");
+    fs::copy(
+        directory.path().join("source/pigloros-source.tar.gz"),
+        &alternate_source,
+    )?;
+    assert!(
+        !replacing_argument(&complete, "--evaluator-source", &alternate_source)?
+            .output()?
+            .status
+            .success()
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_closes_post_preflight_and_output_failures() -> TestResult {
+    for corpus in [
+        support::corpus_with_profile_mutation(
+            support::ProfileMutation::SelectedProfileByteCapBoundary,
+        )?,
+        support::corpus_with_profile_mutation(
+            support::ProfileMutation::SelectedClosureCapBoundary(0),
+        )?,
+        support::corpus_with_bundle_mutation(support::BundleMutation::MemberBytes)?,
+    ] {
+        let directory = tempfile::tempdir()?;
+        let mut command = complete_command(directory.path())?;
+        fs::write(directory.path().join("request.cbor"), corpus.request)?;
+        fs::write(directory.path().join("bundle.cfb1"), corpus.archive)?;
+        fs::write(directory.path().join("policy.tps1"), corpus.trust_policy)?;
+        assert!(!command.output()?.status.success());
+    }
+
+    let directory = tempfile::tempdir()?;
     let diagnostics_sink = fs::OpenOptions::new().write(true).open("/dev/full")?;
     let status = complete_command(directory.path())?
         .stdout(Stdio::null())
         .stderr(Stdio::from(diagnostics_sink))
         .status()?;
     assert!(!status.success());
+
+    let directory = tempfile::tempdir()?;
+    let report_sink = fs::OpenOptions::new().write(true).open("/dev/full")?;
+    let status = complete_command(directory.path())?
+        .stdout(Stdio::from(report_sink))
+        .stderr(Stdio::null())
+        .status()?;
+    assert!(!status.success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_bounds_special_files_that_grow_after_metadata() -> TestResult {
+    for path in ["BLAKE3SUMS", "Cargo.lock"] {
+        let directory = tempfile::tempdir()?;
+        let mut command = complete_command(directory.path())?;
+        fs::remove_file(directory.path().join(path))?;
+        std::os::unix::fs::symlink("/dev/zero", directory.path().join(path))?;
+        assert!(!command.output()?.status.success());
+    }
     Ok(())
 }
 

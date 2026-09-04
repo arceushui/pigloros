@@ -627,9 +627,16 @@ fn evaluator_rejects_empty_archives_and_mismatched_trust_snapshots() -> TestResu
     let mismatched_request = request_with(&corpus.request, |request| {
         request.trust_policy_snapshot_digest = [90; 32];
     })?;
+    let mismatched_archive_request = request_with(&corpus.request, |request| {
+        request.fixture_bundle_digest = [91; 32];
+    })?;
     for (request, archive) in [
         (corpus.request.as_slice(), &[][..]),
         (mismatched_request.as_slice(), corpus.archive.as_slice()),
+        (
+            mismatched_archive_request.as_slice(),
+            corpus.archive.as_slice(),
+        ),
     ] {
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
@@ -1448,6 +1455,18 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         archive[2] = Value::Bytes(vec![0; 33]);
         Ok(())
     })?;
+    let missing_profile = archive_with(&corpus.archive, |archive| {
+        let Value::Array(members) = &mut archive[1] else {
+            return Err("archive members are not an array".into());
+        };
+        members.retain(|member| {
+            let Value::Array(fields) = member else {
+                return true;
+            };
+            fields.first() != Some(&Value::Text("profile/CPF1.cbor".to_owned()))
+        });
+        Ok(())
+    })?;
     let mut oversized_member = vec![0x84, 0xf6, 0x81, 0x83, 0x61, b'p', 0x5b];
     oversized_member.extend_from_slice(&(64_u64 * 1024 * 1024 + 1).to_be_bytes());
     let long_member_path = archive_with(&corpus.archive, |archive| {
@@ -1487,6 +1506,7 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         map_manifest,
         negative_manifest,
         oversized_signer,
+        missing_profile,
         oversized_member,
         long_member_path,
         substituted_profile,
