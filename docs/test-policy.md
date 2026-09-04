@@ -44,7 +44,9 @@ suppress or truncate the report.
 Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so
 newly merged functions become existing baseline entries on the next change.
-If that trusted artifact has expired or the base never completed green CI, the
+The pull request job polls for the artifact for up to five minutes to cover the
+short interval while the corresponding `main` workflow is still finishing. If
+that trusted artifact has expired or the base never completes green CI, the
 pull request must rebase onto a green `main` commit.
 
 PR #58 has one explicit initialization exception for pre-gate base

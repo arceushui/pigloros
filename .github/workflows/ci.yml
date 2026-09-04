@@ -389,26 +389,32 @@ jobs:
             exit 0
           fi
 
-          run_ids="$(gh api --method GET --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-            -f branch=main -f event=push -f status=success -f per_page=100 \
-            --jq ".workflow_runs[] | select(.head_sha == \"${BASE_SHA}\") | .id")"
-          run_id=''
-          while IFS= read -r candidate; do
-            [[ -n "${candidate}" ]] || continue
-            artifact_id="$(gh api --method GET \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts" \
-              --jq ".artifacts[] | select(.name == \"cargo-crap-baseline-${BASE_SHA}\") | .id")"
-            if [[ -n "${artifact_id}" ]]; then
-              run_id="${candidate}"
-              break
+          for ((attempt = 1; attempt <= 30; attempt++)); do
+            run_ids="$(gh api --method GET --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f branch=main -f event=push -f status=success -f per_page=100 \
+              --jq ".workflow_runs[] | select(.head_sha == \"${BASE_SHA}\") | .id")"
+            run_id=''
+            while IFS= read -r candidate; do
+              [[ -n "${candidate}" ]] || continue
+              artifact_id="$(gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts" \
+                --jq ".artifacts[] | select(.name == \"cargo-crap-baseline-${BASE_SHA}\") | .id")"
+              if [[ -n "${artifact_id}" ]]; then
+                run_id="${candidate}"
+                break
+              fi
+            done <<< "${run_ids}"
+            if [[ -n "${run_id}" ]]; then
+              echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
+              echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
+              exit 0
             fi
-          done <<< "${run_ids}"
-          if [[ -n "${run_id}" ]]; then
-            echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
-            echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
+            if (( attempt < 30 )); then
+              echo "Trusted baseline ${BASE_SHA} is not available yet (attempt ${attempt}/30); retrying in 10s"
+              sleep 10
+            fi
+          done
 
           # One-time initialization for this PR's pre-gate base. No future
           # base may silently substitute a PR-controlled baseline.

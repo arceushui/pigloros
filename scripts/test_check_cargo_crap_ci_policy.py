@@ -120,6 +120,27 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(weaken_bootstrap)
 
+    def test_requires_bounded_baseline_retry(self) -> None:
+        def remove_retry(workflow: dict) -> None:
+            step = self.cargo_crap_step(
+                workflow, "Resolve trusted cargo-crap baseline"
+            )
+            step["run"] = step["run"].replace(
+                "for ((attempt = 1; attempt <= 30; attempt++)); do",
+                "while true; do",
+            )
+
+        self.assert_rejected(remove_retry)
+
+    def test_requires_baseline_retry_delay(self) -> None:
+        def remove_delay(workflow: dict) -> None:
+            step = self.cargo_crap_step(
+                workflow, "Resolve trusted cargo-crap baseline"
+            )
+            step["run"] = step["run"].replace("sleep 10", "sleep 1")
+
+        self.assert_rejected(remove_delay)
+
     def test_requires_main_baseline_publication(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"]["steps"].pop()
