@@ -667,10 +667,18 @@ impl SqliteStore {
     }
 
     fn prepare_schema(&self, initialize: bool) -> Result<(), CoreError> {
-        if initialize && self.database_is_empty()? {
+        if self.should_initialize_schema(initialize)? {
             self.init_schema()
         } else {
             self.validate_erasure_schema()
+        }
+    }
+
+    fn should_initialize_schema(&self, initialize: bool) -> Result<bool, CoreError> {
+        if initialize {
+            self.database_is_empty()
+        } else {
+            Ok(false)
         }
     }
 

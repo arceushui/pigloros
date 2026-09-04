@@ -17,7 +17,7 @@ use super::{
     ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorV1,
     ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedStateQueryV1, PreparedErasureCasV1,
-    PreparedErasureRecoveryErrorV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
 };
 use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
@@ -64,32 +64,47 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         self.port.append_recovery_error(prepared)
     }
 
-    fn recover(
+    fn recovery_failure_error(
         &mut self,
         request: ErasureReferenceV1,
-    ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
-        let stored = match self.port.read_manifest(request) {
-            Ok(Some(stored)) => stored,
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                let recovery_error = ErasureRecoveryErrorV1::new(request, None, request, error)?;
-                self.retain_recovery_error(recovery_error)?;
-                return Err(error);
-            }
-        };
-        match RecoveredErasureV1::recover(&self.port, &self.port, &self.port, request, &stored) {
-            Ok(record) => Ok(Some(record)),
-            Err(failure) => {
-                let recovery_error = ErasureRecoveryErrorV1::new(
+        manifest: Option<ErasureReferenceV1>,
+        failure_subject: ErasureReferenceV1,
+        error: ErasureErrorV1,
+    ) -> ErasureErrorV1 {
+        ErasureRecoveryErrorV1::new(request, manifest, failure_subject, error)
+            .and_then(|recovery_error| self.retain_recovery_error(recovery_error).map(|()| error))
+            .unwrap_or_else(std::convert::identity)
+    }
+
+    fn recover_stored(
+        &mut self,
+        request: ErasureReferenceV1,
+        stored: &StoredErasureManifestV1,
+    ) -> Result<RecoveredErasureV1, ErasureErrorV1> {
+        RecoveredErasureV1::recover(&self.port, &self.port, &self.port, request, stored).map_err(
+            |failure| {
+                self.recovery_failure_error(
                     request,
                     Some(stored.digest()),
                     failure.subject(),
                     failure.error(),
-                )?;
-                self.retain_recovery_error(recovery_error)?;
-                Err(failure.error())
-            }
-        }
+                )
+            },
+        )
+    }
+
+    fn recover(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
+        let stored = self
+            .port
+            .read_manifest(request)
+            .map_err(|error| self.recovery_failure_error(request, None, request, error))?;
+        stored
+            .as_ref()
+            .map(|stored| self.recover_stored(request, stored))
+            .transpose()
     }
 
     fn record(
