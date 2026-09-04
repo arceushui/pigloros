@@ -81,6 +81,8 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 |---|---|---|
 | **Plugin** | `pos-runtime` | A named, schema-registered domain extension. Must implement `Plugin` trait. |
 | **PluginRegistry** | `pos-runtime` | Hosts plugins and routes events to their `Reducer` and `Driver`. |
+| **Sandbox Provider Plugin** | planned `pos-reference` security seam | An administrator-installed, independently replaceable, out-of-process provider of kernel-enforced public-adapter isolation. It is privileged and part of the trusted computing base, not an untrusted domain Plugin. |
+| **Sandbox Provider Adapter** | planned `pos-reference` security seam | A concrete implementation of the Sandbox Provider interface. It exposes only `describe`, `execute`, `cancel`, and `reconcile`; provider-specific systemd, VM, container, or kernel mechanisms remain behind this seam. |
 | **Reducer** | `pos-runtime` | Folds events into `State`. Read-only w.r.t. the event store. |
 | **Driver** | `pos-runtime` | Produces `EventDraft`s in response to state or external stimuli. |
 | **Hasher** | `pos-core` | Trait decoupling BLAKE3 from store adapters (`genesis_hash`, `hash_payload`, `hash_event`). Default: `Blake3Hasher`. |

@@ -11,6 +11,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod adapter_transport;
+pub mod evaluator;
+pub mod evaluator_protocol;
+pub mod process_adapter;
+pub mod profile;
+pub mod signed_bundle;
+
 /// Divergence classes emitted by the independent JSON evaluator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceDivergenceV1 {
