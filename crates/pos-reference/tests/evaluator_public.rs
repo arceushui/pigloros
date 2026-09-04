@@ -43,6 +43,10 @@ struct FaultingArchive {
     seeks: usize,
 }
 
+struct LengthMismatchArchive {
+    inner: Cursor<Vec<u8>>,
+}
+
 impl FaultingArchive {
     const fn new(bytes: Vec<u8>, fail_on_read: Option<usize>, fail_on_seek: Option<usize>) -> Self {
         Self {
@@ -74,6 +78,23 @@ impl Seek for FaultingArchive {
         } else {
             self.inner.seek(position)
         }
+    }
+}
+
+impl Read for LengthMismatchArchive {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buffer)
+    }
+}
+
+impl Seek for LengthMismatchArchive {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let offset = self.inner.seek(position)?;
+        Ok(if position == SeekFrom::End(0) {
+            offset + 1
+        } else {
+            offset
+        })
     }
 }
 
@@ -1568,6 +1589,26 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         let mut archive = FaultingArchive::new(corpus.archive.clone(), Some(failing_read), None);
         assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
     }
+
+    let mut changed_length = LengthMismatchArchive {
+        inner: Cursor::new(corpus.archive.clone()),
+    };
+    assert!(preflight_signed_bundle(&mut changed_length, &corpus.trust_policy, &request,).is_err());
+    Ok(())
+}
+
+#[test]
+fn staged_preflight_rejects_a_manifest_above_the_authenticated_bound() -> TestResult {
+    let corpus = support::corpus()?;
+    let manifest_size = 64_u64 * 1024 * 1024 + 1;
+    let mut archive = vec![0x84, 0x5b];
+    archive.extend_from_slice(&manifest_size.to_be_bytes());
+    archive.resize(archive.len() + usize::try_from(manifest_size)?, 0);
+    let request = request_for_archive(&corpus.request, &archive)?;
+    assert!(
+        preflight_signed_bundle(&mut Cursor::new(archive), &corpus.trust_policy, &request,)
+            .is_err()
+    );
     Ok(())
 }
 
