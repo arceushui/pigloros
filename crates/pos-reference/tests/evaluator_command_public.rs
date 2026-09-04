@@ -261,6 +261,15 @@ fn request_with_version(request: &[u8], version: u64) -> TestResult<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(unix)]
+fn request_without_diagnostics(request: &[u8]) -> TestResult<Vec<u8>> {
+    let mut request = EvaluationRequest::from_canonical_cbor(request)?;
+    request.output_capability.diagnostic_bytes_limit = 0;
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    Ok(request.to_canonical_cbor()?)
+}
+
 #[test]
 fn command_rejects_incomplete_duplicate_and_noncanonical_identity_arguments() -> TestResult {
     assert!(!evaluator().output()?.status.success());
@@ -485,6 +494,23 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
     assert!(report.independence.authorship_independent);
     assert!(report.independence.organizational_independent);
     assert!(!output.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_honours_a_zero_diagnostic_output_cap() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let corpus = support::corpus()?;
+    let mut command = complete_command(directory.path())?;
+    fs::write(
+        directory.path().join("request.cbor"),
+        request_without_diagnostics(&corpus.request)?,
+    )?;
+    let output = command.output()?;
+    assert!(output.status.success());
+    assert!(!output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
     Ok(())
 }
 

@@ -1594,6 +1594,15 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         inner: Cursor::new(corpus.archive.clone()),
     };
     assert!(preflight_signed_bundle(&mut changed_length, &corpus.trust_policy, &request,).is_err());
+
+    assert!(
+        preflight_signed_bundle(&mut Cursor::new(Vec::new()), &corpus.trust_policy, &request,)
+            .is_err()
+    );
+
+    let mut oversized = tempfile::tempfile()?;
+    oversized.set_len(1024 * 1024 * 1024 + 1)?;
+    assert!(preflight_signed_bundle(&mut oversized, &corpus.trust_policy, &request,).is_err());
     Ok(())
 }
 
