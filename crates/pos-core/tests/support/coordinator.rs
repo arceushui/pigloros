@@ -346,8 +346,8 @@ impl PublicCoordinatorPort {
             .borrow()
             .manifests
             .get(&request)
-            .and_then(|(digest, bytes)| {
-                pos_core::StoredErasureManifestV1::new(*digest, bytes.clone()).ok()
+            .map(|(digest, bytes)| {
+                pos_core::StoredErasureManifestV1::from_stored(*digest, bytes.clone())
             })
     }
 
@@ -430,6 +430,24 @@ impl PublicCoordinatorPort {
         let changed = replace_array_field(&bytes, index, replacement)?;
         let digest = addressed("ERCRP1", &changed);
         storage.manifests.insert(request, (digest, changed));
+        Ok(())
+    }
+
+    /// Replace a stored manifest envelope without repairing its content address.
+    ///
+    /// This models bytes returned by a corrupted adapter so recovery tests can
+    /// assert that core retains the recorded manifest identity.
+    pub fn replace_manifest_raw(
+        &self,
+        request: ErasureReferenceV1,
+        digest: ErasureReferenceV1,
+        canonical_cbor: Vec<u8>,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        if !storage.manifests.contains_key(&request) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        storage.manifests.insert(request, (digest, canonical_cbor));
         Ok(())
     }
 

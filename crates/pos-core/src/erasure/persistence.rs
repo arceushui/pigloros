@@ -714,6 +714,12 @@ impl RecoveredErasureV1 {
         requested: ErasureReferenceV1,
         stored: &StoredErasureManifestV1,
     ) -> Result<Self, RecoveryFailureV1> {
+        if !stored.content_address_matches() {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                stored.digest(),
+            ));
+        }
         let manifest = ManifestV1::decode(stored.canonical_cbor())
             .map_err(|error| RecoveryFailureV1::new(error, stored.digest()))?;
         if manifest.request != requested {
@@ -742,12 +748,7 @@ impl RecoveredErasureV1 {
             verifier,
         })
         .map_err(|error| RecoveryFailureV1::new(error, stored.digest()))?;
-        let correction_subject = evidence.correction.as_ref().map_or_else(
-            || foundation.request.reference(),
-            ErasureCorrectionProvenanceV1::reference,
-        );
-        validate_correction(port, &foundation.request, evidence.correction.as_ref())
-            .map_err(|error| RecoveryFailureV1::new(error, correction_subject))?;
+        validate_correction(port, &foundation.request, evidence.correction.as_ref())?;
         validate_state_provenance(port, &foundation.state, &manifest, stored.digest())?;
 
         let RecoveredFoundationV1 {
@@ -1960,24 +1961,34 @@ fn validate_correction(
     port: &dyn ErasurePersistencePortV1,
     request: &ErasureRequestV1,
     correction: Option<&ErasureCorrectionProvenanceV1>,
-) -> Result<(), ErasureErrorV1> {
+) -> Result<(), RecoveryFailureV1> {
     let Some(correction) = correction else {
         return Ok(());
     };
     if request.provenance() != correction.reference()
         || request.reference() == correction.rejected_request()
     {
-        return Err(ErasureErrorV1::ProvenanceMissing);
+        return Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            correction.reference(),
+        ));
     }
+    let rejected_terminal_state = correction.rejected_terminal_state();
     let rejected = port
-        .resolve_state(correction.rejected_terminal_state())?
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        .resolve_state(rejected_terminal_state)
+        .map_err(|error| RecoveryFailureV1::new(error, rejected_terminal_state))?
+        .ok_or_else(|| {
+            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, rejected_terminal_state)
+        })?;
     if rejected.request() == correction.rejected_request()
         && rejected.lifecycle() == ErasureLifecycleV1::Rejected
     {
         Ok(())
     } else {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            rejected_terminal_state,
+        ))
     }
 }
 

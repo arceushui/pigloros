@@ -467,13 +467,24 @@ fn assert_mutated_correction_is_rejected(
     request: &ErasureRequestV1,
     state: &ErasureStateV1,
     correction: &ErasureCorrectionProvenanceV1,
+    expected_subject: ErasureReferenceV1,
 ) -> Result<(), ErasureErrorV1> {
     adapter.replace_corrected_graph(old_request, request, state, correction)?;
+    let manifest = adapter
+        .current_manifest(request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR);
     assert_eq!(
-        ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR)
-            .submit(request.clone(), request.provenance()),
+        coordinator.submit(request.clone(), request.provenance()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    let failures = coordinator.recovery_errors(request.reference())?;
+    assert!(failures.iter().any(|failure| {
+        failure.manifest() == Some(manifest)
+            && failure.failure_subject() == expected_subject
+            && failure.error() == ErasureErrorV1::ProvenanceMissing
+    }));
     Ok(())
 }
 
@@ -504,6 +515,7 @@ fn assert_correction_recovery_guards(
         &same_request,
         &same_request_state,
         &same_request_correction,
+        same_request_correction.reference(),
     )?;
 
     let wrong_terminal_correction =
@@ -525,6 +537,7 @@ fn assert_correction_recovery_guards(
         &invalid_terminal_request,
         &invalid_terminal_state,
         &wrong_terminal_correction,
+        wrong_terminal_correction.rejected_terminal_state(),
     )
 }
 

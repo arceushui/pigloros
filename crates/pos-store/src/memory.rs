@@ -1175,10 +1175,10 @@ impl ErasurePersistencePortV1 for MemoryStore {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<StoredErasureManifestV1>, ErasureErrorV1> {
-        self.erasure_records
+        Ok(self
+            .erasure_records
             .get(&request)
-            .map(|(digest, bytes)| StoredErasureManifestV1::new(*digest, bytes.clone()))
-            .transpose()
+            .map(|(digest, bytes)| StoredErasureManifestV1::from_stored(*digest, bytes.clone())))
     }
     fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
         self.erasure_evidence
@@ -1260,13 +1260,20 @@ impl ErasurePersistencePortV1 for MemoryStore {
     ) -> Result<(), ErasureErrorV1> {
         let request = object.request();
         let reference = object.reference();
+        if self
+            .erasure_recovery_errors
+            .get(&request)
+            .is_some_and(|references| {
+                !references.contains(&reference) && references.len() >= ERASURE_MAX_RECOVERY_ERRORS
+            })
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
         let mut evidence = self.erasure_evidence.clone();
         insert_exact(&mut evidence, reference, object.canonical_cbor())?;
         let mut recovery_errors = self.erasure_recovery_errors.clone();
         let request_errors = recovery_errors.entry(request).or_default();
-        if request_errors.insert(reference) && request_errors.len() > ERASURE_MAX_RECOVERY_ERRORS {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
+        request_errors.insert(reference);
         self.erasure_evidence = evidence;
         self.erasure_recovery_errors = recovery_errors;
         Ok(())
