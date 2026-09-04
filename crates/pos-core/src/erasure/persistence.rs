@@ -1969,15 +1969,13 @@ fn validate_recovery_bindings(
         })
 }
 
-fn freeze_reconstruction_failure_subject(graph: &FixedGraphV1<'_>) -> ErasureReferenceV1 {
-    let (Some(scope), Some(admission), Some(freeze), Some(obligation_set)) = (
-        graph.scope,
-        graph.admission,
-        graph.freeze,
-        graph.obligation_set,
-    ) else {
-        return graph.manifest;
-    };
+fn freeze_reconstruction_failure_subject(
+    graph: &FixedGraphV1<'_>,
+    scope: &ErasureScopeCommitmentV1,
+    admission: &ErasureFreezeAdmissionEvidenceV1,
+    freeze: &ErasureFreezeProvenanceV1,
+    obligation_set: &ErasureObligationSetV1,
+) -> ErasureReferenceV1 {
     if scope.target_closure() != target_closure_digest(graph.targets) {
         return scope.reference();
     }
@@ -2112,7 +2110,7 @@ fn validate_freeze_authorization(graph: &FixedGraphV1<'_>) -> Result<(), Recover
 fn reconstruct_frozen_graph(
     graph: &FixedGraphV1<'_>,
 ) -> Result<ErasureAtomicFreezeAdmissionV1, RecoveryFailureV1> {
-    let (Some(scope), Some(admission), Some(authorization), Some(_freeze), Some(set)) = (
+    let (Some(scope), Some(admission), Some(authorization), Some(freeze), Some(set)) = (
         graph.scope,
         graph.admission,
         graph.authorization,
@@ -2138,7 +2136,12 @@ fn reconstruct_frozen_graph(
         freeze_admission_evidence: admission.clone(),
         freeze_authorization_evidence: authorization.clone(),
     })
-    .map_err(|error| RecoveryFailureV1::new(error, freeze_reconstruction_failure_subject(graph)))
+    .map_err(|error| {
+        RecoveryFailureV1::new(
+            error,
+            freeze_reconstruction_failure_subject(graph, scope, admission, freeze, set),
+        )
+    })
 }
 
 fn validate_frozen_bindings(

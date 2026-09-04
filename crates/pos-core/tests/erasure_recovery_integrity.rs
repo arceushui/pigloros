@@ -900,6 +900,13 @@ fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), Er
             Value::Bytes(reference(252).digest().to_vec()),
             ErasureErrorV1::ProvenanceMissing,
         ),
+        (
+            12,
+            ERASURE_OBLIGATION_SET_TAG_V1,
+            5,
+            Value::Bytes(reference(253).digest().to_vec()),
+            ErasureErrorV1::ProvenanceMissing,
+        ),
     ] {
         let graph = completed_graph(vec![target(10)], None)?;
         graph.adapter.replace_manifest_object_field(
