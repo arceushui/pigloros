@@ -16,7 +16,7 @@ use pos_reference::profile::{
 use pos_reference::signed_bundle::{preflight_signed_bundle, SelectedBundleCaps};
 use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 struct PublicAdapter {
     subject_digest: [u8; 32],
@@ -287,6 +287,27 @@ fn request_with(
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
     Ok(request.to_canonical_cbor()?)
+}
+
+fn archive_with(
+    bytes: &[u8],
+    update: impl FnOnce(&mut [ciborium::value::Value]) -> TestResult,
+) -> TestResult<Vec<u8>> {
+    let mut archive: ciborium::value::Value = ciborium::from_reader(bytes)?;
+    let ciborium::value::Value::Array(fields) = &mut archive else {
+        return Err("archive is not an array".into());
+    };
+    update(fields)?;
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&archive, &mut encoded)?;
+    Ok(encoded)
+}
+
+fn request_for_archive(bytes: &[u8], archive: &[u8]) -> TestResult<EvaluationRequest> {
+    let request = request_with(bytes, |request| {
+        request.fixture_bundle_digest = *blake3::hash(archive).as_bytes();
+    })?;
+    Ok(EvaluationRequest::from_canonical_cbor(&request)?)
 }
 
 #[test]
@@ -1395,6 +1416,86 @@ fn staged_preflight_rejects_untrusted_structure_before_member_allocation() -> Te
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let mut archive = Cursor::new(&corpus.archive);
         assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> TestResult {
+    use ciborium::value::Value;
+
+    let corpus = support::corpus()?;
+    let mut trailing = corpus.archive.clone();
+    trailing.push(0);
+
+    let mut nested = Value::Null;
+    for _ in 0..34 {
+        nested = Value::Array(vec![nested]);
+    }
+    let recursive_manifest = archive_with(&corpus.archive, |archive| {
+        archive[0] = nested;
+        Ok(())
+    })?;
+    let map_manifest = archive_with(&corpus.archive, |archive| {
+        archive[0] = Value::Map(Vec::new());
+        Ok(())
+    })?;
+    let negative_manifest = archive_with(&corpus.archive, |archive| {
+        archive[0] = Value::Integer((-1_i64).into());
+        Ok(())
+    })?;
+    let oversized_signer = archive_with(&corpus.archive, |archive| {
+        archive[2] = Value::Bytes(vec![0; 33]);
+        Ok(())
+    })?;
+    let mut oversized_member = vec![0x84, 0xf6, 0x81, 0x83, 0x61, b'p', 0x5b];
+    oversized_member.extend_from_slice(&(64_u64 * 1024 * 1024 + 1).to_be_bytes());
+    let long_member_path = archive_with(&corpus.archive, |archive| {
+        let Value::Array(members) = &mut archive[1] else {
+            return Err("archive members are not an array".into());
+        };
+        let Value::Array(member) = &mut members[0] else {
+            return Err("archive member is not an array".into());
+        };
+        member[0] = Value::Text("p".repeat(257));
+        Ok(())
+    })?;
+    let substituted_profile = archive_with(&corpus.archive, |archive| {
+        let Value::Array(members) = &mut archive[1] else {
+            return Err("archive members are not an array".into());
+        };
+        let profile = members
+            .iter_mut()
+            .find_map(|member| {
+                let Value::Array(fields) = member else {
+                    return None;
+                };
+                (fields.first() == Some(&Value::Text("profile/CPF1.cbor".to_owned())))
+                    .then_some(fields)
+            })
+            .ok_or("profile member is absent")?;
+        let Value::Bytes(bytes) = &mut profile[1] else {
+            return Err("profile member is not bytes".into());
+        };
+        bytes[0] ^= 1;
+        Ok(())
+    })?;
+
+    for archive in [
+        trailing,
+        recursive_manifest,
+        map_manifest,
+        negative_manifest,
+        oversized_signer,
+        oversized_member,
+        long_member_path,
+        substituted_profile,
+    ] {
+        let request = request_for_archive(&corpus.request, &archive)?;
+        assert!(
+            preflight_signed_bundle(&mut Cursor::new(archive), &corpus.trust_policy, &request,)
+                .is_err()
+        );
     }
     Ok(())
 }

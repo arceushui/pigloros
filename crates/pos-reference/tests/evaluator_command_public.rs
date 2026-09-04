@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
@@ -629,6 +629,47 @@ fn command_rejects_source_and_binary_not_bound_by_build_provenance() -> TestResu
     bytes.push(b'\n');
     fs::write(provenance_path, bytes)?;
     assert!(!unrelated_binary.output()?.status.success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_closes_remaining_public_io_and_identity_boundaries() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let mut malformed_request = complete_command(directory.path())?;
+    fs::write(directory.path().join("request.cbor"), [0xf6])?;
+    assert!(!malformed_request.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    let mut renamed_provenance = complete_command(directory.path())?;
+    fs::rename(
+        directory.path().join("provenance.json"),
+        directory.path().join("renamed.json"),
+    )?;
+    std::os::unix::fs::symlink(
+        directory.path().join("renamed.json"),
+        directory.path().join("provenance.json"),
+    )?;
+    assert!(!renamed_provenance.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    let mut substituted_binary = complete_command(directory.path())?;
+    fs::copy(
+        "/bin/false",
+        directory.path().join("bin/pos-reference-evaluator"),
+    )?;
+    let source = fs::read(directory.path().join("source/pigloros-source.tar.gz"))?;
+    write_evaluator_provenance(&directory.path().join("provenance.json"), &source)?;
+    write_checksum_inventory(directory.path())?;
+    assert!(!substituted_binary.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    let diagnostics_sink = fs::OpenOptions::new().write(true).open("/dev/full")?;
+    let status = complete_command(directory.path())?
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(diagnostics_sink))
+        .status()?;
+    assert!(!status.success());
     Ok(())
 }
 
