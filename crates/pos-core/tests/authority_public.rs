@@ -1288,7 +1288,7 @@ fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
     );
     let oversized_bindings = changed_array(&encoded, |fields| {
         let bindings = array_fields_mut(&mut fields[12]);
-        bindings.extend((2_u8..=17).map(|value| Value::Bytes(hash(value).as_bytes().to_vec())));
+        bindings.extend((2_u8..=18).map(|value| Value::Bytes(hash(value).as_bytes().to_vec())));
     });
     assert_eq!(
         AuthorizationDecisionV1::decode(&oversized_bindings),
@@ -1881,7 +1881,7 @@ fn malformed_grant_drafts_reject_invalid_temporal_and_scope_fields() {
         AuthorityGranteeV1::Principal(principal_ref.clone()),
         scope(vec![actor], vec!["read"], None),
     );
-    invalid.issuance_seq = Seq::from_u64(10);
+    invalid.issuance_seq = Seq::from_u64(11);
     assert_eq!(
         CapabilityGrantV1::try_from_draft(invalid),
         Err(AuthorityErrorV1::FieldOutOfBounds)
@@ -2257,12 +2257,14 @@ fn ancestor_changes_invalidate_every_descendant() {
         ),
     );
     expired_parent.valid_until_position = Seq::from_u64(40);
+    let mut expired_child = delegation_child();
+    expired_child.valid_until_position = Seq::from_u64(30);
     assert_eq!(
         decision_for(
             &request(principal(3), actor),
             &[
                 ok(CapabilityGrantV1::try_from_draft(expired_parent)),
-                ok(CapabilityGrantV1::try_from_draft(delegation_child())),
+                ok(CapabilityGrantV1::try_from_draft(expired_child)),
             ],
         )
         .outcome(),
