@@ -152,7 +152,7 @@ class AsanCiPolicyTests(unittest.TestCase):
             lambda workflow: self.asan_step(workflow)["env"].pop("RUST_TEST_THREADS")
         )
 
-    def test_requires_both_asan_shards(self) -> None:
+    def test_requires_all_asan_shards(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["asan"]["strategy"]["matrix"][
                 "shard"

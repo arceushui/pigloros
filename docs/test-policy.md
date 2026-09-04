@@ -73,15 +73,18 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 ## Resource-intensive sanitizer jobs
 
 The complete workspace ASan gate retains all features and test targets, but
-partitions their execution across two hosted shards because Cargo runs separate
-test executables serially. The `bundle-contracts` shard runs the two
-`pos-conformance` bundle integration targets. The `remainder` shard runs
-`--workspace --exclude pos-conformance --tests`, then the `pos-conformance`
-library, binaries, and remaining three integration targets. Each shard
-serializes Cargo build/link jobs and bounds test threads at two. The required
+partitions their execution across four hosted shards because Cargo runs separate
+test executables serially. The `bundle-coverage` and `bundle-public` shards run
+the two `pos-conformance` bundle integration targets independently. The
+`moat-proof` shard runs the slow moat integration target independently, while
+`remainder` runs `--workspace --exclude pos-conformance --tests`, then the
+`pos-conformance` library, binaries, and the profile/provider integration
+targets. Each shard serializes Cargo build/link jobs and bounds test threads at
+two. The required
 `asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
-every shard succeeds. Partitioning changes throughput only: it does not remove
-a package, feature, test target, sanitizer, or coverage requirement. ASan plus
+every shard succeeds. Partitioning reduces wall-clock time by repeating setup
+and build work on independent runners; it does not remove a package, feature,
+test target, sanitizer, or coverage requirement. ASan plus
 `build-std` produces unusually large test-binary links; concurrent lld workers
 can exhaust the runner's available resources and crash with `SIGBUS` before any
 test executes.
@@ -127,7 +130,7 @@ counts are not cross-run invariants because LSan evaluates reachability and
 records matched suppressions separately in each test process.
 
 The complete workspace/all-features/all-test-target ASan scope and
-`detect_leaks=1` remain unchanged across the two shards. A separate 1,234-byte
+`detect_leaks=1` remain unchanged across the four shards. A separate 1,234-byte
 intentional leak runs under the same sanitizer, symbolizer, suppression file,
 and options; it must exit nonzero, report exactly one allocation, and match
 neither approved rule.
