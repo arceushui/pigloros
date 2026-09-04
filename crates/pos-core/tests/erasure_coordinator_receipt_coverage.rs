@@ -541,6 +541,39 @@ fn assert_correction_recovery_guards(
     )
 }
 
+fn assert_correction_recovery_resolve_state_faults(
+    adapter: &PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+) -> Result<(), ErasureErrorV1> {
+    let probe = adapter
+        .clone()
+        .with_operation_fault(PublicCoordinatorFault {
+            operation: PublicCoordinatorOperation::ResolveState,
+            occurrence: u64::MAX,
+        });
+    let observer = probe.clone();
+    ErasureCoordinatorStateMachineV1::new(probe, COORDINATOR)
+        .submit(request.clone(), request.provenance())?;
+    let occurrences = observer.operation_fault_hits();
+    assert!(occurrences > 0, "ResolveState was not exercised");
+
+    for occurrence in 0..occurrences {
+        let faulted = adapter
+            .clone()
+            .with_operation_fault(PublicCoordinatorFault {
+                operation: PublicCoordinatorOperation::ResolveState,
+                occurrence,
+            });
+        assert_eq!(
+            ErasureCoordinatorStateMachineV1::new(faulted, COORDINATOR)
+                .submit(request.clone(), request.provenance()),
+            Err(ErasureErrorV1::TrustSnapshotInvalid),
+            "ResolveState occurrence {occurrence} did not propagate",
+        );
+    }
+    Ok(())
+}
+
 fn correction_for(
     rejected_request: ErasureReferenceV1,
     rejected_terminal_state: ErasureReferenceV1,
@@ -1688,6 +1721,10 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         rejected.state_digest(),
         original_submitted.state_digest(),
         &correction,
+    )?;
+    assert_correction_recovery_resolve_state_faults(
+        &mutation_base,
+        &corrected_request(correction.reference())?,
     )?;
     Ok(())
 }
