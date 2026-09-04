@@ -4707,10 +4707,14 @@ fn apply_sqlite_recovery_error(
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
         .is_some();
     if !already_indexed {
+        let limit = i64::try_from(ERASURE_MAX_RECOVERY_ERRORS + 1).unwrap_or(i64::MAX);
         let count = conn
             .query_row(
-                "SELECT COUNT(*) FROM erasure_recovery_errors WHERE request_digest=?1",
-                params![request.digest().as_slice()],
+                "SELECT COUNT(*) FROM (
+                     SELECT 1 FROM erasure_recovery_errors
+                     WHERE request_digest=?1 LIMIT ?2
+                 )",
+                params![request.digest().as_slice(), limit],
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;

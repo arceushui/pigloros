@@ -351,6 +351,25 @@ impl PublicCoordinatorPort {
             })
     }
 
+    /// Return the current content address linked from one manifest field.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or provenance error when the manifest or
+    /// selected field is absent or malformed.
+    pub fn manifest_object_reference(
+        &self,
+        request: ErasureReferenceV1,
+        field: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        let storage = self.storage.borrow();
+        let (_, manifest) = storage
+            .manifests
+            .get(&request)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        array_reference_field(manifest, field)
+    }
+
     #[must_use]
     pub fn last_mutation(&self) -> Option<pos_core::PreparedErasureCasV1> {
         self.last_mutation.borrow().clone()
