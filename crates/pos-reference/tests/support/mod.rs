@@ -542,7 +542,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     if let Some(ProfileMutation::SelectedClosureCapExact(index)) = profile_mutation {
         select_closure_cap_exact(&mut hard_caps, &members, index)?;
     }
-    let mut profile = profile(
+    let mut profile_value = profile(
         &members,
         fixtures.clone(),
         execution_digest,
@@ -555,10 +555,10 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         Some(ProfileMutation::SelectedClosureCapExact(3))
     ) {
         for _ in 0..4 {
-            let profile_bytes = encoded_profile_length(&profile)?;
+            let profile_bytes = encoded_profile_length(&profile_value)?;
             let total_bytes = closure_member_bytes(&members)?.saturating_add(profile_bytes);
             array_fields_mut(&mut hard_caps)?[5] = uint(total_bytes);
-            profile = profile(
+            profile_value = profile(
                 &members,
                 fixtures.clone(),
                 execution_digest,
@@ -569,10 +569,10 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         }
     }
     if let Some(mutation) = profile_mutation {
-        mutate_profile(&mut profile, mutation)?;
+        mutate_profile(&mut profile_value, mutation)?;
     }
-    let profile_digest = hash_contract("PiglorOS.ConformanceProfile.v1", &profile)?;
-    let mut profile_fields = fields(profile)?;
+    let profile_digest = hash_contract("PiglorOS.ConformanceProfile.v1", &profile_value)?;
+    let mut profile_fields = fields(profile_value)?;
     profile_fields.push(bytes(&profile_digest));
     insert_profile_member(&mut members, profile_fields, profile_mutation)?;
     let archive = archive(
