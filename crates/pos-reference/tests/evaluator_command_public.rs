@@ -152,8 +152,12 @@ fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
     tar.extend_from_slice(record.as_bytes());
     tar.resize(tar.len().div_ceil(512) * 512, 0);
     tar.extend_from_slice(&[0; 1024]);
+    gzip_bytes(&tar)
+}
+
+fn gzip_bytes(bytes: &[u8]) -> TestResult<Vec<u8>> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&tar)?;
+    encoder.write_all(bytes)?;
     Ok(encoder.finish()?)
 }
 
@@ -169,15 +173,64 @@ fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
     header[156] = kind;
     header[257..263].copy_from_slice(b"ustar\0");
     header[263..265].copy_from_slice(b"00");
+    write_tar_checksum(&mut header);
+    header
+}
+
+fn write_tar_checksum(header: &mut [u8; 512]) {
+    header[148..156].fill(b' ');
     let checksum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
     let encoded = format!("{checksum:06o}\0 ");
     header[148..156].copy_from_slice(encoded.as_bytes());
-    header
 }
 
 fn write_octal(field: &mut [u8], value: u64) {
     let encoded = format!("{:0width$o}\0", value, width = field.len() - 1);
     field.copy_from_slice(encoded.as_bytes());
+}
+
+fn source_archive_with_entry(
+    header: [u8; 512],
+    payload: &[u8],
+    pad_and_terminate: bool,
+) -> TestResult<Vec<u8>> {
+    let mut tar = Vec::from(header.as_slice());
+    tar.extend_from_slice(payload);
+    if pad_and_terminate {
+        tar.resize(tar.len().div_ceil(512) * 512, 0);
+        tar.extend_from_slice(&[0; 1024]);
+    }
+    gzip_bytes(&tar)
+}
+
+fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
+    let mut body = Vec::from(key.as_bytes());
+    body.push(b'=');
+    body.extend_from_slice(value);
+    body.push(b'\n');
+    let mut length = body.len() + 2;
+    loop {
+        let prefix = format!("{length} ");
+        let encoded_length = prefix.len() + body.len();
+        if encoded_length == length {
+            let mut record = Vec::from(prefix.as_bytes());
+            record.extend_from_slice(&body);
+            return record;
+        }
+        length = encoded_length;
+    }
+}
+
+fn rebind_source_archive(directory: &Path, source: &[u8]) -> TestResult {
+    fs::write(directory.join("source/pigloros-source.tar.gz"), source)?;
+    let path = directory.join("provenance.json");
+    let mut provenance: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    provenance["evaluator_source_blake3"] =
+        serde_json::Value::String(blake3::hash(source).to_hex().to_string());
+    let mut bytes = serde_json::to_vec(&provenance)?;
+    bytes.push(b'\n');
+    fs::write(path, bytes)?;
+    write_checksum_inventory(directory)
 }
 
 #[cfg(unix)]
@@ -701,6 +754,81 @@ fn command_rejects_incomplete_or_substituted_evaluator_evidence() -> TestResult 
         let directory = tempfile::tempdir()?;
         let mut command = complete_command(directory.path())?;
         fs::write(directory.path().join("BLAKE3SUMS"), inventory)?;
+        assert!(!command.output()?.status.success());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_rejects_malformed_embedded_source_identity_records() -> TestResult {
+    let mut corrupted_checksum = tar_header("pax_global_header", 0, b'g');
+    corrupted_checksum[0] ^= 1;
+
+    let mut invalid_checksum_field = tar_header("pax_global_header", 0, b'g');
+    invalid_checksum_field[148..156].fill(b'x');
+
+    let mut invalid_size_field = tar_header("pax_global_header", 0, b'g');
+    invalid_size_field[124..136].fill(b'x');
+    write_tar_checksum(&mut invalid_size_field);
+
+    let no_space = b"record-without-space";
+    let non_numeric_length = b"x comment=1111111111111111111111111111111111111111\n";
+    let overflowing_length = b"999999999999999999999999999999999999999999999999 comment=x\n";
+    let missing_newline = b"20 comment=missing";
+    let unrelated_record = pax_record("path", b"source");
+    let mut invalid_utf8_commit = [b'1'; 40];
+    invalid_utf8_commit[20] = 0xff;
+    let invalid_utf8_record = pax_record("comment", &invalid_utf8_commit);
+    let short_commit_record = pax_record("comment", b"111111111111111111111111111111111111111");
+
+    let archives = vec![
+        gzip_bytes(&[])?,
+        gzip_bytes(&[0; 1024])?,
+        source_archive_with_entry(corrupted_checksum, &[], true)?,
+        source_archive_with_entry(invalid_checksum_field, &[], true)?,
+        source_archive_with_entry(invalid_size_field, &[], true)?,
+        source_archive_with_entry(tar_header("pax", 4_097, b'g'), &[], false)?,
+        source_archive_with_entry(tar_header("pax", 52, b'g'), b"short", false)?,
+        source_archive_with_entry(tar_header("file", 10, b'0'), b"x", false)?,
+        source_archive_with_entry(tar_header("file", 0, b'0'), &[], true)?,
+        source_archive_with_entry(tar_header("pax", no_space.len(), b'g'), no_space, true)?,
+        source_archive_with_entry(
+            tar_header("pax", non_numeric_length.len(), b'g'),
+            non_numeric_length,
+            true,
+        )?,
+        source_archive_with_entry(
+            tar_header("pax", overflowing_length.len(), b'g'),
+            overflowing_length,
+            true,
+        )?,
+        source_archive_with_entry(
+            tar_header("pax", missing_newline.len(), b'g'),
+            missing_newline,
+            true,
+        )?,
+        source_archive_with_entry(
+            tar_header("pax", unrelated_record.len(), b'g'),
+            &unrelated_record,
+            true,
+        )?,
+        source_archive_with_entry(
+            tar_header("pax", invalid_utf8_record.len(), b'g'),
+            &invalid_utf8_record,
+            true,
+        )?,
+        source_archive_with_entry(
+            tar_header("pax", short_commit_record.len(), b'g'),
+            &short_commit_record,
+            true,
+        )?,
+    ];
+
+    for source in archives {
+        let directory = tempfile::tempdir()?;
+        let mut command = complete_command(directory.path())?;
+        rebind_source_archive(directory.path(), &source)?;
         assert!(!command.output()?.status.success());
     }
     Ok(())

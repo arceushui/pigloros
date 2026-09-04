@@ -1,7 +1,7 @@
 pub mod support;
 
 use std::error::Error;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 use pos_reference::evaluator::{
     evaluate, AdapterError, CaseAttempt, EvaluatorError, EvaluatorIdentity, ResourceUsage,
@@ -33,6 +33,48 @@ struct RecordingAdapter {
     subject_digest: [u8; 32],
     output: Vec<u8>,
     attempts: Vec<CaseAttempt>,
+}
+
+struct FaultingArchive {
+    inner: Cursor<Vec<u8>>,
+    fail_on_read: Option<usize>,
+    fail_on_seek: Option<usize>,
+    reads: usize,
+    seeks: usize,
+}
+
+impl FaultingArchive {
+    const fn new(bytes: Vec<u8>, fail_on_read: Option<usize>, fail_on_seek: Option<usize>) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            fail_on_read,
+            fail_on_seek,
+            reads: 0,
+            seeks: 0,
+        }
+    }
+}
+
+impl Read for FaultingArchive {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.reads += 1;
+        if self.fail_on_read == Some(self.reads) {
+            Err(io::Error::other("injected archive read failure"))
+        } else {
+            self.inner.read(buffer)
+        }
+    }
+}
+
+impl Seek for FaultingArchive {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.seeks += 1;
+        if self.fail_on_seek == Some(self.seeks) {
+            Err(io::Error::other("injected archive seek failure"))
+        } else {
+            self.inner.seek(position)
+        }
+    }
 }
 
 struct MixedOracleAdapter {
@@ -1346,6 +1388,91 @@ fn staged_preflight_rejects_untrusted_structure_before_member_allocation() -> Te
         let mut archive = Cursor::new(&corpus.archive);
         assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+
+    let mismatched_archive_request = request_with(&corpus.request, |request| {
+        request.fixture_bundle_digest = [90; 32];
+    })?;
+    let mismatched_archive_request =
+        EvaluationRequest::from_canonical_cbor(&mismatched_archive_request)?;
+    assert!(preflight_signed_bundle(
+        &mut Cursor::new(&corpus.archive),
+        &corpus.trust_policy,
+        &mismatched_archive_request,
+    )
+    .is_err());
+
+    let mismatched_trust_request = request_with(&corpus.request, |request| {
+        request.trust_policy_snapshot_digest = [91; 32];
+    })?;
+    let mismatched_trust_request =
+        EvaluationRequest::from_canonical_cbor(&mismatched_trust_request)?;
+    assert!(preflight_signed_bundle(
+        &mut Cursor::new(&corpus.archive),
+        &corpus.trust_policy,
+        &mismatched_trust_request,
+    )
+    .is_err());
+
+    let revoked = support::corpus_with_trust_mutation(TrustMutation::RevokedArtifact)?;
+    let revoked_request = EvaluationRequest::from_canonical_cbor(&revoked.request)?;
+    assert!(preflight_signed_bundle(
+        &mut Cursor::new(&revoked.archive),
+        &revoked.trust_policy,
+        &revoked_request,
+    )
+    .is_err());
+
+    for failing_seek in 1..=5 {
+        let mut archive = FaultingArchive::new(corpus.archive.clone(), None, Some(failing_seek));
+        assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
+    }
+    let mut counted = FaultingArchive::new(corpus.archive.clone(), None, None);
+    preflight_signed_bundle(&mut counted, &corpus.trust_policy, &request)?;
+    for failing_read in 1..=counted.reads {
+        let mut archive = FaultingArchive::new(corpus.archive.clone(), Some(failing_read), None);
+        assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn authenticated_caps_reject_request_identity_and_size_mismatches() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let mut archive = Cursor::new(&corpus.archive);
+    let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+
+    for request_bytes in [
+        request_with(&corpus.request, |request| {
+            request.profile_digest = [90; 32];
+        })?,
+        request_with(&corpus.request, |request| {
+            request.evaluator_protocol_digest = [91; 32];
+        })?,
+        request_with(&corpus.request, |request| {
+            request.evaluator_hard_caps_digest = [92; 32];
+        })?,
+    ] {
+        let changed = EvaluationRequest::from_canonical_cbor(&request_bytes)?;
+        assert!(Profile::authenticated_hard_caps(preflight.profile_bytes(), &changed).is_err());
+    }
+
+    let undersized =
+        support::corpus_with_profile_mutation(ProfileMutation::SelectedCapBoundary(0))?;
+    let undersized_request = EvaluationRequest::from_canonical_cbor(&undersized.request)?;
+    let mut archive = Cursor::new(&undersized.archive);
+    let preflight =
+        preflight_signed_bundle(&mut archive, &undersized.trust_policy, &undersized_request)?;
+    assert!(
+        Profile::authenticated_hard_caps(preflight.profile_bytes(), &undersized_request).is_err()
+    );
     Ok(())
 }
 
