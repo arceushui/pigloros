@@ -1500,6 +1500,16 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         member[0] = Value::Text("p".repeat(257));
         Ok(())
     })?;
+    let invalid_member_path = archive_with(&corpus.archive, |archive| {
+        let Value::Array(members) = &mut archive[1] else {
+            return Err("archive members are not an array".into());
+        };
+        let Value::Array(member) = &mut members[0] else {
+            return Err("archive member is not an array".into());
+        };
+        member[0] = Value::Text("../outside".to_owned());
+        Ok(())
+    })?;
     let substituted_profile = archive_with(&corpus.archive, |archive| {
         let Value::Array(members) = &mut archive[1] else {
             return Err("archive members are not an array".into());
@@ -1530,6 +1540,7 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         missing_profile,
         oversized_member,
         long_member_path,
+        invalid_member_path,
         substituted_profile,
     ] {
         let request = request_for_archive(&corpus.request, &archive)?;
