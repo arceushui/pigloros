@@ -547,12 +547,21 @@ fn recover_foundation(
     )?;
     let state = port
         .resolve_state(manifest.state)
-        .map_err(RecoveryFailureV1::from)?
+        .map_err(|error| RecoveryFailureV1::new(error, manifest.state))?
         .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, manifest.state))?;
     if request.reference() != requested || state.request() != requested {
-        return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+        let subject = if request.reference() != requested {
+            request.reference()
+        } else {
+            state.state_digest()
+        };
+        return Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            subject,
+        ));
     }
-    verify_predecessor_chain(state.clone(), port)?;
+    verify_predecessor_chain(state.clone(), port)
+        .map_err(|error| RecoveryFailureV1::new(error, state.state_digest()))?;
     let closure = optional(
         port,
         manifest.target_closure,
@@ -563,7 +572,12 @@ fn recover_foundation(
         .as_ref()
         .is_some_and(|value| value.request != requested)
     {
-        return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+        return Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            closure
+                .as_ref()
+                .map_or(manifest.state, |value| value.reference),
+        ));
     }
     Ok(RecoveredFoundationV1 {
         request,
@@ -745,9 +759,16 @@ impl RecoveredErasureV1 {
             obligations: &evidence.obligations,
             authorize_provenance: manifest.authorize_provenance,
             verifier,
-        })?;
-        validate_correction(port, &foundation.request, evidence.correction.as_ref())?;
-        validate_state_provenance(port, &foundation.state, &manifest)?;
+        })
+        .map_err(|error| RecoveryFailureV1::new(error, stored.digest()))?;
+        let correction_subject = evidence.correction.as_ref().map_or(
+            foundation.request.reference(),
+            ErasureCorrectionProvenanceV1::reference,
+        );
+        validate_correction(port, &foundation.request, evidence.correction.as_ref())
+            .map_err(|error| RecoveryFailureV1::new(error, correction_subject))?;
+        validate_state_provenance(port, &foundation.state, &manifest)
+            .map_err(|error| RecoveryFailureV1::new(error, foundation.state.state_digest()))?;
 
         let RecoveredFoundationV1 {
             request,
@@ -1156,35 +1177,79 @@ impl RecoveredErasureV1 {
         &mut self,
         port: &dyn ErasurePersistencePortV1,
     ) -> Result<(), RecoveryFailureV1> {
-        if port.attempt_index_count(self.request.reference())? != self.completed_attempt_count {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+        let index_count = port
+            .attempt_index_count(self.request.reference())
+            .map_err(|error| {
+                RecoveryFailureV1::new(
+                    error,
+                    self.manifest
+                        .attempt_history_head
+                        .unwrap_or(self.manifest.state),
+                )
+            })?;
+        if index_count != self.completed_attempt_count {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                self.manifest
+                    .attempt_history_head
+                    .unwrap_or(self.manifest.state),
+            ));
         }
         let mut predecessor = None;
         let mut predecessor_receipt = None;
         let mut latest_terminal_state = None;
         for ordinal in 0..self.completed_attempt_count {
             let reference = port
-                .attempt_page_ref(self.request.reference(), ordinal)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                .attempt_page_ref(self.request.reference(), ordinal)
+                .map_err(|error| {
+                    RecoveryFailureV1::new(
+                        error,
+                        self.manifest
+                            .attempt_history_head
+                            .unwrap_or(self.manifest.state),
+                    )
+                })?
+                .ok_or_else(|| {
+                    RecoveryFailureV1::new(
+                        ErasureErrorV1::ProvenanceMissing,
+                        self.manifest
+                            .attempt_history_head
+                            .unwrap_or(self.manifest.state),
+                    )
+                })?;
             let page = load(port, reference, AttemptPageV1::decode, |value| {
                 value.reference
             })?;
             if (page.request, page.ordinal, page.predecessor)
                 != (self.request.reference(), ordinal, predecessor)
             {
-                return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+                return Err(RecoveryFailureV1::new(
+                    ErasureErrorV1::ProvenanceMissing,
+                    reference,
+                ));
             }
             let (receipt, terminal_state) = self.replay_page(port, &page, predecessor_receipt)?;
             predecessor_receipt = Some(receipt);
             latest_terminal_state = Some(terminal_state);
             predecessor = Some(reference);
         }
-        if predecessor != self.attempt_history_head
-            || predecessor_receipt != self.latest_receipt
-            || (self.completed_attempt_count > 0
-                && latest_terminal_state != Some(self.manifest.state))
-        {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+        if predecessor != self.attempt_history_head {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                self.attempt_history_head.unwrap_or(self.manifest.state),
+            ));
+        }
+        if predecessor_receipt != self.latest_receipt {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                self.latest_receipt.unwrap_or(self.manifest.state),
+            ));
+        }
+        if self.completed_attempt_count > 0 && latest_terminal_state != Some(self.manifest.state) {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                self.manifest.state,
+            ));
         }
         if let Some(active) = self.manifest.active.clone() {
             let admission = load(
@@ -1201,10 +1266,16 @@ impl RecoveredErasureV1 {
             .into_iter()
             .all(|matches| matches);
             if !active_admission_matches {
-                return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+                return Err(RecoveryFailureV1::new(
+                    ErasureErrorV1::ProvenanceMissing,
+                    active.admission,
+                ));
             }
             if active.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
-                return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+                return Err(RecoveryFailureV1::new(
+                    ErasureErrorV1::ProvenanceMissing,
+                    admission.reference(),
+                ));
             }
             let active_state_matches = if active.ordinal == 0 {
                 self.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
@@ -1213,14 +1284,21 @@ impl RecoveredErasureV1 {
                 latest_terminal_state == Some(self.manifest.state)
             };
             if !active_state_matches {
-                return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+                return Err(RecoveryFailureV1::new(
+                    ErasureErrorV1::ProvenanceMissing,
+                    self.manifest.state,
+                ));
             }
             self.validate_attempt_effect(port, &admission)?;
             self.effective.retain(|_, value| {
                 value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged
             });
-            let admitted =
-                self.load_acknowledgements(port, &admission, &active.acknowledgements)?;
+            let admitted = self.load_acknowledgements(
+                port,
+                &admission,
+                &active.acknowledgements,
+                active.admission,
+            )?;
             self.apply_acknowledgements(admitted.clone());
             self.active = Some(RecoveredAttemptV1 {
                 ordinal: active.ordinal,
@@ -1267,20 +1345,34 @@ impl RecoveredErasureV1 {
         .into_iter()
         .all(|matches| matches);
         if !page_admission_matches {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                page.reference,
+            ));
         }
         if page.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                admission.reference(),
+            ));
         }
         self.validate_attempt_effect(port, &admission)?;
         self.effective
             .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
-        let admitted_values = self.load_acknowledgements(port, &admission, &admitted.references)?;
+        let admitted_values = self.load_acknowledgements(
+            port,
+            &admission,
+            &admitted.references,
+            page.admitted_inventory,
+        )?;
         self.apply_acknowledgements(admitted_values);
         if canonical_acknowledgement_references(self.effective.values().copied())
             != effective.references
         {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                page.effective_inventory,
+            ));
         }
 
         self.validate_completed_attempt(port, page, &admission, &effective, predecessor_receipt)
@@ -1313,8 +1405,11 @@ impl RecoveredErasureV1 {
             ErasureReceiptProvenanceV1::reference,
         )?;
         let terminal = port
-            .resolve_state(page.terminal_state)?
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            .resolve_state(page.terminal_state)
+            .map_err(|error| RecoveryFailureV1::new(error, page.terminal_state))?
+            .ok_or_else(|| {
+                RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, page.terminal_state)
+            })?;
         let terminal_bindings_match = [
             terminal.request() == self.request.reference(),
             outcome.request() == self.request.reference(),
@@ -1349,7 +1444,10 @@ impl RecoveredErasureV1 {
         .into_iter()
         .all(|matches| matches);
         if !terminal_bindings_match {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                page.reference,
+            ));
         }
         Self::validate_effect_subject(
             port,
@@ -1358,7 +1456,9 @@ impl RecoveredErasureV1 {
                 receipt: receipt.receipt_digest(),
             },
         )?;
-        receipt.validate_frozen_obligations(&self.obligations)?;
+        receipt
+            .validate_frozen_obligations(&self.obligations)
+            .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))?;
         Ok((receipt.receipt_digest(), page.terminal_state))
     }
 
@@ -1367,6 +1467,7 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
         admission: &ErasureRetryAdmissionV1,
         references: &[ErasureReferenceV1],
+        failure_subject: ErasureReferenceV1,
     ) -> Result<
         BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ErasureAcknowledgementProvenanceV1>,
         RecoveryFailureV1,
@@ -1383,7 +1484,10 @@ impl RecoveredErasureV1 {
             if !self.acknowledgement_matches_admission(&acknowledgement, admission)
                 || values.insert(key, acknowledgement).is_some()
             {
-                return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+                return Err(RecoveryFailureV1::new(
+                    ErasureErrorV1::ProvenanceMissing,
+                    *reference,
+                ));
             }
             Self::validate_effect_subject(
                 port,
@@ -1395,8 +1499,9 @@ impl RecoveredErasureV1 {
         }
         (canonical_acknowledgement_references(values.values().copied()) == references)
             .then_some(values)
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .map_err(RecoveryFailureV1::from)
+            .ok_or_else(|| {
+                RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, failure_subject)
+            })
     }
 
     fn validate_attempt_effect(
@@ -1404,10 +1509,9 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<(), RecoveryFailureV1> {
-        let obligation_set = self
-            .obligation_set
-            .as_ref()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let obligation_set = self.obligation_set.as_ref().ok_or_else(|| {
+            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, admission.reference())
+        })?;
         let acknowledged = self
             .effective
             .values()
@@ -1435,7 +1539,10 @@ impl RecoveredErasureV1 {
             && obligations_match
             && identities_match;
         if !admission_matches {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                admission.reference(),
+            ));
         }
         let expected_commands = unresolved
             .into_iter()
@@ -1444,9 +1551,15 @@ impl RecoveredErasureV1 {
             })
             .collect::<Vec<_>>();
         let manifest = port
-            .effect_manifest(admission.reference())?
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        match port.read_effect(manifest)? {
+            .effect_manifest(admission.reference())
+            .map_err(|error| RecoveryFailureV1::new(error, admission.reference()))?
+            .ok_or_else(|| {
+                RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, admission.reference())
+            })?;
+        match port
+            .read_effect(manifest)
+            .map_err(|error| RecoveryFailureV1::new(error, manifest))?
+        {
             ErasureCasEffectV1::AttemptAdmission {
                 reservation,
                 commands,
@@ -1455,10 +1568,16 @@ impl RecoveredErasureV1 {
                 if reservation_matches && commands == expected_commands {
                     Ok(())
                 } else {
-                    Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing))
+                    Err(RecoveryFailureV1::new(
+                        ErasureErrorV1::ProvenanceMissing,
+                        manifest,
+                    ))
                 }
             }
-            _ => Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing)),
+            _ => Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                manifest,
+            )),
         }
     }
 
@@ -1468,12 +1587,19 @@ impl RecoveredErasureV1 {
         expected: &ErasureCasEffectV1,
     ) -> Result<(), RecoveryFailureV1> {
         let manifest = port
-            .effect_manifest(subject)?
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if &port.read_effect(manifest)? == expected {
+            .effect_manifest(subject)
+            .map_err(|error| RecoveryFailureV1::new(error, subject))?
+            .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, subject))?;
+        let effect = port
+            .read_effect(manifest)
+            .map_err(|error| RecoveryFailureV1::new(error, manifest))?;
+        if &effect == expected {
             Ok(())
         } else {
-            Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing))
+            Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                manifest,
+            ))
         }
     }
 
@@ -1527,11 +1653,20 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
         verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
     ) -> Result<(), RecoveryFailureV1> {
-        let count = port.scope_index_count(self.request.reference())?;
+        let fallback_subject = self
+            .manifest
+            .scope_extension_head
+            .unwrap_or(self.manifest.state);
+        let count = port
+            .scope_index_count(self.request.reference())
+            .map_err(|error| RecoveryFailureV1::new(error, fallback_subject))?;
         if count > ERASURE_MAX_SCOPE_EXTENSIONS as u64
             || (count == 0) != self.manifest.scope_extension_head.is_none()
         {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                fallback_subject,
+            ));
         }
         let mut predecessor_node = None;
         let mut predecessor_extension = None;
@@ -1542,8 +1677,11 @@ impl RecoveredErasureV1 {
             .and_then(ErasureScopeCommitmentV1::lineage_rule);
         for ordinal in 0..count {
             let reference = port
-                .scope_node_ref(self.request.reference(), ordinal)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                .scope_node_ref(self.request.reference(), ordinal)
+                .map_err(|error| RecoveryFailureV1::new(error, fallback_subject))?
+                .ok_or_else(|| {
+                    RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
+                })?;
             let node = load(port, reference, ScopeNodeV1::decode, |value| {
                 value.reference
             })?;
@@ -1563,9 +1701,14 @@ impl RecoveredErasureV1 {
                 || extension.predecessor_extension() != predecessor_extension
                 || !forks.insert(extension.fork())
             {
-                return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+                return Err(RecoveryFailureV1::new(
+                    ErasureErrorV1::ProvenanceMissing,
+                    reference,
+                ));
             }
-            verifier.validate_scope_extension(&extension)?;
+            verifier
+                .validate_scope_extension(&extension)
+                .map_err(|error| RecoveryFailureV1::new(error, extension.reference()))?;
             predecessor_node = Some(reference);
             predecessor_extension = Some(extension.reference());
             self.scope_extensions.push(extension);
@@ -1576,7 +1719,10 @@ impl RecoveredErasureV1 {
             });
         }
         if predecessor_node != self.manifest.scope_extension_head {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                fallback_subject,
+            ));
         }
         Ok(())
     }
@@ -1586,28 +1732,38 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
         verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
     ) -> Result<(), RecoveryFailureV1> {
-        let count = port.administrative_resolution_index_count(self.request.reference())?;
+        let fallback_subject = self
+            .manifest
+            .administrative_resolution_head
+            .unwrap_or(self.manifest.state);
+        let count = port
+            .administrative_resolution_index_count(self.request.reference())
+            .map_err(|error| RecoveryFailureV1::new(error, fallback_subject))?;
         if count > ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64
             || (count == 0) != self.administrative_resolution_head.is_none()
         {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                fallback_subject,
+            ));
         }
         if count == 0 {
             return Ok(());
         }
-        let scope = self
-            .scope
-            .as_ref()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let obligation_set = self
-            .obligation_set
-            .as_ref()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let scope = self.scope.as_ref().ok_or_else(|| {
+            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
+        })?;
+        let obligation_set = self.obligation_set.as_ref().ok_or_else(|| {
+            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
+        })?;
         let mut predecessor = None;
         for ordinal in 0..count {
             let reference = port
-                .administrative_resolution_ref(self.request.reference(), ordinal)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                .administrative_resolution_ref(self.request.reference(), ordinal)
+                .map_err(|error| RecoveryFailureV1::new(error, fallback_subject))?
+                .ok_or_else(|| {
+                    RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
+                })?;
             let resolution = load(
                 port,
                 reference,
@@ -1620,13 +1776,21 @@ impl RecoveredErasureV1 {
                 || resolution.policy() != self.request.policy()
                 || resolution.trust() != obligation_set.trust()
             {
-                return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+                return Err(RecoveryFailureV1::new(
+                    ErasureErrorV1::ProvenanceMissing,
+                    reference,
+                ));
             }
-            verifier.validate_administrative_resolution(&resolution)?;
+            verifier
+                .validate_administrative_resolution(&resolution)
+                .map_err(|error| RecoveryFailureV1::new(error, resolution.reference()))?;
             predecessor = Some(reference);
         }
         if predecessor != self.administrative_resolution_head {
-            return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                fallback_subject,
+            ));
         }
         self.administrative_resolution_count = count;
         Ok(())

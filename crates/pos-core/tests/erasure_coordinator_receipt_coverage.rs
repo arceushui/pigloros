@@ -51,8 +51,8 @@ use coordinator_support::{
     PublicCoordinatorPortConfig,
 };
 use erasure_support::{
-    reference, request as fixture_request, retry_admission as fixture_retry_admission, target,
-    RetryAdmissionFixture,
+    obligation_for_category, reference, request as fixture_request,
+    retry_admission as fixture_retry_admission, target, RetryAdmissionFixture,
 };
 
 fn encoded_target(target: ErasureRequiredTargetV1) -> Value {
@@ -240,12 +240,7 @@ fn obligation(
     category: ErasureInventoryCategoryV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureObligationV1, ErasureErrorV1> {
-    ErasureObligationV1::new(ErasureObligationInputV1 {
-        category,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })
+    obligation_for_category(request, category, target)
 }
 
 fn atomic_freeze_input(

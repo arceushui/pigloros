@@ -98,16 +98,25 @@ pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureEr
 ///
 /// Returns [`ErasureErrorV1`] when the target or derived command identity is
 /// not valid for an ERRA1 obligation.
-pub fn obligation(
+pub fn obligation_for_category(
     request: ErasureReferenceV1,
+    category: ErasureInventoryCategoryV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureObligationV1, ErasureErrorV1> {
     ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
+        category,
         target,
         owner: target.replica_id,
         command_identity: destruction_command_reference(request, target),
     })
+}
+
+/// Build the common artifact obligation for an ERQ1 target.
+pub fn obligation(
+    request: ErasureReferenceV1,
+    target: ErasureRequiredTargetV1,
+) -> Result<ErasureObligationV1, ErasureErrorV1> {
+    obligation_for_category(request, ErasureInventoryCategoryV1::Artifact, target)
 }
 
 /// Named fields for a retry-admission fixture built from validated obligations.

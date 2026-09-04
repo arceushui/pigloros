@@ -15,7 +15,7 @@ pub mod erasure_support;
 
 use coordinator_support::{
     PublicCoordinatorFault, PublicCoordinatorOperation, PublicCoordinatorPort,
-    PublicCoordinatorPortConfig,
+    PublicCoordinatorPortConfig, ATTEMPT_ADMITTED_INVENTORY_FIELD, MANIFEST_TARGET_CLOSURE_FIELD,
 };
 use erasure_support::{
     obligation as fixture_obligation, reference, replay_target as target,
@@ -308,6 +308,16 @@ fn assert_recovery_fails(adapter: PublicCoordinatorPort, request: &ErasureReques
     );
 }
 
+fn assert_recovery_fails_and_retains(
+    adapter: PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1> {
+    let observer = adapter.clone();
+    assert_recovery_fails(adapter, request);
+    ErasureCoordinatorStateMachineV1::new(observer, COORDINATOR)
+        .recovery_errors(request.reference())
+}
+
 #[test]
 fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), ErasureErrorV1> {
     let target = target(10);
@@ -397,7 +407,11 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(
     adapter.remove_object(request);
     adapter.insert_object(request, graph.request.to_canonical_cbor()?);
     let missing_closure = reference(250);
-    adapter.replace_manifest_field(request, 4, Value::Bytes(missing_closure.digest().to_vec()))?;
+    adapter.replace_manifest_field(
+        request,
+        MANIFEST_TARGET_CLOSURE_FIELD,
+        Value::Bytes(missing_closure.digest().to_vec()),
+    )?;
     let changed_manifest = adapter
         .current_manifest(request)
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
@@ -586,21 +600,29 @@ fn public_state_chain_query_requires_the_complete_predecessor_chain() -> Result<
 fn recovery_rejects_manifest_state_rollback_after_a_completed_attempt() -> Result<(), ErasureErrorV1>
 {
     let graph = completed_graph(vec![target(10)], None)?;
-    graph.adapter.replace_manifest_with_state_lifecycle(
+    let changed_state = graph.adapter.replace_manifest_with_state_lifecycle(
         graph.request.reference(),
         ErasureLifecycleV1::AwaitingAcknowledgements,
     )?;
-    assert_recovery_fails(graph.adapter, &graph.request);
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), changed_state);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
 
 #[test]
 fn recovery_rejects_reordered_persisted_acknowledgement_inventory() -> Result<(), ErasureErrorV1> {
     let graph = completed_graph(vec![target(10), target(20)], None)?;
-    graph
-        .adapter
-        .reverse_attempt_inventory(graph.request.reference(), 0, 5)?;
-    assert_recovery_fails(graph.adapter, &graph.request);
+    let changed_inventory = graph.adapter.reverse_attempt_inventory(
+        graph.request.reference(),
+        0,
+        ATTEMPT_ADMITTED_INVENTORY_FIELD,
+    )?;
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), changed_inventory);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
 

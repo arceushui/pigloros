@@ -2384,6 +2384,10 @@ enum TestCorruption {
         parent: TimelineId,
         fork_seq: Seq,
     },
+    RecoveryErrorIndex {
+        request: ErasureReferenceV1,
+        references: usize,
+    },
 }
 
 #[cfg(test)]
@@ -2405,6 +2409,18 @@ impl MemoryStore {
                     .timeline
                     .meta
                     .fork_point = Some((parent, fork_seq));
+            }
+            TestCorruption::RecoveryErrorIndex {
+                request,
+                references,
+            } => {
+                for ordinal in 0..=references {
+                    let mut digest = [0_u8; 32];
+                    let ordinal = u64::try_from(ordinal).unwrap_or(u64::MAX);
+                    digest[..8].copy_from_slice(&ordinal.to_be_bytes());
+                    self.erasure_recovery_errors
+                        .insert((request, ErasureReferenceV1::from_digest(digest)));
+                }
             }
         }
     }
@@ -5589,14 +5605,10 @@ mod coverage_entrypoints {
     fn memory_recovery_error_index_rejects_an_over_bound_read() {
         let mut store = MemoryStore::new();
         let request = ErasureReferenceV1::from_digest([250_u8; 32]);
-        for ordinal in 0..=ERASURE_MAX_RECOVERY_ERRORS {
-            let mut digest = [0_u8; 32];
-            let ordinal = u64::try_from(ordinal).unwrap_or(u64::MAX);
-            digest[..8].copy_from_slice(&ordinal.to_be_bytes());
-            store
-                .erasure_recovery_errors
-                .insert((request, ErasureReferenceV1::from_digest(digest)));
-        }
+        store.test_corrupt(TestCorruption::RecoveryErrorIndex {
+            request,
+            references: ERASURE_MAX_RECOVERY_ERRORS,
+        });
         assert_eq!(
             store.recovery_error_refs(request),
             Err(ErasureErrorV1::ScopeInvalid)

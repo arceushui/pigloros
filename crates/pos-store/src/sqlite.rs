@@ -361,6 +361,57 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
     },
 ];
 
+// Keep the erasure DDL in one authoritative batch. `ERASURE_SCHEMA_TABLES`
+// describes the independent validation contract below; it must not become a
+// second source for creating or evolving SQLite tables.
+const ERASURE_SCHEMA_DDL: &str = "
+             CREATE TABLE IF NOT EXISTS erasure_records (
+                 request_digest BLOB NOT NULL PRIMARY KEY CHECK (length(request_digest) = 32),
+                 manifest_digest BLOB NOT NULL CHECK (length(manifest_digest) = 32),
+                 manifest_cbor BLOB NOT NULL CHECK (length(manifest_cbor) <= 1048576)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_evidence (
+                 reference_digest BLOB NOT NULL PRIMARY KEY CHECK (length(reference_digest) = 32),
+                 object_cbor BLOB NOT NULL CHECK (length(object_cbor) <= 16777216)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_recovery_errors (
+                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                 error_digest BLOB NOT NULL CHECK (length(error_digest) = 32),
+                 PRIMARY KEY (request_digest, error_digest)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_states (
+                 state_digest BLOB NOT NULL PRIMARY KEY CHECK (length(state_digest) = 32),
+                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                 state_cbor BLOB NOT NULL CHECK (length(state_cbor) <= 1048576)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_attempt_pages (
+                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
+                 PRIMARY KEY (request_digest, ordinal)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_scope_nodes (
+                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
+                 PRIMARY KEY (request_digest, ordinal)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_administrative_resolutions (
+                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
+                 PRIMARY KEY (request_digest, ordinal)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_effects (
+                 manifest_digest BLOB NOT NULL PRIMARY KEY CHECK (length(manifest_digest) = 32),
+                 effect_digest BLOB NOT NULL CHECK (length(effect_digest) = 32),
+                 subject_digest BLOB CHECK (
+                     subject_digest IS NULL OR length(subject_digest) = 32
+                 ),
+                 effect_cbor BLOB NOT NULL CHECK (length(effect_cbor) <= 16777216),
+                 UNIQUE (subject_digest)
+             );";
+
 impl SqliteStore {
     fn configure_busy_timeout(conn: &Connection) -> rusqlite::Result<()> {
         #[cfg(test)]
@@ -739,52 +790,6 @@ impl SqliteStore {
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  state_cbor BLOB NOT NULL
              );
-             CREATE TABLE IF NOT EXISTS erasure_records (
-                 request_digest BLOB NOT NULL PRIMARY KEY CHECK (length(request_digest) = 32),
-                 manifest_digest BLOB NOT NULL CHECK (length(manifest_digest) = 32),
-                 manifest_cbor BLOB NOT NULL CHECK (length(manifest_cbor) <= 1048576)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_evidence (
-                 reference_digest BLOB NOT NULL PRIMARY KEY CHECK (length(reference_digest) = 32),
-                 object_cbor BLOB NOT NULL CHECK (length(object_cbor) <= 16777216)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_recovery_errors (
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 error_digest BLOB NOT NULL CHECK (length(error_digest) = 32),
-                 PRIMARY KEY (request_digest, error_digest)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_states (
-                 state_digest BLOB NOT NULL PRIMARY KEY CHECK (length(state_digest) = 32),
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 state_cbor BLOB NOT NULL CHECK (length(state_cbor) <= 1048576)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_attempt_pages (
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
-                 PRIMARY KEY (request_digest, ordinal)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_scope_nodes (
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
-                 PRIMARY KEY (request_digest, ordinal)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_administrative_resolutions (
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
-                 PRIMARY KEY (request_digest, ordinal)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_effects (
-                 manifest_digest BLOB NOT NULL PRIMARY KEY CHECK (length(manifest_digest) = 32),
-                 effect_digest BLOB NOT NULL CHECK (length(effect_digest) = 32),
-                 subject_digest BLOB CHECK (
-                     subject_digest IS NULL OR length(subject_digest) = 32
-                 ),
-                 effect_cbor BLOB NOT NULL CHECK (length(effect_cbor) <= 16777216),
-                 UNIQUE (subject_digest)
-             );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
              CREATE TABLE IF NOT EXISTS append_identities (
                  dedup_key BLOB PRIMARY KEY CHECK (length(dedup_key) = 32),
@@ -875,6 +880,11 @@ impl SqliteStore {
              );",
             )
             .map_err(|error| Self::storage_error(&error))
+            .and_then(|()| {
+                self.conn
+                    .execute_batch(ERASURE_SCHEMA_DDL)
+                    .map_err(|error| Self::storage_error(&error))
+            })
             .and_then(|()| self.validate_erasure_schema())
     }
 
