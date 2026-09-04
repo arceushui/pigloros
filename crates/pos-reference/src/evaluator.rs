@@ -290,26 +290,45 @@ fn evaluate_cases(
         if !fixture.modes.contains(&bundle.mode) {
             continue;
         }
-        let attempt = case_attempt(bundle, fixture, bundle.mode)?;
-        let observation = adapter.execute(&attempt);
-        if matches!(
-            &observation,
-            Ok(SubjectObservation {
-                result: SubjectResult::Divergence { first_coordinate, .. },
-                ..
-            }) if first_coordinate.is_empty()
-                || first_coordinate.len() as u64
-                    > profile.evaluator_hard_caps.max_coordinate_bytes
-        ) {
-            return Err(EvaluatorError::Profile);
-        }
-        outcomes.push(case_outcome(fixture, bundle.mode, observation));
+        outcomes.push(evaluate_case(profile, bundle, fixture, adapter)?);
     }
-    if outcomes.is_empty() {
-        Err(EvaluatorError::Profile)
-    } else {
-        Ok(outcomes)
+    (!outcomes.is_empty())
+        .then_some(outcomes)
+        .ok_or(EvaluatorError::Profile)
+}
+
+fn evaluate_case(
+    profile: &Profile,
+    bundle: &VerifiedBundle,
+    fixture: &Fixture,
+    adapter: &mut impl SubjectAdapter,
+) -> Result<CaseOutcome, EvaluatorError> {
+    let attempt = case_attempt(bundle, fixture, bundle.mode)?;
+    let observation = adapter.execute(&attempt);
+    enforce_observed_coordinate_limit(
+        &observation,
+        profile.evaluator_hard_caps.max_coordinate_bytes,
+    )?;
+    Ok(case_outcome(fixture, bundle.mode, observation))
+}
+
+const fn enforce_observed_coordinate_limit(
+    observation: &Result<SubjectObservation, AdapterError>,
+    maximum: u64,
+) -> Result<(), EvaluatorError> {
+    let Ok(SubjectObservation {
+        result: SubjectResult::Divergence {
+            first_coordinate, ..
+        },
+        ..
+    }) = observation
+    else {
+        return Ok(());
+    };
+    if first_coordinate.is_empty() || first_coordinate.len() as u64 > maximum {
+        return Err(EvaluatorError::Profile);
     }
+    Ok(())
 }
 
 fn case_attempt(

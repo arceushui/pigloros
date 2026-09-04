@@ -1383,7 +1383,7 @@ fn public_evaluator_rejects_profile_local_caps_before_full_materialization() -> 
 
 #[test]
 fn public_evaluator_enforces_selected_coordinate_cap_on_adapter_output() -> TestResult {
-    for (coordinate_bytes, expected) in [(128, true), (129, false)] {
+    for (coordinate_bytes, expected) in [(0, false), (128, true), (129, false)] {
         let corpus = support::mixed_oracle_corpus()?;
         let mut adapter = MixedOracleAdapter {
             subject_digest: corpus.subject_digest,

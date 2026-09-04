@@ -559,10 +559,7 @@ fn decode_fixtures(
     hard_caps: EvaluatorHardCaps,
 ) -> Result<Vec<Fixture>, ProfileError> {
     let values = array_values(value)?;
-    if values.is_empty() || values.len() > MAX_FIXTURES || values.len() as u64 > hard_caps.max_cases
-    {
-        return Err(ProfileError::FieldOutOfBounds);
-    }
+    validate_fixture_count(values.len(), hard_caps.max_cases)?;
     let fixtures = values
         .iter()
         .map(|fixture| decode_fixture(fixture, hard_caps))
@@ -574,6 +571,13 @@ fn decode_fixtures(
         return Err(ProfileError::NonCanonicalOrder);
     }
     Ok(fixtures)
+}
+
+const fn validate_fixture_count(count: usize, selected_maximum: u64) -> Result<(), ProfileError> {
+    if count == 0 || count > MAX_FIXTURES || count as u64 > selected_maximum {
+        return Err(ProfileError::FieldOutOfBounds);
+    }
+    Ok(())
 }
 
 fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture, ProfileError> {
