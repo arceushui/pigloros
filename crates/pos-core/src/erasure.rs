@@ -3263,6 +3263,8 @@ pub trait ErasureFreezeAuthorizationVerifierV1 {
 /// The persistence layer validates immutable structural bindings. The host
 /// remains responsible for interpreting retained #186/#187 evidence and
 /// checking capabilities, principals, policy, and trust semantics.
+/// This verifier revalidates already admitted evidence during recovery; it
+/// does not itself make the admission decision.
 pub trait ErasureRecoveryAuthorizationVerifierV1 {
     /// Verify the host admission which authorized one future-Fork extension.
     ///
