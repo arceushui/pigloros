@@ -241,7 +241,8 @@ impl InventoryV1 {
         kind: u64,
         references: Vec<ErasureReferenceV1>,
     ) -> Result<Self, ErasureErrorV1> {
-        if kind > INVENTORY_EFFECTIVE || references.len() > ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT
+        if kind > INVENTORY_EFFECTIVE.0
+            || references.len() > ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
@@ -1142,13 +1143,13 @@ impl RecoveredErasureV1 {
         let admitted = InventoryV1::new(
             self.request.reference(),
             ordinal,
-            INVENTORY_ADMITTED,
+            INVENTORY_ADMITTED.0,
             canonical_acknowledgement_references(active.admitted.values().copied()),
         )?;
         let effective = InventoryV1::new(
             self.request.reference(),
             ordinal,
-            INVENTORY_EFFECTIVE,
+            INVENTORY_EFFECTIVE.0,
             canonical_acknowledgement_references(self.effective.values().copied()),
         )?;
         let page = AttemptPageV1 {
