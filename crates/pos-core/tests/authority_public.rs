@@ -1861,7 +1861,7 @@ fn malformed_grants_are_rejected_before_evaluation() {
     );
     let mut invalid = base;
     invalid.grantee = AuthorityGranteeV1::PluginInstallation {
-        controller: principal.clone(),
+        controller: principal,
         plugin_id: plugin(1),
         installation_id: [0; 16],
     };
