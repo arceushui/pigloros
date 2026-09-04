@@ -42,7 +42,11 @@ use std::sync::{atomic::AtomicU64, Arc};
 // Keep fallible proof orchestration linear without the compiler-generated
 // unmapped coverage regions introduced by repeated `?` propagation.
 macro_rules! result_pipeline {
-    (let $binding:pat = $value:expr_2021; $($remaining:tt)+) => {{
+    (let mut $binding:ident = $value:expr_2021; $($remaining:tt)+) => {{
+        let mut $binding = $value;
+        result_pipeline!($($remaining)+)
+    }};
+    (let $binding:ident = $value:expr_2021; $($remaining:tt)+) => {{
         let $binding = $value;
         result_pipeline!($($remaining)+)
     }};
@@ -181,8 +185,10 @@ impl MoatProofRun {
             child.source_events_with_control().map_err(MoatProofError::from) => |counterfactual_events|;
             parent.run_to_completion().map_err(MoatProofError::from) => |parent_result|;
             child.run_to_completion().map_err(MoatProofError::from) => |child_result|;
-            let (prefix_identical_through_fork, suffix_recomputed) =
+            let suffix_audit_result =
                 suffix_audit(&baseline_events, &counterfactual_events, fork_cut_seq);
+            let prefix_identical_through_fork = suffix_audit_result.0;
+            let suffix_recomputed = suffix_audit_result.1;
             evidence(&EvidenceContext {
                 input: &input,
                 mode,
