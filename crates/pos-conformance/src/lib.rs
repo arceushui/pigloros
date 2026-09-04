@@ -1200,12 +1200,15 @@ impl ConformanceReportV1 {
     /// not a complete, self-consistent report.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, EvidenceError> {
         self.validate()?;
-        let bytes = strict_codec::encode_conformance_report(self).map_err(EvidenceError::from)?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            Err(EvidenceError::InvalidConformanceReport)
-        } else {
-            Ok(bytes)
-        }
+        strict_codec::encode_conformance_report(self)
+            .map_err(EvidenceError::from)
+            .and_then(|bytes| {
+                if bytes.len() > 16 * 1024 * 1024 {
+                    Err(EvidenceError::InvalidConformanceReport)
+                } else {
+                    Ok(bytes)
+                }
+            })
     }
 
     /// Decode and validate an exact canonical CNR1 array.
@@ -8045,5 +8048,273 @@ pub mod tests {
             report
         );
         Ok(())
+    }
+
+    fn change_array(value: &mut Value, change: impl FnOnce(&mut Vec<Value>)) -> bool {
+        if let Value::Array(values) = value {
+            change(values);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn encode_cnr1(report: &ConformanceReportV1) -> Result<Vec<u8>, EvidenceError> {
+        let encode: fn(&ConformanceReportV1) -> Result<Vec<u8>, EvidenceError> =
+            ConformanceReportV1::to_canonical_cbor;
+        std::hint::black_box(encode)(report)
+    }
+
+    fn decode_cnr1(bytes: &[u8]) -> Result<ConformanceReportV1, EvidenceError> {
+        let decode: fn(&[u8]) -> Result<ConformanceReportV1, EvidenceError> =
+            ConformanceReportV1::from_canonical_cbor;
+        std::hint::black_box(decode)(bytes)
+    }
+
+    fn canonical_report_with(
+        report: &ConformanceReportV1,
+        change: impl FnOnce(&mut Vec<Value>),
+    ) -> Vec<u8> {
+        let encoded = encode_cnr1(report).unwrap_or_default();
+        let mut value = ciborium::from_reader(encoded.as_slice()).unwrap_or(Value::Null);
+        assert!(
+            change_array(&mut value, change),
+            "CNR1 fixture must preserve its public array shape"
+        );
+        let mut changed = Vec::new();
+        ciborium::into_writer(&value, &mut changed).unwrap_or_default();
+        changed
+    }
+
+    fn assert_cnr1_rejects(bytes: &[u8]) {
+        assert_eq!(
+            decode_cnr1(bytes),
+            Err(EvidenceError::InvalidConformanceReport)
+        );
+    }
+
+    #[test]
+    fn public_cnr1_round_trips_every_safe_error_code_and_case_axis() {
+        let safe_errors = [
+            SafeErrorCodeV1::InvalidEncoding,
+            SafeErrorCodeV1::UnsupportedVersion,
+            SafeErrorCodeV1::FieldOutOfBounds,
+            SafeErrorCodeV1::NonCanonicalOrder,
+            SafeErrorCodeV1::DigestMismatch,
+            SafeErrorCodeV1::SignatureInvalid,
+            SafeErrorCodeV1::TrustRootUnknown,
+            SafeErrorCodeV1::TrustSnapshotRollback,
+            SafeErrorCodeV1::ArtifactRevoked,
+            SafeErrorCodeV1::ClosureIncomplete,
+            SafeErrorCodeV1::ProfileClassMismatch,
+            SafeErrorCodeV1::ProfileUnsupported,
+            SafeErrorCodeV1::ProvenanceMissing,
+            SafeErrorCodeV1::ResourceLimitExceeded,
+        ];
+        let modes = [
+            ExecutionModeV1::Local,
+            ExecutionModeV1::AirGapped,
+            ExecutionModeV1::Replay,
+            ExecutionModeV1::Fork,
+        ];
+        let claim_layers = [
+            ClaimLayerV1::ArtifactIntegrity,
+            ClaimLayerV1::ReplayConformance,
+            ClaimLayerV1::KnowledgeNonInterference,
+            ClaimLayerV1::GatewayClientConformance,
+            ClaimLayerV1::PluginConformance,
+            ClaimLayerV1::MetricConformance,
+            ClaimLayerV1::EmpiricalEvaluation,
+        ];
+        let template = test_report().cases[0].clone();
+        let mut report = test_report();
+        report.implementation.organization_id = Some("independent-lab".to_owned());
+        report.cases = safe_errors
+            .into_iter()
+            .enumerate()
+            .map(|(index, error)| {
+                let mut case = template.clone();
+                case.case_id = format!("safe-error-{index:02}");
+                case.fixture_digest = [u8::try_from(index + 1).unwrap_or_default(); 32];
+                case.mode = modes[index % modes.len()];
+                case.claim_layer = claim_layers[index % claim_layers.len()];
+                case.expected_digest = None;
+                case.actual_digest = None;
+                case.expected_error = Some(error);
+                case.actual_error = Some(error);
+                case
+            })
+            .collect();
+        refresh_test_report(&mut report);
+
+        let encoded = encode_cnr1(&report).unwrap_or_default();
+        assert_eq!(decode_cnr1(&encoded), Ok(report));
+    }
+
+    #[test]
+    fn public_cnr1_round_trips_every_outcome_counter_and_redaction_state() {
+        let mut report = test_report();
+        let template = report.cases[0].clone();
+        report.cases = [
+            (
+                CaseOutcomeStatusV1::Pass,
+                RedactionStateV1::None,
+                ReplayClaimV1::Exact,
+            ),
+            (
+                CaseOutcomeStatusV1::Fail,
+                RedactionStateV1::None,
+                ReplayClaimV1::Exact,
+            ),
+            (
+                CaseOutcomeStatusV1::Skip,
+                RedactionStateV1::RedactedViews,
+                ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            ),
+            (
+                CaseOutcomeStatusV1::Unavailable,
+                RedactionStateV1::StructuralOnly,
+                ReplayClaimV1::StructuralOnly,
+            ),
+            (
+                CaseOutcomeStatusV1::NotApplicable,
+                RedactionStateV1::EvidenceMissing,
+                ReplayClaimV1::UnverifiableArtifactsMissing,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (outcome, redaction_state, replay_claim))| {
+            let mut case = template.clone();
+            case.case_id = format!("outcome-{index:02}");
+            case.fixture_digest = [u8::try_from(index + 1).unwrap_or_default(); 32];
+            case.outcome = outcome;
+            case.redaction_state = redaction_state;
+            case.replay_claim = replay_claim;
+            if outcome == CaseOutcomeStatusV1::Pass {
+                case.expected_digest = Some([1; 32]);
+                case.actual_digest = Some([1; 32]);
+            } else if matches!(
+                redaction_state,
+                RedactionStateV1::None | RedactionStateV1::RedactedViews
+            ) {
+                case.expected_digest = Some([1; 32]);
+                case.actual_digest = Some([2; 32]);
+                case.first_coordinate = Some(vec![u8::try_from(index).unwrap_or_default()]);
+            } else {
+                case.expected_digest = None;
+                case.actual_digest = None;
+            }
+            case
+        })
+        .collect();
+        refresh_test_report(&mut report);
+
+        let encoded = encode_cnr1(&report).unwrap_or_default();
+        assert_eq!(decode_cnr1(&encoded), Ok(report));
+    }
+
+    #[test]
+    fn public_cnr1_decoder_rejects_invalid_enum_and_counter_values() {
+        let report = test_report();
+        for (field, value) in [
+            (0, Value::Text("CNR2".to_owned())),
+            (1, Value::Integer(2_u64.into())),
+        ] {
+            let bytes = canonical_report_with(&report, |fields| fields[field] = value);
+            assert_cnr1_rejects(&bytes);
+        }
+        let wrong_length = canonical_report_with(&report, |fields| {
+            fields.truncate(23);
+        });
+        assert_cnr1_rejects(&wrong_length);
+
+        for (field, value) in [
+            (14, u64::from(u32::MAX) + 1),
+            (15, u64::from(u32::MAX) + 1),
+            (16, u64::from(u32::MAX) + 1),
+            (17, u64::from(u32::MAX) + 1),
+            (18, u64::from(u32::MAX) + 1),
+        ] {
+            let bytes = canonical_report_with(&report, |fields| {
+                fields[field] = Value::Integer(value.into());
+            });
+            assert_cnr1_rejects(&bytes);
+        }
+
+        for (case_field, value) in [
+            (3, 4_u64),
+            (4, 7),
+            (4, 256),
+            (5, 5),
+            (9, 14),
+            (10, 14),
+            (12, 4),
+        ] {
+            let bytes = canonical_report_with(&report, |fields| {
+                assert!(matches!(fields[13], Value::Array(_)));
+                let Value::Array(cases) = &mut fields[13] else {
+                    return;
+                };
+                assert!(matches!(cases[0], Value::Array(_)));
+                let Value::Array(case) = &mut cases[0] else {
+                    return;
+                };
+                case[case_field] = Value::Integer(value.into());
+            });
+            assert_cnr1_rejects(&bytes);
+        }
+    }
+
+    #[test]
+    fn public_cnr1_decoder_rejects_malformed_nested_records() {
+        let report = test_report();
+        for identity_field in 0..5 {
+            let bytes = canonical_report_with(&report, |fields| {
+                assert!(matches!(fields[11], Value::Array(_)));
+                let Value::Array(identity) = &mut fields[11] else {
+                    return;
+                };
+                identity[identity_field] = Value::Null;
+            });
+            assert_cnr1_rejects(&bytes);
+        }
+        for independence_field in 0..6 {
+            let bytes = canonical_report_with(&report, |fields| {
+                assert!(matches!(fields[12], Value::Array(_)));
+                let Value::Array(independence) = &mut fields[12] else {
+                    return;
+                };
+                independence[independence_field] = Value::Null;
+            });
+            assert_cnr1_rejects(&bytes);
+        }
+        for case_field in [0, 1, 2, 7, 8, 11, 13] {
+            let bytes = canonical_report_with(&report, |fields| {
+                assert!(matches!(fields[13], Value::Array(_)));
+                let Value::Array(cases) = &mut fields[13] else {
+                    return;
+                };
+                assert!(matches!(cases[0], Value::Array(_)));
+                let Value::Array(case) = &mut cases[0] else {
+                    return;
+                };
+                case[case_field] = Value::Null;
+            });
+            assert_cnr1_rejects(&bytes);
+        }
+
+        let oversized_coordinate = canonical_report_with(&report, |fields| {
+            assert!(matches!(fields[13], Value::Array(_)));
+            let Value::Array(cases) = &mut fields[13] else {
+                return;
+            };
+            assert!(matches!(cases[0], Value::Array(_)));
+            let Value::Array(case) = &mut cases[0] else {
+                return;
+            };
+            case[6] = Value::Bytes(vec![0; 129]);
+        });
+        assert_cnr1_rejects(&oversized_coordinate);
     }
 }

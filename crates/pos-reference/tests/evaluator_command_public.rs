@@ -13,9 +13,18 @@ use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
+#[cfg(target_os = "linux")]
+use std::os::{fd::AsRawFd, unix::fs::symlink};
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
+#[cfg(target_os = "linux")]
+use pos_reference::evaluator_build_identity::{
+    verify_evaluator_build_identity, EvaluatorBuildEvidence, EvaluatorBuildIdentityError,
+    VerifiedEvaluatorBuildIdentity,
+};
+#[cfg(target_os = "linux")]
+use pos_reference::evaluator_protocol::IndependenceEvidence;
 use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport, EvaluationRequest};
 use pos_reference::profile::Profile;
 use pos_reference::signed_bundle::{preflight_signed_bundle, SelectedBundleCaps};
@@ -169,6 +178,48 @@ fn write_checksum_inventory(directory: &Path) -> TestResult {
     }
     fs::write(directory.join("BLAKE3SUMS"), inventory)?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_public_verifier_package(directory: &Path) -> TestResult {
+    write_evaluator_package(directory)?;
+    fs::copy(
+        std::env::current_exe()?,
+        directory.join("bin/pos-reference-evaluator"),
+    )?;
+    let source = fs::read(directory.join("source/pigloros-source.tar.gz"))?;
+    write_evaluator_provenance(&directory.join("provenance.json"), &source)?;
+    write_checksum_inventory(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn public_verifier_result(
+    directory: &Path,
+    source_archive: &Path,
+) -> Result<VerifiedEvaluatorBuildIdentity, EvaluatorBuildIdentityError> {
+    verify_evaluator_build_identity(
+        &EvaluatorBuildEvidence::new(source_archive, directory.join("provenance.json")),
+        IndependenceEvidence {
+            technical_independent: true,
+            authorship_independent: true,
+            organizational_independent: false,
+            declaration_digest: [47; 32],
+            shared_code_audit_digest: [64; 32],
+            reviewer_ids: vec!["reviewer-one".to_owned()],
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn assert_public_verifier_error(
+    directory: &Path,
+    source_archive: &Path,
+    expected: EvaluatorBuildIdentityError,
+) {
+    assert_eq!(
+        public_verifier_result(directory, source_archive),
+        Err(expected)
+    );
 }
 
 fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
@@ -1000,6 +1051,150 @@ fn command_rejects_malformed_or_oversized_build_provenance() -> TestResult {
     fs::write(path, prefixed)?;
     assert!(!noncanonical.output()?.status.success());
 
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_verifier_rejects_noncanonical_digest_encodings_at_their_use_sites() -> TestResult {
+    for source_digest in ["1".to_owned(), "g1".repeat(32), "1g".repeat(32)] {
+        let directory = tempfile::tempdir()?;
+        write_public_verifier_package(directory.path())?;
+        replace_provenance_field(
+            directory.path(),
+            "evaluator_source_blake3",
+            serde_json::json!(source_digest),
+        )?;
+        assert_public_verifier_error(
+            directory.path(),
+            &directory.path().join("source/pigloros-source.tar.gz"),
+            EvaluatorBuildIdentityError::Invalid,
+        );
+    }
+
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    replace_provenance_field(
+        directory.path(),
+        "dependency_lock_blake3",
+        serde_json::json!("g1".repeat(32)),
+    )?;
+    assert_public_verifier_error(
+        directory.path(),
+        &directory.path().join("source/pigloros-source.tar.gz"),
+        EvaluatorBuildIdentityError::Invalid,
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_verifier_rejects_path_and_bounded_file_failures() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    let source = directory.path().join("source/pigloros-source.tar.gz");
+    let alternate_source = directory.path().join("alternate-source.tar.gz");
+    fs::rename(&source, &alternate_source)?;
+    assert_public_verifier_error(
+        directory.path(),
+        &alternate_source,
+        EvaluatorBuildIdentityError::Input,
+    );
+
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    let provenance = directory.path().join("provenance.json");
+    fs::remove_file(&provenance)?;
+    fs::create_dir(&provenance)?;
+    assert_public_verifier_error(
+        directory.path(),
+        &directory.path().join("source/pigloros-source.tar.gz"),
+        EvaluatorBuildIdentityError::Input,
+    );
+
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(directory.path().join("Cargo.lock"))?
+        .set_len(16 * 1024 * 1024 + 1)?;
+    assert_public_verifier_error(
+        directory.path(),
+        &directory.path().join("source/pigloros-source.tar.gz"),
+        EvaluatorBuildIdentityError::Input,
+    );
+
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    let dependency_lock = directory.path().join("Cargo.lock");
+    fs::remove_file(&dependency_lock)?;
+    fs::create_dir(&dependency_lock)?;
+    assert_public_verifier_error(
+        directory.path(),
+        &directory.path().join("source/pigloros-source.tar.gz"),
+        EvaluatorBuildIdentityError::Input,
+    );
+
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    let dependency_lock = directory.path().join("Cargo.lock");
+    fs::remove_file(&dependency_lock)?;
+    let mut child = Command::new("true").stdout(Stdio::piped()).spawn()?;
+    let pipe = child.stdout.take().ok_or("child stdout is unavailable")?;
+    let pipe_fd = pipe.as_raw_fd();
+    symlink(format!("/proc/self/fd/{pipe_fd}"), &dependency_lock)?;
+    assert_public_verifier_error(
+        directory.path(),
+        &directory.path().join("source/pigloros-source.tar.gz"),
+        EvaluatorBuildIdentityError::Input,
+    );
+    drop(pipe);
+    assert!(child.wait()?.success());
+
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    fs::remove_file(directory.path().join("Cargo.lock"))?;
+    assert_public_verifier_error(
+        directory.path(),
+        &directory.path().join("source/pigloros-source.tar.gz"),
+        EvaluatorBuildIdentityError::Input,
+    );
+
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    fs::remove_file(directory.path().join("BLAKE3SUMS"))?;
+    assert_public_verifier_error(
+        directory.path(),
+        &directory.path().join("source/pigloros-source.tar.gz"),
+        EvaluatorBuildIdentityError::Input,
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_verifier_rejects_decoder_failures_and_trailing_archive_data() -> TestResult {
+    const INCOMPLETE_GZIP_MEMBER: [u8; 4] = [0x1f, 0x8b, 0x08, 0x00];
+
+    let mut termination_failure = source_archive("1111111111111111111111111111111111111111")?;
+    termination_failure.extend_from_slice(&INCOMPLETE_GZIP_MEMBER);
+
+    let mut body_failure = gzip_bytes(&tar_header("file", 1_024, b'0'))?;
+    body_failure.extend_from_slice(&INCOMPLETE_GZIP_MEMBER);
+
+    let mut trailing_nonzero = source_archive("1111111111111111111111111111111111111111")?;
+    trailing_nonzero.extend_from_slice(&gzip_bytes(&[1])?);
+
+    for source in [termination_failure, body_failure, trailing_nonzero] {
+        let directory = tempfile::tempdir()?;
+        write_public_verifier_package(directory.path())?;
+        rebind_source_archive(directory.path(), &source)?;
+        assert_public_verifier_error(
+            directory.path(),
+            &directory.path().join("source/pigloros-source.tar.gz"),
+            EvaluatorBuildIdentityError::Invalid,
+        );
+    }
     Ok(())
 }
 

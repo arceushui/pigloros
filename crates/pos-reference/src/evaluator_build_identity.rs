@@ -5,7 +5,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use flate2::read::MultiGzDecoder;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::evaluator_protocol::IndependenceEvidence;
 
@@ -103,14 +103,37 @@ pub enum EvaluatorBuildIdentityError {
 struct BuildProvenance {
     build_target: String,
     cargo_locked: bool,
-    dependency_lock_blake3: String,
-    evaluator_binary_blake3: String,
-    evaluator_source_blake3: String,
-    licences_blake3: String,
+    dependency_lock_blake3: BuildDigest,
+    evaluator_binary_blake3: BuildDigest,
+    evaluator_source_blake3: BuildDigest,
+    licences_blake3: BuildDigest,
     rust_toolchain: String,
-    sbom_blake3: String,
+    sbom_blake3: BuildDigest,
     schema: String,
     source_commit: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct BuildDigest([u8; 32]);
+
+impl<'de> Deserialize<'de> for BuildDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)
+            .and_then(|encoded| parse_digest(&encoded).map_err(serde::de::Error::custom))
+            .map(Self)
+    }
+}
+
+impl Serialize for BuildDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(blake3::Hash::from_bytes(self.0).to_hex().as_str())
+    }
 }
 
 /// Verify the complete package, source archive, and running executable before
@@ -130,9 +153,7 @@ pub fn verify_evaluator_build_identity(
     if provenance_path.file_name().and_then(|name| name.to_str()) != Some("provenance.json") {
         return Err(EvaluatorBuildIdentityError::Invalid);
     }
-    let evidence_root = provenance_path
-        .parent()
-        .ok_or(EvaluatorBuildIdentityError::Invalid)?;
+    let evidence_root = provenance_path.with_file_name("");
     let source_path = evidence_root.join("source/pigloros-source.tar.gz");
     if fs::canonicalize(&evidence.source_archive).map_err(|_| EvaluatorBuildIdentityError::Input)?
         != fs::canonicalize(&source_path).map_err(|_| EvaluatorBuildIdentityError::Input)?
@@ -179,7 +200,7 @@ pub fn verify_evaluator_build_identity(
         &provenance.sbom_blake3,
     )?;
     verify_checksum_inventory(
-        evidence_root,
+        &evidence_root,
         [
             lock,
             packaged_binary,
@@ -206,15 +227,6 @@ fn parse_build_provenance(bytes: &[u8]) -> Result<BuildProvenance, EvaluatorBuil
         || !valid_metadata(&provenance.build_target)
         || !valid_metadata(&provenance.rust_toolchain)
         || !provenance.cargo_locked
-        || [
-            &provenance.dependency_lock_blake3,
-            &provenance.evaluator_binary_blake3,
-            &provenance.evaluator_source_blake3,
-            &provenance.licences_blake3,
-            &provenance.sbom_blake3,
-        ]
-        .iter()
-        .any(|digest| parse_digest(digest).is_err())
     {
         Err(EvaluatorBuildIdentityError::Invalid)
     } else {
@@ -248,17 +260,17 @@ fn valid_metadata(value: &str) -> bool {
 fn verified_digest(
     path: &Path,
     maximum: u64,
-    expected: &str,
+    expected: &BuildDigest,
 ) -> Result<[u8; 32], EvaluatorBuildIdentityError> {
-    verify_digest(parse_digest(expected)?, digest_bounded(path, maximum)?)
+    verify_digest(expected.0, digest_bounded(path, maximum)?)
 }
 
 fn verified_file_digest(
     file: &mut File,
     maximum: u64,
-    expected: &str,
+    expected: &BuildDigest,
 ) -> Result<[u8; 32], EvaluatorBuildIdentityError> {
-    verify_digest(parse_digest(expected)?, digest_bounded_file(file, maximum)?)
+    digest_bounded_file(file, maximum).and_then(|actual| verify_digest(expected.0, actual))
 }
 
 fn verify_digest(
@@ -557,9 +569,7 @@ fn snapshot_bounded(path: &Path, maximum: u64) -> Result<File, EvaluatorBuildIde
 
 fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, EvaluatorBuildIdentityError> {
     let file = File::open(path).map_err(|_| EvaluatorBuildIdentityError::Input)?;
-    let capacity = usize::try_from(maximum.min(16 * 1024 * 1024))
-        .map_err(|_| EvaluatorBuildIdentityError::Input)?;
-    let mut bytes = Vec::with_capacity(capacity);
+    let mut bytes = Vec::new();
     file.take(maximum.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| EvaluatorBuildIdentityError::Input)?;
