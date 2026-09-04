@@ -344,6 +344,16 @@ fn assert_recovery_fails_and_retains_with_error(
         .recovery_errors(request.reference())
 }
 
+fn assert_recovery_query_trait(
+    coordinator: &ErasureCoordinatorStateMachineV1<PublicCoordinatorPort>,
+    request: ErasureReferenceV1,
+    expected: &[ErasureRecoveryErrorV1],
+) -> Result<(), ErasureErrorV1> {
+    let query: &dyn ErasureRecoveryErrorQueryV1 = coordinator;
+    assert_eq!(query.recovery_errors(request)?.as_slice(), expected);
+    Ok(())
+}
+
 #[test]
 fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), ErasureErrorV1> {
     let target = target(10);
@@ -452,8 +462,7 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(
     );
 
     let failures = coordinator.recovery_errors(request)?;
-    let query: &dyn ErasureRecoveryErrorQueryV1 = &coordinator;
-    assert_eq!(query.recovery_errors(request)?, failures);
+    assert_recovery_query_trait(&coordinator, request, &failures)?;
     assert_eq!(failures.len(), 2);
     assert!(failures.iter().any(|failure| {
         failure.request() == request
