@@ -1088,8 +1088,16 @@ fn profile_decoder_rejects_malformed_bytes_from_an_authenticated_bundle() -> Tes
     let corpus = support::corpus_with_profile_mutation(ProfileMutation::RawProfileField(0))?;
     let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
     let bundle = verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request)?;
-
     assert!(Profile::from_bundle(&bundle, &request).is_err());
+
+    let corpus = support::corpus()?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let mut bundle = verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request)?;
+    bundle.profile_digest = [90; 32];
+    assert_eq!(
+        Profile::from_bundle(&bundle, &request),
+        Err(ProfileError::DigestMismatch)
+    );
     Ok(())
 }
 
@@ -1829,6 +1837,10 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         preflight_signed_bundle(&mut Cursor::new(Vec::new()), &corpus.trust_policy, &request,)
             .is_err()
     );
+    assert_eq!(
+        verify_signed_bundle(&[], &corpus.trust_policy, &request),
+        Err(BundleError::FieldOutOfBounds)
+    );
 
     let mut oversized = tempfile::tempfile()?;
     oversized.set_len(1024 * 1024 * 1024 + 1)?;
@@ -1949,6 +1961,8 @@ fn evaluator_rejects_wrong_types_at_each_required_archive_field() -> TestResult 
         .chain((0..4).map(BundleMutation::RawArchiveField));
     for mutation in mutations {
         let corpus = support::corpus_with_bundle_mutation(mutation)?;
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        assert!(verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request).is_err());
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,
