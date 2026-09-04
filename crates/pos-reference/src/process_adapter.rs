@@ -64,14 +64,8 @@ impl ProcessAdapter {
         let mut child = command(&self.program, &self.arguments)
             .spawn()
             .map_err(|_| AdapterError::Unavailable)?;
-        let stdin = child
-            .stdin
-            .take()
-            .expect("piped stdin is available immediately after spawn");
-        let stdout = child
-            .stdout
-            .take()
-            .expect("piped stdout is available immediately after spawn");
+        let stdin = child.stdin.take().unwrap_or_else(std::process::abort);
+        let stdout = child.stdout.take().unwrap_or_else(std::process::abort);
         let (writer_tx, writer_rx) = mpsc::sync_channel(1);
         let (reader_tx, reader_rx) = mpsc::sync_channel(1);
         let writer_worker = writer_tx.clone();
