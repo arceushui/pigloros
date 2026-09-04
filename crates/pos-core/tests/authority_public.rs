@@ -518,20 +518,6 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
         assert_eq!(decision_for(&request, &[]).outcome(), expected);
     }
 
-    let mut no_subject_missing = request_draft(authenticated(principal_ref.clone()), entity(10));
-    no_subject_missing.subject_id = None;
-    no_subject_missing.consent_timeline = None;
-    no_subject_missing.consent_at_position = None;
-    no_subject_missing.consent = ConsentEvidenceV1::Missing;
-    assert_eq!(
-        decision_for(
-            &ok(AuthorizationRequestV1::try_from_draft(no_subject_missing)),
-            &[],
-        )
-        .outcome(),
-        AuthorizationOutcomeV1::ConsentMissing
-    );
-
     let grant = root_grant(principal_ref.clone(), vec![entity(99)]);
     let chain = ok(DelegationChainV1::try_from_grants(vec![grant]));
     let missing_request = ok(AuthorizationRequestV1::try_from_draft({
@@ -752,6 +738,19 @@ fn consent_binds_grantee_policy_and_exact_subject_timeline_position() {
         )
         .outcome(),
         AuthorizationOutcomeV1::RevokedAtFence
+    );
+}
+
+#[test]
+fn no_subject_missing_consent_is_denied() {
+    let mut draft = request_draft(authenticated(principal(1)), entity(10));
+    draft.subject_id = None;
+    draft.consent_timeline = None;
+    draft.consent_at_position = None;
+    draft.consent = ConsentEvidenceV1::Missing;
+    assert_eq!(
+        decision_for(&ok(AuthorizationRequestV1::try_from_draft(draft)), &[]).outcome(),
+        AuthorizationOutcomeV1::ConsentMissing
     );
 }
 
@@ -1194,13 +1193,6 @@ fn decision_decoder_rejects_inconsistent_evidence() {
         AuthorizationDecisionV1::decode(&invalid_error),
         Err(AuthorityErrorV1::UnknownEnum)
     );
-    let invalid_role = changed_array(&encoded, |fields| {
-        fields[3] = Value::Integer(99.into());
-    });
-    assert_eq!(
-        AuthorizationDecisionV1::decode(&invalid_role),
-        Err(AuthorityErrorV1::UnknownEnum)
-    );
     let missing_grant_evidence = changed_array(&encoded, |fields| {
         fields[11] = Value::Null;
     });
@@ -1280,7 +1272,20 @@ fn decision_decoder_rejects_inconsistent_evidence() {
             "digest field {digest_field} accepted the zero digest"
         );
     }
+}
 
+#[test]
+fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
+    let request = request(principal(1), entity(10));
+    let encoded =
+        ok(decision_for(&request, &[root_grant(principal(1), vec![entity(10)])]).encode());
+    let invalid_role = changed_array(&encoded, |fields| {
+        fields[3] = Value::Integer(99.into());
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&invalid_role),
+        Err(AuthorityErrorV1::UnknownEnum)
+    );
     let oversized_bindings = changed_array(&encoded, |fields| {
         let bindings = array_fields_mut(&mut fields[12]);
         bindings.extend((2_u8..=17).map(|value| Value::Bytes(hash(value).as_bytes().to_vec())));
@@ -1809,7 +1814,7 @@ fn malformed_grants_are_rejected_before_evaluation() {
         1,
         principal.clone(),
         AuthorityGranteeV1::Principal(principal.clone()),
-        scope.clone(),
+        scope,
     );
 
     let mut invalid = base.clone();
@@ -1864,12 +1869,17 @@ fn malformed_grants_are_rejected_before_evaluation() {
         CapabilityGrantV1::try_from_draft(invalid),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
+}
 
+#[test]
+fn malformed_grant_drafts_reject_invalid_temporal_and_scope_fields() {
+    let principal_ref = principal(1);
+    let actor = entity(10);
     let mut invalid = grant_draft(
         6,
-        principal.clone(),
-        AuthorityGranteeV1::Principal(principal.clone()),
-        scope.clone(),
+        principal_ref.clone(),
+        AuthorityGranteeV1::Principal(principal_ref.clone()),
+        scope(vec![actor], vec!["read"], None),
     );
     invalid.issuance_seq = Seq::from_u64(10);
     assert_eq!(
@@ -1878,20 +1888,19 @@ fn malformed_grants_are_rejected_before_evaluation() {
     );
     let mut invalid = grant_draft(
         7,
-        principal.clone(),
-        AuthorityGranteeV1::Principal(principal.clone()),
-        scope.clone(),
+        principal_ref.clone(),
+        AuthorityGranteeV1::Principal(principal_ref.clone()),
+        scope(vec![actor], vec!["read"], None),
     );
     invalid.revocation_fence = Some(Seq::from_u64(5));
     assert_eq!(
         CapabilityGrantV1::try_from_draft(invalid),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
-
     let invalid = grant_draft(
         8,
-        principal.clone(),
-        AuthorityGranteeV1::Principal(principal),
+        principal_ref.clone(),
+        AuthorityGranteeV1::Principal(principal_ref),
         scope_for_role(
             vec![actor],
             vec![entity(50)],
