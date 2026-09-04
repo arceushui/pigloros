@@ -1481,11 +1481,10 @@ impl RecoveredErasureV1 {
             })
     }
 
-    fn validate_attempt_effect(
+    fn validate_attempt_admission(
         &self,
-        port: &dyn ErasurePersistencePortV1,
         admission: &ErasureRetryAdmissionV1,
-    ) -> Result<(), RecoveryFailureV1> {
+    ) -> Result<Vec<ErasureDestructionCommandV1>, RecoveryFailureV1> {
         let Some(obligation_set) = self.obligation_set.as_ref() else {
             return Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
@@ -1524,12 +1523,20 @@ impl RecoveredErasureV1 {
                 admission.reference(),
             ));
         }
-        let expected_commands = unresolved
+        Ok(unresolved
             .into_iter()
             .map(|obligation| {
                 ErasureDestructionCommandV1::from_obligation(obligation, admission.reference())
             })
-            .collect::<Vec<_>>();
+            .collect())
+    }
+
+    fn validate_attempt_effect(
+        &self,
+        port: &dyn ErasurePersistencePortV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), RecoveryFailureV1> {
+        let expected_commands = self.validate_attempt_admission(admission)?;
         let manifest = port
             .effect_manifest(admission.reference())
             .map_err(|error| RecoveryFailureV1::new(error, admission.reference()))?
@@ -2174,13 +2181,20 @@ mod tests {
     }
 
     #[test]
-    fn acknowledgement_matching_requires_a_recovered_scope() -> Result<(), ErasureErrorV1> {
+    fn recovered_validation_requires_scope_and_obligation_set() -> Result<(), ErasureErrorV1> {
         let request = request()?;
         let state = ErasureStateV1::submitted(request.reference(), reference(15), reference(16))?;
         let recovered = RecoveredErasureV1::initial(request.clone(), state);
         let admission = admission(request.reference())?;
         let acknowledgement = acknowledgement(request.reference(), admission.reference())?;
         assert!(!recovered.acknowledgement_matches_admission(&acknowledgement, &admission));
+        assert_eq!(
+            recovered.validate_attempt_admission(&admission),
+            Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                admission.reference(),
+            ))
+        );
         Ok(())
     }
 
