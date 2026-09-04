@@ -5,10 +5,10 @@ use super::evidence::{
     target_from_value, target_value, text, uint, unordered_references_from_value, unsigned,
 };
 use super::{
-    acknowledgement_inventory_reference, decode_limited, domain_digest, encode_limited,
-    erasure_evidence_set_reference, exact_array, selected_obligations_reference,
-    target_closure_digest, verify_predecessor_chain_with_subject, BTreeMap, BTreeSet,
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
+    acknowledgement_inventory_reference, decode_limited, destruction_command_reference,
+    domain_digest, encode_limited, erasure_evidence_set_reference, exact_array,
+    selected_obligations_reference, target_closure_digest, verify_predecessor_chain_with_subject,
+    BTreeMap, BTreeSet, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionV1,
     ErasureCasEffectV1, ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
@@ -1964,7 +1964,7 @@ fn freeze_reconstruction_failure_subject(graph: &FixedGraphV1<'_>) -> ErasureRef
         || obligation_set.policy() != graph.erq.policy()
         || obligation_set.trust() != admission.trust()
     {
-        return graph.obligation_set.reference();
+        return obligation_set.reference();
     }
     if let Some(obligation) = graph.obligations.iter().find(|obligation| {
         graph.targets.binary_search(&obligation.target()).is_err()
