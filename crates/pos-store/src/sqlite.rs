@@ -4493,7 +4493,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
             )
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
         let request_digest = request.digest();
-        let limit = i64::try_from(ERASURE_MAX_RECOVERY_ERRORS + 1).unwrap_or(i64::MAX);
+        let limit = (ERASURE_MAX_RECOVERY_ERRORS + 1) as i64;
         let query_params: [&dyn ToSql; 2] = [&&request_digest[..], &limit];
         let references = Self::query_prepared(&mut statement, &query_params)
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
@@ -4707,7 +4707,7 @@ fn apply_sqlite_recovery_error(
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
         .is_some();
     if !already_indexed {
-        let limit = i64::try_from(ERASURE_MAX_RECOVERY_ERRORS + 1).unwrap_or(i64::MAX);
+        let limit = (ERASURE_MAX_RECOVERY_ERRORS + 1) as i64;
         let count = conn
             .query_row(
                 "SELECT COUNT(*) FROM (
@@ -4718,7 +4718,7 @@ fn apply_sqlite_recovery_error(
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        if usize::try_from(count).unwrap_or(usize::MAX) >= ERASURE_MAX_RECOVERY_ERRORS {
+        if count >= ERASURE_MAX_RECOVERY_ERRORS as i64 {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
     }

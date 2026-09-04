@@ -3111,6 +3111,25 @@ pub trait ErasureVerifiedStateQueryV1 {
     ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1>;
 }
 
+/// Public read-only seam for payload-free recovery diagnostics.
+///
+/// Implementations return only ERRE1 evidence that has been retrieved and
+/// validated through the persistence boundary. These diagnostics never
+/// authorize containment and must not be used as a substitute for a
+/// successfully verified [`ErasureVerifiedStateV1`].
+pub trait ErasureRecoveryErrorQueryV1 {
+    /// Return the bounded, immutable recovery failures retained for a request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed persistence, decoding, or provenance error when an
+    /// indexed recovery-error object cannot be verified.
+    fn recovery_errors(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1>;
+}
+
 mod receipt;
 pub use receipt::target_closure_digest;
 use receipt::{

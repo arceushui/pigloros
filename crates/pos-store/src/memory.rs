@@ -1260,6 +1260,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
     ) -> Result<(), ErasureErrorV1> {
         let request = object.request();
         let reference = object.reference();
+        let bytes = object.canonical_cbor();
         if self
             .erasure_recovery_errors
             .get(&request)
@@ -1269,13 +1270,20 @@ impl ErasurePersistencePortV1 for MemoryStore {
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let mut evidence = self.erasure_evidence.clone();
-        insert_exact(&mut evidence, reference, object.canonical_cbor())?;
-        let mut recovery_errors = self.erasure_recovery_errors.clone();
-        let request_errors = recovery_errors.entry(request).or_default();
-        request_errors.insert(reference);
-        self.erasure_evidence = evidence;
-        self.erasure_recovery_errors = recovery_errors;
+        if self
+            .erasure_evidence
+            .get(&reference)
+            .is_some_and(|existing| existing.as_slice() != bytes)
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if !self.erasure_evidence.contains_key(&reference) {
+            self.erasure_evidence.insert(reference, bytes.to_vec());
+        }
+        self.erasure_recovery_errors
+            .entry(request)
+            .or_default()
+            .insert(reference);
         Ok(())
     }
     fn compare_and_swap(

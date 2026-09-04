@@ -14,10 +14,10 @@ use super::{
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
     ErasureIndexInsertV1, ErasureLifecycleV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
-    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedStateQueryV1, PreparedErasureCasV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
+    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorQueryV1,
+    ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedStateQueryV1,
+    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
 };
 use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
@@ -1083,6 +1083,17 @@ impl<P: ErasureCoordinatorPortV1> ErasureVerifiedStateQueryV1
         request: ErasureReferenceV1,
     ) -> Result<Option<super::ErasureVerifiedStateV1>, ErasureErrorV1> {
         Self::verified_state(self, request)
+    }
+}
+
+impl<P: ErasureCoordinatorPortV1> ErasureRecoveryErrorQueryV1
+    for ErasureCoordinatorStateMachineV1<P>
+{
+    fn recovery_errors(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1> {
+        Self::recovery_errors(self, request)
     }
 }
 

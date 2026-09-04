@@ -34,8 +34,9 @@ use pos_core::{
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureCoordinator,
     ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureInventoryCategoryV1,
     ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryErrorQueryV1,
+    ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
     ErasureStateV1, ErasureVerifiedStateQueryV1,
@@ -451,6 +452,8 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(
     );
 
     let failures = coordinator.recovery_errors(request)?;
+    let query: &dyn ErasureRecoveryErrorQueryV1 = &coordinator;
+    assert_eq!(query.recovery_errors(request)?, failures);
     assert_eq!(failures.len(), 2);
     assert!(failures.iter().any(|failure| {
         failure.request() == request

@@ -111,7 +111,7 @@ struct RawStorage {
     resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
-    recovery_errors: BTreeSet<(ErasureReferenceV1, ErasureReferenceV1)>,
+    recovery_errors: BTreeMap<ErasureReferenceV1, BTreeSet<ErasureReferenceV1>>,
 }
 
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
@@ -300,7 +300,11 @@ impl PublicCoordinatorPort {
             digest[..8].copy_from_slice(&ordinal_u64.to_be_bytes());
             let reference = ErasureReferenceV1::from_digest(digest);
             if excluded != Some(reference) {
-                storage.recovery_errors.insert((request, reference));
+                storage
+                    .recovery_errors
+                    .entry(request)
+                    .or_default()
+                    .insert(reference);
                 inserted = inserted.saturating_add(1);
             }
             ordinal = ordinal.saturating_add(1);
@@ -1236,9 +1240,9 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             .storage
             .borrow()
             .recovery_errors
-            .iter()
-            .filter(|(candidate, _)| *candidate == request)
-            .map(|(_, reference)| *reference)
+            .get(&request)
+            .into_iter()
+            .flat_map(|references| references.iter().copied())
             .take(pos_core::ERASURE_MAX_RECOVERY_ERRORS + 1)
             .collect::<Vec<_>>();
         if references.len() > pos_core::ERASURE_MAX_RECOVERY_ERRORS
@@ -1257,19 +1261,33 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         let mut storage = self.storage.borrow_mut();
         let request = object.request();
         let reference = object.reference();
-        let key = (request, reference);
-        let mut recovery_errors = storage.recovery_errors.clone();
-        if recovery_errors.insert(key) {
-            let count = recovery_errors
-                .iter()
-                .filter(|(candidate, _)| *candidate == request)
-                .count();
-            if count > pos_core::ERASURE_MAX_RECOVERY_ERRORS {
-                return Err(ErasureErrorV1::ScopeInvalid);
-            }
+        if storage
+            .recovery_errors
+            .get(&request)
+            .is_some_and(|references| {
+                !references.contains(&reference)
+                    && references.len() >= pos_core::ERASURE_MAX_RECOVERY_ERRORS
+            })
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
         }
-        insert_exact(&mut storage.objects, reference, object.canonical_cbor())?;
-        storage.recovery_errors = recovery_errors;
+        if storage
+            .objects
+            .get(&reference)
+            .is_some_and(|existing| existing.as_slice() != object.canonical_cbor())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if !storage.objects.contains_key(&reference) {
+            storage
+                .objects
+                .insert(reference, object.canonical_cbor().to_vec());
+        }
+        storage
+            .recovery_errors
+            .entry(request)
+            .or_default()
+            .insert(reference);
         Ok(())
     }
 
