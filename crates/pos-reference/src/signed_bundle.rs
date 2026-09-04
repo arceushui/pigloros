@@ -287,7 +287,6 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
         .ok_or(BundleError::ClosureIncomplete)?;
     if scanned.profile_bytes.len() as u64 != profile.size
         || *blake3::hash(&scanned.profile_bytes).as_bytes() != profile.digest
-        || profile.digest != request.profile_digest
     {
         return Err(BundleError::DigestMismatch);
     }
