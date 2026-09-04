@@ -674,12 +674,13 @@ fn exercise_scalar_boundaries<T, E>(
     value: &ciborium::Value,
     decode: impl Fn(&[u8]) -> Result<T, E>,
     encode: impl Fn(&T) -> Result<Vec<u8>, E>,
+    should_exercise: impl Fn(&[usize]) -> bool,
 ) -> usize {
     let mut paths = Vec::new();
     structural_paths(value, &mut Vec::new(), &mut paths);
     let mut exercised = 0_usize;
     let mut mutant = value.clone();
-    for path in paths {
+    for path in paths.into_iter().filter(|path| should_exercise(path)) {
         let original = value_at_path(value, &path).clone();
         for replacement in scalar_replacements(&original) {
             if replacement == original {
@@ -1038,6 +1039,7 @@ fn malformed_verification_results_reach_closed_decoder_boundaries() {
             &result_value,
             VerificationResultV1::from_canonical_cbor,
             VerificationResultV1::to_canonical_cbor,
+            |_| true,
         ) > 100
     );
     expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
@@ -1105,6 +1107,7 @@ fn malformed_divergence_reports_reach_closed_decoder_boundaries() {
             &report_value,
             DivergenceReportV1::from_canonical_cbor,
             DivergenceReportV1::to_canonical_cbor,
+            |_| true,
         ) > 100
     );
     expect_err(&DivergenceReportV1::from_canonical_cbor(&encode_value(
@@ -1166,7 +1169,7 @@ fn public_evidence_decoder_enforces_case_coordinate_boundary() {
 }
 
 #[test]
-fn public_evidence_decoder_closes_scalar_and_length_boundaries() {
+fn public_evidence_decoder_closes_scalar_and_length_boundaries_even_root_fields() {
     let evidence = evidence_with_optional_record_variants();
     let value = decode_value(ok(evidence.to_canonical_cbor()));
     assert!(
@@ -1174,6 +1177,21 @@ fn public_evidence_decoder_closes_scalar_and_length_boundaries() {
             &value,
             MoatProofEvidenceV1::from_canonical_cbor,
             MoatProofEvidenceV1::to_canonical_cbor,
+            |path| path.first().is_some_and(|root| root.is_multiple_of(2)),
+        ) > 0
+    );
+}
+
+#[test]
+fn public_evidence_decoder_closes_scalar_and_length_boundaries_odd_root_fields() {
+    let evidence = evidence_with_optional_record_variants();
+    let value = decode_value(ok(evidence.to_canonical_cbor()));
+    assert!(
+        exercise_scalar_boundaries(
+            &value,
+            MoatProofEvidenceV1::from_canonical_cbor,
+            MoatProofEvidenceV1::to_canonical_cbor,
+            |path| path.first().is_some_and(|root| !root.is_multiple_of(2)),
         ) > 0
     );
 }

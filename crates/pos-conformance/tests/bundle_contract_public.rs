@@ -3044,76 +3044,103 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn assert_live_staging_rejections(cases: &[(StagingMutation, &str)]) -> TestResult {
+fn assert_live_staging_rejection(
+    mutation: StagingMutation,
+    expected_error: &str,
+) -> TestResult {
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let key = "0707070707070707070707070707070707070707070707070707070707070707";
-    for &(mutation, expected_error) in cases {
-        let stderr = mutate_live_staging(materializer.as_os_str(), key, mutation)?;
-        assert!(stderr.contains(expected_error));
-    }
+    let stderr = mutate_live_staging(materializer.as_os_str(), key, mutation)?;
+    assert!(stderr.contains(expected_error));
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn public_materializer_rejects_live_staging_identity_replacement() -> TestResult {
-    assert_live_staging_rejections(&[
-        (StagingMutation::ReplaceIdentity, "UntrustedOutputDirectory"),
-        (
-            StagingMutation::RelaxPermissions,
-            "UntrustedOutputDirectory",
-        ),
-        (
-            StagingMutation::RelaxRetainedPermissions,
-            "UntrustedOutputDirectory",
-        ),
-    ])
+macro_rules! live_staging_rejection_test {
+    ($name:ident, $mutation:ident, $expected_error:literal) => {
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn $name() -> TestResult {
+            assert_live_staging_rejection(StagingMutation::$mutation, $expected_error)
+        }
+    };
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn public_materializer_rejects_unexpected_staging_entries() -> TestResult {
-    assert_live_staging_rejections(&[
-        (StagingMutation::CorruptFiles, "ArchiveDigestMismatch"),
-        (
-            StagingMutation::InjectRegularFile,
-            "UntrustedOutputDirectory",
-        ),
-        (StagingMutation::InjectDirectory, "UntrustedOutputDirectory"),
-        (StagingMutation::InjectSymlink, "SymlinkDetected"),
-        (StagingMutation::InjectFifo, "UntrustedOutputDirectory"),
-    ])
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn public_materializer_rejects_expected_staging_entry_mutations() -> TestResult {
-    assert_live_staging_rejections(&[
-        (
-            StagingMutation::CorruptFileAtSameLength,
-            "ArchiveDigestMismatch",
-        ),
-        (StagingMutation::RemoveFile, "UntrustedOutputDirectory"),
-        (
-            StagingMutation::PreventFutureDirectories,
-            "UntrustedOutputDirectory",
-        ),
-        (
-            StagingMutation::ReplaceDirectoryWithSymlink,
-            "SymlinkDetected",
-        ),
-        (
-            StagingMutation::ReplaceDirectoryWithRegularFile,
-            "UntrustedOutputDirectory",
-        ),
-        (
-            StagingMutation::ReplaceFileWithFifo,
-            "UntrustedOutputDirectory",
-        ),
-        (StagingMutation::BlockFutureDirectory, "SymlinkDetected"),
-    ])
-}
+live_staging_rejection_test!(
+    public_materializer_rejects_live_staging_identity_replacement,
+    ReplaceIdentity,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_live_staging_permissions,
+    RelaxPermissions,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_retained_staging_permissions,
+    RelaxRetainedPermissions,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_corrupt_staged_files,
+    CorruptFiles,
+    "ArchiveDigestMismatch"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_injected_regular_file,
+    InjectRegularFile,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_injected_directory,
+    InjectDirectory,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_injected_symlink,
+    InjectSymlink,
+    "SymlinkDetected"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_injected_fifo,
+    InjectFifo,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_same_length_corruption,
+    CorruptFileAtSameLength,
+    "ArchiveDigestMismatch"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_removed_file,
+    RemoveFile,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_future_directory_permission_change,
+    PreventFutureDirectories,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_replaced_directory_symlink,
+    ReplaceDirectoryWithSymlink,
+    "SymlinkDetected"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_replaced_directory_file,
+    ReplaceDirectoryWithRegularFile,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_replaced_file_fifo,
+    ReplaceFileWithFifo,
+    "UntrustedOutputDirectory"
+);
+live_staging_rejection_test!(
+    public_materializer_rejects_blocked_future_directory,
+    BlockFutureDirectory,
+    "SymlinkDetected"
+);
 
 #[cfg(unix)]
 #[test]
