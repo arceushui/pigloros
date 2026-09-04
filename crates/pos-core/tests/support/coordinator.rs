@@ -437,6 +437,10 @@ impl PublicCoordinatorPort {
     ///
     /// This models bytes returned by a corrupted adapter so recovery tests can
     /// assert that core retains the recorded manifest identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProvenanceMissing` when the requested manifest is absent.
     pub fn replace_manifest_raw(
         &self,
         request: ErasureReferenceV1,
