@@ -19,12 +19,13 @@ use super::{
     ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1,
     ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureStateV1, ErasureVerifiedStateV1, PreparedErasureCasV1, StoredErasureManifestV1,
-    ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
-    ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
-    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
-    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
-    ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, VERSION,
+    ErasureStateResolverV1, ErasureStateV1, ErasureVerifiedStateV1, PreparedErasureCasV1,
+    StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+    ERASURE_ATTEMPT_HISTORY_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
+    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
+    ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+    ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -1986,7 +1987,7 @@ fn validate_correction(
 }
 
 fn validate_state_provenance(
-    port: &dyn ErasurePersistencePortV1,
+    resolver: &dyn ErasureStateResolverV1,
     state: &ErasureStateV1,
     manifest: &ManifestV1,
     manifest_digest: ErasureReferenceV1,
@@ -2011,7 +2012,7 @@ fn validate_state_provenance(
                 manifest_digest,
             ));
         };
-        current = port
+        current = resolver
             .resolve_state(previous)
             .map_err(|error| RecoveryFailureV1::new(error, previous))?
             .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, previous))?;
@@ -2020,4 +2021,270 @@ fn validate_state_provenance(
         ErasureErrorV1::ProvenanceMissing,
         manifest_digest,
     ))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    const fn reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+        ErasureRequestV1::new(super::super::ErasureRequestInputV1 {
+            request: reference(1),
+            subject: reference(2),
+            scope: super::super::ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(3)],
+            requester: reference(4),
+            authorization: reference(5),
+            policy: reference(6),
+            request_position: 1,
+            horizon_position: 2,
+            provenance: reference(7),
+        })
+    }
+
+    fn admission(request: ErasureReferenceV1) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+        ErasureRetryAdmissionV1::new(super::super::ErasureRetryAdmissionInputV1 {
+            request,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: Vec::new(),
+            command_identities: Vec::new(),
+            policy: reference(6),
+            trust: reference(8),
+            admitted_position: 10,
+            deadline_position: 20,
+            authorization_provenance: reference(9),
+        })
+    }
+
+    fn acknowledgement(
+        request: ErasureReferenceV1,
+        attempt: ErasureReferenceV1,
+    ) -> Result<ErasureAcknowledgementProvenanceV1, ErasureErrorV1> {
+        ErasureAcknowledgementProvenanceV1::new(
+            super::super::ErasureAcknowledgementProvenanceInputV1 {
+                request,
+                command: reference(10),
+                attempt,
+                obligation: reference(11),
+                owner: reference(12),
+                scope: reference(13),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+                evidence: reference(14),
+                policy: reference(6),
+                trust: reference(8),
+            },
+        )
+    }
+
+    const fn indexed_reference(index: usize) -> ErasureReferenceV1 {
+        let mut digest = [0; 32];
+        let bytes = (index as u64).to_be_bytes();
+        let mut position = 0;
+        while position < bytes.len() {
+            digest[position] = bytes[position];
+            position += 1;
+        }
+        ErasureReferenceV1::from_digest(digest)
+    }
+
+    fn oversized_acknowledgements(
+        request: ErasureReferenceV1,
+        admission: ErasureReferenceV1,
+    ) -> Result<
+        BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ErasureAcknowledgementProvenanceV1>,
+        ErasureErrorV1,
+    > {
+        let acknowledgement = acknowledgement(request, admission)?;
+        let mut values = BTreeMap::new();
+        for index in 0..=ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT {
+            values.insert(
+                (indexed_reference(index), indexed_reference(index + 1)),
+                acknowledgement,
+            );
+        }
+        Ok(values)
+    }
+
+    fn finish_inputs(
+        request: ErasureReferenceV1,
+        admission: ErasureReferenceV1,
+        state: ErasureReferenceV1,
+    ) -> Result<
+        (
+            ErasureAttemptOutcomeV1,
+            ErasureReceiptProvenanceV1,
+            ErasureReceiptV1,
+        ),
+        ErasureErrorV1,
+    > {
+        let outcome = ErasureAttemptOutcomeV1::new(super::super::ErasureAttemptOutcomeInputV1 {
+            request,
+            attempt: admission,
+            source_receipt: None,
+            lifecycle: ErasureLifecycleV1::Complete,
+            selected_obligations: reference(17),
+            acknowledgement_inventory: reference(18),
+            terminal_position: 20,
+            policy: reference(6),
+            trust: reference(8),
+        })?;
+        let provenance =
+            ErasureReceiptProvenanceV1::new(super::super::ErasureReceiptProvenanceInputV1 {
+                request,
+                attempt: admission,
+                attempt_ordinal: 0,
+                predecessor_receipt: None,
+                terminal_state: state,
+                evidence_set: reference(19),
+                policy: reference(6),
+                trust: reference(8),
+                issue_position: 20,
+            })?;
+        let receipt = ErasureReceiptV1::new(super::super::ErasureReceiptInputV1 {
+            request,
+            terminal_state: state,
+            coordinator: reference(20),
+            lifecycle: ErasureLifecycleV1::Complete,
+            freeze_position: 20,
+            acknowledgements: Vec::new(),
+            frozen_targets: Vec::new(),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            inventories: super::super::ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: super::super::ErasureReplayClaimV1::Exact,
+            policy: reference(6),
+            trust: reference(8),
+            provenance: reference(21),
+            issue_position: 20,
+            signature: reference(22),
+            receipt_digest: reference(0),
+        })?;
+        Ok((outcome, provenance, receipt))
+    }
+
+    #[test]
+    fn acknowledgement_matching_requires_a_recovered_scope() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let state = ErasureStateV1::submitted(request.reference(), reference(15), reference(16))?;
+        let recovered = RecoveredErasureV1::initial(request.clone(), state);
+        let admission = admission(request.reference())?;
+        let acknowledgement = acknowledgement(request.reference(), admission.reference())?;
+        assert!(!recovered.acknowledgement_matches_admission(&acknowledgement, &admission));
+        Ok(())
+    }
+
+    struct LoopingStateResolver {
+        state: ErasureStateV1,
+    }
+
+    impl ErasureStateResolverV1 for LoopingStateResolver {
+        fn resolve_state(
+            &self,
+            _digest: ErasureReferenceV1,
+        ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+            Ok(Some(self.state.clone()))
+        }
+    }
+
+    #[test]
+    fn state_provenance_rejects_a_chain_beyond_the_recovery_bound() {
+        let state = ErasureStateV1 {
+            request: reference(1),
+            lifecycle: ErasureLifecycleV1::Submitted,
+            freeze_position: None,
+            coordinator: reference(2),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: super::super::ErasureReplayClaimV1::Exact,
+            previous_state: Some(reference(3)),
+            provenance: reference(4),
+            state_digest: reference(5),
+        };
+        let manifest = ManifestV1 {
+            request: reference(1),
+            state: reference(5),
+            target_closure: None,
+            correction: None,
+            rejection: None,
+            scope: None,
+            freeze_admission: None,
+            freeze_authorization: None,
+            freeze_provenance: None,
+            freeze_failure: None,
+            obligation_set: None,
+            scope_extension_head: None,
+            active: None,
+            attempt_history_head: None,
+            completed_attempt_count: 0,
+            latest_receipt: None,
+            administrative_resolution_head: None,
+            authorize_provenance: None,
+            dispatch_provenance: None,
+        };
+        assert_eq!(
+            validate_state_provenance(
+                &LoopingStateResolver {
+                    state: state.clone(),
+                },
+                &state,
+                &manifest,
+                reference(6),
+            ),
+            Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                reference(6),
+            ))
+        );
+    }
+
+    #[test]
+    fn finish_attempt_rejects_oversized_admitted_and_effective_inventories(
+    ) -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let state = ErasureStateV1::submitted(request.reference(), reference(23), reference(24))?;
+        let admission = admission(request.reference())?;
+        let (outcome, provenance, receipt) = finish_inputs(
+            request.reference(),
+            admission.reference(),
+            state.state_digest(),
+        )?;
+
+        {
+            let mut recovered = RecoveredErasureV1::initial(request.clone(), state.clone());
+            recovered.active = Some(RecoveredAttemptV1 {
+                ordinal: 0,
+                admission: admission.clone(),
+                admitted: oversized_acknowledgements(request.reference(), admission.reference())?,
+            });
+            assert_eq!(
+                recovered.finish_attempt(&outcome, &provenance, &receipt),
+                Err(ErasureErrorV1::ScopeInvalid)
+            );
+        }
+
+        let mut recovered = RecoveredErasureV1::initial(request.clone(), state);
+        recovered.active = Some(RecoveredAttemptV1 {
+            ordinal: 0,
+            admission: admission.clone(),
+            admitted: BTreeMap::new(),
+        });
+        recovered.effective =
+            oversized_acknowledgements(request.reference(), admission.reference())?;
+        assert_eq!(
+            recovered.finish_attempt(&outcome, &provenance, &receipt),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        Ok(())
+    }
 }
