@@ -649,7 +649,7 @@ fn memory_recovery_error_bound_rejects_without_partial_writes(
             let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::ScopeInvalid)?;
             let mut digest = [0_u8; 32];
             digest[..8].copy_from_slice(&ordinal.to_be_bytes());
-            Ok(pos_core::StoredErasureManifestV1::from_stored(
+            Ok::<_, ErasureErrorV1>(pos_core::StoredErasureManifestV1::from_stored(
                 ErasureReferenceV1::from_digest(digest),
                 vec![0xff_u8],
             ))
