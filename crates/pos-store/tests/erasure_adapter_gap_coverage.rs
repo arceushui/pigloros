@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[path = "support/erasure.rs"]
+#[path = "../../pos-core/tests/support/erasure.rs"]
 pub mod erasure_support;
 
 use erasure_support::{
@@ -32,7 +32,7 @@ use pos_core::{
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, PreparedErasureCasV1,
+    ErasureStateV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -323,12 +323,11 @@ where
 
     fn append_recovery_error(
         &mut self,
-        request: ErasureReferenceV1,
-        object: pos_core::ErasurePersistenceObjectV1,
+        object: PreparedErasureRecoveryErrorV1,
     ) -> Result<(), ErasureErrorV1> {
         self.store
             .borrow_mut()
-            .append_recovery_error(request, object)
+            .append_recovery_error(object)
     }
 
     fn compare_and_swap(

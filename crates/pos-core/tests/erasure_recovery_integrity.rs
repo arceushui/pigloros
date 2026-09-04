@@ -599,6 +599,25 @@ fn public_state_chain_query_requires_the_complete_predecessor_chain() -> Result<
 }
 
 #[test]
+fn recovery_failure_identifies_a_missing_predecessor_state() -> Result<(), ErasureErrorV1> {
+    let graph = completed_graph(vec![target(10)], None)?;
+    let terminal = graph
+        .adapter
+        .resolve_state(graph.receipt.terminal_state())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let missing_predecessor = terminal
+        .previous_state()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    graph.adapter.remove_state(missing_predecessor);
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), missing_predecessor);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
 fn recovery_rejects_manifest_state_rollback_after_a_completed_attempt() -> Result<(), ErasureErrorV1>
 {
     let graph = completed_graph(vec![target(10)], None)?;
@@ -743,10 +762,15 @@ fn recovery_rejects_a_missing_resolution_index_entry() -> Result<(), ErasureErro
     graph
         .adapter
         .remove_resolution(graph.request.reference(), 0);
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
 
     let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].failure_subject(), resolution.reference());
+    assert_eq!(failures[0].failure_subject(), manifest);
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }

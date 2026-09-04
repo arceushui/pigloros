@@ -213,7 +213,13 @@ impl std::fmt::Display for ErasureErrorV1 {
 
 impl std::error::Error for ErasureErrorV1 {}
 
-/// Immutable, payload-free evidence that one durable ERCRP1 graph failed recovery.
+/// Immutable, payload-free, non-authoritative evidence that one durable ERCRP1
+/// graph failed recovery.
+///
+/// This diagnostic never authorizes containment and never proves that the
+/// recovered graph is invalid. Consumers that need authority must use a
+/// successfully verified state instead of treating the presence of this record
+/// as an authority grant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureRecoveryErrorV1 {
     request: ErasureReferenceV1,
@@ -3343,6 +3349,46 @@ impl ErasurePersistenceObjectV1 {
     }
 }
 
+/// Opaque core-prepared ERRE1 evidence for an adapter append.
+///
+/// Adapters can persist and inspect this token, but cannot construct one from
+/// an arbitrary public diagnostic. Core creates it only after content-addressing
+/// the complete [`ErasureRecoveryErrorV1`] record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedErasureRecoveryErrorV1 {
+    request: ErasureReferenceV1,
+    object: ErasurePersistenceObjectV1,
+}
+
+impl PreparedErasureRecoveryErrorV1 {
+    pub(crate) fn new(record: ErasureRecoveryErrorV1) -> Result<Self, ErasureErrorV1> {
+        let object =
+            ErasurePersistenceObjectV1::new(record.reference(), record.to_canonical_cbor()?);
+        Ok(Self {
+            request: record.request(),
+            object,
+        })
+    }
+
+    /// Return the ERQ1 request bound to this core-prepared diagnostic.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.request
+    }
+
+    /// Return the content address of the ERRE1 diagnostic.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.object.reference()
+    }
+
+    /// Return the canonical ERRE1 bytes prepared by core.
+    #[must_use]
+    pub fn canonical_cbor(&self) -> &[u8] {
+        self.object.canonical_cbor()
+    }
+}
+
 /// One immutable ERS1 object inserted with a manifest delta.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasurePersistedStateV1 {
@@ -3687,11 +3733,11 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1>;
-    /// Atomically retain one immutable ERRE1 recovery-error object and its
-    /// request index entry.
+    /// Atomically retain one core-prepared, immutable ERRE1 recovery-error
+    /// object and its request index entry.
     ///
-    /// Repeating the exact `(request, object.reference())` insertion is
-    /// idempotent. A different object at the same content address fails
+    /// Repeating the exact `(object.request(), object.reference())` insertion
+    /// is idempotent. A different object at the same content address fails
     /// closed, and the per-request retention bound is enforced by the adapter.
     ///
     /// # Errors
@@ -3699,8 +3745,7 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     /// Returns a closed transaction, bound, or provenance error.
     fn append_recovery_error(
         &mut self,
-        request: ErasureReferenceV1,
-        object: ErasurePersistenceObjectV1,
+        object: PreparedErasureRecoveryErrorV1,
     ) -> Result<(), ErasureErrorV1>;
     /// Atomically apply a core-prepared delta. If the current manifest already
     /// equals the supplied next manifest and every referenced delta is equal,
@@ -3717,10 +3762,29 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PredecessorChainFailureV1 {
+    error: ErasureErrorV1,
+    subject: ErasureReferenceV1,
+}
+
+impl PredecessorChainFailureV1 {
+    const fn new(error: ErasureErrorV1, subject: ErasureReferenceV1) -> Self {
+        Self { error, subject }
+    }
+}
+
 fn verify_predecessor_chain<R: ErasureStateResolverV1 + ?Sized>(
     current: ErasureStateV1,
     resolver: &R,
 ) -> Result<(), ErasureErrorV1> {
+    verify_predecessor_chain_with_subject(current, resolver).map_err(|failure| failure.error)
+}
+
+fn verify_predecessor_chain_with_subject<R: ErasureStateResolverV1 + ?Sized>(
+    current: ErasureStateV1,
+    resolver: &R,
+) -> Result<(), PredecessorChainFailureV1> {
     verify_predecessor_chain_bounded(
         current,
         resolver,
@@ -3732,24 +3796,39 @@ fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1 + ?Sized>(
     mut current: ErasureStateV1,
     resolver: &R,
     maximum_depth: usize,
-) -> Result<(), ErasureErrorV1> {
+) -> Result<(), PredecessorChainFailureV1> {
     for _ in 0..maximum_depth {
         if let Some(previous_digest) = current.previous_state() {
             match resolver.resolve_state(previous_digest) {
                 Ok(Some(previous)) => {
-                    current.validate_predecessor(&previous)?;
+                    current
+                        .validate_predecessor(&previous)
+                        .map_err(|error| PredecessorChainFailureV1::new(error, previous_digest))?;
                     current = previous;
                 }
-                Ok(None) => return Err(ErasureErrorV1::ProvenanceMissing),
-                Err(error) => return Err(error),
+                Ok(None) => {
+                    return Err(PredecessorChainFailureV1::new(
+                        ErasureErrorV1::ProvenanceMissing,
+                        previous_digest,
+                    ));
+                }
+                Err(error) => {
+                    return Err(PredecessorChainFailureV1::new(error, previous_digest));
+                }
             }
         } else if current.lifecycle() == ErasureLifecycleV1::Submitted {
             return Ok(());
         } else {
-            return Err(ErasureErrorV1::ProvenanceMissing);
+            return Err(PredecessorChainFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                current.state_digest(),
+            ));
         }
     }
-    Err(ErasureErrorV1::ProvenanceMissing)
+    Err(PredecessorChainFailureV1::new(
+        ErasureErrorV1::ProvenanceMissing,
+        current.state_digest(),
+    ))
 }
 
 /// Application-facing erasure lifecycle interface.

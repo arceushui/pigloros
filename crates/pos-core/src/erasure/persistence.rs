@@ -7,7 +7,7 @@ use super::evidence::{
 use super::{
     acknowledgement_inventory_reference, decode_limited, domain_digest, encode_limited,
     erasure_evidence_set_reference, exact_array, selected_obligations_reference,
-    target_closure_digest, verify_predecessor_chain, BTreeMap, BTreeSet,
+    target_closure_digest, verify_predecessor_chain_with_subject, BTreeMap, BTreeSet,
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionV1,
@@ -549,8 +549,8 @@ fn recover_foundation(
             state.state_digest(),
         ));
     }
-    verify_predecessor_chain(state.clone(), port)
-        .map_err(|error| RecoveryFailureV1::new(error, state.state_digest()))?;
+    verify_predecessor_chain_with_subject(state.clone(), port)
+        .map_err(|failure| RecoveryFailureV1::new(failure.error, failure.subject))?;
     let closure = optional(
         port,
         manifest.target_closure,
@@ -756,8 +756,7 @@ impl RecoveredErasureV1 {
         );
         validate_correction(port, &foundation.request, evidence.correction.as_ref())
             .map_err(|error| RecoveryFailureV1::new(error, correction_subject))?;
-        validate_state_provenance(port, &foundation.state, &manifest)
-            .map_err(|error| RecoveryFailureV1::new(error, foundation.state.state_digest()))?;
+        validate_state_provenance(port, &foundation.state, &manifest, stored.digest())?;
 
         let RecoveredFoundationV1 {
             request,
@@ -1229,20 +1228,11 @@ impl RecoveredErasureV1 {
     ) -> Result<(), RecoveryFailureV1> {
         let index_count = port
             .attempt_index_count(self.request.reference())
-            .map_err(|error| {
-                RecoveryFailureV1::new(
-                    error,
-                    self.manifest
-                        .attempt_history_head
-                        .unwrap_or(self.manifest.state),
-                )
-            })?;
+            .map_err(|error| RecoveryFailureV1::new(error, self.manifest_digest))?;
         if index_count != self.completed_attempt_count {
             return Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
-                self.manifest
-                    .attempt_history_head
-                    .unwrap_or(self.manifest.state),
+                self.manifest_digest,
             ));
         }
         let mut predecessor = None;
@@ -1251,21 +1241,9 @@ impl RecoveredErasureV1 {
         for ordinal in 0..self.completed_attempt_count {
             let reference = port
                 .attempt_page_ref(self.request.reference(), ordinal)
-                .map_err(|error| {
-                    RecoveryFailureV1::new(
-                        error,
-                        self.manifest
-                            .attempt_history_head
-                            .unwrap_or(self.manifest.state),
-                    )
-                })?
+                .map_err(|error| RecoveryFailureV1::new(error, self.manifest_digest))?
                 .ok_or_else(|| {
-                    RecoveryFailureV1::new(
-                        ErasureErrorV1::ProvenanceMissing,
-                        self.manifest
-                            .attempt_history_head
-                            .unwrap_or(self.manifest.state),
-                    )
+                    RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, self.manifest_digest)
                 })?;
             let page = load(port, reference, AttemptPageV1::decode, |value| {
                 value.reference
@@ -1286,19 +1264,19 @@ impl RecoveredErasureV1 {
         if predecessor != self.attempt_history_head {
             return Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
-                self.attempt_history_head.unwrap_or(self.manifest.state),
+                self.manifest_digest,
             ));
         }
         if predecessor_receipt != self.latest_receipt {
             return Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
-                self.latest_receipt.unwrap_or(self.manifest.state),
+                self.manifest_digest,
             ));
         }
         if self.completed_attempt_count > 0 && latest_terminal_state != Some(self.manifest.state) {
             return Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
-                self.manifest.state,
+                self.manifest_digest,
             ));
         }
         if let Some(active) = self.manifest.active.clone() {
@@ -1654,10 +1632,7 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
         verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
     ) -> Result<(), RecoveryFailureV1> {
-        let fallback_subject = self
-            .manifest
-            .scope_extension_head
-            .unwrap_or(self.manifest.state);
+        let fallback_subject = self.manifest_digest;
         let count = port
             .scope_index_count(self.request.reference())
             .map_err(|error| RecoveryFailureV1::new(error, fallback_subject))?;
@@ -1733,10 +1708,7 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
         verifier: &dyn ErasureRecoveryAuthorizationVerifierV1,
     ) -> Result<(), RecoveryFailureV1> {
-        let fallback_subject = self
-            .manifest
-            .administrative_resolution_head
-            .unwrap_or(self.manifest.state);
+        let fallback_subject = self.manifest_digest;
         let count = port
             .administrative_resolution_index_count(self.request.reference())
             .map_err(|error| RecoveryFailureV1::new(error, fallback_subject))?;
@@ -2017,7 +1989,8 @@ fn validate_state_provenance(
     port: &dyn ErasurePersistencePortV1,
     state: &ErasureStateV1,
     manifest: &ManifestV1,
-) -> Result<(), ErasureErrorV1> {
+    manifest_digest: ErasureReferenceV1,
+) -> Result<(), RecoveryFailureV1> {
     let mut current = state.clone();
     let mut authorization = None;
     let mut dispatch = None;
@@ -2033,11 +2006,18 @@ fn validate_state_provenance(
             {
                 return Ok(());
             }
-            return Err(ErasureErrorV1::ProvenanceMissing);
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                manifest_digest,
+            ));
         };
         current = port
-            .resolve_state(previous)?
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            .resolve_state(previous)
+            .map_err(|error| RecoveryFailureV1::new(error, previous))?
+            .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, previous))?;
     }
-    Err(ErasureErrorV1::ProvenanceMissing)
+    Err(RecoveryFailureV1::new(
+        ErasureErrorV1::ProvenanceMissing,
+        manifest_digest,
+    ))
 }
