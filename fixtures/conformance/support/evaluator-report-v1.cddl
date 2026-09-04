@@ -23,7 +23,7 @@ conformance-report-v1 = [
   replay-claim: 0..4,
   redaction-state: 0..3,
   limitations-digest: digest,
-  provenance-digest: digest,
+  evaluator-build-provenance-digest: digest,
   report-digest: digest
 ]
 

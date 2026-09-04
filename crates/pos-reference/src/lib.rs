@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub mod adapter_transport;
 pub mod evaluator;
+pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
 pub mod process_adapter;
 pub mod profile;
@@ -559,7 +560,6 @@ fn validate_contract_shape(
         "authorization_decisions",
         "counterfactual",
         "atomicity",
-        "conformance_report",
         "non_interference",
     ];
     for field in required {
@@ -580,9 +580,6 @@ fn validate_contract_shape(
             .is_some_and(serde_json::Value::is_object)
         || !contract
             .get("counterfactual")
-            .is_some_and(serde_json::Value::is_object)
-        || !contract
-            .get("conformance_report")
             .is_some_and(serde_json::Value::is_object)
         || !contract
             .get("knowledge_snapshots")
@@ -862,7 +859,6 @@ mod tests {
                 "authorization_decisions": [],
                 "counterfactual": {},
                 "atomicity": [],
-                "conformance_report": {},
                 "non_interference": []
             }
         })
@@ -1214,7 +1210,6 @@ mod tests {
                 "authorization_decisions": [],
                 "counterfactual": {},
                 "atomicity": [],
-                "conformance_report": {},
                 "non_interference": non_interference_fixture()
             }
         });
@@ -1601,7 +1596,6 @@ mod tests {
             "authorization_decisions",
             "counterfactual",
             "atomicity",
-            "conformance_report",
             "non_interference",
         ];
         for field in contract_fields {
@@ -1619,7 +1613,6 @@ mod tests {
             "scenario_room",
             "plugin_boundary",
             "counterfactual",
-            "conformance_report",
             "knowledge_snapshots",
             "authorization_decisions",
             "atomicity",

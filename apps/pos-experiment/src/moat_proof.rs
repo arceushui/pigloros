@@ -9,14 +9,13 @@ use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, St
 use pos_conformance::{
     compare, compare_authoritative_outputs, schema_id_for_event_type, verify_counterfactual_fork,
     verify_evidence, wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
-    CaseOutcomeStatusV1, CaseOutcomeV1, CausalTraceEntryV1, ClaimLayerV1, ComparisonV1,
-    ConformanceReportV1, CounterfactualContractV1, DependencyClassV1, DependencyNodeV1,
-    DivergenceClassV1, ExecutionModeV1, FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1,
-    FixturePrincipalRefV1, HostClosureAuditV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1,
-    MoatProofInputV1, ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1,
-    ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1,
-    ReproManifestV1, ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
+    CausalTraceEntryV1, ComparisonV1, CounterfactualContractV1, DependencyClassV1,
+    DependencyNodeV1, DivergenceClassV1, ExecutionModeV1, FixtureAuthorizationDecisionV1,
+    FixtureCapabilityGrantV1, FixturePrincipalRefV1, HostClosureAuditV1, InputDependencyV1,
+    InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
+    ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1,
+    ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
+    ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
     SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
     Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
 };
@@ -64,7 +63,6 @@ const SOCIETY_ENTITY_KIND: &str = "proof-society";
 const WORLD_BACKEND_CONTENT: &[u8] = b"PiglorOS.WorldBackend.simple-kinematic.v1";
 const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.deterministic-v1";
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
-const HOST_SOURCE_CONTENT: &[u8] = include_bytes!("moat_proof.rs");
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
 
 /// Result of one Local or Air-Gapped proof execution.
@@ -1279,89 +1277,6 @@ fn build_counterfactual_contract(
     counterfactual
 }
 
-fn build_conformance_report(
-    mode: ExecutionModeV1,
-    events: &[AuthoritativeEventV1],
-    plugin_versions: &BTreeMap<String, String>,
-    policy_digest: [u8; 32],
-) -> (ConformanceReportV1, [u8; 32]) {
-    let subject_artifact_digest = serialized_digest(&events.to_vec());
-    let cases = vec![CaseOutcomeV1 {
-        case_id: format!("scenario-{mode:?}").to_lowercase(),
-        fixture_digest: subject_artifact_digest,
-        execution_profile_digest: policy_digest,
-        mode,
-        claim_layer: ClaimLayerV1::ReplayConformance,
-        outcome: CaseOutcomeStatusV1::Pass,
-        first_coordinate: None,
-        expected_digest: Some(subject_artifact_digest),
-        actual_digest: Some(subject_artifact_digest),
-        expected_error: None,
-        actual_error: None,
-        replay_claim: ReplayClaimV1::Exact,
-        redaction_state: RedactionStateV1::None,
-        provenance_digest: policy_digest,
-    }];
-    let mut report = ConformanceReportV1 {
-        report_id: id16_digest(&subject_artifact_digest),
-        subject_artifact_digest,
-        profile_digest: policy_digest,
-        normative_spec_digest: digest_domain(b"PiglorOS.NormativeSpec.v1", b"ADR-058-064"),
-        execution_profile_digest: policy_digest,
-        fixture_bundle_digest: serialized_digest(plugin_versions),
-        evaluator_source_digest: digest_domain(b"PiglorOS.Evaluator.Source.v1", EVALUATOR_CONTENT),
-        evaluator_binary_digest: digest_domain(
-            b"PiglorOS.Evaluator.Binary.v1",
-            &[EVALUATOR_CONTENT, EXECUTION_PROFILE_CONTENT].concat(),
-        ),
-        evaluator_protocol_digest: digest_domain(b"PiglorOS.Evaluator.Protocol.v1", b"VRR1/DVR1"),
-        implementation: ImplementationIdentityV1 {
-            implementation_id: "pos-experiment-wave8".to_owned(),
-            source_digest: digest_domain(b"PiglorOS.Host.Source.v1", HOST_SOURCE_CONTENT),
-            build_digest: digest_domain(
-                b"PiglorOS.Host.Build.v1",
-                concat!(env!("CARGO_PKG_NAME"), "\0", env!("CARGO_PKG_VERSION")).as_bytes(),
-            ),
-            binary_digest: digest_domain(
-                b"PiglorOS.Host.Binary.v1",
-                &[HOST_SOURCE_CONTENT, EXECUTION_PROFILE_CONTENT].concat(),
-            ),
-            public_contract_digest: serialized_digest(&wave8_plugin_boundary()),
-            organization_id: None,
-        },
-        independence: IndependenceEvidenceV1 {
-            technical_independent: true,
-            authorship_independent: false,
-            organizational_independent: false,
-            declaration_digest: digest_domain(
-                b"PiglorOS.Independence.Declaration.v1",
-                b"candidate",
-            ),
-            shared_code_audit_digest: digest_domain(
-                b"PiglorOS.Independence.Audit.v1",
-                EVALUATOR_CONTENT,
-            ),
-            reviewer_ids: vec!["pos-reference".to_owned()],
-        },
-        passed: u32::try_from(cases.len()).unwrap_or(u32::MAX),
-        failed: 0,
-        skipped: 0,
-        unavailable: 0,
-        not_applicable: 0,
-        cases,
-        replay_claim: ReplayClaimV1::Exact,
-        redaction_state: RedactionStateV1::None,
-        limitations_digest: digest_domain(
-            b"PiglorOS.Conformance.Limitations.v1",
-            b"external-authorship-and-organization-attestation-not-claimed",
-        ),
-        provenance_digest: policy_digest,
-        report_digest: [0; 32],
-    };
-    report.report_digest = report.digest().unwrap_or([0; 32]);
-    (report, subject_artifact_digest)
-}
-
 fn build_atomicity(
     input: &MoatProofInputV1,
     events: &[AuthoritativeEventV1],
@@ -1423,14 +1338,12 @@ fn build_wave8_contract(
         policy_digest,
         room_parts.exogenous_digest,
     );
-    let (conformance_report, subject_artifact_digest) =
-        build_conformance_report(context.mode, events, context.plugin_versions, policy_digest);
     let atomicity = build_atomicity(
         context.input,
         events,
         context.failure_probes,
         counterfactual.generation,
-        subject_artifact_digest,
+        serialized_digest(&events.to_vec()),
     );
     Wave8ProofContractV1 {
         scenario_room: room_parts.room,
@@ -1439,7 +1352,6 @@ fn build_wave8_contract(
         authorization_decisions,
         counterfactual,
         atomicity,
-        conformance_report,
         non_interference: wave8_non_interference_matrix(context.input.digest().unwrap_or([0; 32])),
     }
 }

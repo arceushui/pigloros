@@ -1,11 +1,21 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::fmt::Write as _;
+use std::fs;
 use std::io;
+use std::io::Write as _;
+use std::path::Path;
 
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use pos_reference::evaluator_build_identity::{
+    verify_evaluator_build_identity, EvaluatorBuildEvidence, VerifiedEvaluatorBuildIdentity,
+};
 use pos_reference::evaluator_protocol::{
-    EvaluationRequest, ImplementationIdentity, OutputCapability, SubjectAdapterKind,
+    EvaluationRequest, ImplementationIdentity, IndependenceEvidence, OutputCapability,
+    SubjectAdapterKind,
 };
 
 pub struct Corpus {
@@ -16,6 +26,207 @@ pub struct Corpus {
     pub expected_output: Vec<u8>,
 }
 
+const SUBJECT_DIGEST: [u8; 32] = [41; 32];
+
+/// Build and verify the current public test executable's evaluator evidence package.
+///
+/// # Errors
+/// Returns an error when the temporary package cannot be written or verified.
+pub fn verified_evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentity> {
+    verified_evaluator_identity_with(IndependenceEvidence {
+        technical_independent: true,
+        authorship_independent: true,
+        organizational_independent: false,
+        declaration_digest: [47; 32],
+        shared_code_audit_digest: [64; 32],
+        reviewer_ids: vec!["reviewer-one".to_owned()],
+    })
+}
+
+/// Build and verify an evaluator evidence package with the supplied independence claims.
+///
+/// # Errors
+/// Returns an error when the temporary package cannot be written or verified.
+pub fn verified_evaluator_identity_with(
+    independence: IndependenceEvidence,
+) -> TestResult<VerifiedEvaluatorBuildIdentity> {
+    let directory = tempfile::tempdir()?;
+    write_evaluator_package(directory.path(), &std::env::current_exe()?)?;
+    verify_evaluator_build_identity(
+        &EvaluatorBuildEvidence::new(
+            directory.path().join("source/pigloros-source.tar.gz"),
+            directory.path().join("provenance.json"),
+        ),
+        independence,
+        100,
+    )
+    .map_err(|error| -> Box<dyn Error> { Box::new(error) })
+}
+
+/// Prove that a corrupted canonical checksum inventory cannot authorize report emission.
+///
+/// # Errors
+/// Returns an error when the temporary package cannot be prepared.
+///
+/// # Panics
+/// Panics if the public verifier accepts the corrupted inventory.
+pub fn evaluator_evidence_rejects_corrupted_checksum() -> TestResult<()> {
+    let directory = tempfile::tempdir()?;
+    write_evaluator_package(directory.path(), &std::env::current_exe()?)?;
+    fs::write(directory.path().join("BLAKE3SUMS"), b"corrupted\n")?;
+    let result = verify_evaluator_build_identity(
+        &EvaluatorBuildEvidence::new(
+            directory.path().join("source/pigloros-source.tar.gz"),
+            directory.path().join("provenance.json"),
+        ),
+        IndependenceEvidence {
+            technical_independent: true,
+            authorship_independent: true,
+            organizational_independent: false,
+            declaration_digest: [47; 32],
+            shared_code_audit_digest: [64; 32],
+            reviewer_ids: vec!["reviewer-one".to_owned()],
+        },
+        100,
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+pub(crate) fn write_evaluator_package(directory: &Path, binary: &Path) -> TestResult<()> {
+    fs::create_dir_all(directory.join("source"))?;
+    fs::create_dir_all(directory.join("bin"))?;
+    let source = source_archive("1111111111111111111111111111111111111111")?;
+    fs::write(directory.join("source/pigloros-source.tar.gz"), &source)?;
+    fs::copy(binary, directory.join("bin/pos-reference-evaluator"))?;
+    fs::write(
+        directory.join("Cargo.lock"),
+        b"public test dependency lock\n",
+    )?;
+    fs::write(directory.join("sbom.cdx.json"), b"{}\n")?;
+    fs::write(directory.join("licences.json"), b"{}\n")?;
+    write_evaluator_provenance(directory, &source)?;
+    write_checksum_inventory(directory)
+}
+
+pub(crate) fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult<()> {
+    let binary = fs::read(directory.join("bin/pos-reference-evaluator"))?;
+    let lock = fs::read(directory.join("Cargo.lock"))?;
+    let sbom = fs::read(directory.join("sbom.cdx.json"))?;
+    let licences = fs::read(directory.join("licences.json"))?;
+    let provenance = serde_json::json!({
+        "build_target": "public-test-target",
+        "cargo_locked": true,
+        "dependency_lock_blake3": blake3::hash(&lock).to_hex().to_string(),
+        "evaluator_binary_blake3": blake3::hash(&binary).to_hex().to_string(),
+        "evaluator_source_blake3": blake3::hash(source).to_hex().to_string(),
+        "licences_blake3": blake3::hash(&licences).to_hex().to_string(),
+        "rust_toolchain": "rustc public-test-toolchain",
+        "sbom_blake3": blake3::hash(&sbom).to_hex().to_string(),
+        "schema": "PiglorOS.EvaluatorBuildProvenance.v1",
+        "source_commit": "1111111111111111111111111111111111111111",
+    });
+    let mut bytes = serde_json::to_vec(&provenance)?;
+    bytes.push(b'\n');
+    fs::write(directory.join("provenance.json"), bytes)?;
+    Ok(())
+}
+
+pub(crate) fn write_checksum_inventory(directory: &Path) -> TestResult<()> {
+    let paths = [
+        "Cargo.lock",
+        "bin/pos-reference-evaluator",
+        "licences.json",
+        "provenance.json",
+        "sbom.cdx.json",
+        "source/pigloros-source.tar.gz",
+    ];
+    let mut inventory = String::new();
+    for path in paths {
+        writeln!(
+            inventory,
+            "{}  {path}",
+            blake3::hash(&fs::read(directory.join(path))?).to_hex()
+        )?;
+    }
+    fs::write(directory.join("BLAKE3SUMS"), inventory)?;
+    Ok(())
+}
+
+pub(crate) fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
+    gzip_bytes(&source_tar(commit))
+}
+
+pub(crate) fn source_tar(commit: &str) -> Vec<u8> {
+    let record = pax_record("comment", commit.as_bytes());
+    let mut tar = Vec::new();
+    tar.extend_from_slice(&tar_header("pax_global_header", record.len(), b'g'));
+    tar.extend_from_slice(&record);
+    tar.resize(tar.len().div_ceil(512) * 512, 0);
+    for path in [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/pos-reference/Cargo.toml",
+        "crates/pos-reference/src/bin/pos-reference-evaluator.rs",
+    ] {
+        tar.extend_from_slice(&tar_header(path, 0, b'0'));
+    }
+    tar.extend_from_slice(&[0; 1024]);
+    tar
+}
+
+pub(crate) fn gzip_bytes(bytes: &[u8]) -> TestResult<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
+}
+
+pub(crate) fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
+    let mut body = Vec::from(key.as_bytes());
+    body.push(b'=');
+    body.extend_from_slice(value);
+    body.push(b'\n');
+    let mut length = body.len() + 2;
+    loop {
+        let prefix = format!("{length} ");
+        let encoded_length = prefix.len() + body.len();
+        if encoded_length == length {
+            let mut record = Vec::from(prefix.as_bytes());
+            record.extend_from_slice(&body);
+            return record;
+        }
+        length = encoded_length;
+    }
+}
+
+pub(crate) fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
+    let mut header = [0_u8; 512];
+    header[..name.len()].copy_from_slice(name.as_bytes());
+    write_octal(&mut header[100..108], 0o644);
+    write_octal(&mut header[108..116], 0);
+    write_octal(&mut header[116..124], 0);
+    write_octal(&mut header[124..136], size as u64);
+    write_octal(&mut header[136..148], 0);
+    header[148..156].fill(b' ');
+    header[156] = kind;
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+    write_tar_checksum(&mut header);
+    header
+}
+
+pub(crate) fn write_tar_checksum(header: &mut [u8; 512]) {
+    header[148..156].fill(b' ');
+    let checksum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
+    let encoded = format!("{checksum:06o}\0 ");
+    header[148..156].copy_from_slice(encoded.as_bytes());
+}
+
+fn write_octal(field: &mut [u8], value: u64) {
+    let encoded = format!("{:0width$o}\0", value, width = field.len() - 1);
+    field.copy_from_slice(encoded.as_bytes());
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProfileMutation {
     ArtifactEncoding(u8),
@@ -24,6 +235,11 @@ pub enum ProfileMutation {
     ProviderKeyNumericBoundary(u8),
     DivergenceCoordinateLong,
     SelectedCapBoundary(u8),
+    SelectedCompressionCapBoundary,
+    SelectedProfileByteCapBoundary,
+    SelectedProfileByteCapExact,
+    SelectedClosureCapBoundary(u8),
+    SelectedClosureCapExact(u8),
     ExecutionContractBoundary(u8),
     FixtureSemanticBoundary(u8),
     ProvenanceBoundary(u8),
@@ -464,6 +680,36 @@ pub fn corpus_with_profile_mutation(mutation: ProfileMutation) -> TestResult<Cor
     })
 }
 
+/// Build a signed corpus that combines a selected-cap violation with secret material.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_selected_closure_cap_and_secret(
+    cap_index: u8,
+    secret: &[u8],
+) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        extra: Some(secret),
+        profile_mutation: Some(ProfileMutation::SelectedClosureCapBoundary(cap_index)),
+        ..CorpusOptions::default()
+    })
+}
+
+/// Build a signed corpus combining a profile-local selected-cap violation with secret material.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_profile_mutation_and_secret(
+    mutation: ProfileMutation,
+    secret: &[u8],
+) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        extra: Some(secret),
+        profile_mutation: Some(mutation),
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a request-bound corpus containing one signed CFB1 attack shape.
 ///
 /// # Errors
@@ -526,6 +772,18 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     if let Some(ProfileMutation::SelectedCapBoundary(index)) = profile_mutation {
         select_hard_cap_boundary(&mut hard_caps, index)?;
     }
+    if matches!(
+        profile_mutation,
+        Some(ProfileMutation::SelectedCompressionCapBoundary)
+    ) {
+        array_fields_mut(&mut hard_caps)?[6] = uint(1);
+    }
+    if matches!(
+        profile_mutation,
+        Some(ProfileMutation::SelectedProfileByteCapBoundary)
+    ) {
+        array_fields_mut(&mut hard_caps)?[0] = uint(1);
+    }
     let fixtures = fixtures(
         &mut members,
         &signing_key,
@@ -534,19 +792,27 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         &expected_output,
         options,
     )?;
-    let mut profile = profile(
+    if let Some(ProfileMutation::SelectedClosureCapBoundary(index)) = profile_mutation {
+        select_closure_cap_boundary(&mut hard_caps, &members, index)?;
+    }
+    if let Some(ProfileMutation::SelectedClosureCapExact(index)) = profile_mutation {
+        select_closure_cap_exact(&mut hard_caps, &members, index)?;
+    }
+    let mut profile_value = profile_with_selected_closure_caps(
         &members,
-        fixtures,
+        &fixtures,
         execution_digest,
         trust_digest,
-        &hard_caps,
+        &mut hard_caps,
         mixed_oracles,
+        profile_mutation,
     )?;
+    let exact_profile_byte_cap = exact_profile_byte_cap(profile_mutation, &profile_value)?;
     if let Some(mutation) = profile_mutation {
-        mutate_profile(&mut profile, mutation)?;
+        mutate_profile(&mut profile_value, mutation)?;
     }
-    let profile_digest = hash_contract("PiglorOS.ConformanceProfile.v1", &profile)?;
-    let mut profile_fields = fields(profile)?;
+    let profile_digest = hash_contract("PiglorOS.ConformanceProfile.v1", &profile_value)?;
+    let mut profile_fields = fields(profile_value)?;
     profile_fields.push(bytes(&profile_digest));
     insert_profile_member(&mut members, profile_fields, profile_mutation)?;
     let archive = archive(
@@ -560,14 +826,63 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         bundle_mutation,
     )?;
     let archive_digest = hash(&archive);
-    let subject_digest = [41; 32];
     let hard_caps_digest = hash_contract("PiglorOS.EvaluatorHardCaps.v1", &hard_caps)?;
+    let mut request = evaluation_request(
+        profile_digest,
+        archive_digest,
+        subject_adapter,
+        execution_digest,
+        trust_digest,
+        evaluator_protocol_digest,
+        hard_caps_digest,
+    )?;
+    bind_exact_profile_output_cap(&mut request, exact_profile_byte_cap)?;
+    Ok(Corpus {
+        request: request.to_canonical_cbor()?,
+        archive,
+        trust_policy,
+        subject_digest: SUBJECT_DIGEST,
+        expected_output,
+    })
+}
+
+fn exact_profile_byte_cap(
+    mutation: Option<ProfileMutation>,
+    profile: &Value,
+) -> TestResult<Option<u64>> {
+    matches!(mutation, Some(ProfileMutation::SelectedProfileByteCapExact))
+        .then(|| encoded_profile_length(profile))
+        .transpose()
+}
+
+fn bind_exact_profile_output_cap(
+    request: &mut EvaluationRequest,
+    limit: Option<u64>,
+) -> TestResult<()> {
+    if let Some(limit) = limit {
+        request.output_capability.report_bytes_limit = limit;
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+    }
+    Ok(())
+}
+
+fn evaluation_request(
+    profile_digest: [u8; 32],
+    archive_digest: [u8; 32],
+    subject_adapter: SubjectAdapterKind,
+    execution_digest: [u8; 32],
+    trust_digest: [u8; 32],
+    evaluator_protocol_digest: [u8; 32],
+    hard_caps_digest: [u8; 32],
+) -> TestResult<EvaluationRequest> {
     let mut request = EvaluationRequest {
         request_id: [1; 16],
         profile_digest,
         fixture_bundle_digest: archive_digest,
         subject_adapter,
-        subject_artifact_digest: subject_digest,
+        subject_artifact_digest: SUBJECT_DIGEST,
         implementation: ImplementationIdentity {
             implementation_id: "public-subject".to_owned(),
             source_digest: [42; 32],
@@ -589,13 +904,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     };
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
-    Ok(Corpus {
-        request: request.to_canonical_cbor()?,
-        archive,
-        trust_policy,
-        subject_digest,
-        expected_output,
-    })
+    Ok(request)
 }
 
 fn mutate_support_members(
@@ -1038,7 +1347,11 @@ fn support_members(trust: &[u8], execution: &[u8]) -> BTreeMap<String, (Vec<u8>,
         ),
         (
             "support/evaluator-report-v1.cddl".to_owned(),
-            (b"report schema".to_vec(), 4),
+            (
+                include_bytes!("../../../../fixtures/conformance/support/evaluator-report-v1.cddl")
+                    .to_vec(),
+                4,
+            ),
         ),
         (
             "support/evaluator-request-v1.cddl".to_owned(),
@@ -1872,7 +2185,10 @@ fn mutate_profile_boundary(
         ProfileMutation::DivergenceCoordinateLong => {
             profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[1; 129])])]);
         }
-        ProfileMutation::SelectedCapBoundary(_) => {}
+        ProfileMutation::SelectedCapBoundary(_)
+        | ProfileMutation::SelectedCompressionCapBoundary
+        | ProfileMutation::SelectedProfileByteCapBoundary
+        | ProfileMutation::SelectedProfileByteCapExact => {}
         _ => return Ok(false),
     }
     Ok(true)
@@ -2994,6 +3310,131 @@ fn select_hard_cap_boundary(hard_caps: &mut Value, index: u8) -> TestResult<()> 
     };
     array_fields_mut(hard_caps)?[cap_index] = uint(u64::from(cap_index != 9));
     Ok(())
+}
+
+fn select_closure_cap_boundary(
+    hard_caps: &mut Value,
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    index: u8,
+) -> TestResult<()> {
+    let measurements = closure_measurements(members)?;
+    let (cap_index, value) = match index {
+        0 => (2, measurements.member_count.saturating_sub(1)),
+        1 => (3, measurements.maximum_path_bytes.saturating_sub(1)),
+        2 => (4, measurements.maximum_member_bytes.saturating_sub(1)),
+        _ => (5, measurements.member_bytes),
+    };
+    array_fields_mut(hard_caps)?[cap_index] = uint(value);
+    Ok(())
+}
+
+fn select_closure_cap_exact(
+    hard_caps: &mut Value,
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    index: u8,
+) -> TestResult<()> {
+    let measurements = closure_measurements(members)?;
+    let (cap_index, value) = match index {
+        0 => (2, measurements.member_count),
+        1 => (3, measurements.maximum_path_bytes),
+        2 => (4, measurements.maximum_member_bytes),
+        _ => return Ok(()),
+    };
+    array_fields_mut(hard_caps)?[cap_index] = uint(value);
+    Ok(())
+}
+
+struct ClosureMeasurements {
+    member_count: u64,
+    maximum_path_bytes: u64,
+    maximum_member_bytes: u64,
+    member_bytes: u64,
+}
+
+fn closure_measurements(
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+) -> TestResult<ClosureMeasurements> {
+    let maximum_path_bytes = members
+        .keys()
+        .map(String::len)
+        .chain(std::iter::once("profile/CPF1.cbor".len()))
+        .max()
+        .ok_or_else(|| io::Error::other("test closure is empty"))?;
+    let maximum_member_bytes = members
+        .values()
+        .map(|(bytes, _)| bytes.len())
+        .max()
+        .ok_or_else(|| io::Error::other("test closure is empty"))?;
+    Ok(ClosureMeasurements {
+        member_count: u64::try_from(members.len())?.saturating_add(1),
+        maximum_path_bytes: u64::try_from(maximum_path_bytes)?,
+        maximum_member_bytes: u64::try_from(maximum_member_bytes)?,
+        member_bytes: closure_member_bytes(members)?,
+    })
+}
+
+fn closure_member_bytes(members: &BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<u64> {
+    members.values().try_fold(0_u64, |total, (bytes, _)| {
+        u64::try_from(bytes.len())
+            .map(|length| total.saturating_add(length))
+            .map_err(Into::into)
+    })
+}
+
+fn profile_with_selected_closure_caps(
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    fixtures: &[Value],
+    execution_digest: [u8; 32],
+    trust_digest: [u8; 32],
+    hard_caps: &mut Value,
+    mixed_oracles: bool,
+    mutation: Option<ProfileMutation>,
+) -> TestResult<Value> {
+    let build_profile = |caps: &Value| {
+        profile(
+            members,
+            fixtures.to_vec(),
+            execution_digest,
+            trust_digest,
+            caps,
+            mixed_oracles,
+        )
+    };
+    let mut profile_value = build_profile(hard_caps)?;
+    if matches!(mutation, Some(ProfileMutation::SelectedProfileByteCapExact)) {
+        const MAX_CONVERGENCE_STEPS: usize = 8;
+        for _ in 0..MAX_CONVERGENCE_STEPS {
+            let profile_bytes = encoded_profile_length(&profile_value)?;
+            array_fields_mut(hard_caps)?[0] = uint(profile_bytes);
+            profile_value = build_profile(hard_caps)?;
+            if encoded_profile_length(&profile_value)? == profile_bytes {
+                return Ok(profile_value);
+            }
+        }
+        return Err(io::Error::other("exact profile byte cap did not converge").into());
+    }
+    if matches!(mutation, Some(ProfileMutation::SelectedClosureCapExact(3))) {
+        const MAX_CONVERGENCE_STEPS: usize = 8;
+        for _ in 0..MAX_CONVERGENCE_STEPS {
+            let profile_bytes = encoded_profile_length(&profile_value)?;
+            let total_bytes = closure_member_bytes(members)?.saturating_add(profile_bytes);
+            array_fields_mut(hard_caps)?[5] = uint(total_bytes);
+            profile_value = build_profile(hard_caps)?;
+            let encoded_total = closure_member_bytes(members)?
+                .saturating_add(encoded_profile_length(&profile_value)?);
+            if encoded_total == total_bytes {
+                return Ok(profile_value);
+            }
+        }
+        return Err(io::Error::other("exact closure cap did not converge").into());
+    }
+    Ok(profile_value)
+}
+
+fn encoded_profile_length(profile: &Value) -> TestResult<u64> {
+    let mut fields = fields(profile.clone())?;
+    fields.push(bytes(&[1; 32]));
+    Ok(u64::try_from(canonical(&array(fields))?.len())?)
 }
 
 fn descriptor(members: &BTreeMap<String, (Vec<u8>, u8)>, path: &str) -> TestResult<Value> {
