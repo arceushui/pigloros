@@ -667,11 +667,14 @@ impl SqliteStore {
     }
 
     fn prepare_schema(&self, initialize: bool) -> Result<(), CoreError> {
-        if self.should_initialize_schema(initialize)? {
-            self.init_schema()
-        } else {
-            self.validate_erasure_schema()
-        }
+        self.should_initialize_schema(initialize)
+            .and_then(|should_initialize| {
+                if should_initialize {
+                    self.init_schema()
+                } else {
+                    self.validate_erasure_schema()
+                }
+            })
     }
 
     fn should_initialize_schema(&self, initialize: bool) -> Result<bool, CoreError> {
