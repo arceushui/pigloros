@@ -227,6 +227,7 @@ pub struct PublicCoordinatorPort {
     attempt_admissions: Rc<RefCell<u64>>,
     dispatch_calls: Rc<RefCell<u64>>,
     operation_fault_hits: Rc<Cell<u64>>,
+    allow_overbound_recovery_errors: bool,
     config: PublicCoordinatorPortConfig,
 }
 
@@ -239,6 +240,7 @@ impl PublicCoordinatorPort {
             attempt_admissions: Rc::new(RefCell::new(0)),
             dispatch_calls: Rc::new(RefCell::new(0)),
             operation_fault_hits: Rc::new(Cell::new(0)),
+            allow_overbound_recovery_errors: false,
             config,
         }
     }
@@ -248,6 +250,40 @@ impl PublicCoordinatorPort {
         self.config.operation_fault = Some(fault);
         self.operation_fault_hits.set(0);
         self
+    }
+
+    #[must_use]
+    pub const fn with_overbound_recovery_errors(mut self) -> Self {
+        self.allow_overbound_recovery_errors = true;
+        self
+    }
+
+    /// Seed indexed references for exercising the adapter retention boundary.
+    pub fn fill_recovery_error_index(&self, request: ErasureReferenceV1, count: usize) {
+        self.fill_recovery_error_index_excluding(request, count, None);
+    }
+
+    /// Seed indexed references while reserving one reference for the generated record.
+    pub fn fill_recovery_error_index_excluding(
+        &self,
+        request: ErasureReferenceV1,
+        count: usize,
+        excluded: Option<ErasureReferenceV1>,
+    ) {
+        let mut storage = self.storage.borrow_mut();
+        let mut ordinal = 0_usize;
+        let mut inserted = 0_usize;
+        while inserted < count {
+            let mut digest = [0_u8; 32];
+            let ordinal_u64 = u64::try_from(ordinal).unwrap_or(u64::MAX);
+            digest[..8].copy_from_slice(&ordinal_u64.to_be_bytes());
+            let reference = ErasureReferenceV1::from_digest(digest);
+            if excluded != Some(reference) {
+                storage.recovery_errors.insert((request, reference));
+                inserted = inserted.saturating_add(1);
+            }
+            ordinal = ordinal.saturating_add(1);
+        }
     }
 
     #[must_use]
@@ -1097,7 +1133,9 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             .map(|(_, reference)| *reference)
             .take(pos_core::ERASURE_MAX_RECOVERY_ERRORS + 1)
             .collect::<Vec<_>>();
-        if references.len() > pos_core::ERASURE_MAX_RECOVERY_ERRORS {
+        if references.len() > pos_core::ERASURE_MAX_RECOVERY_ERRORS
+            && !self.allow_overbound_recovery_errors
+        {
             Err(ErasureErrorV1::ScopeInvalid)
         } else {
             Ok(references)
