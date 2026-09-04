@@ -785,6 +785,7 @@ fn sqlite_public_reads_map_missing_schema_to_closed_storage_errors(
         SqliteReadOperation::ScopeCount,
         SqliteReadOperation::ResolutionRef,
         SqliteReadOperation::ResolutionCount,
+        SqliteReadOperation::RecoveryErrorRefs,
         SqliteReadOperation::State,
     ] {
         let database = tempfile::NamedTempFile::new()?;
@@ -827,6 +828,7 @@ enum SqliteReadOperation {
     ScopeCount,
     ResolutionRef,
     ResolutionCount,
+    RecoveryErrorRefs,
     State,
 }
 
@@ -840,6 +842,7 @@ impl SqliteReadOperation {
             Self::AttemptRef | Self::AttemptCount => "erasure_attempt_pages",
             Self::ScopeRef | Self::ScopeCount => "erasure_scope_nodes",
             Self::ResolutionRef | Self::ResolutionCount => "erasure_administrative_resolutions",
+            Self::RecoveryErrorRefs => "erasure_recovery_errors",
             Self::State => "erasure_states",
         }
     }
@@ -860,6 +863,7 @@ impl SqliteReadOperation {
             Self::ResolutionCount => store
                 .administrative_resolution_index_count(reference(1))
                 .map(|_| ()),
+            Self::RecoveryErrorRefs => store.recovery_error_refs(reference(1)).map(|_| ()),
             Self::State => store.resolve_state(reference(1)).map(|_| ()),
         }
     }

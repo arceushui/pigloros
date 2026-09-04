@@ -53,6 +53,12 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
+fn encode_value(value: &Value) -> Result<Vec<u8>, ErasureErrorV1> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    Ok(bytes)
+}
+
 fn port(
     targets: Vec<ErasureRequiredTargetV1>,
     lineage_rule: Option<ErasureReferenceV1>,
@@ -371,6 +377,24 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(
         coordinator.verified_state(request),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    let foreign_request = fixture_request(RequestFixtureInput {
+        request: reference(251),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
+        request_position: 10,
+        horizon_position: 20,
+        provenance: reference(6),
+    })?;
+    adapter.insert_object(request, foreign_request.to_canonical_cbor()?);
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    adapter.remove_object(request);
     adapter.insert_object(request, graph.request.to_canonical_cbor()?);
     let missing_closure = reference(250);
     adapter.replace_manifest_field(request, 4, Value::Bytes(missing_closure.digest().to_vec()))?;
@@ -409,6 +433,108 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(
     assert_eq!(
         ErasureRecoveryErrorV1::from_canonical_cbor(&[]),
         Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let value: Value =
+        ciborium::from_reader(bytes.as_slice()).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    let Value::Array(fields) = value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    for (index, replacement) in [
+        (0, Value::Text("wrong-contract".to_owned())),
+        (2, Value::Bytes(vec![0_u8])),
+        (3, Value::Text("wrong-optional-reference".to_owned())),
+        (4, Value::Bytes(vec![0_u8])),
+        (5, Value::Text("wrong-error-code".to_owned())),
+        (5, Value::Integer(16_u64.into())),
+    ] {
+        let mut malformed = fields.clone();
+        malformed[index] = replacement;
+        assert_eq!(
+            ErasureRecoveryErrorV1::from_canonical_cbor(&encode_value(&Value::Array(malformed))?),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_error_queries_fail_closed_at_each_public_boundary() -> Result<(), ErasureErrorV1> {
+    let request = request()?.reference();
+
+    let missing_object = port(Vec::new(), None);
+    missing_object.fill_recovery_error_index(request, 1);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(missing_object, COORDINATOR).recovery_errors(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let malformed_object = port(Vec::new(), None);
+    malformed_object.fill_recovery_error_index(request, 1);
+    malformed_object.insert_object(reference(0), vec![0]);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(malformed_object, COORDINATOR)
+            .recovery_errors(request),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let bounded = port(Vec::new(), None);
+    bounded.fill_recovery_error_index(request, pos_core::ERASURE_MAX_RECOVERY_ERRORS + 1);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(bounded, COORDINATOR).recovery_errors(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let overbound = port(Vec::new(), None).with_overbound_recovery_errors();
+    overbound.fill_recovery_error_index(request, pos_core::ERASURE_MAX_RECOVERY_ERRORS + 1);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(overbound, COORDINATOR).recovery_errors(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovery_error_retention_fails_closed_when_the_bound_is_full() -> Result<(), ErasureErrorV1> {
+    let request = request()?.reference();
+    let manifest_fault = port(Vec::new(), None).with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::LoadManifest,
+        occurrence: 0,
+    });
+    let manifest_failure =
+        ErasureRecoveryErrorV1::new(request, None, request, ErasureErrorV1::TrustSnapshotInvalid)?;
+    manifest_fault.fill_recovery_error_index_excluding(
+        request,
+        pos_core::ERASURE_MAX_RECOVERY_ERRORS,
+        Some(manifest_failure.reference()),
+    );
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(manifest_fault, COORDINATOR).verified_state(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let graph = active_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let recovery_failure = ErasureRecoveryErrorV1::new(
+        request,
+        Some(manifest),
+        request,
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    graph.adapter.remove_object(request);
+    graph.adapter.fill_recovery_error_index_excluding(
+        request,
+        pos_core::ERASURE_MAX_RECOVERY_ERRORS,
+        Some(recovery_failure.reference()),
+    );
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR).verified_state(request),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }
