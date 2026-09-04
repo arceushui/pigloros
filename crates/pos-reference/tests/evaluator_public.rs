@@ -1381,7 +1381,15 @@ fn staged_preflight_rejects_untrusted_structure_before_member_allocation() -> Te
         BundleMutation::Signer,
         BundleMutation::Signature,
         BundleMutation::ArchiveShape,
-    ];
+    ]
+    .into_iter()
+    .chain((0..6).map(BundleMutation::RawManifestField))
+    .chain((0..4).map(BundleMutation::RawDescriptorField))
+    .chain((0..3).map(BundleMutation::RawMemberField))
+    .chain((0..6).map(BundleMutation::RawExpectedField))
+    .chain((0..4).map(BundleMutation::RawArchiveField))
+    .chain((0..8).map(BundleMutation::PathBoundary))
+    .chain((0..2).map(BundleMutation::ExpectedCaseBoundary));
     for mutation in mutations {
         let corpus = support::corpus_with_bundle_mutation(mutation)?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
