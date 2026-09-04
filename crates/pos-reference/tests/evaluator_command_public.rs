@@ -525,24 +525,35 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
 
 #[cfg(unix)]
 #[test]
-fn command_accepts_a_sha256_git_source_commit() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    let mut command = complete_command(directory.path())?;
-    let commit = "2".repeat(64);
-    let source = source_archive(&commit)?;
-    rebind_source_archive(directory.path(), &source)?;
-    replace_provenance_field(
-        directory.path(),
-        "source_commit",
-        serde_json::Value::String(commit),
-    )?;
-    write_checksum_inventory(directory.path())?;
-    let output = command.output()?;
-    assert!(
-        output.status.success(),
-        "evaluator stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn command_accepts_supported_git_commit_and_ustar_path_forms() -> TestResult {
+    for (commit, split_evaluator_path) in [("2".repeat(64), false), ("a".repeat(40), true)] {
+        let directory = tempfile::tempdir()?;
+        let mut command = complete_command(directory.path())?;
+        let mut tar = source_tar(&commit);
+        if split_evaluator_path {
+            let evaluator_header = 5 * 512;
+            let mut header = <[u8; 512]>::try_from(&tar[evaluator_header..evaluator_header + 512])?;
+            header[..100].fill(0);
+            header[..26].copy_from_slice(b"pos-reference-evaluator.rs");
+            header[345..373].copy_from_slice(b"crates/pos-reference/src/bin");
+            write_tar_checksum(&mut header);
+            tar[evaluator_header..evaluator_header + 512].copy_from_slice(&header);
+        }
+        let source = gzip_bytes(&tar)?;
+        rebind_source_archive(directory.path(), &source)?;
+        replace_provenance_field(
+            directory.path(),
+            "source_commit",
+            serde_json::Value::String(commit),
+        )?;
+        write_checksum_inventory(directory.path())?;
+        let output = command.output()?;
+        assert!(
+            output.status.success(),
+            "evaluator stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }
 
@@ -1028,8 +1039,7 @@ fn command_rejects_incomplete_or_substituted_evaluator_evidence() -> TestResult 
 }
 
 #[cfg(unix)]
-#[test]
-fn command_rejects_malformed_embedded_source_identity_records() -> TestResult {
+fn malformed_tar_archives() -> TestResult<Vec<Vec<u8>>> {
     let mut corrupted_checksum = tar_header("pax_global_header", 0, b'g');
     corrupted_checksum[0] ^= 1;
 
@@ -1040,6 +1050,53 @@ fn command_rejects_malformed_embedded_source_identity_records() -> TestResult {
     invalid_size_field[124..136].fill(b'x');
     write_tar_checksum(&mut invalid_size_field);
 
+    let mut invalid_utf8_size_field = tar_header("pax_global_header", 0, b'g');
+    invalid_utf8_size_field[124] = 0xff;
+    write_tar_checksum(&mut invalid_utf8_size_field);
+
+    let mut empty_name = tar_header("file", 0, b'0');
+    empty_name[..100].fill(0);
+    write_tar_checksum(&mut empty_name);
+
+    let mut bytes_after_name_terminator = tar_header("a", 0, b'0');
+    bytes_after_name_terminator[2] = b'x';
+    write_tar_checksum(&mut bytes_after_name_terminator);
+
+    let mut invalid_utf8_name = tar_header("a", 0, b'0');
+    invalid_utf8_name[0] = 0xff;
+    write_tar_checksum(&mut invalid_utf8_name);
+
+    let mut bytes_after_prefix_terminator = tar_header("file", 0, b'0');
+    bytes_after_prefix_terminator[345] = b'a';
+    bytes_after_prefix_terminator[347] = b'x';
+    write_tar_checksum(&mut bytes_after_prefix_terminator);
+
+    let mut invalid_utf8_prefix = tar_header("file", 0, b'0');
+    invalid_utf8_prefix[345] = 0xff;
+    write_tar_checksum(&mut invalid_utf8_prefix);
+
+    Ok(vec![
+        gzip_bytes(&[])?,
+        gzip_bytes(&[0; 1024])?,
+        source_archive_with_entry(&corrupted_checksum, &[], true)?,
+        source_archive_with_entry(&invalid_checksum_field, &[], true)?,
+        source_archive_with_entry(&invalid_size_field, &[], true)?,
+        source_archive_with_entry(&invalid_utf8_size_field, &[], true)?,
+        source_archive_with_entry(&empty_name, &[], true)?,
+        source_archive_with_entry(&bytes_after_name_terminator, &[], true)?,
+        source_archive_with_entry(&invalid_utf8_name, &[], true)?,
+        source_archive_with_entry(&bytes_after_prefix_terminator, &[], true)?,
+        source_archive_with_entry(&invalid_utf8_prefix, &[], true)?,
+        source_archive_with_entry(&tar_header("pax", 4_097, b'g'), &[], false)?,
+        source_archive_with_entry(&tar_header("pax", 52, b'g'), b"short", false)?,
+        source_archive_with_entry(&tar_header("file", 10, b'0'), b"x", false)?,
+        source_archive_with_entry(&tar_header("file", 1, b'0'), b"x", false)?,
+        source_archive_with_entry(&tar_header("file", 0, b'0'), &[], true)?,
+    ])
+}
+
+#[cfg(unix)]
+fn malformed_pax_archives() -> TestResult<Vec<Vec<u8>>> {
     let no_space = b"record-without-space";
     let non_numeric_length = b"x comment=1111111111111111111111111111111111111111\n";
     let overflowing_length = b"999999999999999999999999999999999999999999999999 comment=x\n";
@@ -1049,17 +1106,23 @@ fn command_rejects_malformed_embedded_source_identity_records() -> TestResult {
     invalid_utf8_commit[20] = 0xff;
     let invalid_utf8_record = pax_record("comment", &invalid_utf8_commit);
     let short_commit_record = pax_record("comment", b"111111111111111111111111111111111111111");
+    let empty_commit_record = pax_record("comment", b"");
+    let duplicate_commit_record = [
+        pax_record("comment", b"1111111111111111111111111111111111111111"),
+        pax_record("comment", b"2222222222222222222222222222222222222222"),
+    ]
+    .concat();
+    let invalid_utf8_length = b"\xff comment=1111111111111111111111111111111111111111\n";
+    let first_record = pax_record("path", b"source");
+    let overflow_record = format!("{} comment=x\n", usize::MAX);
+    let checked_add_overflow = [first_record.as_slice(), overflow_record.as_bytes()].concat();
 
-    let archives = vec![
-        gzip_bytes(&[])?,
-        gzip_bytes(&[0; 1024])?,
-        source_archive_with_entry(&corrupted_checksum, &[], true)?,
-        source_archive_with_entry(&invalid_checksum_field, &[], true)?,
-        source_archive_with_entry(&invalid_size_field, &[], true)?,
-        source_archive_with_entry(&tar_header("pax", 4_097, b'g'), &[], false)?,
-        source_archive_with_entry(&tar_header("pax", 52, b'g'), b"short", false)?,
-        source_archive_with_entry(&tar_header("file", 10, b'0'), b"x", false)?,
-        source_archive_with_entry(&tar_header("file", 0, b'0'), &[], true)?,
+    Ok(vec![
+        source_archive_with_entry(
+            &tar_header("pax", unrelated_record.len(), b'g'),
+            &unrelated_record,
+            false,
+        )?,
         source_archive_with_entry(&tar_header("pax", no_space.len(), b'g'), no_space, true)?,
         source_archive_with_entry(
             &tar_header("pax", non_numeric_length.len(), b'g'),
@@ -1091,9 +1154,36 @@ fn command_rejects_malformed_embedded_source_identity_records() -> TestResult {
             &short_commit_record,
             true,
         )?,
-    ];
+        source_archive_with_entry(
+            &tar_header("pax", empty_commit_record.len(), b'g'),
+            &empty_commit_record,
+            true,
+        )?,
+        source_archive_with_entry(
+            &tar_header("pax", duplicate_commit_record.len(), b'g'),
+            &duplicate_commit_record,
+            true,
+        )?,
+        source_archive_with_entry(
+            &tar_header("pax", invalid_utf8_length.len(), b'g'),
+            invalid_utf8_length,
+            true,
+        )?,
+        source_archive_with_entry(
+            &tar_header("pax", checked_add_overflow.len(), b'g'),
+            &checked_add_overflow,
+            true,
+        )?,
+    ])
+}
 
-    for source in archives {
+#[cfg(unix)]
+#[test]
+fn command_rejects_malformed_embedded_source_identity_records() -> TestResult {
+    for source in malformed_tar_archives()?
+        .into_iter()
+        .chain(malformed_pax_archives()?)
+    {
         let directory = tempfile::tempdir()?;
         let mut command = complete_command(directory.path())?;
         rebind_source_archive(directory.path(), &source)?;

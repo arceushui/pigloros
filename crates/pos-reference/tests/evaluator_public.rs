@@ -1582,6 +1582,49 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
 }
 
 #[test]
+fn staged_preflight_rejects_truncated_cfb1_at_each_streaming_boundary() -> TestResult {
+    let corpus = support::corpus()?;
+    let member_prefix = [0x84, 0x00, 0x81, 0x83];
+    let mut truncated_path = Vec::from(member_prefix);
+    truncated_path.push(0x61);
+
+    let mut missing_member_bytes = truncated_path.clone();
+    missing_member_bytes.push(b'p');
+
+    let mut truncated_member_bytes = missing_member_bytes.clone();
+    truncated_member_bytes.push(0x41);
+
+    let mut missing_member_role = truncated_member_bytes.clone();
+    missing_member_role.push(b'x');
+
+    let mut truncated_profile_bytes = Vec::from(member_prefix);
+    truncated_profile_bytes.push(0x71);
+    truncated_profile_bytes.extend_from_slice(b"profile/CPF1.cbor");
+    truncated_profile_bytes.push(0x41);
+
+    for archive in [
+        vec![0x84],
+        vec![0x84, 0x41],
+        vec![0x84, 0x61],
+        vec![0x84, 0x00],
+        vec![0x84, 0x00, 0x81],
+        Vec::from(member_prefix),
+        truncated_path,
+        missing_member_bytes,
+        truncated_member_bytes,
+        missing_member_role,
+        truncated_profile_bytes,
+    ] {
+        let request = request_for_archive(&corpus.request, &archive)?;
+        assert_eq!(
+            preflight_signed_bundle(&mut Cursor::new(archive), &corpus.trust_policy, &request,),
+            Err(pos_reference::signed_bundle::BundleError::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn signed_bundle_verifiers_reject_invalid_member_paths_and_noncanonical_manifests() -> TestResult {
     use ciborium::value::Value;
 
