@@ -54,10 +54,13 @@ fn synthetic_state(
 #[test]
 fn predecessor_chain_reports_a_non_submitted_root_without_a_predecessor() {
     let state = synthetic_state(ErasureLifecycleV1::Authorized, None, reference(4));
-    let failure = verify_predecessor_chain_bounded(state, &EmptyStateResolver, 1)
-        .expect_err("non-submitted root must have a predecessor");
-    assert_eq!(failure.error, ErasureErrorV1::ProvenanceMissing);
-    assert_eq!(failure.subject, reference(4));
+    assert_eq!(
+        verify_predecessor_chain_bounded(state, &EmptyStateResolver, 1),
+        Err(PredecessorChainFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            reference(4),
+        ))
+    );
 }
 
 #[test]
@@ -68,11 +71,13 @@ fn predecessor_chain_reports_the_state_at_the_depth_limit() {
         reference(6),
     );
     let predecessor = synthetic_state(ErasureLifecycleV1::Submitted, None, reference(5));
-    let failure =
-        verify_predecessor_chain_bounded(current, &FixedStateResolver { state: predecessor }, 1)
-            .expect_err("bounded history must reject an exhausted depth budget");
-    assert_eq!(failure.error, ErasureErrorV1::ProvenanceMissing);
-    assert_eq!(failure.subject, reference(5));
+    assert_eq!(
+        verify_predecessor_chain_bounded(current, &FixedStateResolver { state: predecessor }, 1),
+        Err(PredecessorChainFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            reference(5),
+        ))
+    );
 }
 
 #[test]
