@@ -36,10 +36,10 @@ use pos_core::{
     ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1,
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryErrorQueryV1,
     ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedStateQueryV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureVerifiedStateQueryV1,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
