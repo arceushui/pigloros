@@ -1465,7 +1465,7 @@ fn authenticated_caps_reject_request_identity_and_size_mismatches() -> TestResul
     }
 
     let undersized =
-        support::corpus_with_profile_mutation(ProfileMutation::SelectedCapBoundary(0))?;
+        support::corpus_with_profile_mutation(ProfileMutation::SelectedProfileByteCapBoundary)?;
     let undersized_request = EvaluationRequest::from_canonical_cbor(&undersized.request)?;
     let mut archive = Cursor::new(&undersized.archive);
     let preflight =

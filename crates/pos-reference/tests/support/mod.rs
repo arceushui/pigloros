@@ -26,6 +26,7 @@ pub enum ProfileMutation {
     ProviderKeyNumericBoundary(u8),
     DivergenceCoordinateLong,
     SelectedCapBoundary(u8),
+    SelectedProfileByteCapBoundary,
     SelectedClosureCapBoundary(u8),
     SelectedClosureCapExact(u8),
     ExecutionContractBoundary(u8),
@@ -529,6 +530,12 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let mut hard_caps = hard_caps();
     if let Some(ProfileMutation::SelectedCapBoundary(index)) = profile_mutation {
         select_hard_cap_boundary(&mut hard_caps, index)?;
+    }
+    if matches!(
+        profile_mutation,
+        Some(ProfileMutation::SelectedProfileByteCapBoundary)
+    ) {
+        array_fields_mut(&mut hard_caps)?[0] = uint(1);
     }
     let fixtures = fixtures(
         &mut members,
@@ -1903,7 +1910,8 @@ fn mutate_profile_boundary(
         ProfileMutation::DivergenceCoordinateLong => {
             profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[1; 129])])]);
         }
-        ProfileMutation::SelectedCapBoundary(_) => {}
+        ProfileMutation::SelectedCapBoundary(_)
+        | ProfileMutation::SelectedProfileByteCapBoundary => {}
         _ => return Ok(false),
     }
     Ok(true)
