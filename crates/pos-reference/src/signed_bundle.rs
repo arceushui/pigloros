@@ -291,36 +291,24 @@ fn preflight_archive(
         scanned.signature,
         &trust_policy,
     )?;
-    validate_scanned_closure(&manifest, &scanned.members, &trust_policy)?;
-    let profile = manifest
-        .descriptors
-        .iter()
-        .find(|descriptor| descriptor.path == PROFILE_PATH)
-        .ok_or(BundleError::ClosureIncomplete)?;
-    if scanned.profile_bytes.len() as u64 != profile.size
-        || *blake3::hash(&scanned.profile_bytes).as_bytes() != profile.digest
-    {
-        return Err(BundleError::DigestMismatch);
-    }
-    let member_count =
-        u64::try_from(scanned.members.len()).map_err(|_| BundleError::FieldOutOfBounds)?;
+    validate_scanned_closure(
+        &manifest,
+        &scanned.members,
+        &scanned.profile_bytes,
+        &trust_policy,
+    )?;
+    let member_count = scanned.members.len() as u64;
     let maximum_path_bytes = scanned
         .members
         .iter()
         .map(|member| member.path.len() as u64)
-        .max()
-        .ok_or(BundleError::ClosureIncomplete)?;
+        .fold(0_u64, u64::max);
     let maximum_member_bytes = scanned
         .members
         .iter()
         .map(|member| member.size)
-        .max()
-        .ok_or(BundleError::ClosureIncomplete)?;
-    let total_member_bytes = scanned.members.iter().try_fold(0_u64, |total, member| {
-        total
-            .checked_add(member.size)
-            .ok_or(BundleError::FieldOutOfBounds)
-    })?;
+        .fold(0_u64, u64::max);
+    let total_member_bytes = scanned.members.iter().map(|member| member.size).sum();
     Ok(AuthenticatedBundlePreflight {
         profile_bytes: scanned.profile_bytes,
         member_count,
@@ -600,6 +588,7 @@ fn verified_trust_policy(
 fn validate_scanned_closure(
     manifest: &DecodedManifest,
     members: &[ScannedMember],
+    profile_bytes: &[u8],
     trust_policy: &TrustPolicy,
 ) -> Result<(), BundleError> {
     if manifest.descriptors.len() != members.len() {
@@ -609,6 +598,12 @@ fn validate_scanned_closure(
         if descriptor.path != member.path
             || descriptor.size != member.size
             || descriptor.role != member.role
+        {
+            return Err(BundleError::DigestMismatch);
+        }
+        if descriptor.path == PROFILE_PATH
+            && (profile_bytes.len() as u64 != descriptor.size
+                || *blake3::hash(profile_bytes).as_bytes() != descriptor.digest)
         {
             return Err(BundleError::DigestMismatch);
         }
