@@ -1981,9 +1981,6 @@ fn freeze_reconstruction_failure_subject(graph: &FixedGraphV1<'_>) -> ErasureRef
     if scope.target_closure() != target_closure_digest(graph.targets) {
         return scope.reference();
     }
-    if !freeze_fields_match_graph(freeze, scope, admission, obligation_set) {
-        return freeze.reference();
-    }
     let obligation_references = graph
         .obligations
         .iter()
@@ -1994,6 +1991,9 @@ fn freeze_reconstruction_failure_subject(graph: &FixedGraphV1<'_>) -> ErasureRef
         || obligation_set.trust() != admission.trust()
     {
         return obligation_set.reference();
+    }
+    if !freeze_fields_match_graph(freeze, scope, admission, obligation_set) {
+        return freeze.reference();
     }
     if let Some(obligation) = graph.obligations.iter().find(|obligation| {
         graph.targets.binary_search(&obligation.target()).is_err()
