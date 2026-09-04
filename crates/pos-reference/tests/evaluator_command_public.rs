@@ -749,6 +749,30 @@ fn command_bounds_special_files_that_grow_after_metadata() -> TestResult {
 
 #[cfg(unix)]
 #[test]
+fn command_rejects_the_staged_archive_grammar_through_file_io() -> TestResult {
+    let mutations = (0..6)
+        .map(support::BundleMutation::RawManifestField)
+        .chain((0..4).map(support::BundleMutation::RawDescriptorField))
+        .chain((0..3).map(support::BundleMutation::RawMemberField))
+        .chain((0..6).map(support::BundleMutation::RawExpectedField))
+        .chain((0..4).map(support::BundleMutation::RawArchiveField))
+        .chain((0..8).map(support::BundleMutation::PathBoundary))
+        .chain((0..2).map(support::BundleMutation::ExpectedCaseBoundary));
+
+    for mutation in mutations {
+        let corpus = support::corpus_with_bundle_mutation(mutation)?;
+        let directory = tempfile::tempdir()?;
+        let mut command = complete_command(directory.path())?;
+        fs::write(directory.path().join("request.cbor"), corpus.request)?;
+        fs::write(directory.path().join("bundle.cfb1"), corpus.archive)?;
+        fs::write(directory.path().join("policy.tps1"), corpus.trust_policy)?;
+        assert!(!command.output()?.status.success());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn command_rejects_malformed_or_oversized_build_provenance() -> TestResult {
     for bytes in [b"null".to_vec(), b"{".to_vec()] {
         let directory = tempfile::tempdir()?;
