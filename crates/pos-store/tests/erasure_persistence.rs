@@ -1,121 +1,40 @@
 //! Backend parity for the raw ERCRP1 manifest/CAS persistence port.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use pos_core::erasure::{
-    destruction_command_reference, target_closure_digest, ErasureAuthorizationDecisionV1,
-};
+use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
     ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1,
-    ErasureErrorV1, ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ERASURE_MAX_RECOVERY_ERRORS,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1, ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
+
+#[path = "../../pos-core/tests/support/erasure.rs"]
+mod erasure_support;
+
+use erasure_support::{
+    freeze_evidence_fixture, obligation, reference, replay_target, request as fixture_request,
+    retry_admission as fixture_retry_admission, FreezeEvidenceFixtureInput, RequestFixtureInput,
+    RetryAdmissionFixture,
+};
 
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
 
-const fn reference(value: u8) -> ErasureReferenceV1 {
-    ErasureReferenceV1::from_digest([value; 32])
-}
-
-fn freeze_evidence(
-    request: ErasureReferenceV1,
-    scope_commitment: ErasureReferenceV1,
-    obligation_set: &ErasureObligationSetV1,
-    targets: &[ErasureRequiredTargetV1],
-    obligations: &[ErasureObligationV1],
-    freeze_position: u64,
-    evidence: &[u8],
-) -> Result<
-    (
-        ErasureFreezeAdmissionEvidenceV1,
-        ErasureFreezeAuthorizationEvidenceV1,
-    ),
-    ErasureErrorV1,
-> {
-    let owners = obligations
-        .iter()
-        .map(|obligation| {
-            (
-                (obligation.category(), obligation.target()),
-                obligation.owner(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut matrix = Vec::with_capacity(
-        targets
-            .len()
-            .saturating_mul(ErasureInventoryCategoryV1::CANONICAL.len()),
-    );
-    for category in ErasureInventoryCategoryV1::CANONICAL {
-        for (target_index, target) in targets.iter().enumerate() {
-            let owner = owners.get(&(category, *target)).copied();
-            matrix.push(ErasureFreezeApplicabilityRowV1::new(
-                category,
-                target_index as u64,
-                if owner.is_some() {
-                    pos_core::ErasureApplicabilityDecisionV1::Applicable
-                } else {
-                    pos_core::ErasureApplicabilityDecisionV1::Inapplicable
-                },
-                owner,
-            )?);
-        }
-    }
-    let input = ErasureFreezeAdmissionEvidenceInputV1 {
-        request,
-        scope_commitment,
-        obligation_set: obligation_set.reference(),
-        applicability_matrix: matrix,
-        freeze_position,
-        policy: obligation_set.policy(),
-        trust: obligation_set.trust(),
-        authorization_provenance: reference(0),
-    };
-    let provisional = ErasureFreezeAdmissionEvidenceV1::new(input.clone())?;
-    let authorization =
-        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: provisional.authorization_body_digest()?,
-            policy: obligation_set.policy(),
-            trust: obligation_set.trust(),
-            evidence: evidence.to_vec(),
-        })?;
-    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
-        authorization_provenance: authorization.reference(),
-        ..input
-    })?;
-    Ok((admission, authorization))
-}
-
-const fn target() -> ErasureRequiredTargetV1 {
-    ErasureRequiredTargetV1 {
-        artifact_class: ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(10),
-        key_role: ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(11),
-        replica_set: reference(12),
-        replica_id: reference(13),
-    }
-}
-
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    ErasureRequestV1::new(ErasureRequestInputV1 {
+    fixture_request(RequestFixtureInput {
         request: reference(1),
         subject: reference(2),
         scope: ErasureScopeV1::PrivateSubjectData,
@@ -129,39 +48,25 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
+const fn target() -> ErasureRequiredTargetV1 {
+    replay_target(10)
+}
+
 fn admission(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
-    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })?;
-    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+    let obligation = obligation(request, target)?;
+    fixture_retry_admission(RetryAdmissionFixture {
         request,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: vec![obligation.reference()],
-        command_identities: vec![obligation.command_identity()],
+        obligations: std::slice::from_ref(&obligation),
         policy: reference(6),
         trust: reference(8),
         admitted_position: 11,
         deadline_position: 20,
         authorization_provenance: reference(12),
-    })
-}
-
-fn obligation(
-    request: ErasureReferenceV1,
-    target: ErasureRequiredTargetV1,
-) -> Result<ErasureObligationV1, ErasureErrorV1> {
-    ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
     })
 }
 
@@ -375,14 +280,7 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
         let mut obligations = targets
             .iter()
             .copied()
-            .map(|target| {
-                ErasureObligationV1::new(ErasureObligationInputV1 {
-                    category: ErasureInventoryCategoryV1::Artifact,
-                    target,
-                    owner: target.replica_id,
-                    command_identity: destruction_command_reference(request, target),
-                })
-            })
+            .map(|target| obligation(request, target))
             .collect::<Result<Vec<_>, _>>()?;
         obligations.sort_unstable_by_key(ErasureObligationV1::reference);
         let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
@@ -403,15 +301,16 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
         let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
         let evidence = requested.provenance.digest();
         let freeze_position = requested.freeze_position.unwrap_or(10);
-        let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
-            request,
-            scope_reference,
-            &obligation_set,
-            &targets,
-            &obligations,
-            freeze_position,
-            &evidence,
-        )?;
+        let (freeze_admission_evidence, freeze_authorization_evidence) =
+            freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+                request,
+                scope_commitment: scope_reference,
+                obligation_set: &obligation_set,
+                targets: &targets,
+                obligations: &obligations,
+                freeze_position,
+                evidence: &evidence,
+            })?;
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets,
             scope,
@@ -732,6 +631,54 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
 }
 
 #[cfg(feature = "sqlite")]
+fn retained_recovery_failure<S: ErasurePersistencePortV1>(
+    store: S,
+) -> Result<(ErasureRecoveryErrorV1, Vec<u8>), ErasureErrorV1> {
+    let (shared, request, _) = complete(store)?;
+    let mut failing = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        failing.verified_state(request.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let observer = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: shared,
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+        },
+        reference(30),
+    );
+    let failure = observer
+        .recovery_errors(request.reference())?
+        .into_iter()
+        .next()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let bytes = failure.to_canonical_cbor()?;
+    Ok((failure, bytes))
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn recovery_error_identity_and_canonical_bytes_match_across_backends(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let memory = retained_recovery_failure(MemoryStore::new())?;
+    let sqlite = retained_recovery_failure(SqliteStore::open_in_memory()?)?;
+    assert_eq!(memory.0, sqlite.0);
+    assert_eq!(memory.1, sqlite.1);
+    assert_eq!(memory.0.reference(), sqlite.0.reference());
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_manifest_cas_survives_restart_and_retains_indexes(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -990,9 +937,9 @@ fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dy
             .reference();
     let raw = rusqlite::Connection::open(path)?;
     let mut inserted = 0_usize;
-    let mut value = 0_usize;
+    let mut candidate_ordinal = 0_usize;
     while inserted <= ERASURE_MAX_RECOVERY_ERRORS {
-        let ordinal = u64::try_from(value)?;
+        let ordinal = u64::try_from(candidate_ordinal)?;
         let mut digest = [0_u8; 32];
         digest[..8].copy_from_slice(&ordinal.to_be_bytes());
         if ErasureReferenceV1::from_digest(digest) != reserved_reference {
@@ -1003,7 +950,7 @@ fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dy
             )?;
             inserted = inserted.saturating_add(1);
         }
-        value = value.saturating_add(1);
+        candidate_ordinal = candidate_ordinal.saturating_add(1);
     }
     drop(raw);
 

@@ -58,12 +58,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     fn retain_recovery_error(
         &mut self,
         request: ErasureReferenceV1,
-        manifest: Option<ErasureReferenceV1>,
-        failure_subject: ErasureReferenceV1,
-        error: ErasureErrorV1,
+        recovery_error: ErasureRecoveryErrorV1,
     ) -> Result<(), ErasureErrorV1> {
-        let recovery_error =
-            ErasureRecoveryErrorV1::new(request, manifest, failure_subject, error)?;
         let object = ErasurePersistenceObjectV1::new(
             recovery_error.reference(),
             recovery_error.to_canonical_cbor()?,
@@ -86,7 +82,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             Ok(Some(stored)) => stored,
             Ok(None) => return Ok(None),
             Err(error) => {
-                self.retain_recovery_error(request, None, request, error)?;
+                let recovery_error = ErasureRecoveryErrorV1::new(request, None, request, error)?;
+                self.retain_recovery_error(request, recovery_error)?;
                 return Err(error);
             }
         };
@@ -98,12 +95,13 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 } else {
                     failure.subject()
                 };
-                self.retain_recovery_error(
+                let recovery_error = ErasureRecoveryErrorV1::new(
                     request,
                     Some(stored.digest()),
                     failure_subject,
                     failure.error(),
                 )?;
+                self.retain_recovery_error(request, recovery_error)?;
                 Err(failure.error())
             }
         }

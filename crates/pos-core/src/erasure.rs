@@ -3086,6 +3086,9 @@ impl ErasureVerifiedStateV1 {
 /// Implementations must return a snapshot only after durable recovery has
 /// validated every referenced record. In particular, a warm cache or a raw
 /// ERCRP1 manifest is not sufficient evidence for #186's runtime fence.
+/// This remains a separate port from [`ErasurePersistencePortV1`]: the
+/// containment consumer owns the verified-state contract, while persistence
+/// adapters own storage, indexing, and compare-and-swap capabilities.
 pub trait ErasureVerifiedStateQueryV1 {
     /// Recover and return one request's authoritative verified state.
     ///
