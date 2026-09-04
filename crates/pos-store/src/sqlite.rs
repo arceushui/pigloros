@@ -4459,15 +4459,12 @@ impl ErasurePersistencePortV1 for SqliteStore {
                  WHERE request_digest=?1 ORDER BY error_digest LIMIT ?2",
             )
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        let references = statement
-            .query_map(
-                params![
-                    request.digest().as_slice(),
-                    i64::try_from(ERASURE_MAX_RECOVERY_ERRORS + 1).unwrap_or(i64::MAX),
-                ],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
+        let request_digest = request.digest();
+        let limit = i64::try_from(ERASURE_MAX_RECOVERY_ERRORS + 1).unwrap_or(i64::MAX);
+        let query_params: [&dyn ToSql; 2] = [request_digest.as_slice(), &limit];
+        let references = Self::query_prepared(&mut statement, &query_params)
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+            .mapped(|row| row.get::<_, Vec<u8>>(0))
             .map(|result| {
                 result
                     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
@@ -8721,6 +8718,22 @@ mod tests {
         let listed = store.list_timelines();
         FAIL_STMT_QUERY.with(|fail| fail.set(false));
         assert_storage_err(listed.map(|_| ()));
+
+        FAIL_STMT_QUERY.with(|fail| fail.set(true));
+        assert_eq!(
+            store.recovery_error_refs(ErasureReferenceV1::from_digest([1; 32])),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        FAIL_STMT_QUERY.with(|fail| fail.set(false));
+
+        store
+            .conn
+            .execute_batch("DROP TABLE erasure_recovery_errors")
+            .test_ok();
+        assert_eq!(
+            store.recovery_error_refs(ErasureReferenceV1::from_digest([1; 32])),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
 
         let mut stmt = store.conn.prepare("SELECT ?1").test_ok();
         FAIL_STMT_QUERY.with(|fail| fail.set(true));
