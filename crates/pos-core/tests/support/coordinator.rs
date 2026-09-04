@@ -19,12 +19,11 @@ use pos_core::{
     ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
     ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureIndexInsertV1,
     ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1,
-    ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    PreparedErasureRecoveryErrorV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, PreparedErasureRecoveryErrorV1,
 };
 
 use crate::erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
