@@ -131,20 +131,7 @@ fn run() -> Result<(), CommandError> {
     })?;
     let evaluator_digests = verified_evaluator_digests(&options)?;
     let trust_policy_bytes = read_bounded(&options.trust_policy, MAX_TRUST_POLICY_BYTES)?;
-    let mut archive = File::open(&options.archive).map_err(|_| CommandError::Input)?;
-    let preflight = preflight_signed_bundle(&mut archive, &trust_policy_bytes, &request)
-        .map_err(|_| CommandError::Evaluation)?;
-    let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)
-        .map_err(|_| CommandError::Evaluation)?;
-    preflight
-        .enforce_selected_caps(SelectedBundleCaps {
-            max_profile_bytes: caps.max_profile_bytes,
-            max_bundle_members: caps.max_bundle_members,
-            max_member_path_bytes: caps.max_member_path_bytes,
-            max_member_bytes: caps.max_member_bytes,
-            max_total_bundle_bytes: caps.max_total_bundle_bytes,
-        })
-        .map_err(|_| CommandError::Evaluation)?;
+    authenticate_selected_archive_bounds(&options, &trust_policy_bytes, &request)?;
     let archive_bytes = read_bounded(&options.archive, MAX_ARCHIVE_BYTES)?;
     let identity = EvaluatorIdentity {
         source_digest: evaluator_digests.source,
@@ -185,6 +172,27 @@ fn run() -> Result<(), CommandError> {
             .map_err(|_| CommandError::Output)?;
     }
     Ok(())
+}
+
+fn authenticate_selected_archive_bounds(
+    options: &Options,
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<(), CommandError> {
+    let mut archive = File::open(&options.archive).map_err(|_| CommandError::Input)?;
+    let preflight = preflight_signed_bundle(&mut archive, trust_policy_bytes, request)
+        .map_err(|_| CommandError::Evaluation)?;
+    let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)
+        .map_err(|_| CommandError::Evaluation)?;
+    preflight
+        .enforce_selected_caps(SelectedBundleCaps {
+            max_profile_bytes: caps.max_profile_bytes,
+            max_bundle_members: caps.max_bundle_members,
+            max_member_path_bytes: caps.max_member_path_bytes,
+            max_member_bytes: caps.max_member_bytes,
+            max_total_bundle_bytes: caps.max_total_bundle_bytes,
+        })
+        .map_err(|_| CommandError::Evaluation)
 }
 
 fn parse_options(arguments: impl Iterator<Item = OsString>) -> Result<Options, CommandError> {
