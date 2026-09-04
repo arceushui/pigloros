@@ -752,7 +752,7 @@ fn command_closes_remaining_public_io_and_identity_boundaries() -> TestResult {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn command_closes_post_preflight_and_output_failures() -> TestResult {
     for corpus in [
@@ -994,6 +994,20 @@ fn public_verifier_rejects_path_and_bounded_file_failures() -> TestResult {
     let dependency_lock = directory.path().join("Cargo.lock");
     fs::remove_file(&dependency_lock)?;
     fs::create_dir(&dependency_lock)?;
+    assert_public_verifier_error(
+        directory.path(),
+        &directory.path().join("source/pigloros-source.tar.gz"),
+        EvaluatorBuildIdentityError::Input,
+    );
+
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    let dependency_lock = directory.path().join("Cargo.lock");
+    fs::remove_file(&dependency_lock)?;
+    assert!(Command::new("mkfifo")
+        .arg(&dependency_lock)
+        .status()?
+        .success());
     assert_public_verifier_error(
         directory.path(),
         &directory.path().join("source/pigloros-source.tar.gz"),

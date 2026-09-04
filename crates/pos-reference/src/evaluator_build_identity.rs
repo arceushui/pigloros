@@ -1,6 +1,6 @@
 //! Fail-closed verification of the evaluator package that authorizes CNR1 emission.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -306,7 +306,9 @@ fn verify_digest(
 
 #[cfg(target_os = "linux")]
 fn running_binary_digest() -> Result<[u8; 32], EvaluatorBuildIdentityError> {
-    digest_bounded(Path::new("/proc/self/exe"), MAX_EVALUATOR_BINARY_BYTES)
+    let mut executable =
+        File::open("/proc/self/exe").map_err(|_| EvaluatorBuildIdentityError::Invalid)?;
+    digest_bounded_file(&mut executable, MAX_EVALUATOR_BINARY_BYTES)
         .map_err(|_| EvaluatorBuildIdentityError::Invalid)
 }
 
@@ -567,8 +569,31 @@ const fn hexadecimal_nibble(value: u8) -> Option<u8> {
 }
 
 fn digest_bounded(path: &Path, maximum: u64) -> Result<[u8; 32], EvaluatorBuildIdentityError> {
-    let mut file = File::open(path).map_err(|_| EvaluatorBuildIdentityError::Input)?;
+    let mut file = open_regular_file(path)?;
     digest_bounded_file(&mut file, maximum)
+}
+
+fn open_regular_file(path: &Path) -> Result<File, EvaluatorBuildIdentityError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| EvaluatorBuildIdentityError::Input)?;
+    if file
+        .metadata()
+        .map_err(|_| EvaluatorBuildIdentityError::Input)?
+        .is_file()
+    {
+        Ok(file)
+    } else {
+        Err(EvaluatorBuildIdentityError::Input)
+    }
 }
 
 fn digest_bounded_file(
@@ -597,7 +622,7 @@ fn digest_bounded_file(
 }
 
 fn snapshot_bounded(path: &Path, maximum: u64) -> Result<File, EvaluatorBuildIdentityError> {
-    let source = File::open(path).map_err(|_| EvaluatorBuildIdentityError::Input)?;
+    let source = open_regular_file(path)?;
     let mut snapshot = tempfile::tempfile().map_err(|_| EvaluatorBuildIdentityError::Input)?;
     let copied = io::copy(&mut source.take(maximum.saturating_add(1)), &mut snapshot)
         .map_err(|_| EvaluatorBuildIdentityError::Input)?;
@@ -611,7 +636,7 @@ fn snapshot_bounded(path: &Path, maximum: u64) -> Result<File, EvaluatorBuildIde
 }
 
 fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, EvaluatorBuildIdentityError> {
-    let file = File::open(path).map_err(|_| EvaluatorBuildIdentityError::Input)?;
+    let file = open_regular_file(path)?;
     let mut bytes = Vec::new();
     file.take(maximum.saturating_add(1))
         .read_to_end(&mut bytes)

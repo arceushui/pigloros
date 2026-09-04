@@ -768,6 +768,7 @@ fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
     let verification = evidence.to_verification_result();
     assert!(verification.is_ok());
     let verification = verification.map(|result| {
+        assert_eq!(result.provenance_digest, ok(evidence.digest()));
         assert!(result.digest().is_ok());
         result.to_canonical_cbor()
     });

@@ -1462,7 +1462,7 @@ impl MoatProofEvidenceV1 {
                         + self.causal_trace.len(),
                 )
                 .unwrap_or(u64::MAX),
-                provenance_digest: self.manifest.evaluator_digest,
+                provenance_digest: digests.authoritative_result,
                 result_digest: [0; 32],
             };
             result.digest().map(|result_digest| {
