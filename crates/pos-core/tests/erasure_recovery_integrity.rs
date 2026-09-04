@@ -621,13 +621,17 @@ fn recovery_failure_identifies_a_missing_predecessor_state() -> Result<(), Erasu
 fn recovery_rejects_manifest_state_rollback_after_a_completed_attempt() -> Result<(), ErasureErrorV1>
 {
     let graph = completed_graph(vec![target(10)], None)?;
-    let changed_state = graph.adapter.replace_manifest_with_state_lifecycle_digest(
+    graph.adapter.replace_manifest_with_state_lifecycle_digest(
         graph.request.reference(),
         ErasureLifecycleV1::AwaitingAcknowledgements,
     )?;
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].failure_subject(), changed_state);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
@@ -641,10 +645,14 @@ fn recovery_rejects_a_replayed_attempt_with_a_stale_manifest_head() -> Result<()
         MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
         Value::Bytes(changed_head.digest().to_vec()),
     )?;
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
 
     let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].failure_subject(), changed_head);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
@@ -659,10 +667,14 @@ fn recovery_rejects_a_replayed_attempt_with_a_stale_manifest_receipt() -> Result
         MANIFEST_LATEST_RECEIPT_FIELD,
         Value::Bytes(changed_receipt.digest().to_vec()),
     )?;
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
 
     let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].failure_subject(), changed_receipt);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
@@ -736,10 +748,13 @@ fn recovery_rejects_an_indexed_resolution_without_a_frozen_scope() -> Result<(),
         MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD,
         Value::Bytes(resolution.reference().digest().to_vec()),
     )?;
+    let manifest = adapter
+        .current_manifest(request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
 
     let failures = assert_recovery_fails_and_retains(adapter, &request)?;
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].failure_subject(), resolution.reference());
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
