@@ -1088,6 +1088,7 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
         .map(ProfileMutation::ProviderKeyNumericBoundary)
         .chain(std::iter::once(ProfileMutation::DivergenceCoordinateLong))
         .chain((0..7).map(ProfileMutation::SelectedCapBoundary))
+        .chain((0..4).map(ProfileMutation::SelectedClosureCapBoundary))
         .chain((0..10).map(ProfileMutation::ExecutionContractBoundary))
         .chain((0..10).map(ProfileMutation::FixtureSemanticBoundary))
         .chain((0..8).map(ProfileMutation::ProvenanceBoundary))
@@ -1121,6 +1122,26 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
             ),
             expected
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_accepts_exact_authenticated_closure_caps() -> TestResult {
+    for mutation in (0..4).map(ProfileMutation::SelectedClosureCapExact) {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert!(evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        )
+        .is_ok());
     }
     Ok(())
 }

@@ -15,6 +15,20 @@ const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_TRUST_POLICY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EVALUATOR_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_EVALUATOR_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_EVALUATOR_PROVENANCE_BYTES: u64 = 64 * 1024;
+const PROVENANCE_SCHEMA: &str = "PiglorOS.EvaluatorBuildProvenance.v1";
+const PROVENANCE_FIELDS: [&str; 10] = [
+    "schema",
+    "source_commit",
+    "build_target",
+    "rust_toolchain",
+    "cargo_locked",
+    "evaluator_source_blake3",
+    "evaluator_binary_blake3",
+    "dependency_lock_blake3",
+    "sbom_blake3",
+    "licences_blake3",
+];
 
 #[derive(Debug, thiserror::Error)]
 enum CommandError {
@@ -39,6 +53,7 @@ struct Options {
     archive: PathBuf,
     trust_policy: PathBuf,
     evaluator_source: PathBuf,
+    evaluator_provenance: PathBuf,
     declaration_digest: [u8; 32],
     shared_code_audit_digest: [u8; 32],
     reviewer_ids: Vec<String>,
@@ -54,6 +69,7 @@ struct OptionsBuilder {
     archive: Option<PathBuf>,
     trust_policy: Option<PathBuf>,
     evaluator_source: Option<PathBuf>,
+    evaluator_provenance: Option<PathBuf>,
     declaration_digest: Option<[u8; 32]>,
     shared_code_audit_digest: Option<[u8; 32]>,
     reviewer_ids: Vec<String>,
@@ -70,8 +86,6 @@ fn main() -> Result<(), CommandError> {
 fn run() -> Result<(), CommandError> {
     let options = parse_options(env::args_os())?;
     let request_bytes = read_bounded(&options.request, MAX_REQUEST_BYTES)?;
-    let archive_bytes = read_bounded(&options.archive, MAX_ARCHIVE_BYTES)?;
-    let trust_policy_bytes = read_bounded(&options.trust_policy, MAX_TRUST_POLICY_BYTES)?;
     let request = EvaluationRequest::from_canonical_cbor(&request_bytes).map_err(|error| {
         if error == ProtocolError::UnsupportedVersion {
             CommandError::UnsupportedVersion
@@ -79,9 +93,9 @@ fn run() -> Result<(), CommandError> {
             CommandError::Input
         }
     })?;
-    let executable = env::current_exe().map_err(|_| CommandError::Identity)?;
-    let binary_digest = digest_bounded(&executable, MAX_EVALUATOR_BINARY_BYTES)?;
-    let source_digest = digest_bounded(&options.evaluator_source, MAX_EVALUATOR_SOURCE_BYTES)?;
+    let (source_digest, binary_digest) = verified_evaluator_digests(&options)?;
+    let archive_bytes = read_bounded(&options.archive, MAX_ARCHIVE_BYTES)?;
+    let trust_policy_bytes = read_bounded(&options.trust_policy, MAX_TRUST_POLICY_BYTES)?;
     let identity = EvaluatorIdentity {
         source_digest,
         binary_digest,
@@ -143,6 +157,9 @@ fn parse_option(
         "--evaluator-source" => {
             set_once(&mut builder.evaluator_source, next_path(arguments)?)?;
         }
+        "--evaluator-provenance" => {
+            set_once(&mut builder.evaluator_provenance, next_path(arguments)?)?;
+        }
         "--declaration-digest" => {
             set_once(&mut builder.declaration_digest, next_digest(arguments)?)?;
         }
@@ -181,6 +198,7 @@ impl OptionsBuilder {
             archive: self.archive.ok_or(CommandError::Arguments)?,
             trust_policy: self.trust_policy.ok_or(CommandError::Arguments)?,
             evaluator_source: self.evaluator_source.ok_or(CommandError::Arguments)?,
+            evaluator_provenance: self.evaluator_provenance.ok_or(CommandError::Arguments)?,
             declaration_digest: self.declaration_digest.ok_or(CommandError::Arguments)?,
             shared_code_audit_digest: self
                 .shared_code_audit_digest
@@ -192,6 +210,73 @@ impl OptionsBuilder {
             adapter_arguments: self.adapter_arguments,
         })
     }
+}
+
+fn verified_evaluator_digests(options: &Options) -> Result<([u8; 32], [u8; 32]), CommandError> {
+    let source_digest = digest_bounded(&options.evaluator_source, MAX_EVALUATOR_SOURCE_BYTES)?;
+    let executable = env::current_exe().map_err(|_| CommandError::Identity)?;
+    let binary_digest = digest_bounded(&executable, MAX_EVALUATOR_BINARY_BYTES)?;
+    let provenance_bytes = read_bounded(
+        &options.evaluator_provenance,
+        MAX_EVALUATOR_PROVENANCE_BYTES,
+    )?;
+    let (bound_source, bound_binary) = parse_build_provenance(&provenance_bytes)?;
+    if source_digest == bound_source && binary_digest == bound_binary {
+        Ok((source_digest, binary_digest))
+    } else {
+        Err(CommandError::Identity)
+    }
+}
+
+fn parse_build_provenance(bytes: &[u8]) -> Result<([u8; 32], [u8; 32]), CommandError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| CommandError::Identity)?;
+    let object = value.as_object().ok_or(CommandError::Identity)?;
+    if object.len() != PROVENANCE_FIELDS.len()
+        || !PROVENANCE_FIELDS
+            .iter()
+            .all(|field| object.contains_key(*field))
+        || provenance_text(object, "schema")? != PROVENANCE_SCHEMA
+        || !valid_commit(provenance_text(object, "source_commit")?)
+        || !valid_metadata(provenance_text(object, "build_target")?)
+        || !valid_metadata(provenance_text(object, "rust_toolchain")?)
+        || object.get("cargo_locked") != Some(&serde_json::Value::Bool(true))
+    {
+        return Err(CommandError::Identity);
+    }
+    let source = parse_digest(provenance_text(object, "evaluator_source_blake3")?)?;
+    let binary = parse_digest(provenance_text(object, "evaluator_binary_blake3")?)?;
+    for field in ["dependency_lock_blake3", "sbom_blake3", "licences_blake3"] {
+        parse_digest(provenance_text(object, field)?)?;
+    }
+    Ok((source, binary))
+}
+
+fn provenance_text<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<&'a str, CommandError> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or(CommandError::Identity)
+}
+
+fn valid_commit(value: &str) -> bool {
+    (40..=64).contains(&value.len()) && value.bytes().all(is_lower_hexadecimal)
+}
+
+fn valid_metadata(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().any(|byte| byte.is_ascii_graphic())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+}
+
+const fn is_lower_hexadecimal(value: u8) -> bool {
+    value.is_ascii_digit() || matches!(value, b'a'..=b'f')
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), CommandError> {

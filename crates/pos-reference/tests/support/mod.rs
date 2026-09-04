@@ -24,6 +24,8 @@ pub enum ProfileMutation {
     ProviderKeyNumericBoundary(u8),
     DivergenceCoordinateLong,
     SelectedCapBoundary(u8),
+    SelectedClosureCapBoundary(u8),
+    SelectedClosureCapExact(u8),
     ExecutionContractBoundary(u8),
     FixtureSemanticBoundary(u8),
     ProvenanceBoundary(u8),
@@ -534,14 +536,38 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         &expected_output,
         options,
     )?;
+    if let Some(ProfileMutation::SelectedClosureCapBoundary(index)) = profile_mutation {
+        select_closure_cap_boundary(&mut hard_caps, &members, index)?;
+    }
+    if let Some(ProfileMutation::SelectedClosureCapExact(index)) = profile_mutation {
+        select_closure_cap_exact(&mut hard_caps, &members, index)?;
+    }
     let mut profile = profile(
         &members,
-        fixtures,
+        fixtures.clone(),
         execution_digest,
         trust_digest,
         &hard_caps,
         mixed_oracles,
     )?;
+    if matches!(
+        profile_mutation,
+        Some(ProfileMutation::SelectedClosureCapExact(3))
+    ) {
+        for _ in 0..4 {
+            let profile_bytes = encoded_profile_length(&profile)?;
+            let total_bytes = closure_member_bytes(&members)?.saturating_add(profile_bytes);
+            array_fields_mut(&mut hard_caps)?[5] = uint(total_bytes);
+            profile = profile(
+                &members,
+                fixtures.clone(),
+                execution_digest,
+                trust_digest,
+                &hard_caps,
+                mixed_oracles,
+            )?;
+        }
+    }
     if let Some(mutation) = profile_mutation {
         mutate_profile(&mut profile, mutation)?;
     }
@@ -2994,6 +3020,82 @@ fn select_hard_cap_boundary(hard_caps: &mut Value, index: u8) -> TestResult<()> 
     };
     array_fields_mut(hard_caps)?[cap_index] = uint(u64::from(cap_index != 9));
     Ok(())
+}
+
+fn select_closure_cap_boundary(
+    hard_caps: &mut Value,
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    index: u8,
+) -> TestResult<()> {
+    let member_count = u64::try_from(members.len())?.saturating_add(1);
+    let maximum_path_bytes = members
+        .keys()
+        .map(String::len)
+        .chain(std::iter::once("profile/CPF1.cbor".len()))
+        .max()
+        .ok_or_else(|| io::Error::other("test closure is empty"))?;
+    let maximum_member_bytes = members
+        .values()
+        .map(|(bytes, _)| bytes.len())
+        .max()
+        .ok_or_else(|| io::Error::other("test closure is empty"))?;
+    let member_bytes = closure_member_bytes(members)?;
+    let (cap_index, value) = match index {
+        0 => (2, member_count.saturating_sub(1)),
+        1 => (3, u64::try_from(maximum_path_bytes.saturating_sub(1))?),
+        2 => (4, u64::try_from(maximum_member_bytes.saturating_sub(1))?),
+        _ => (5, member_bytes),
+    };
+    array_fields_mut(hard_caps)?[cap_index] = uint(value);
+    Ok(())
+}
+
+fn select_closure_cap_exact(
+    hard_caps: &mut Value,
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    index: u8,
+) -> TestResult<()> {
+    let (cap_index, value) = match index {
+        0 => (2, u64::try_from(members.len())?.saturating_add(1)),
+        1 => (
+            3,
+            u64::try_from(
+                members
+                    .keys()
+                    .map(String::len)
+                    .chain(std::iter::once("profile/CPF1.cbor".len()))
+                    .max()
+                    .ok_or_else(|| io::Error::other("test closure is empty"))?,
+            )?,
+        ),
+        2 => (
+            4,
+            u64::try_from(
+                members
+                    .values()
+                    .map(|(bytes, _)| bytes.len())
+                    .max()
+                    .ok_or_else(|| io::Error::other("test closure is empty"))?,
+            )?,
+        ),
+        _ => return Ok(()),
+    };
+    array_fields_mut(hard_caps)?[cap_index] = uint(value);
+    Ok(())
+}
+
+fn closure_member_bytes(members: &BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<u64> {
+    members.values().try_fold(0_u64, |total, (bytes, _)| {
+        u64::try_from(bytes.len())
+            .map(|length| total.saturating_add(length))
+            .map_err(Into::into)
+    })
+}
+
+fn encoded_profile_length(profile: &Value) -> TestResult<u64> {
+    let mut fields = fields(profile.clone())?;
+    fields.push(bytes(&[1; 32]));
+    Ok(u64::try_from(canonical(&array(fields))?.len())?)
 }
 
 fn descriptor(members: &BTreeMap<String, (Vec<u8>, u8)>, path: &str) -> TestResult<Value> {

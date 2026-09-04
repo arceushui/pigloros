@@ -354,7 +354,7 @@ impl Profile {
         validate_selected_caps(
             bytes.len(),
             &value,
-            &registry,
+            bundle,
             &fixtures,
             &allowed_divergences,
             hard_caps,
@@ -1056,7 +1056,7 @@ fn validate_artifact_paths(
 fn validate_selected_caps(
     encoded_len: usize,
     value: &Value,
-    registry: &ArtifactDescriptor,
+    bundle: &VerifiedBundle,
     fixtures: &[Fixture],
     allowed: &[AllowedDivergence],
     caps: EvaluatorHardCaps,
@@ -1067,26 +1067,16 @@ fn validate_selected_caps(
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
-    let mut member_count = 1_u64;
-    let mut total_bytes = registry.byte_length;
-    let mut artifacts_within_caps =
-        account_artifact_caps(registry, caps, &mut member_count, &mut total_bytes, false);
-    for fixture in fixtures {
-        for artifact in [&fixture.schema, &fixture.payload]
-            .into_iter()
-            .chain(&fixture.auxiliary)
-        {
-            artifacts_within_caps &=
-                account_artifact_caps(artifact, caps, &mut member_count, &mut total_bytes, true);
-        }
-        if let StrictOracle::Output(output) = &fixture.oracle {
-            artifacts_within_caps &=
-                account_artifact_caps(output, caps, &mut member_count, &mut total_bytes, true);
-        }
-    }
-    if !artifacts_within_caps
-        || member_count > caps.max_bundle_members
+    let member_count = bundle.members.len() as u64;
+    let total_bytes = bundle.members.values().fold(0_u64, |total, member| {
+        total.saturating_add(member.bytes.len() as u64)
+    });
+    if member_count > caps.max_bundle_members
         || total_bytes > caps.max_total_bundle_bytes
+        || bundle.members.iter().any(|(path, member)| {
+            path.len() as u64 > caps.max_member_path_bytes
+                || member.bytes.len() as u64 > caps.max_member_bytes
+        })
         || allowed
             .iter()
             .any(|item| item.first_coordinate.len() as u64 > caps.max_coordinate_bytes)
@@ -1095,25 +1085,6 @@ fn validate_selected_caps(
     } else {
         Ok(())
     }
-}
-
-const fn account_artifact_caps(
-    artifact: &ArtifactDescriptor,
-    caps: EvaluatorHardCaps,
-    member_count: &mut u64,
-    total_bytes: &mut u64,
-    increment: bool,
-) -> bool {
-    if increment {
-        *member_count = member_count.saturating_add(1);
-    }
-    *total_bytes = if increment {
-        total_bytes.saturating_add(artifact.byte_length)
-    } else {
-        *total_bytes
-    };
-    artifact.member_path.len() as u64 <= caps.max_member_path_bytes
-        && artifact.byte_length <= caps.max_member_bytes
 }
 
 fn value_depth(value: &Value) -> usize {

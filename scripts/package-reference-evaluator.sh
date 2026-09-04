@@ -19,7 +19,7 @@ if [[ ! -d ${output_parent} || -L ${output_parent} ]]; then
   exit 2
 fi
 
-for command in b3sum cargo git gzip jq rustc; do
+for command in b3sum cargo git gzip jq rustc tar; do
   command -v "${command}" >/dev/null || {
     printf 'required packaging command is unavailable: %s\n' "${command}" >&2
     exit 2
@@ -40,22 +40,28 @@ trap cleanup EXIT
 package_directory=${work_directory}/reference-evaluator
 mkdir -p -- "${package_directory}/bin" "${package_directory}/source"
 
+git archive --format=tar HEAD | gzip -n >"${package_directory}/source/pigloros-source.tar.gz"
+source_directory=${work_directory}/source-checkout
+mkdir -p -- "${source_directory}"
+tar -xzf "${package_directory}/source/pigloros-source.tar.gz" -C "${source_directory}"
+
 target_directory=${work_directory}/target
 CARGO_TARGET_DIR=${target_directory} cargo build \
   --locked \
   --release \
+  --manifest-path "${source_directory}/Cargo.toml" \
   --package pos-reference \
   --bin pos-reference-evaluator
 install -m 0755 -- \
   "${target_directory}/release/pos-reference-evaluator" \
   "${package_directory}/bin/pos-reference-evaluator"
 
-git archive --format=tar HEAD | gzip -n >"${package_directory}/source/pigloros-source.tar.gz"
-install -m 0644 -- Cargo.lock "${package_directory}/Cargo.lock"
+install -m 0644 -- "${source_directory}/Cargo.lock" "${package_directory}/Cargo.lock"
 
 metadata=${work_directory}/cargo-metadata.json
 target=$(rustc -vV | sed -n 's/^host: //p')
-cargo metadata --format-version 1 --locked --filter-platform "${target}" >"${metadata}"
+cargo metadata --format-version 1 --locked --filter-platform "${target}" \
+  --manifest-path "${source_directory}/Cargo.toml" >"${metadata}"
 
 jq --sort-keys '
   (.packages | map({ key: .id, value: . }) | from_entries) as $packages
@@ -148,6 +154,15 @@ jq -n --sort-keys \
     sbom_blake3: $sbom_digest,
     licences_blake3: $licences_digest
   }' >"${package_directory}/provenance.json"
+
+jq -e \
+  --arg source_digest "${source_digest}" \
+  --arg binary_digest "${binary_digest}" \
+  '.schema == "PiglorOS.EvaluatorBuildProvenance.v1"
+    and .cargo_locked == true
+    and .evaluator_source_blake3 == $source_digest
+    and .evaluator_binary_blake3 == $binary_digest' \
+  "${package_directory}/provenance.json" >/dev/null
 
 (
   cd -- "${package_directory}"
