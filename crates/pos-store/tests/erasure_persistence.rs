@@ -1,6 +1,7 @@
 //! Backend parity for the raw ERCRP1 manifest/CAS persistence port.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
@@ -103,6 +104,7 @@ struct Host<S> {
     targets: Vec<ErasureRequiredTargetV1>,
     verify_exact_retry: bool,
     fail_read_object: bool,
+    manifest_sequence: Option<Rc<RefCell<VecDeque<pos_core::StoredErasureManifestV1>>>>,
 }
 
 type RetainedEffect = (ErasureReferenceV1, pos_core::ErasureCasEffectV1);
@@ -122,6 +124,11 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for Host<S> {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<pos_core::StoredErasureManifestV1>, ErasureErrorV1> {
+        if let Some(sequence) = &self.manifest_sequence {
+            if let Some(manifest) = sequence.borrow_mut().pop_front() {
+                return Ok(Some(manifest));
+            }
+        }
         self.store.borrow().read_manifest(request)
     }
 
@@ -382,6 +389,7 @@ fn complete_with_retry_validation<S: ErasurePersistencePortV1>(
             targets: vec![target],
             verify_exact_retry,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -495,6 +503,7 @@ fn assert_raw_backend<S: ErasurePersistencePortV1>(
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -515,6 +524,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
             targets: Vec::new(),
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -524,6 +534,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
             targets: Vec::new(),
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -600,6 +611,7 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: true,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -617,6 +629,7 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -624,6 +637,67 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].manifest(), Some(manifest));
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn memory_recovery_error_bound_rejects_without_partial_writes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let request = reference(30);
+    let manifests = (0..=ERASURE_MAX_RECOVERY_ERRORS)
+        .map(|ordinal| {
+            let ordinal = u64::try_from(ordinal).expect("recovery-error bound fits in u64");
+            let mut digest = [0_u8; 32];
+            digest[..8].copy_from_slice(&ordinal.to_be_bytes());
+            pos_core::StoredErasureManifestV1::from_stored(
+                ErasureReferenceV1::from_digest(digest),
+                vec![0xff_u8],
+            )
+        })
+        .collect::<Vec<_>>();
+    let attempted_manifest = manifests
+        .last()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let expected_failure = ErasureRecoveryErrorV1::new(
+        request,
+        Some(attempted_manifest),
+        attempted_manifest,
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    let shared = Rc::new(RefCell::new(MemoryStore::new()));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: Vec::new(),
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: Some(Rc::new(RefCell::new(VecDeque::from(manifests)))),
+        },
+        reference(30),
+    );
+    for _ in 0..ERASURE_MAX_RECOVERY_ERRORS {
+        assert_eq!(
+            coordinator.verified_state(request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    let index_before = shared.borrow().recovery_error_refs(request)?;
+    assert_eq!(index_before.len(), ERASURE_MAX_RECOVERY_ERRORS);
+    assert_eq!(
+        shared.borrow().read_object(expected_failure.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(shared.borrow().recovery_error_refs(request)?, index_before);
+    assert_eq!(
+        shared.borrow().read_object(expected_failure.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
 
@@ -638,6 +712,7 @@ fn retained_recovery_failure<S: ErasurePersistencePortV1>(
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: true,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -651,6 +726,7 @@ fn retained_recovery_failure<S: ErasurePersistencePortV1>(
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -727,6 +803,7 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -770,6 +847,7 @@ fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -787,6 +865,7 @@ fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -832,6 +911,7 @@ fn assert_sqlite_recovery_error_retention_failure(
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: true,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -869,6 +949,78 @@ fn sqlite_recovery_error_retention_fails_closed_at_backend_boundaries(
              BEGIN SELECT RAISE(ABORT, 'recovery evidence denied'); END;",
         )
     })?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_error_trigger_rollbacks_leave_no_partial_rows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for trigger in [
+        "CREATE TRIGGER deny_recovery_error_index_insert
+         BEFORE INSERT ON erasure_recovery_errors
+         BEGIN SELECT RAISE(ABORT, 'recovery error index denied'); END;",
+        "CREATE TRIGGER deny_recovery_evidence_insert
+         BEFORE INSERT ON erasure_evidence
+         BEGIN SELECT RAISE(ABORT, 'recovery evidence denied'); END;",
+    ] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or(ErasureErrorV1::InvalidEncoding)?;
+        let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+        let manifest = shared
+            .borrow()
+            .read_manifest(request.reference())?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .digest();
+        drop(shared);
+
+        let raw = rusqlite::Connection::open(path)?;
+        raw.execute_batch(trigger)?;
+        drop(raw);
+
+        let expected_failure = ErasureRecoveryErrorV1::new(
+            request.reference(),
+            Some(manifest),
+            request.reference(),
+            ErasureErrorV1::ProvenanceMissing,
+        )?;
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+            Host {
+                store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
+                targets: vec![target()],
+                verify_exact_retry: false,
+                fail_read_object: true,
+                manifest_sequence: None,
+            },
+            reference(30),
+        );
+        assert_eq!(
+            coordinator.verified_state(request.reference()),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        drop(coordinator);
+
+        let raw = rusqlite::Connection::open(path)?;
+        let indexed: i64 = raw.query_row(
+            "SELECT COUNT(*) FROM erasure_recovery_errors
+             WHERE request_digest=?1 AND error_digest=?2",
+            rusqlite::params![
+                request.reference().digest().as_slice(),
+                expected_failure.reference().digest().as_slice()
+            ],
+            |row| row.get(0),
+        )?;
+        let retained: i64 = raw.query_row(
+            "SELECT COUNT(*) FROM erasure_evidence WHERE reference_digest=?1",
+            rusqlite::params![expected_failure.reference().digest().as_slice()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(indexed, 0);
+        assert_eq!(retained, 0);
+    }
     Ok(())
 }
 
@@ -942,6 +1094,7 @@ fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dy
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -983,6 +1136,7 @@ fn sqlite_recovery_rejects_a_missing_durable_attempt_effect(
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -1024,6 +1178,7 @@ fn sqlite_recovery_rejects_a_corrupted_durable_attempt_effect(
             targets: vec![target()],
             verify_exact_retry: false,
             fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
