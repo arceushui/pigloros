@@ -1176,7 +1176,7 @@ impl RecoveredErasureV1 {
     fn recover_active_attempt(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
-        active: ActiveAttemptRefV1,
+        active: &ActiveAttemptRefV1,
         latest_terminal_state: Option<ErasureReferenceV1>,
     ) -> Result<(), RecoveryFailureV1> {
         let admission = load(
@@ -1313,7 +1313,7 @@ impl RecoveredErasureV1 {
             ));
         }
         if let Some(active) = self.manifest.active.clone() {
-            self.recover_active_attempt(port, active, latest_terminal_state)?;
+            self.recover_active_attempt(port, &active, latest_terminal_state)?;
         }
         Ok(())
     }
