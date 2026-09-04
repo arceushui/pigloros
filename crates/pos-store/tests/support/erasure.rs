@@ -85,6 +85,11 @@ pub fn obligation_for_category(
 }
 
 /// Build the common artifact obligation for an ERQ1 target.
+///
+/// # Errors
+///
+/// Returns [`ErasureErrorV1`] when the target or derived command identity is
+/// not valid for an ERRA1 obligation.
 pub fn obligation(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
