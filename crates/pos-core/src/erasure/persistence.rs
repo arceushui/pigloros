@@ -550,10 +550,10 @@ fn recover_foundation(
         .map_err(|error| RecoveryFailureV1::new(error, manifest.state))?
         .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, manifest.state))?;
     if request.reference() != requested || state.request() != requested {
-        let subject = if request.reference() != requested {
-            request.reference()
-        } else {
+        let subject = if request.reference() == requested {
             state.state_digest()
+        } else {
+            request.reference()
         };
         return Err(RecoveryFailureV1::new(
             ErasureErrorV1::ProvenanceMissing,
@@ -761,8 +761,8 @@ impl RecoveredErasureV1 {
             verifier,
         })
         .map_err(|error| RecoveryFailureV1::new(error, stored.digest()))?;
-        let correction_subject = evidence.correction.as_ref().map_or(
-            foundation.request.reference(),
+        let correction_subject = evidence.correction.as_ref().map_or_else(
+            || foundation.request.reference(),
             ErasureCorrectionProvenanceV1::reference,
         );
         validate_correction(port, &foundation.request, evidence.correction.as_ref())
@@ -1173,6 +1173,67 @@ impl RecoveredErasureV1 {
         ))
     }
 
+    fn recover_active_attempt(
+        &mut self,
+        port: &dyn ErasurePersistencePortV1,
+        active: ActiveAttemptRefV1,
+        latest_terminal_state: Option<ErasureReferenceV1>,
+    ) -> Result<(), RecoveryFailureV1> {
+        let admission = load(
+            port,
+            active.admission,
+            ErasureRetryAdmissionV1::from_canonical_cbor,
+            ErasureRetryAdmissionV1::reference,
+        )?;
+        let active_admission_matches = [
+            admission.request() == self.request.reference(),
+            admission.attempt_ordinal() == active.ordinal,
+            admission.source_receipt() == self.latest_receipt,
+        ]
+        .into_iter()
+        .all(|matches| matches);
+        if !active_admission_matches {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                active.admission,
+            ));
+        }
+        if active.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                admission.reference(),
+            ));
+        }
+        let active_state_matches = if active.ordinal == 0 {
+            self.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
+                && self.state.provenance() == admission.reference()
+        } else {
+            latest_terminal_state == Some(self.manifest.state)
+        };
+        if !active_state_matches {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                self.manifest.state,
+            ));
+        }
+        self.validate_attempt_effect(port, &admission)?;
+        self.effective
+            .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let admitted = self.load_acknowledgements(
+            port,
+            &admission,
+            &active.acknowledgements,
+            active.admission,
+        )?;
+        self.apply_acknowledgements(admitted.clone());
+        self.active = Some(RecoveredAttemptV1 {
+            ordinal: active.ordinal,
+            admission,
+            admitted,
+        });
+        Ok(())
+    }
+
     fn recover_attempts(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
@@ -1252,59 +1313,7 @@ impl RecoveredErasureV1 {
             ));
         }
         if let Some(active) = self.manifest.active.clone() {
-            let admission = load(
-                port,
-                active.admission,
-                ErasureRetryAdmissionV1::from_canonical_cbor,
-                ErasureRetryAdmissionV1::reference,
-            )?;
-            let active_admission_matches = [
-                admission.request() == self.request.reference(),
-                admission.attempt_ordinal() == active.ordinal,
-                admission.source_receipt() == self.latest_receipt,
-            ]
-            .into_iter()
-            .all(|matches| matches);
-            if !active_admission_matches {
-                return Err(RecoveryFailureV1::new(
-                    ErasureErrorV1::ProvenanceMissing,
-                    active.admission,
-                ));
-            }
-            if active.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
-                return Err(RecoveryFailureV1::new(
-                    ErasureErrorV1::ProvenanceMissing,
-                    admission.reference(),
-                ));
-            }
-            let active_state_matches = if active.ordinal == 0 {
-                self.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
-                    && self.state.provenance() == admission.reference()
-            } else {
-                latest_terminal_state == Some(self.manifest.state)
-            };
-            if !active_state_matches {
-                return Err(RecoveryFailureV1::new(
-                    ErasureErrorV1::ProvenanceMissing,
-                    self.manifest.state,
-                ));
-            }
-            self.validate_attempt_effect(port, &admission)?;
-            self.effective.retain(|_, value| {
-                value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged
-            });
-            let admitted = self.load_acknowledgements(
-                port,
-                &admission,
-                &active.acknowledgements,
-                active.admission,
-            )?;
-            self.apply_acknowledgements(admitted.clone());
-            self.active = Some(RecoveredAttemptV1 {
-                ordinal: active.ordinal,
-                admission,
-                admitted,
-            });
+            self.recover_active_attempt(port, active, latest_terminal_state)?;
         }
         Ok(())
     }
