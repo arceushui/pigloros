@@ -43,8 +43,8 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta},
     ConsentAppendPermit, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
-    ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReferenceV1,
-    ErasureStateResolverV1, KeyRegistryStateV1, PreparedErasureCasV1, StoredErasureManifestV1,
+    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
+    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
     ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
@@ -164,7 +164,7 @@ pub struct MemoryStore {
     erasure_administrative_resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     erasure_effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
-    erasure_recovery_errors: BTreeSet<(ErasureReferenceV1, ErasureReferenceV1)>,
+    erasure_recovery_errors: BTreeMap<ErasureReferenceV1, BTreeSet<ErasureReferenceV1>>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -466,7 +466,7 @@ impl MemoryStore {
             erasure_administrative_resolutions: BTreeMap::new(),
             erasure_effects: BTreeMap::new(),
             erasure_effect_subjects: BTreeMap::new(),
-            erasure_recovery_errors: BTreeSet::new(),
+            erasure_recovery_errors: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1243,9 +1243,9 @@ impl ErasurePersistencePortV1 for MemoryStore {
     ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
         let references = self
             .erasure_recovery_errors
-            .iter()
-            .filter(|(candidate, _)| *candidate == request)
-            .map(|(_, reference)| *reference)
+            .get(&request)
+            .into_iter()
+            .flat_map(|references| references.iter().copied())
             .take(ERASURE_MAX_RECOVERY_ERRORS + 1)
             .collect::<Vec<_>>();
         if references.len() > ERASURE_MAX_RECOVERY_ERRORS {
@@ -1256,22 +1256,16 @@ impl ErasurePersistencePortV1 for MemoryStore {
     }
     fn append_recovery_error(
         &mut self,
-        request: ErasureReferenceV1,
-        object: ErasurePersistenceObjectV1,
+        object: PreparedErasureRecoveryErrorV1,
     ) -> Result<(), ErasureErrorV1> {
+        let request = object.request();
         let reference = object.reference();
-        let key = (request, reference);
         let mut evidence = self.erasure_evidence.clone();
         insert_exact(&mut evidence, reference, object.canonical_cbor())?;
         let mut recovery_errors = self.erasure_recovery_errors.clone();
-        if recovery_errors.insert(key) {
-            let count = recovery_errors
-                .iter()
-                .filter(|(candidate, _)| *candidate == request)
-                .count();
-            if count > ERASURE_MAX_RECOVERY_ERRORS {
+        let request_errors = recovery_errors.entry(request).or_default();
+        if request_errors.insert(reference) && request_errors.len() > ERASURE_MAX_RECOVERY_ERRORS {
                 return Err(ErasureErrorV1::ScopeInvalid);
-            }
         }
         self.erasure_evidence = evidence;
         self.erasure_recovery_errors = recovery_errors;
@@ -2419,7 +2413,9 @@ impl MemoryStore {
             let ordinal = u64::try_from(ordinal).unwrap_or(u64::MAX);
             digest[..8].copy_from_slice(&ordinal.to_be_bytes());
             self.erasure_recovery_errors
-                .insert((request, ErasureReferenceV1::from_digest(digest)));
+                .entry(request)
+                .or_default()
+                .insert(ErasureReferenceV1::from_digest(digest));
         }
     }
 

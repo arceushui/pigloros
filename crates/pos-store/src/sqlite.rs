@@ -43,10 +43,10 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
-    ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReferenceV1,
-    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PreparedErasureCasV1, StoredErasureManifestV1,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1,
+    KeyRoleV1, OwnerIdV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -667,11 +667,23 @@ impl SqliteStore {
     }
 
     fn prepare_schema(&self, initialize: bool) -> Result<(), CoreError> {
-        if initialize {
+        if initialize && self.database_is_empty()? {
             self.init_schema()
         } else {
             self.validate_erasure_schema()
         }
+    }
+
+    fn database_is_empty(&self) -> Result<bool, CoreError> {
+        self.conn
+            .query_row(
+                "SELECT NOT EXISTS (
+                     SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| Self::storage_error(&error))
     }
 
     /// Open a `SQLite` store with a trusted admission clock.
@@ -4489,13 +4501,12 @@ impl ErasurePersistencePortV1 for SqliteStore {
     }
     fn append_recovery_error(
         &mut self,
-        request: ErasureReferenceV1,
-        object: ErasurePersistenceObjectV1,
+        object: PreparedErasureRecoveryErrorV1,
     ) -> Result<(), ErasureErrorV1> {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        let result = apply_sqlite_recovery_error(&self.conn, request, &object);
+        let result = apply_sqlite_recovery_error(&self.conn, &object);
         finish_erasure_transaction(&self.conn, result)
     }
     fn compare_and_swap(
@@ -4670,9 +4681,9 @@ fn insert_sqlite_exact(
 
 fn apply_sqlite_recovery_error(
     conn: &Connection,
-    request: ErasureReferenceV1,
-    object: &ErasurePersistenceObjectV1,
+    object: &PreparedErasureRecoveryErrorV1,
 ) -> Result<(), ErasureErrorV1> {
+    let request = object.request();
     let reference = object.reference();
     let already_indexed = conn
         .query_row(
@@ -7589,6 +7600,17 @@ mod tests {
 
         let result = SqliteStore::open(file.path().to_str().test_ok());
         let _ = result.err().test_ok();
+
+        let conn = Connection::open(file.path()).test_ok();
+        let recovery_error_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'erasure_recovery_errors'",
+                [],
+                |row| row.get(0),
+            )
+            .test_ok();
+        assert_eq!(recovery_error_tables, 0);
     }
 
     #[test]
@@ -7617,7 +7639,10 @@ mod tests {
             let error = SqliteStore::open(file.path().to_str().test_ok())
                 .err()
                 .test_ok();
-            assert!(error.to_string().contains("incompatible schema"));
+            assert!(matches!(
+                error,
+                CoreError::Storage(message) if message.contains("schema")
+            ));
         }
     }
 
@@ -7625,10 +7650,12 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_rejects_an_events_table_without_role_columns() {
         let file = tempfile::NamedTempFile::new().test_ok();
+        drop(SqliteStore::open(file.path().to_str().test_ok()).test_ok());
         {
             let conn = Connection::open(file.path()).test_ok();
             conn.execute_batch(
-                "CREATE TABLE events (
+                "DROP TABLE events;
+                 CREATE TABLE events (
                     timeline_id TEXT NOT NULL,
                     seq INTEGER NOT NULL,
                     event_id TEXT NOT NULL,
@@ -7666,10 +7693,12 @@ mod tests {
             "signature_epoch INTEGER",
         ] {
             let file = tempfile::NamedTempFile::new().test_ok();
+            drop(SqliteStore::open(file.path().to_str().test_ok()).test_ok());
             {
                 let conn = Connection::open(file.path()).test_ok();
                 conn.execute_batch(&format!(
-                    "CREATE TABLE events (
+                    "DROP TABLE events;
+                     CREATE TABLE events (
                         timeline_id TEXT NOT NULL,
                         seq INTEGER NOT NULL,
                         event_id TEXT NOT NULL,

@@ -1,4 +1,7 @@
 //! Shared builders for public ADR-060 integration-test fixtures.
+//!
+//! Store integration tests include this file by path so these public fixture
+//! builders have one test-only owner.
 
 use std::collections::BTreeMap;
 

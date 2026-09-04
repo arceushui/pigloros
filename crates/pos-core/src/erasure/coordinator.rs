@@ -17,6 +17,7 @@ use super::{
     ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorV1,
     ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedStateQueryV1, PreparedErasureCasV1,
+    PreparedErasureRecoveryErrorV1,
 };
 use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
@@ -57,24 +58,13 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
 
     fn retain_recovery_error(
         &mut self,
-        request: ErasureReferenceV1,
         recovery_error: ErasureRecoveryErrorV1,
     ) -> Result<(), ErasureErrorV1> {
-        let object = ErasurePersistenceObjectV1::new(
-            recovery_error.reference(),
-            recovery_error.to_canonical_cbor()?,
-        );
-        self.port.append_recovery_error(request, object)
+        let prepared = PreparedErasureRecoveryErrorV1::new(recovery_error)?;
+        self.port.append_recovery_error(prepared)
     }
 
     fn recover(
-        &mut self,
-        request: ErasureReferenceV1,
-    ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
-        self.recover_with_evidence(request)
-    }
-
-    fn recover_with_evidence(
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
@@ -83,7 +73,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             Ok(None) => return Ok(None),
             Err(error) => {
                 let recovery_error = ErasureRecoveryErrorV1::new(request, None, request, error)?;
-                self.retain_recovery_error(request, recovery_error)?;
+                self.retain_recovery_error(recovery_error)?;
                 return Err(error);
             }
         };
@@ -96,7 +86,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     failure.subject(),
                     failure.error(),
                 )?;
-                self.retain_recovery_error(request, recovery_error)?;
+                self.retain_recovery_error(recovery_error)?;
                 Err(failure.error())
             }
         }
@@ -209,9 +199,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Return the durable recovery failures retained for one request.
     ///
     /// Recovery failures are intentionally queryable even while the primary
-    /// ERCRP1 graph remains unrecoverable. This allows containment and
-    /// administrative consumers to inspect bounded, payload-free evidence
-    /// without weakening fail-closed recovery.
+    /// ERCRP1 graph remains unrecoverable. These are bounded, payload-free
+    /// diagnostics only: they never authorize containment or prove that the
+    /// graph is invalid. Containment and administrative consumers must use a
+    /// successfully verified state and fail closed when recovery fails.
     ///
     /// # Errors
     ///

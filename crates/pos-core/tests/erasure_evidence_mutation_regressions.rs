@@ -1,6 +1,6 @@
 //! Evidence codec mutation regressions for the direct V1 records.
 
-#[path = "support/erasure_codec.rs"]
+#[path = "support/erasure.rs"]
 pub mod erasure_support;
 
 use ciborium::value::Value;
