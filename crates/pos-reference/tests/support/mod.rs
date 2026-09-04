@@ -561,6 +561,12 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         mixed_oracles,
         profile_mutation,
     )?;
+    let exact_profile_byte_cap = matches!(
+        profile_mutation,
+        Some(ProfileMutation::SelectedProfileByteCapExact)
+    )
+    .then(|| encoded_profile_length(&profile_value))
+    .transpose()?;
     if let Some(mutation) = profile_mutation {
         mutate_profile(&mut profile_value, mutation)?;
     }
@@ -580,7 +586,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     )?;
     let archive_digest = hash(&archive);
     let hard_caps_digest = hash_contract("PiglorOS.EvaluatorHardCaps.v1", &hard_caps)?;
-    let request = evaluation_request(
+    let mut request = evaluation_request(
         profile_digest,
         archive_digest,
         subject_adapter,
@@ -589,6 +595,12 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         evaluator_protocol_digest,
         hard_caps_digest,
     )?;
+    if let Some(limit) = exact_profile_byte_cap {
+        request.output_capability.report_bytes_limit = limit;
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+    }
     Ok(Corpus {
         request: request.to_canonical_cbor()?,
         archive,
