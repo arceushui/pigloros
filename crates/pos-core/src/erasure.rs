@@ -3095,6 +3095,9 @@ impl ErasureVerifiedStateV1 {
 /// This remains a separate port from [`ErasurePersistencePortV1`]: the
 /// containment consumer owns the verified-state contract, while persistence
 /// adapters own storage, indexing, and compare-and-swap capabilities.
+/// It is read-only with respect to authoritative ERS1/ERCRP1 lifecycle state;
+/// recovery may refresh a non-authoritative cache or append a bounded
+/// immutable ERRE1 diagnostic when verification fails.
 pub trait ErasureVerifiedStateQueryV1 {
     /// Recover and return one request's authoritative verified state.
     ///
@@ -3237,8 +3240,8 @@ pub trait ErasureStateResolverV1 {
 
 /// Host-owned verifier for retained freeze-authorization evidence.
 ///
-/// Persistence adapters require this capability before returning any
-/// frozen-or-later coordinator record. This keeps ADR-060's authorization
+/// Durable recovery requires this independent host capability before returning
+/// any frozen-or-later coordinator record. This keeps ADR-060's authorization
 /// rule inside the recovery interface instead of relying on caller discipline.
 pub trait ErasureFreezeAuthorizationVerifierV1 {
     /// Verify one retained ERFA1 body and its ERFAA1 authorization evidence.
