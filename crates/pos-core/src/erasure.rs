@@ -3635,6 +3635,14 @@ pub enum ErasureCasOutcomeV1 {
 /// The core owns ERCRP1 decoding, recovery, validation, and construction of
 /// every mutation. Adapters own only canonical byte/object storage and one
 /// atomic compare-and-swap transaction.
+///
+/// This is deliberately separate from the host-owned authorization verifier
+/// traits: persistence proves structural and content-address bindings, while
+/// the verifiers interpret independently authenticated Principal, capability,
+/// policy, and trust evidence. [`ErasureVerifiedStateQueryV1`] is a separate
+/// read-only consumer seam over successfully recovered state. The composite
+/// [`ErasureCoordinatorPortV1`] groups these capabilities for a coordinator
+/// host; it does not grant persistence adapters authorization authority.
 pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     /// Return the current ERCRP1 envelope for one request, if any.
     ///
@@ -3947,6 +3955,11 @@ pub trait ErasureCoordinator {
 
 /// Host capability boundary for authentication, atomic freeze admission, and
 /// irreversible-work admission.
+///
+/// This composite is an application-facing dependency bundle, not a decision
+/// to merge storage and authorization into one port. Implementations keep the
+/// persistence, freeze-verification, and recovery-verification contracts
+/// independently auditable and replaceable.
 pub trait ErasureCoordinatorPortV1:
     ErasurePersistencePortV1
     + ErasureFreezeAuthorizationVerifierV1
