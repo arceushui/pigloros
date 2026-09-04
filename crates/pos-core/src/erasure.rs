@@ -3324,7 +3324,7 @@ impl StoredErasureManifestV1 {
     /// recovery verifies that the digest authenticates the bytes before it
     /// decodes or uses the manifest.
     #[must_use]
-    pub fn from_stored(digest: ErasureReferenceV1, canonical_cbor: Vec<u8>) -> Self {
+    pub const fn from_stored(digest: ErasureReferenceV1, canonical_cbor: Vec<u8>) -> Self {
         Self {
             digest,
             canonical_cbor,
