@@ -671,7 +671,7 @@ fn recovery_rejects_a_replayed_attempt_with_a_different_dispatch_admission(
     graph.adapter.replace_attempt_page_field(
         request,
         0,
-        2,
+        4,
         Value::Bytes(alternate.reference().digest().to_vec()),
     )?;
 
