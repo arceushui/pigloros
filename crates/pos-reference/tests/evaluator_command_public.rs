@@ -34,7 +34,7 @@ fn replacing_argument(command: &Command, option: &str, value: &Path) -> TestResu
     let target = arguments
         .get_mut(index + 1)
         .ok_or("command option has no value")?;
-    *target = value.as_os_str().to_owned();
+    value.as_os_str().clone_into(target);
     let mut replacement = evaluator();
     replacement.args(arguments);
     Ok(replacement)
