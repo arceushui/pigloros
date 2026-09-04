@@ -204,7 +204,7 @@ struct ScannedMember {
 }
 
 struct ScannedArchive {
-    manifest_range: Range<u64>,
+    manifest_range: Range<usize>,
     members: Vec<ScannedMember>,
     profile_bytes: Vec<u8>,
     signer_key: [u8; 32],
@@ -282,7 +282,7 @@ fn preflight_archive(
 ) -> Result<AuthenticatedBundlePreflight, BundleError> {
     let archive_length = bounded_archive_digest(archive, request.fixture_bundle_digest)?;
     let scanned = scan_archive(archive, archive_length)?;
-    let manifest_bytes = read_range(archive, scanned.manifest_range.clone(), MAX_MANIFEST_BYTES)?;
+    let manifest_bytes = read_range(archive, scanned.manifest_range.clone())?;
     let manifest = decode_manifest_bytes(manifest_bytes, request)?;
     let trust_policy = verified_trust_policy(trust_policy_bytes, request)?;
     verify_signature(
@@ -352,10 +352,10 @@ fn scan_archive<R: Read + Seek + ?Sized>(
         .map_err(|_| BundleError::InvalidEncoding)?;
     let mut decoder = Decoder::from(&mut *archive);
     expect_array(&mut decoder, 4)?;
-    let manifest_start = decoder.offset() as u64;
+    let manifest_start = decoder.offset();
     skip_cbor_value(&mut decoder, 0)?;
-    let manifest_end = decoder.offset() as u64;
-    if manifest_end.saturating_sub(manifest_start) > MAX_MANIFEST_BYTES as u64 {
+    let manifest_end = decoder.offset();
+    if manifest_end.saturating_sub(manifest_start) > MAX_MANIFEST_BYTES {
         return Err(BundleError::FieldOutOfBounds);
     }
     let (members, profile_bytes) = scan_members(&mut decoder)?;
@@ -556,17 +556,11 @@ fn drain_text<R: Read + ?Sized>(
 
 fn read_range<R: Read + Seek + ?Sized>(
     archive: &mut R,
-    range: Range<u64>,
-    maximum: usize,
+    range: Range<usize>,
 ) -> Result<Vec<u8>, BundleError> {
-    let length = range
-        .end
-        .checked_sub(range.start)
-        .and_then(|length| usize::try_from(length).ok())
-        .filter(|length| *length <= maximum)
-        .ok_or(BundleError::FieldOutOfBounds)?;
+    let length = range.end - range.start;
     archive
-        .seek(SeekFrom::Start(range.start))
+        .seek(SeekFrom::Start(range.start as u64))
         .map_err(|_| BundleError::InvalidEncoding)?;
     let mut bytes = vec![0_u8; length];
     archive
