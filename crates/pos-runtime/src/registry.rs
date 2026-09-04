@@ -294,7 +294,9 @@ mod coverage_paths {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
-    use crate::driver::{Driver, ObservationView, StepOutput, TimelineHistorySegment};
+    use crate::driver::{
+        Driver, ObservationView, ProjectionKey, StepOutput, TimelineHistorySegment,
+    };
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
@@ -303,7 +305,9 @@ mod coverage_entrypoints {
         ConsentAuthority, ConsentGrantedV1,
     };
 
-    struct NoopDriver;
+    struct NoopDriver {
+        subscription: ProjectionKey,
+    }
 
     impl Driver for NoopDriver {
         fn step(
@@ -322,6 +326,10 @@ mod coverage_entrypoints {
 
         fn name(&self) -> &'static str {
             "coverage-registry-driver"
+        }
+
+        fn subscriptions(&self) -> &[ProjectionKey] {
+            std::slice::from_ref(&self.subscription)
         }
     }
 
@@ -353,7 +361,9 @@ mod coverage_entrypoints {
     #[test]
     fn restore_and_cadence_entrypoints_update_driver_state() {
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(NoopDriver));
+        registry.register_driver(Box::new(NoopDriver {
+            subscription: ProjectionKey::new(EntityId::new()),
+        }));
         let timeline = TimelineId::new();
         let restore_event = event("coverage.restore", 1);
         assert!(registry
@@ -386,6 +396,27 @@ mod coverage_entrypoints {
         assert!(*committed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner));
+    }
+
+    #[test]
+    fn subscription_and_visibility_helpers_cover_duplicate_and_host_events() {
+        let first = ProjectionKey::new(EntityId::new());
+        let second = ProjectionKey::new(EntityId::new());
+        let mut subscriptions = Vec::new();
+        let mut seen = HashSet::new();
+        extend_unique_subscriptions(&mut subscriptions, &mut seen, &[first, first, second]);
+        assert_eq!(subscriptions, [first, second]);
+
+        assert!(driver_visible_event(&event("ordinary.event", 1)));
+        assert!(!driver_visible_event(&event("consent.granted.v1", 2)));
+        assert!(!driver_visible_event(&event(
+            pos_core::GEOGRAPHIC_EVENT_TYPE,
+            3
+        )));
+        assert!(!driver_visible_event(&event(
+            pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE,
+            4,
+        )));
     }
 
     fn event(event_type: &str, seq: u64) -> Event {
