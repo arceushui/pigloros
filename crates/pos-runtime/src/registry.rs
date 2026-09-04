@@ -404,7 +404,11 @@ mod coverage_entrypoints {
         let second = ProjectionKey::new(EntityId::new());
         let mut subscriptions = Vec::new();
         let mut seen = HashSet::new();
-        extend_unique_subscriptions(&mut subscriptions, &mut seen, &[first, first, second]);
+        extend_unique_subscriptions(
+            &mut subscriptions,
+            &mut seen,
+            &[first.clone(), first.clone(), second.clone()],
+        );
         assert_eq!(subscriptions, [first, second]);
 
         assert!(driver_visible_event(&event("ordinary.event", 1)));
