@@ -1,6 +1,7 @@
 pub mod support;
 
 use std::error::Error;
+use std::io::Cursor;
 
 use pos_reference::evaluator::{
     evaluate, AdapterError, CaseAttempt, EvaluatorError, EvaluatorIdentity, ResourceUsage,
@@ -10,8 +11,9 @@ use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
 };
 use pos_reference::profile::{
-    DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, ProfileError,
+    DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
 };
+use pos_reference::signed_bundle::{preflight_signed_bundle, SelectedBundleCaps};
 use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -209,6 +211,7 @@ fn evaluator_identity() -> EvaluatorIdentity {
     EvaluatorIdentity {
         source_digest: [61; 32],
         binary_digest: [62; 32],
+        build_provenance_digest: [63; 32],
         independence: IndependenceEvidence {
             technical_independent: true,
             authorship_independent: true,
@@ -1147,6 +1150,40 @@ fn evaluator_accepts_exact_authenticated_closure_caps() -> TestResult {
 }
 
 #[test]
+fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> TestResult {
+    for mutation in (0..4).map(ProfileMutation::SelectedClosureCapBoundary) {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut archive = Cursor::new(&corpus.archive);
+        let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+        let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
+        assert_eq!(
+            preflight.enforce_selected_caps(selected_bundle_caps(caps)),
+            Err(pos_reference::signed_bundle::BundleError::FieldOutOfBounds)
+        );
+    }
+    for mutation in (0..4).map(ProfileMutation::SelectedClosureCapExact) {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut archive = Cursor::new(&corpus.archive);
+        let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+        let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
+        preflight.enforce_selected_caps(selected_bundle_caps(caps))?;
+    }
+    Ok(())
+}
+
+const fn selected_bundle_caps(caps: EvaluatorHardCaps) -> SelectedBundleCaps {
+    SelectedBundleCaps {
+        max_profile_bytes: caps.max_profile_bytes,
+        max_bundle_members: caps.max_bundle_members,
+        max_member_path_bytes: caps.max_member_path_bytes,
+        max_member_bytes: caps.max_member_bytes,
+        max_total_bundle_bytes: caps.max_total_bundle_bytes,
+    }
+}
+
+#[test]
 fn evaluator_rejects_deeply_malformed_profile_values() -> TestResult {
     for mutation in (0..42).map(ProfileMutation::DeepTypeBoundary) {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
@@ -1259,6 +1296,55 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
             ),
             Err(EvaluatorError::Bundle)
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn staged_preflight_rejects_untrusted_structure_before_member_allocation() -> TestResult {
+    let mutations = [
+        BundleMutation::Encoding,
+        BundleMutation::ManifestShape,
+        BundleMutation::DescriptorRecordShape,
+        BundleMutation::MemberRecordShape,
+        BundleMutation::ExpectedRecordShape,
+        BundleMutation::Magic,
+        BundleMutation::Version,
+        BundleMutation::ModeOverflow,
+        BundleMutation::ProfileDigest,
+        BundleMutation::DescriptorOrder,
+        BundleMutation::DescriptorDuplicate,
+        BundleMutation::DescriptorSize,
+        BundleMutation::DescriptorRole,
+        BundleMutation::DescriptorEmpty,
+        BundleMutation::DescriptorRoleOverflow,
+        BundleMutation::DescriptorMissingPath,
+        BundleMutation::MemberOrder,
+        BundleMutation::MemberDuplicate,
+        BundleMutation::MemberEmpty,
+        BundleMutation::MemberRoleOverflow,
+        BundleMutation::MemberRoleAboveMaximum,
+        BundleMutation::MemberMissing,
+        BundleMutation::ExpectedOrder,
+        BundleMutation::ExpectedDuplicate,
+        BundleMutation::ExpectedClaimLayerOverflow,
+        BundleMutation::ExpectedModeOverflow,
+        BundleMutation::ExpectedClaimLayerAbove,
+        BundleMutation::ExpectedModeAbove,
+        BundleMutation::ExpectedMissingPath,
+        BundleMutation::ExpectedDigest,
+        BundleMutation::ExpectedPathType,
+        BundleMutation::ExpectedInvalidPath,
+        BundleMutation::ExpectedCountAboveMaximum,
+        BundleMutation::Signer,
+        BundleMutation::Signature,
+        BundleMutation::ArchiveShape,
+    ];
+    for mutation in mutations {
+        let corpus = support::corpus_with_bundle_mutation(mutation)?;
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut archive = Cursor::new(&corpus.archive);
+        assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
     }
     Ok(())
 }

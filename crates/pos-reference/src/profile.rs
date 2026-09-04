@@ -310,6 +310,40 @@ impl From<ProtocolError> for ProfileError {
 }
 
 impl Profile {
+    /// Authenticate the selected archive caps from a digest-bound CPF1 member.
+    ///
+    /// This narrow decode is used after CFB1 manifest authentication and before
+    /// archive-wide member allocation.
+    ///
+    /// # Errors
+    /// Returns a closed profile failure for malformed bytes or identity mismatch.
+    pub fn authenticated_hard_caps(
+        bytes: &[u8],
+        request: &EvaluationRequest,
+    ) -> Result<EvaluatorHardCaps, ProfileError> {
+        let value = decode_canonical(bytes)?;
+        let fields = array(&value, 18)?;
+        let profile_digest = fixed_bytes(&fields[17])?;
+        if !contract_digest_matches(
+            b"PiglorOS.ConformanceProfile.v1",
+            &Value::Array(fields[..17].to_vec()),
+            profile_digest,
+        ) || profile_digest != request.profile_digest
+        {
+            return Err(ProfileError::DigestMismatch);
+        }
+        let (evaluator_artifacts, caps) = decode_protocol(&fields[11])?;
+        if evaluator_artifacts[0] != request.evaluator_protocol_digest
+            || caps.digest()? != request.evaluator_hard_caps_digest
+        {
+            return Err(ProfileError::DigestMismatch);
+        }
+        if bytes.len() as u64 > caps.max_profile_bytes {
+            return Err(ProfileError::FieldOutOfBounds);
+        }
+        Ok(caps)
+    }
+
     /// Decode the sole current eighteen-field CPF1 profile and verify its
     /// self-digest and the request-selected identities.
     ///

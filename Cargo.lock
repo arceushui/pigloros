@@ -4273,6 +4273,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "ciborium-ll",
  "ed25519-dalek",
  "libc",
  "pos-core",
@@ -4492,7 +4493,9 @@ dependencies = [
  "blake3",
  "ciborium",
  "ed25519-dalek",
+ "flate2",
  "rustix 1.1.4",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",

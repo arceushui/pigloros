@@ -26,7 +26,8 @@ for command in b3sum cargo git gzip jq rustc tar; do
   }
 done
 
-if [[ -n $(git status --porcelain=v1 --untracked-files=all) ]]; then
+commit=$(git rev-parse --verify 'HEAD^{commit}')
+if ! git diff --quiet "${commit}" -- || [[ -n $(git ls-files --others --exclude-standard) ]]; then
   printf '%s\n' 'evaluator packages must be built from a clean source tree' >&2
   exit 2
 fi
@@ -40,7 +41,12 @@ trap cleanup EXIT
 package_directory=${work_directory}/reference-evaluator
 mkdir -p -- "${package_directory}/bin" "${package_directory}/source"
 
-git archive --format=tar HEAD | gzip -n >"${package_directory}/source/pigloros-source.tar.gz"
+git archive --format=tar "${commit}" | gzip -n >"${package_directory}/source/pigloros-source.tar.gz"
+archived_commit=$(gzip -dc -- "${package_directory}/source/pigloros-source.tar.gz" | git get-tar-commit-id)
+if [[ ${archived_commit} != "${commit}" ]]; then
+  printf '%s\n' 'source archive commit identity does not match the selected commit' >&2
+  exit 2
+fi
 source_directory=${work_directory}/source-checkout
 mkdir -p -- "${source_directory}"
 tar -xzf "${package_directory}/source/pigloros-source.tar.gz" -C "${source_directory}"
@@ -130,10 +136,9 @@ binary_digest=$(b3sum "${package_directory}/bin/pos-reference-evaluator" | cut -
 lock_digest=$(b3sum "${package_directory}/Cargo.lock" | cut -d ' ' -f 1)
 sbom_digest=$(b3sum "${package_directory}/sbom.cdx.json" | cut -d ' ' -f 1)
 licences_digest=$(b3sum "${package_directory}/licences.json" | cut -d ' ' -f 1)
-commit=$(git rev-parse HEAD)
 toolchain=$(rustc --version)
 
-jq -n --sort-keys \
+jq -cS -n \
   --arg commit "${commit}" \
   --arg target "${target}" \
   --arg toolchain "${toolchain}" \
@@ -166,9 +171,13 @@ jq -e \
 
 (
   cd -- "${package_directory}"
-  find . -type f ! -name BLAKE3SUMS -print0 \
-    | sort -z \
-    | xargs -0 b3sum >BLAKE3SUMS
+  b3sum \
+    Cargo.lock \
+    bin/pos-reference-evaluator \
+    licences.json \
+    provenance.json \
+    sbom.cdx.json \
+    source/pigloros-source.tar.gz >BLAKE3SUMS
   b3sum --check BLAKE3SUMS
 )
 

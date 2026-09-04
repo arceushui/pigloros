@@ -100,6 +100,7 @@ fn evaluator_identity() -> EvaluatorIdentity {
     EvaluatorIdentity {
         source_digest: [61; 32],
         binary_digest: [62; 32],
+        build_provenance_digest: [63; 32],
         independence: IndependenceEvidence {
             technical_independent: true,
             authorship_independent: true,
@@ -651,7 +652,7 @@ fn report_rejects_every_top_level_and_independence_boundary() -> TestResult {
                 6 => report.evaluator_binary_digest = [0; 32],
                 7 => report.evaluator_protocol_digest = [0; 32],
                 8 => report.limitations_digest = [0; 32],
-                _ => report.provenance_digest = [0; 32],
+                _ => report.evaluator_build_provenance_digest = [0; 32],
             },
             ProtocolError::FieldOutOfBounds,
         );

@@ -3032,7 +3032,43 @@ fn select_closure_cap_boundary(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     index: u8,
 ) -> TestResult<()> {
-    let member_count = u64::try_from(members.len())?.saturating_add(1);
+    let measurements = closure_measurements(members)?;
+    let (cap_index, value) = match index {
+        0 => (2, measurements.member_count.saturating_sub(1)),
+        1 => (3, measurements.maximum_path_bytes.saturating_sub(1)),
+        2 => (4, measurements.maximum_member_bytes.saturating_sub(1)),
+        _ => (5, measurements.member_bytes),
+    };
+    array_fields_mut(hard_caps)?[cap_index] = uint(value);
+    Ok(())
+}
+
+fn select_closure_cap_exact(
+    hard_caps: &mut Value,
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    index: u8,
+) -> TestResult<()> {
+    let measurements = closure_measurements(members)?;
+    let (cap_index, value) = match index {
+        0 => (2, measurements.member_count),
+        1 => (3, measurements.maximum_path_bytes),
+        2 => (4, measurements.maximum_member_bytes),
+        _ => return Ok(()),
+    };
+    array_fields_mut(hard_caps)?[cap_index] = uint(value);
+    Ok(())
+}
+
+struct ClosureMeasurements {
+    member_count: u64,
+    maximum_path_bytes: u64,
+    maximum_member_bytes: u64,
+    member_bytes: u64,
+}
+
+fn closure_measurements(
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+) -> TestResult<ClosureMeasurements> {
     let maximum_path_bytes = members
         .keys()
         .map(String::len)
@@ -3044,49 +3080,12 @@ fn select_closure_cap_boundary(
         .map(|(bytes, _)| bytes.len())
         .max()
         .ok_or_else(|| io::Error::other("test closure is empty"))?;
-    let member_bytes = closure_member_bytes(members)?;
-    let (cap_index, value) = match index {
-        0 => (2, member_count.saturating_sub(1)),
-        1 => (3, u64::try_from(maximum_path_bytes.saturating_sub(1))?),
-        2 => (4, u64::try_from(maximum_member_bytes.saturating_sub(1))?),
-        _ => (5, member_bytes),
-    };
-    array_fields_mut(hard_caps)?[cap_index] = uint(value);
-    Ok(())
-}
-
-fn select_closure_cap_exact(
-    hard_caps: &mut Value,
-    members: &BTreeMap<String, (Vec<u8>, u8)>,
-    index: u8,
-) -> TestResult<()> {
-    let (cap_index, value) = match index {
-        0 => (2, u64::try_from(members.len())?.saturating_add(1)),
-        1 => (
-            3,
-            u64::try_from(
-                members
-                    .keys()
-                    .map(String::len)
-                    .chain(std::iter::once("profile/CPF1.cbor".len()))
-                    .max()
-                    .ok_or_else(|| io::Error::other("test closure is empty"))?,
-            )?,
-        ),
-        2 => (
-            4,
-            u64::try_from(
-                members
-                    .values()
-                    .map(|(bytes, _)| bytes.len())
-                    .max()
-                    .ok_or_else(|| io::Error::other("test closure is empty"))?,
-            )?,
-        ),
-        _ => return Ok(()),
-    };
-    array_fields_mut(hard_caps)?[cap_index] = uint(value);
-    Ok(())
+    Ok(ClosureMeasurements {
+        member_count: u64::try_from(members.len())?.saturating_add(1),
+        maximum_path_bytes: u64::try_from(maximum_path_bytes)?,
+        maximum_member_bytes: u64::try_from(maximum_member_bytes)?,
+        member_bytes: closure_member_bytes(members)?,
+    })
 }
 
 fn closure_member_bytes(members: &BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<u64> {
@@ -3118,12 +3117,19 @@ fn profile_with_selected_closure_caps(
     };
     let mut profile_value = build_profile(hard_caps)?;
     if matches!(mutation, Some(ProfileMutation::SelectedClosureCapExact(3))) {
-        for _ in 0..4 {
+        const MAX_CONVERGENCE_STEPS: usize = 8;
+        for _ in 0..MAX_CONVERGENCE_STEPS {
             let profile_bytes = encoded_profile_length(&profile_value)?;
             let total_bytes = closure_member_bytes(members)?.saturating_add(profile_bytes);
             array_fields_mut(hard_caps)?[5] = uint(total_bytes);
             profile_value = build_profile(hard_caps)?;
+            let encoded_total = closure_member_bytes(members)?
+                .saturating_add(encoded_profile_length(&profile_value)?);
+            if encoded_total == total_bytes {
+                return Ok(profile_value);
+            }
         }
+        return Err(io::Error::other("exact closure cap did not converge").into());
     }
     Ok(profile_value)
 }

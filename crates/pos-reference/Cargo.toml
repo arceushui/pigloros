@@ -9,7 +9,10 @@ publish.workspace = true
 [dependencies]
 blake3 = { workspace = true }
 ciborium = { workspace = true }
+ciborium-ll = "0.2.2"
 ed25519-dalek = { workspace = true }
+flate2 = "1"
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

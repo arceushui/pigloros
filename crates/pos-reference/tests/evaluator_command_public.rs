@@ -4,12 +4,15 @@ use std::error::Error;
 #[cfg(unix)]
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -27,14 +30,12 @@ fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<
     let request = directory.join("request.cbor");
     let bundle = directory.join("bundle.cfb1");
     let policy = directory.join("policy.tps1");
-    let source = directory.join("evaluator-source.tar.gz");
-    let provenance = directory.join("evaluator-provenance.json");
+    let source = directory.join("source/pigloros-source.tar.gz");
+    let provenance = directory.join("provenance.json");
     fs::write(&request, corpus.request)?;
     fs::write(&bundle, corpus.archive)?;
     fs::write(&policy, corpus.trust_policy)?;
-    let source_bytes = b"independently reviewed evaluator source";
-    fs::write(&source, source_bytes)?;
-    write_evaluator_provenance(&provenance, source_bytes)?;
+    write_evaluator_package(directory)?;
     let digest = "01".repeat(32);
     let declaration_digest = "2f".repeat(32);
     let mut command = evaluator();
@@ -64,21 +65,100 @@ fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<
 }
 
 fn write_evaluator_provenance(path: &Path, source: &[u8]) -> TestResult {
-    let binary = fs::read(env!("CARGO_BIN_EXE_pos-reference-evaluator"))?;
+    let root = path.parent().ok_or("provenance path has no parent")?;
+    let binary = fs::read(root.join("bin/pos-reference-evaluator"))?;
+    let lock = fs::read(root.join("Cargo.lock"))?;
+    let sbom = fs::read(root.join("sbom.cdx.json"))?;
+    let licences = fs::read(root.join("licences.json"))?;
     let provenance = serde_json::json!({
+        "build_target": "public-test-target",
+        "cargo_locked": true,
+        "dependency_lock_blake3": blake3::hash(&lock).to_hex().to_string(),
+        "evaluator_binary_blake3": blake3::hash(&binary).to_hex().to_string(),
+        "evaluator_source_blake3": blake3::hash(source).to_hex().to_string(),
+        "licences_blake3": blake3::hash(&licences).to_hex().to_string(),
+        "rust_toolchain": "rustc public-test-toolchain",
+        "sbom_blake3": blake3::hash(&sbom).to_hex().to_string(),
         "schema": "PiglorOS.EvaluatorBuildProvenance.v1",
         "source_commit": "1111111111111111111111111111111111111111",
-        "build_target": "public-test-target",
-        "rust_toolchain": "rustc public-test-toolchain",
-        "cargo_locked": true,
-        "evaluator_source_blake3": blake3::hash(source).to_hex().to_string(),
-        "evaluator_binary_blake3": blake3::hash(&binary).to_hex().to_string(),
-        "dependency_lock_blake3": "22".repeat(32),
-        "sbom_blake3": "33".repeat(32),
-        "licences_blake3": "44".repeat(32),
     });
-    fs::write(path, serde_json::to_vec(&provenance)?)?;
+    let mut bytes = serde_json::to_vec(&provenance)?;
+    bytes.push(b'\n');
+    fs::write(path, bytes)?;
     Ok(())
+}
+
+fn write_evaluator_package(directory: &Path) -> TestResult {
+    fs::create_dir_all(directory.join("source"))?;
+    fs::create_dir_all(directory.join("bin"))?;
+    let source = source_archive("1111111111111111111111111111111111111111")?;
+    fs::write(directory.join("source/pigloros-source.tar.gz"), &source)?;
+    fs::copy(
+        env!("CARGO_BIN_EXE_pos-reference-evaluator"),
+        directory.join("bin/pos-reference-evaluator"),
+    )?;
+    fs::write(
+        directory.join("Cargo.lock"),
+        b"public test dependency lock\n",
+    )?;
+    fs::write(directory.join("sbom.cdx.json"), b"{}\n")?;
+    fs::write(directory.join("licences.json"), b"{}\n")?;
+    write_evaluator_provenance(&directory.join("provenance.json"), &source)?;
+    write_checksum_inventory(directory)?;
+    Ok(())
+}
+
+fn write_checksum_inventory(directory: &Path) -> TestResult {
+    let paths = [
+        "Cargo.lock",
+        "bin/pos-reference-evaluator",
+        "licences.json",
+        "provenance.json",
+        "sbom.cdx.json",
+        "source/pigloros-source.tar.gz",
+    ];
+    let mut inventory = String::new();
+    for path in paths {
+        let digest = blake3::hash(&fs::read(directory.join(path))?);
+        inventory.push_str(&format!("{}  {path}\n", digest.to_hex()));
+    }
+    fs::write(directory.join("BLAKE3SUMS"), inventory)?;
+    Ok(())
+}
+
+fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
+    let record = format!("52 comment={commit}\n");
+    let mut tar = Vec::new();
+    tar.extend_from_slice(&tar_header("pax_global_header", record.len(), b'g'));
+    tar.extend_from_slice(record.as_bytes());
+    tar.resize(tar.len().div_ceil(512) * 512, 0);
+    tar.extend_from_slice(&[0; 1024]);
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&tar)?;
+    Ok(encoder.finish()?)
+}
+
+fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
+    let mut header = [0_u8; 512];
+    header[..name.len()].copy_from_slice(name.as_bytes());
+    write_octal(&mut header[100..108], 0o644);
+    write_octal(&mut header[108..116], 0);
+    write_octal(&mut header[116..124], 0);
+    write_octal(&mut header[124..136], size as u64);
+    write_octal(&mut header[136..148], 0);
+    header[148..156].fill(b' ');
+    header[156] = kind;
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+    let checksum = header.iter().map(|byte| u64::from(*byte)).sum();
+    let encoded = format!("{checksum:06o}\0 ");
+    header[148..156].copy_from_slice(encoded.as_bytes());
+    header
+}
+
+fn write_octal(field: &mut [u8], value: u64) {
+    let encoded = format!("{:0width$o}\0", value, width = field.len() - 1);
+    field.copy_from_slice(encoded.as_bytes());
 }
 
 #[cfg(unix)]
@@ -291,9 +371,19 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
     assert!(output.status.success());
     let report = ConformanceReport::from_canonical_cbor(&output.stdout)?;
     assert_eq!(report.cases.len(), 7);
+    let source = fs::read(directory.path().join("source/pigloros-source.tar.gz"))?;
     assert_eq!(
         report.evaluator_source_digest,
-        *blake3::hash(b"independently reviewed evaluator source").as_bytes()
+        *blake3::hash(&source).as_bytes()
+    );
+    let provenance = fs::read(directory.path().join("provenance.json"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.EvaluatorBuildProvenance.v1");
+    hasher.update(&[0]);
+    hasher.update(&provenance);
+    assert_eq!(
+        report.evaluator_build_provenance_digest,
+        *hasher.finalize().as_bytes()
     );
     assert_eq!(
         report.independence.reviewer_ids,
@@ -312,8 +402,13 @@ fn command_closes_input_adapter_and_evaluation_failures() -> TestResult {
         "request.cbor",
         "bundle.cfb1",
         "policy.tps1",
-        "evaluator-source.tar.gz",
-        "evaluator-provenance.json",
+        "source/pigloros-source.tar.gz",
+        "bin/pos-reference-evaluator",
+        "Cargo.lock",
+        "sbom.cdx.json",
+        "licences.json",
+        "provenance.json",
+        "BLAKE3SUMS",
     ] {
         let directory = tempfile::tempdir()?;
         let mut missing_input = complete_command(directory.path())?;
@@ -323,7 +418,7 @@ fn command_closes_input_adapter_and_evaluation_failures() -> TestResult {
 
     let directory = tempfile::tempdir()?;
     let mut oversized_source = complete_command(directory.path())?;
-    fs::File::create(directory.path().join("evaluator-source.tar.gz"))?
+    fs::File::create(directory.path().join("source/pigloros-source.tar.gz"))?
         .set_len(1024 * 1024 * 1024 + 1)?;
     assert!(!oversized_source.output()?.status.success());
 
@@ -426,7 +521,7 @@ fn command_preserves_unsupported_request_version_and_source_read_failures() -> T
 
     let directory = tempfile::tempdir()?;
     let mut unreadable_source = complete_command(directory.path())?;
-    let source = directory.path().join("evaluator-source.tar.gz");
+    let source = directory.path().join("source/pigloros-source.tar.gz");
     fs::remove_file(&source)?;
     fs::create_dir(&source)?;
     assert!(!unreadable_source.output()?.status.success());
@@ -439,17 +534,19 @@ fn command_rejects_source_and_binary_not_bound_by_build_provenance() -> TestResu
     let directory = tempfile::tempdir()?;
     let mut unrelated_source = complete_command(directory.path())?;
     fs::write(
-        directory.path().join("evaluator-source.tar.gz"),
+        directory.path().join("source/pigloros-source.tar.gz"),
         b"unrelated source bytes",
     )?;
     assert!(!unrelated_source.output()?.status.success());
 
     let directory = tempfile::tempdir()?;
     let mut unrelated_binary = complete_command(directory.path())?;
-    let provenance_path = directory.path().join("evaluator-provenance.json");
+    let provenance_path = directory.path().join("provenance.json");
     let mut provenance: serde_json::Value = serde_json::from_slice(&fs::read(&provenance_path)?)?;
     provenance["evaluator_binary_blake3"] = serde_json::Value::String("55".repeat(32));
-    fs::write(provenance_path, serde_json::to_vec(&provenance)?)?;
+    let mut bytes = serde_json::to_vec(&provenance)?;
+    bytes.push(b'\n');
+    fs::write(provenance_path, bytes)?;
     assert!(!unrelated_binary.output()?.status.success());
     Ok(())
 }
@@ -460,19 +557,21 @@ fn command_rejects_malformed_or_oversized_build_provenance() -> TestResult {
     for bytes in [b"null".to_vec(), b"{".to_vec()] {
         let directory = tempfile::tempdir()?;
         let mut command = complete_command(directory.path())?;
-        fs::write(directory.path().join("evaluator-provenance.json"), bytes)?;
+        fs::write(directory.path().join("provenance.json"), bytes)?;
         assert!(!command.output()?.status.success());
     }
 
     let invalid_fields = [
         ("schema", serde_json::json!("wrong-schema")),
         ("source_commit", serde_json::json!("1".repeat(39))),
+        ("source_commit", serde_json::json!("1".repeat(41))),
+        ("source_commit", serde_json::json!("1".repeat(63))),
         ("source_commit", serde_json::json!("1".repeat(65))),
         ("source_commit", serde_json::json!("A".repeat(40))),
         ("build_target", serde_json::json!("")),
         ("build_target", serde_json::json!("x".repeat(257))),
         ("build_target", serde_json::json!("target\nname")),
-        ("rust_toolchain", serde_json::json!(" ")),
+        ("rust_toolchain", serde_json::json!("rustc\\escaped")),
         ("cargo_locked", serde_json::json!(false)),
         (
             "evaluator_source_blake3",
@@ -496,13 +595,15 @@ fn command_rejects_malformed_or_oversized_build_provenance() -> TestResult {
     for field in ["schema", "source_commit"] {
         let directory = tempfile::tempdir()?;
         let mut command = complete_command(directory.path())?;
-        let path = directory.path().join("evaluator-provenance.json");
+        let path = directory.path().join("provenance.json");
         let mut provenance: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         provenance
             .as_object_mut()
             .ok_or("provenance is not an object")?
             .remove(field);
-        fs::write(path, serde_json::to_vec(&provenance)?)?;
+        let mut bytes = serde_json::to_vec(&provenance)?;
+        bytes.push(b'\n');
+        fs::write(path, bytes)?;
         assert!(!command.output()?.status.success());
     }
 
@@ -513,18 +614,79 @@ fn command_rejects_malformed_or_oversized_build_provenance() -> TestResult {
 
     let directory = tempfile::tempdir()?;
     let mut command = complete_command(directory.path())?;
-    fs::File::create(directory.path().join("evaluator-provenance.json"))?.set_len(65_537)?;
+    fs::File::create(directory.path().join("provenance.json"))?.set_len(4_097)?;
     assert!(!command.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    let mut duplicate = complete_command(directory.path())?;
+    let path = directory.path().join("provenance.json");
+    let bytes = fs::read_to_string(&path)?;
+    fs::write(
+        path,
+        bytes.replacen(
+            "\"build_target\":",
+            "\"build_target\":\"duplicate\",\"build_target\":",
+            1,
+        ),
+    )?;
+    assert!(!duplicate.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    let mut noncanonical = complete_command(directory.path())?;
+    let path = directory.path().join("provenance.json");
+    let bytes = fs::read(&path)?;
+    let mut prefixed = vec![b' '];
+    prefixed.extend(bytes);
+    fs::write(path, prefixed)?;
+    assert!(!noncanonical.output()?.status.success());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_rejects_incomplete_or_substituted_evaluator_evidence() -> TestResult {
+    for path in [
+        "Cargo.lock",
+        "bin/pos-reference-evaluator",
+        "licences.json",
+        "sbom.cdx.json",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let mut command = complete_command(directory.path())?;
+        fs::write(directory.path().join(path), b"substituted artifact\n")?;
+        assert!(!command.output()?.status.success());
+    }
+
+    let directory = tempfile::tempdir()?;
+    let mut wrong_commit = complete_command(directory.path())?;
+    let source = source_archive("2222222222222222222222222222222222222222")?;
+    fs::write(
+        directory.path().join("source/pigloros-source.tar.gz"),
+        &source,
+    )?;
+    write_evaluator_provenance(&directory.path().join("provenance.json"), &source)?;
+    write_checksum_inventory(directory.path())?;
+    assert!(!wrong_commit.output()?.status.success());
+
+    for inventory in ["", "00  Cargo.lock\n", "extra  record\n"] {
+        let directory = tempfile::tempdir()?;
+        let mut command = complete_command(directory.path())?;
+        fs::write(directory.path().join("BLAKE3SUMS"), inventory)?;
+        assert!(!command.output()?.status.success());
+    }
     Ok(())
 }
 
 fn replace_provenance_field(directory: &Path, field: &str, value: serde_json::Value) -> TestResult {
-    let path = directory.join("evaluator-provenance.json");
+    let path = directory.join("provenance.json");
     let mut provenance: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
     provenance
         .as_object_mut()
         .ok_or("provenance is not an object")?
         .insert(field.to_owned(), value);
-    fs::write(path, serde_json::to_vec(&provenance)?)?;
+    let mut bytes = serde_json::to_vec(&provenance)?;
+    bytes.push(b'\n');
+    fs::write(path, bytes)?;
     Ok(())
 }

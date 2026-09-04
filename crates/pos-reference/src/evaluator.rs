@@ -16,6 +16,7 @@ use crate::signed_bundle::{verify_signed_bundle, BundleError, VerifiedBundle};
 pub struct EvaluatorIdentity {
     pub source_digest: [u8; 32],
     pub binary_digest: [u8; 32],
+    pub build_provenance_digest: [u8; 32],
     pub independence: IndependenceEvidence,
 }
 
@@ -221,7 +222,7 @@ pub fn evaluate(
         replay_claim,
         redaction_state,
         limitations_digest: profile.limitations_digest,
-        provenance_digest: profile.provenance_digest,
+        evaluator_build_provenance_digest: evaluator.build_provenance_digest,
         report_digest: [0; 32],
     };
     report.report_digest = report

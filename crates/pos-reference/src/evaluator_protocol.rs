@@ -280,7 +280,7 @@ pub struct ConformanceReport {
     pub replay_claim: u8,
     pub redaction_state: u8,
     pub limitations_digest: [u8; 32],
-    pub provenance_digest: [u8; 32],
+    pub evaluator_build_provenance_digest: [u8; 32],
     pub report_digest: [u8; 32],
 }
 
@@ -334,7 +334,7 @@ impl ConformanceReport {
                 self.evaluator_binary_digest,
                 self.evaluator_protocol_digest,
                 self.limitations_digest,
-                self.provenance_digest,
+                self.evaluator_build_provenance_digest,
                 self.report_digest,
             ]
             .contains(&[0; 32])
@@ -546,7 +546,7 @@ fn decode_report(value: &Value) -> Result<ConformanceReport, ProtocolError> {
         replay_claim: u8_value(&fields[19])?,
         redaction_state: u8_value(&fields[20])?,
         limitations_digest: fixed_bytes(&fields[21])?,
-        provenance_digest: fixed_bytes(&fields[22])?,
+        evaluator_build_provenance_digest: fixed_bytes(&fields[22])?,
         report_digest: fixed_bytes(&fields[23])?,
     })
 }
@@ -668,7 +668,7 @@ fn report_value(value: &ConformanceReport, include_digest: bool) -> Value {
         unsigned(u64::from(value.replay_claim)),
         unsigned(u64::from(value.redaction_state)),
         bytes(&value.limitations_digest),
-        bytes(&value.provenance_digest),
+        bytes(&value.evaluator_build_provenance_digest),
     ]);
     if include_digest {
         fields.push(bytes(&value.report_digest));
