@@ -1298,7 +1298,7 @@ fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 
-    let delegated = ok(decision_for(
+    let delegated_bytes = ok(decision_for(
         &request(principal(3), entity(10)),
         &[
             delegation_parent(),
@@ -1306,11 +1306,11 @@ fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
         ],
     )
     .encode());
-    let oversized_delegates = changed_array(&delegated, |fields| {
-        let delegates = array_fields_mut(&mut fields[10]);
-        let delegate = delegates[0].clone();
-        delegates.clear();
-        delegates.extend(vec![
+    let oversized_delegates = changed_array(&delegated_bytes, |fields| {
+        let delegate_values = array_fields_mut(&mut fields[10]);
+        let delegate = delegate_values[0].clone();
+        delegate_values.clear();
+        delegate_values.extend(vec![
             delegate;
             usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 2
         ]);
