@@ -1502,33 +1502,6 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         member[0] = Value::Text("p".repeat(257));
         Ok(())
     })?;
-    let invalid_member_path = archive_with(&corpus.archive, |archive| {
-        let Value::Array(members) = &mut archive[1] else {
-            return Err("archive members are not an array".into());
-        };
-        let Value::Array(member) = &mut members[0] else {
-            return Err("archive member is not an array".into());
-        };
-        member[0] = Value::Text("../outside".to_owned());
-        Ok(())
-    })?;
-    let invalid_member_path_request = request_for_archive(&corpus.request, &invalid_member_path)?;
-    assert!(verify_signed_bundle(
-        &invalid_member_path,
-        &corpus.trust_policy,
-        &invalid_member_path_request,
-    )
-    .is_err());
-
-    let mut noncanonical_manifest = corpus.archive.clone();
-    let canonical_prefix = [0x84, 0x86, 0x64, b'C', b'F', b'B', b'1', 0x00];
-    let version_offset = noncanonical_manifest
-        .windows(canonical_prefix.len())
-        .position(|window| window == canonical_prefix)
-        .ok_or("canonical CFB1 prefix is absent")?
-        + canonical_prefix.len()
-        - 1;
-    noncanonical_manifest.splice(version_offset..=version_offset, [0x18, 0x00]);
     let substituted_profile = archive_with(&corpus.archive, |archive| {
         let Value::Array(members) = &mut archive[1] else {
             return Err("archive members are not an array".into());
@@ -1559,8 +1532,6 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         missing_profile,
         oversized_member,
         long_member_path,
-        invalid_member_path,
-        noncanonical_manifest,
         substituted_profile,
     ] {
         let request = request_for_archive(&corpus.request, &archive)?;
@@ -1569,6 +1540,54 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
                 .is_err()
         );
     }
+    Ok(())
+}
+
+#[test]
+fn signed_bundle_verifiers_reject_invalid_member_paths_and_noncanonical_manifests() -> TestResult {
+    use ciborium::value::Value;
+
+    let corpus = support::corpus()?;
+    let invalid_member_path = archive_with(&corpus.archive, |archive| {
+        let Value::Array(members) = &mut archive[1] else {
+            return Err("archive members are not an array".into());
+        };
+        let Value::Array(member) = &mut members[0] else {
+            return Err("archive member is not an array".into());
+        };
+        member[0] = Value::Text("../outside".to_owned());
+        Ok(())
+    })?;
+    let invalid_path_request = request_for_archive(&corpus.request, &invalid_member_path)?;
+    assert!(verify_signed_bundle(
+        &invalid_member_path,
+        &corpus.trust_policy,
+        &invalid_path_request,
+    )
+    .is_err());
+    assert!(preflight_signed_bundle(
+        &mut Cursor::new(invalid_member_path),
+        &corpus.trust_policy,
+        &invalid_path_request,
+    )
+    .is_err());
+
+    let mut noncanonical_manifest = corpus.archive;
+    let canonical_prefix = [0x84, 0x86, 0x64, b'C', b'F', b'B', b'1', 0x00];
+    let version_offset = noncanonical_manifest
+        .windows(canonical_prefix.len())
+        .position(|window| window == canonical_prefix)
+        .ok_or("canonical CFB1 prefix is absent")?
+        + canonical_prefix.len()
+        - 1;
+    noncanonical_manifest.splice(version_offset..=version_offset, [0x18, 0x00]);
+    let request = request_for_archive(&corpus.request, &noncanonical_manifest)?;
+    assert!(preflight_signed_bundle(
+        &mut Cursor::new(noncanonical_manifest),
+        &corpus.trust_policy,
+        &request,
+    )
+    .is_err());
     Ok(())
 }
 
