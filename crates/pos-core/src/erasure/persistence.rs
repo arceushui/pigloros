@@ -1476,15 +1476,9 @@ impl RecoveredErasureV1 {
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<Vec<ErasureDestructionCommandV1>, RecoveryFailureV1> {
-        let obligation_set = match self.obligation_set.as_ref() {
-            Some(obligation_set) => obligation_set,
-            None => {
-                return Err(RecoveryFailureV1 {
-                    error: ErasureErrorV1::ProvenanceMissing,
-                    subject: admission.reference(),
-                });
-            }
-        };
+        let obligation_set = self.obligation_set.as_ref().ok_or_else(|| {
+            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, admission.reference())
+        })?;
         let acknowledged = self
             .effective
             .values()
