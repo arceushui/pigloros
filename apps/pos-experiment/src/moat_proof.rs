@@ -1355,7 +1355,7 @@ fn build_conformance_report(
             b"PiglorOS.Conformance.Limitations.v1",
             b"external-authorship-and-organization-attestation-not-claimed",
         ),
-        provenance_digest: policy_digest,
+        evaluator_build_provenance_digest: policy_digest,
         report_digest: [0; 32],
     };
     report.report_digest = report.digest().unwrap_or([0; 32]);
