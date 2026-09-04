@@ -14,14 +14,14 @@ use pos_core::{
 
 /// Build a deterministic test-only digest reference.
 #[must_use]
-pub const fn reference(value: u8) -> ErasureReferenceV1 {
+pub(super) const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
 /// Build the common TimelineReplay/DataEncryption target used by persistence
 /// lifecycle scenarios.
 #[must_use]
-pub const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
+pub(super) const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
     let varied = target(seed);
     ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::TimelineReplay,
@@ -32,7 +32,7 @@ pub const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
 
 /// Build the varied target matrix used by codec and receipt scenarios.
 #[must_use]
-pub const fn target(seed: u8) -> ErasureRequiredTargetV1 {
+pub(super) const fn target(seed: u8) -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: match seed % 7 {
             0 => ErasureArtifactClassV1::TimelineReplay,
@@ -57,17 +57,17 @@ pub const fn target(seed: u8) -> ErasureRequiredTargetV1 {
 }
 
 /// Named fields for a public ERQ1 fixture.
-pub struct RequestFixtureInput {
-    pub request: ErasureReferenceV1,
-    pub subject: ErasureReferenceV1,
-    pub scope: ErasureScopeV1,
-    pub selectors: Vec<ErasureReferenceV1>,
-    pub requester: ErasureReferenceV1,
-    pub authorization: ErasureReferenceV1,
-    pub policy: ErasureReferenceV1,
-    pub request_position: u64,
-    pub horizon_position: u64,
-    pub provenance: ErasureReferenceV1,
+pub(super) struct RequestFixtureInput {
+    pub(super) request: ErasureReferenceV1,
+    pub(super) subject: ErasureReferenceV1,
+    pub(super) scope: ErasureScopeV1,
+    pub(super) selectors: Vec<ErasureReferenceV1>,
+    pub(super) requester: ErasureReferenceV1,
+    pub(super) authorization: ErasureReferenceV1,
+    pub(super) policy: ErasureReferenceV1,
+    pub(super) request_position: u64,
+    pub(super) horizon_position: u64,
+    pub(super) provenance: ErasureReferenceV1,
 }
 
 /// Construct an ERQ1 through the same public constructor used by callers.
@@ -75,7 +75,7 @@ pub struct RequestFixtureInput {
 /// # Errors
 ///
 /// Returns [`ErasureErrorV1`] when the fixture fields violate ERQ1 invariants.
-pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureErrorV1> {
+pub(super) fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(ErasureRequestInputV1 {
         request: input.request,
         subject: input.subject,
@@ -96,7 +96,7 @@ pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureEr
 ///
 /// Returns [`ErasureErrorV1`] when the target or derived command identity is
 /// not valid for an ERRA1 obligation.
-pub fn obligation_for_category(
+pub(super) fn obligation_for_category(
     request: ErasureReferenceV1,
     category: ErasureInventoryCategoryV1,
     target: ErasureRequiredTargetV1,
@@ -110,7 +110,7 @@ pub fn obligation_for_category(
 }
 
 /// Build the common artifact obligation for an ERQ1 target.
-pub fn obligation(
+pub(super) fn obligation(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureObligationV1, ErasureErrorV1> {
@@ -119,16 +119,16 @@ pub fn obligation(
 
 /// Named fields for a retry-admission fixture built from validated obligations.
 #[derive(Clone, Copy)]
-pub struct RetryAdmissionFixture<'a> {
-    pub request: ErasureReferenceV1,
-    pub attempt_ordinal: u64,
-    pub source_receipt: Option<ErasureReferenceV1>,
-    pub obligations: &'a [ErasureObligationV1],
-    pub policy: ErasureReferenceV1,
-    pub trust: ErasureReferenceV1,
-    pub admitted_position: u64,
-    pub deadline_position: u64,
-    pub authorization_provenance: ErasureReferenceV1,
+pub(super) struct RetryAdmissionFixture<'a> {
+    pub(super) request: ErasureReferenceV1,
+    pub(super) attempt_ordinal: u64,
+    pub(super) source_receipt: Option<ErasureReferenceV1>,
+    pub(super) obligations: &'a [ErasureObligationV1],
+    pub(super) policy: ErasureReferenceV1,
+    pub(super) trust: ErasureReferenceV1,
+    pub(super) admitted_position: u64,
+    pub(super) deadline_position: u64,
+    pub(super) authorization_provenance: ErasureReferenceV1,
 }
 
 /// Construct a retry admission while keeping obligation/command ordering
@@ -138,7 +138,7 @@ pub struct RetryAdmissionFixture<'a> {
 ///
 /// Returns [`ErasureErrorV1`] when the supplied obligation identities do not
 /// form a valid ERRA1 admission.
-pub fn retry_admission(
+pub(super) fn retry_admission(
     input: RetryAdmissionFixture<'_>,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
     ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
@@ -165,14 +165,14 @@ pub fn retry_admission(
 
 /// Named inputs for one mutually bound admission/authorization fixture.
 #[derive(Clone, Copy)]
-pub struct FreezeEvidenceFixtureInput<'a> {
-    pub request: ErasureReferenceV1,
-    pub scope_commitment: ErasureReferenceV1,
-    pub obligation_set: &'a ErasureObligationSetV1,
-    pub targets: &'a [ErasureRequiredTargetV1],
-    pub obligations: &'a [ErasureObligationV1],
-    pub freeze_position: u64,
-    pub evidence: &'a [u8],
+pub(super) struct FreezeEvidenceFixtureInput<'a> {
+    pub(super) request: ErasureReferenceV1,
+    pub(super) scope_commitment: ErasureReferenceV1,
+    pub(super) obligation_set: &'a ErasureObligationSetV1,
+    pub(super) targets: &'a [ErasureRequiredTargetV1],
+    pub(super) obligations: &'a [ErasureObligationV1],
+    pub(super) freeze_position: u64,
+    pub(super) evidence: &'a [u8],
 }
 
 /// Builds mutually bound admission and authorization evidence for a test freeze.
@@ -181,7 +181,7 @@ pub struct FreezeEvidenceFixtureInput<'a> {
 ///
 /// Returns [`ErasureErrorV1`] when the fixture inputs violate an erasure
 /// evidence invariant or canonical encoding fails.
-pub fn freeze_evidence_fixture(
+pub(super) fn freeze_evidence_fixture(
     input: FreezeEvidenceFixtureInput<'_>,
 ) -> Result<
     (
