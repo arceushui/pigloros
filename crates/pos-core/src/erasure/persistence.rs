@@ -1507,9 +1507,12 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<(), RecoveryFailureV1> {
-        let obligation_set = self.obligation_set.as_ref().ok_or_else(|| {
-            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, admission.reference())
-        })?;
+        let Some(obligation_set) = self.obligation_set.as_ref() else {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                admission.reference(),
+            ));
+        };
         let acknowledged = self
             .effective
             .values()

@@ -16,8 +16,8 @@ pub mod erasure_support;
 use coordinator_support::{
     PublicCoordinatorFault, PublicCoordinatorOperation, PublicCoordinatorPort,
     PublicCoordinatorPortConfig, ATTEMPT_ADMITTED_INVENTORY_FIELD,
-    MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD, MANIFEST_LATEST_RECEIPT_FIELD,
-    MANIFEST_TARGET_CLOSURE_FIELD,
+    MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD, MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
+    MANIFEST_LATEST_RECEIPT_FIELD, MANIFEST_TARGET_CLOSURE_FIELD,
 };
 use erasure_support::{
     obligation as fixture_obligation, reference, replay_target as target,
@@ -698,6 +698,29 @@ fn recovery_rejects_a_replayed_attempt_with_a_missing_terminal_state() -> Result
     let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].failure_subject(), missing_state);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_an_indexed_resolution_without_a_frozen_scope() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let port = port(Vec::new(), None);
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+
+    let resolution = resolution(request.reference(), reference(246), reference(247))?;
+    adapter.insert_resolution(request.reference(), 0, &resolution)?;
+    adapter.replace_manifest_field(
+        request.reference(),
+        MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD,
+        Value::Bytes(resolution.reference().digest().to_vec()),
+    )?;
+
+    let failures = assert_recovery_fails_and_retains(adapter, &request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), resolution.reference());
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
