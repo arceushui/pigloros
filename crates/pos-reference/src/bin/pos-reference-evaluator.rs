@@ -456,7 +456,7 @@ fn embedded_git_commit(path: &Path) -> Result<String, CommandError> {
             archive
                 .read_exact(&mut records)
                 .map_err(|_| CommandError::Identity)?;
-            skip_tar_padding(&mut archive, size as u64)?;
+            skip_tar_padding(&mut archive, size)?;
             return pax_commit(&records);
         }
         skip_exact(&mut archive, size)?;
