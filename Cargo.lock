@@ -4489,7 +4489,12 @@ dependencies = [
 name = "pos-reference"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "ciborium",
+ "ed25519-dalek",
+ "rustix 1.1.4",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
 ]
 

@@ -1,0 +1,390 @@
+pub mod support;
+
+use std::error::Error;
+#[cfg(unix)]
+use std::ffi::OsString;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+
+use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport};
+
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+fn evaluator() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_pos-reference-evaluator"))
+}
+
+fn complete_command(directory: &Path) -> TestResult<Command> {
+    complete_command_with_adapter(directory, "/bin/cat")
+}
+
+fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<Command> {
+    let corpus = support::corpus()?;
+    let request = directory.join("request.cbor");
+    let bundle = directory.join("bundle.cfb1");
+    let policy = directory.join("policy.tps1");
+    let source = directory.join("evaluator-source.tar.gz");
+    fs::write(&request, corpus.request)?;
+    fs::write(&bundle, corpus.archive)?;
+    fs::write(&policy, corpus.trust_policy)?;
+    fs::write(&source, b"independently reviewed evaluator source")?;
+    let digest = "01".repeat(32);
+    let declaration_digest = "2f".repeat(32);
+    let mut command = evaluator();
+    command.args([
+        "--request",
+        request.to_str().ok_or("request path is not UTF-8")?,
+        "--bundle",
+        bundle.to_str().ok_or("bundle path is not UTF-8")?,
+        "--trust-policy",
+        policy.to_str().ok_or("policy path is not UTF-8")?,
+        "--evaluator-source",
+        source.to_str().ok_or("source path is not UTF-8")?,
+        "--declaration-digest",
+        declaration_digest.as_str(),
+        "--shared-code-audit-digest",
+        digest.as_str(),
+        "--reviewer",
+        "reviewer-one",
+        "--authorship-independent",
+        "--organizational-independent",
+        "--adapter",
+        adapter,
+    ]);
+    Ok(command)
+}
+
+#[cfg(unix)]
+fn request_with_version(request: &[u8], version: u64) -> TestResult<Vec<u8>> {
+    let mut value: ciborium::value::Value = ciborium::from_reader(request)?;
+    let ciborium::value::Value::Array(fields) = &mut value else {
+        return Err("request is not an array".into());
+    };
+    fields[1] = ciborium::value::Value::Integer(version.into());
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&value, &mut bytes)?;
+    Ok(bytes)
+}
+
+#[test]
+fn command_rejects_incomplete_duplicate_and_noncanonical_identity_arguments() -> TestResult {
+    assert!(!evaluator().output()?.status.success());
+
+    let duplicated = evaluator()
+        .args(["--request", "one", "--request", "two"])
+        .output()?;
+    assert!(!duplicated.status.success());
+
+    let unknown = evaluator().arg("--legacy-protocol").output()?;
+    assert!(!unknown.status.success());
+
+    for option in [
+        "--request",
+        "--bundle",
+        "--trust-policy",
+        "--evaluator-source",
+        "--declaration-digest",
+        "--shared-code-audit-digest",
+        "--reviewer",
+        "--adapter",
+        "--adapter-arg",
+    ] {
+        assert!(!evaluator().arg(option).output()?.status.success());
+    }
+
+    for flag in ["--authorship-independent", "--organizational-independent"] {
+        assert!(!evaluator().args([flag, flag]).output()?.status.success());
+    }
+    Ok(())
+}
+
+#[test]
+fn command_rejects_each_missing_required_option() -> TestResult {
+    let digest = "01".repeat(32);
+    let prefixes = [
+        vec!["--reviewer", "reviewer-one"],
+        vec!["--request", "request", "--reviewer", "reviewer-one"],
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--reviewer",
+            "reviewer-one",
+        ],
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--trust-policy",
+            "policy",
+            "--reviewer",
+            "reviewer-one",
+        ],
+    ];
+    for arguments in prefixes {
+        assert!(!evaluator().args(arguments).output()?.status.success());
+    }
+    for arguments in [
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--trust-policy",
+            "policy",
+            "--evaluator-source",
+            "source",
+            "--reviewer",
+            "reviewer-one",
+        ],
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--trust-policy",
+            "policy",
+            "--evaluator-source",
+            "source",
+            "--declaration-digest",
+            digest.as_str(),
+            "--reviewer",
+            "reviewer-one",
+        ],
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--trust-policy",
+            "policy",
+            "--evaluator-source",
+            "source",
+            "--declaration-digest",
+            digest.as_str(),
+            "--shared-code-audit-digest",
+            digest.as_str(),
+            "--reviewer",
+            "reviewer-one",
+        ],
+    ] {
+        assert!(!evaluator().args(arguments).output()?.status.success());
+    }
+    Ok(())
+}
+
+#[test]
+fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let request = directory.path().join("request.cbor");
+    let bundle = directory.path().join("bundle.cfb1");
+    let policy = directory.path().join("policy.tps1");
+    fs::write(&request, [0xff])?;
+    fs::write(&bundle, [0xff])?;
+    fs::write(&policy, [0xff])?;
+    let digest = "01".repeat(32);
+    let output = evaluator()
+        .args([
+            "--request",
+            request.to_str().ok_or("request path is not UTF-8")?,
+            "--bundle",
+            bundle.to_str().ok_or("bundle path is not UTF-8")?,
+            "--trust-policy",
+            policy.to_str().ok_or("policy path is not UTF-8")?,
+            "--evaluator-source",
+            "source",
+            "--declaration-digest",
+            digest.as_str(),
+            "--shared-code-audit-digest",
+            digest.as_str(),
+            "--reviewer",
+            "reviewer-one",
+            "--adapter",
+            "/bin/false",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+
+    let oversized = directory.path().join("oversized-request.cbor");
+    fs::File::create(&oversized)?.set_len(16 * 1024 * 1024 + 1)?;
+    let oversized_output = evaluator()
+        .args([
+            "--request",
+            oversized.to_str().ok_or("oversized path is not UTF-8")?,
+            "--bundle",
+            bundle.to_str().ok_or("bundle path is not UTF-8")?,
+            "--trust-policy",
+            policy.to_str().ok_or("policy path is not UTF-8")?,
+            "--evaluator-source",
+            "source",
+            "--declaration-digest",
+            digest.as_str(),
+            "--shared-code-audit-digest",
+            digest.as_str(),
+            "--reviewer",
+            "reviewer-one",
+            "--adapter",
+            "/bin/false",
+        ])
+        .output()?;
+    assert!(!oversized_output.status.success());
+    assert!(oversized_output.stdout.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_emits_a_self_verified_report_through_the_public_process_boundary() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = complete_command(directory.path())?
+        .args(["--adapter-arg", "--ignored-by-cat"])
+        .output()?;
+    assert!(output.status.success());
+    let report = ConformanceReport::from_canonical_cbor(&output.stdout)?;
+    assert_eq!(report.cases.len(), 7);
+    assert_eq!(
+        report.evaluator_source_digest,
+        *blake3::hash(b"independently reviewed evaluator source").as_bytes()
+    );
+    assert_eq!(
+        report.independence.reviewer_ids,
+        vec!["reviewer-one".to_owned()]
+    );
+    assert!(report.independence.authorship_independent);
+    assert!(report.independence.organizational_independent);
+    assert!(!output.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_closes_input_adapter_and_evaluation_failures() -> TestResult {
+    for input in [
+        "request.cbor",
+        "bundle.cfb1",
+        "policy.tps1",
+        "evaluator-source.tar.gz",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let mut missing_input = complete_command(directory.path())?;
+        fs::remove_file(directory.path().join(input))?;
+        assert!(!missing_input.output()?.status.success());
+    }
+
+    let directory = tempfile::tempdir()?;
+    let mut oversized_source = complete_command(directory.path())?;
+    fs::File::create(directory.path().join("evaluator-source.tar.gz"))?
+        .set_len(1024 * 1024 * 1024 + 1)?;
+    assert!(!oversized_source.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    assert!(
+        !complete_command_with_adapter(directory.path(), "relative-adapter")?
+            .output()?
+            .status
+            .success()
+    );
+
+    let directory = tempfile::tempdir()?;
+    let unavailable = complete_command_with_adapter(directory.path(), "/bin/false")?.output()?;
+    assert!(unavailable.status.success());
+    let report = ConformanceReport::from_canonical_cbor(&unavailable.stdout)?;
+    assert!(report
+        .cases
+        .iter()
+        .all(|case| case.outcome == CaseStatus::Unavailable));
+
+    let directory = tempfile::tempdir()?;
+    let mut malformed_bundle = complete_command(directory.path())?;
+    fs::write(directory.path().join("bundle.cfb1"), [0xff])?;
+    assert!(!malformed_bundle.output()?.status.success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_rejects_duplicate_and_unsorted_public_identity_options() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    for duplicate in [
+        ["--bundle", "second"],
+        ["--trust-policy", "second"],
+        ["--evaluator-source", "second-source"],
+        [
+            "--declaration-digest",
+            "0101010101010101010101010101010101010101010101010101010101010101",
+        ],
+        [
+            "--shared-code-audit-digest",
+            "0101010101010101010101010101010101010101010101010101010101010101",
+        ],
+        ["--adapter", "/bin/false"],
+    ] {
+        let output = complete_command(directory.path())?
+            .args(duplicate)
+            .output()?;
+        assert!(!output.status.success());
+    }
+
+    let output = complete_command(directory.path())?
+        .args(["--reviewer", "reviewer-one"])
+        .output()?;
+    assert!(!output.status.success());
+
+    let output = complete_command(directory.path())?
+        .args(["--reviewer", "reviewer-alpha"])
+        .output()?;
+    assert!(!output.status.success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_rejects_noncanonical_digest_and_argument_boundaries() -> TestResult {
+    for digest in [
+        "01".to_owned(),
+        "g1".repeat(32),
+        "1g".repeat(32),
+        "AA".repeat(32),
+        "00".repeat(32),
+    ] {
+        assert!(!evaluator()
+            .args(["--declaration-digest", digest.as_str()])
+            .output()?
+            .status
+            .success());
+    }
+    assert!(!evaluator()
+        .arg(OsString::from_vec(vec![0xff]))
+        .output()?
+        .status
+        .success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_preserves_unsupported_request_version_and_source_read_failures() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let mut unsupported = complete_command(directory.path())?;
+    let corpus = support::corpus()?;
+    fs::write(
+        directory.path().join("request.cbor"),
+        request_with_version(&corpus.request, 2)?,
+    )?;
+    assert!(!unsupported.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    let mut unreadable_source = complete_command(directory.path())?;
+    let source = directory.path().join("evaluator-source.tar.gz");
+    fs::remove_file(&source)?;
+    fs::create_dir(&source)?;
+    assert!(!unreadable_source.output()?.status.success());
+    Ok(())
+}

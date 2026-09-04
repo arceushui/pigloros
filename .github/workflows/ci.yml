@@ -1,4 +1,4 @@
-# PiglorOS CI — quality gates enforced on every PR and push to main.
+# PiglorOS CI — quality gates enforced for Rust-affecting changes and pushes to main.
 #
 # Gate policy (Redmine #100):
 #   fmt          — cargo fmt --check (rustfmt)
@@ -20,6 +20,13 @@
 #   coverage(off) is only permitted on #[test]/#[tokio::test]/#[cfg(test)] code
 #     (enforced by Trunk rust-test-policy).
 #   --include-ignored: ensures #[ignore] tests run in CI; none may silently skip.
+#
+# Pull requests that change only documentation or other non-Rust content run the
+# lightweight scope job plus Trunk/CodeQL policy workflows. Coverage and its
+# cargo-crap consumer remain unconditional; the other Rust build, test,
+# security, platform, and report jobs are skipped successfully. Any Rust,
+# manifest, dependency, script, workflow, or build-policy change keeps the
+# complete gate set.
 
 name: ci
 
@@ -45,8 +52,37 @@ env:
 
 jobs:
 
+  ci_change_scope:
+    name: ci change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.scope.outputs.rust || steps.full.outputs.rust }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+      - name: Detect Rust-affecting changes
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: scope
+        if: github.event_name == 'pull_request' && hashFiles('.github/rust-scope.yml') != ''
+        with:
+          filters: .github/rust-scope.yml
+          predicate-quantifier: some-with-excludes
+      - name: Use full scope for non-pull-request events
+        id: full
+        if: github.event_name != 'pull_request' || hashFiles('.github/rust-scope.yml') == ''
+        run: printf 'rust=true\n' >> "$GITHUB_OUTPUT"
+
   fmt:
     name: fmt
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -62,6 +98,8 @@ jobs:
 
   rustdoc:
     name: rustdoc
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -79,6 +117,8 @@ jobs:
 
   test:
     name: test
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -93,11 +133,41 @@ jobs:
         run: cargo check --workspace --all-targets --no-default-features --locked
       - name: cargo check (all features, all targets)
         run: cargo check --workspace --all-targets --all-features --locked
+      - name: Prove reference evaluator implementation independence
+        run: bash scripts/check-reference-evaluator-independence.sh
       - name: cargo test (all features, no ignored skip)
         run: |
           set -euo pipefail
           cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
           bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-test.log
+
+  reference-evaluator-release:
+    name: reference-evaluator-release
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: reference-evaluator-release
+      - name: Install evaluator packaging tools
+        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+      - name: Build and verify standalone evaluator release evidence
+        run: bash scripts/package-reference-evaluator.sh "${RUNNER_TEMP}/reference-evaluator"
+      - name: Upload standalone evaluator release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reference-evaluator-${{ github.sha }}
+          path: ${{ runner.temp }}/reference-evaluator
+          retention-days: 7
+          if-no-files-found: error
 
   conformance-fixtures:
     name: conformance-fixtures
@@ -198,6 +268,8 @@ jobs:
 
   clippy:
     name: clippy
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -394,6 +466,8 @@ jobs:
 
   audit:
     name: cargo-audit (security advisories)
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -408,6 +482,8 @@ jobs:
 
   deny:
     name: cargo-deny (licenses / bans / sources / deps)
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -422,6 +498,8 @@ jobs:
 
   cargo-shear:
     name: cargo-shear (dependencies and source layout)
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -437,6 +515,8 @@ jobs:
 
   geiger:
     name: cargo-geiger (unsafe code audit)
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -451,6 +531,8 @@ jobs:
 
   asan:
     name: asan shard (${{ matrix.shard }})
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -552,6 +634,8 @@ jobs:
 
   docker-build:
     name: docker-build
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -584,6 +668,8 @@ jobs:
 
   world-client-wasm:
     name: world-client-wasm
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -603,6 +689,8 @@ jobs:
 
   world-client-browser-parity:
     name: world-client-browser-parity
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -636,6 +724,8 @@ jobs:
 
   pinned-dependencies:
     name: pinned-dependencies
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -651,6 +741,8 @@ jobs:
         run: bash scripts/check-pinned-dependencies.sh
       - name: Test pinned dependency checker
         run: bash scripts/test-check-pinned-dependencies.sh
+      - name: Test Rust scope filter policy
+        run: python scripts/test_rust_scope_policy.py
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker
@@ -666,6 +758,8 @@ jobs:
 
   modules-structure:
     name: modules-structure (reports only)
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -701,6 +795,8 @@ jobs:
 
   depgraph:
     name: depgraph
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

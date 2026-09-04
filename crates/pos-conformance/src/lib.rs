@@ -700,20 +700,20 @@ pub fn wave8_plugin_boundary() -> PluginBoundaryV1 {
     boundary
 }
 
-/// A stable authorization identity used by participant knowledge records.
+/// Synthetic Principal-shaped evidence used only by Wave 8 conformance fixtures.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PrincipalRefV1 {
+pub struct FixturePrincipalRefV1 {
     pub principal_id: String,
     pub participant_id: String,
     pub subject_id: Option<String>,
     pub trust_domain: String,
 }
 
-/// An attenuated capability made visible only through a digest in the proof.
+/// Synthetic grant evidence used only by Wave 8 conformance fixtures.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CapabilityGrantV1 {
+pub struct FixtureCapabilityGrantV1 {
     pub grant_id: String,
     pub principal_id: String,
     pub capability: String,
@@ -722,10 +722,10 @@ pub struct CapabilityGrantV1 {
     pub policy_digest: [u8; 32],
 }
 
-/// The host-owned answer used to derive a participant snapshot.
+/// Synthetic authorization evidence used only by Wave 8 conformance fixtures.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AuthorizationDecisionV1 {
+pub struct FixtureAuthorizationDecisionV1 {
     pub principal_id: String,
     pub resource: String,
     pub operation: String,
@@ -741,9 +741,9 @@ pub struct AuthorizationDecisionV1 {
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeSnapshotV1 {
     pub participant_id: String,
-    pub principal: PrincipalRefV1,
-    pub grant: CapabilityGrantV1,
-    pub authorization: AuthorizationDecisionV1,
+    pub principal: FixturePrincipalRefV1,
+    pub grant: FixtureCapabilityGrantV1,
+    pub authorization: FixtureAuthorizationDecisionV1,
     pub tick: u64,
     pub visible_event_seqs: Vec<u64>,
     pub visible_event_digests: Vec<[u8; 32]>,
@@ -763,8 +763,8 @@ pub struct ScenarioRoomFixtureV1 {
     pub network_enabled: bool,
     pub exogenous_digests: Vec<[u8; 32]>,
     pub fixed_policy_digests: Vec<[u8; 32]>,
-    pub principals: Vec<PrincipalRefV1>,
-    pub grants: Vec<CapabilityGrantV1>,
+    pub principals: Vec<FixturePrincipalRefV1>,
+    pub grants: Vec<FixtureCapabilityGrantV1>,
     pub room_digest: [u8; 32],
 }
 
@@ -1239,7 +1239,7 @@ pub struct Wave8ProofContractV1 {
     pub scenario_room: ScenarioRoomFixtureV1,
     pub plugin_boundary: PluginBoundaryV1,
     pub knowledge_snapshots: Vec<KnowledgeSnapshotV1>,
-    pub authorization_decisions: Vec<AuthorizationDecisionV1>,
+    pub authorization_decisions: Vec<FixtureAuthorizationDecisionV1>,
     pub counterfactual: CounterfactualContractV1,
     pub atomicity: Vec<TickAtomicityV1>,
     pub conformance_report: ConformanceReportV1,
@@ -1583,21 +1583,22 @@ fn typed_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<[u8; 32], pos_
 /// preventing serde's map representation from becoming a protocol by accident.
 pub mod strict_codec {
     use super::{
-        AuthoritativeEventV1, AuthorizationDecisionV1, BTreeMap, CapabilityGrantV1,
-        CaseOutcomeStatusV1, CaseOutcomeV1, CausalTraceEntryV1, ClaimLayerV1, ConformanceReportV1,
-        ConsentAuditV1, CounterfactualContractV1, Cursor, DependencyClassV1, DependencyNodeV1,
-        DigestSizeV1, DivergenceLocationKindV1, DivergenceMismatchKindV1, DivergenceReportV1,
-        ExecutionModeV1, FollowOnMismatchV1, HostClosureAuditV1, ImplementationIdentityV1,
-        IndependenceEvidenceV1, InputDependencyV1, InterventionV1, InvalidArtifactV1,
-        KnowledgeSnapshotV1, MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceVariantV1,
-        OwnerFrontierV1, ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1,
-        PluginFailureClassV1, PluginFailureV1, PrincipalRefV1, ProjectionEvidenceV1,
-        RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1, ReproManifestV1,
-        ReproducibilityClassV1, SafeErrorCodeV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
-        SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1, Value,
-        VerificationErrorV1, VerificationOutcomeV1, VerificationResultV1, Wave8ProofContractV1,
-        CONFORMANCE_REPORT_MAGIC_V1, DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1,
-        EVIDENCE_FORMAT_V1, RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
+        AuthoritativeEventV1, BTreeMap, CaseOutcomeStatusV1, CaseOutcomeV1, CausalTraceEntryV1,
+        ClaimLayerV1, ConformanceReportV1, ConsentAuditV1, CounterfactualContractV1, Cursor,
+        DependencyClassV1, DependencyNodeV1, DigestSizeV1, DivergenceLocationKindV1,
+        DivergenceMismatchKindV1, DivergenceReportV1, ExecutionModeV1,
+        FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1, FixturePrincipalRefV1,
+        FollowOnMismatchV1, HostClosureAuditV1, ImplementationIdentityV1, IndependenceEvidenceV1,
+        InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1,
+        MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceVariantV1, OwnerFrontierV1,
+        ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1, PluginFailureClassV1,
+        PluginFailureV1, ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1,
+        ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, SafeErrorCodeV1,
+        ScenarioRoomFixtureV1, SuffixInvalidationReasonV1, SuffixInvalidationV1, TickAtomicityV1,
+        UncertaintyV1, UnknownEdgePolicyV1, Value, VerificationErrorV1, VerificationOutcomeV1,
+        VerificationResultV1, Wave8ProofContractV1, CONFORMANCE_REPORT_MAGIC_V1,
+        DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1, EVIDENCE_FORMAT_V1,
+        RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
         VERIFICATION_RECORD_MAGIC_V1,
     };
 
@@ -2919,7 +2920,7 @@ pub mod strict_codec {
         }
     }
 
-    fn encode_principal(principal: &PrincipalRefV1) -> Value {
+    fn encode_principal(principal: &FixturePrincipalRefV1) -> Value {
         Value::Array(vec![
             text(&principal.principal_id),
             text(&principal.participant_id),
@@ -2928,9 +2929,9 @@ pub mod strict_codec {
         ])
     }
 
-    fn decode_principal(value: &Value) -> Result<PrincipalRefV1, StrictCborError> {
+    fn decode_principal(value: &Value) -> Result<FixturePrincipalRefV1, StrictCborError> {
         let fields = array(value, "principal", 4)?;
-        Ok(PrincipalRefV1 {
+        Ok(FixturePrincipalRefV1 {
             principal_id: string(&fields[0], "principal_id")?,
             participant_id: string(&fields[1], "participant_id")?,
             subject_id: optional_string(&fields[2], "subject_id")?,
@@ -2938,7 +2939,7 @@ pub mod strict_codec {
         })
     }
 
-    fn encode_grant(grant: &CapabilityGrantV1) -> Value {
+    fn encode_grant(grant: &FixtureCapabilityGrantV1) -> Value {
         Value::Array(vec![
             text(&grant.grant_id),
             text(&grant.principal_id),
@@ -2949,9 +2950,9 @@ pub mod strict_codec {
         ])
     }
 
-    fn decode_grant(value: &Value) -> Result<CapabilityGrantV1, StrictCborError> {
+    fn decode_grant(value: &Value) -> Result<FixtureCapabilityGrantV1, StrictCborError> {
         let fields = array(value, "grant", 6)?;
-        Ok(CapabilityGrantV1 {
+        Ok(FixtureCapabilityGrantV1 {
             grant_id: string(&fields[0], "grant_id")?,
             principal_id: string(&fields[1], "grant_principal")?,
             capability: string(&fields[2], "grant_capability")?,
@@ -2961,7 +2962,7 @@ pub mod strict_codec {
         })
     }
 
-    fn encode_authorization(decision: &AuthorizationDecisionV1) -> Value {
+    fn encode_authorization(decision: &FixtureAuthorizationDecisionV1) -> Value {
         Value::Array(vec![
             text(&decision.principal_id),
             text(&decision.resource),
@@ -2974,9 +2975,11 @@ pub mod strict_codec {
         ])
     }
 
-    fn decode_authorization(value: &Value) -> Result<AuthorizationDecisionV1, StrictCborError> {
+    fn decode_authorization(
+        value: &Value,
+    ) -> Result<FixtureAuthorizationDecisionV1, StrictCborError> {
         let fields = array(value, "authorization", 8)?;
-        Ok(AuthorizationDecisionV1 {
+        Ok(FixtureAuthorizationDecisionV1 {
             principal_id: string(&fields[0], "authorization_principal")?,
             resource: string(&fields[1], "authorization_resource")?,
             operation: string(&fields[2], "authorization_operation")?,
@@ -5823,15 +5826,18 @@ pub mod tests {
         );
     }
 
-    fn test_authorization_fixtures() -> (PrincipalRefV1, CapabilityGrantV1, AuthorizationDecisionV1)
-    {
-        let principal = PrincipalRefV1 {
+    fn test_authorization_fixtures() -> (
+        FixturePrincipalRefV1,
+        FixtureCapabilityGrantV1,
+        FixtureAuthorizationDecisionV1,
+    ) {
+        let principal = FixturePrincipalRefV1 {
             principal_id: "principal:operator".to_owned(),
             participant_id: "operator".to_owned(),
             subject_id: None,
             trust_domain: "test".to_owned(),
         };
-        let grant = CapabilityGrantV1 {
+        let grant = FixtureCapabilityGrantV1 {
             grant_id: "grant:operator".to_owned(),
             principal_id: principal.principal_id.clone(),
             capability: "observe".to_owned(),
@@ -5839,7 +5845,7 @@ pub mod tests {
             consent_epoch: 0,
             policy_digest: [3; 32],
         };
-        let decision = AuthorizationDecisionV1 {
+        let decision = FixtureAuthorizationDecisionV1 {
             principal_id: principal.principal_id.clone(),
             resource: "room".to_owned(),
             operation: "observe".to_owned(),
