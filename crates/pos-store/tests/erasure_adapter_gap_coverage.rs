@@ -779,6 +779,7 @@ fn sqlite_public_reads_map_missing_schema_to_closed_storage_errors(
 enum SqliteFaultKind {
     MissingObject,
     MismatchedState,
+    MissingStateTable,
     MissingIndex,
     MismatchedEffect,
     ApplyWithMismatchedState,
@@ -845,6 +846,7 @@ impl SqliteFaultKind {
             Self::MissingIndex => 4,
             Self::MissingObject
             | Self::MismatchedState
+            | Self::MissingStateTable
             | Self::MismatchedEffect
             | Self::ApplyWithMismatchedState => 1,
         }
@@ -853,6 +855,7 @@ impl SqliteFaultKind {
     const fn expected_error(self) -> ErasureErrorV1 {
         match self {
             Self::ApplyWithMismatchedState => ErasureErrorV1::ProvenanceMissing,
+            Self::MissingStateTable => ErasureErrorV1::ReceiptCommitFailed,
             Self::MissingObject
             | Self::MismatchedState
             | Self::MissingIndex
@@ -923,6 +926,11 @@ impl SqliteFaultHook {
                         )
                         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
                 }
+            }
+            SqliteFaultKind::MissingStateTable => {
+                connection
+                    .execute_batch("DROP TABLE erasure_states")
+                    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
             }
             SqliteFaultKind::MissingIndex => {
                 let index = mutation
@@ -1037,6 +1045,7 @@ fn sqlite_exact_retry_rechecks_each_public_durable_component(
     for kind in [
         SqliteFaultKind::MissingObject,
         SqliteFaultKind::MismatchedState,
+        SqliteFaultKind::MissingStateTable,
         SqliteFaultKind::MissingIndex,
         SqliteFaultKind::MismatchedEffect,
     ] {
