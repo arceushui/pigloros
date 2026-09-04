@@ -5,6 +5,8 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::fs::OpenOptions;
 use std::io::{Cursor, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -46,14 +48,22 @@ fn complete_command(directory: &Path) -> TestResult<Command> {
 
 fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<Command> {
     let corpus = support::corpus()?;
+    command_for_corpus(directory, adapter, &corpus)
+}
+
+fn command_for_corpus(
+    directory: &Path,
+    adapter: &str,
+    corpus: &support::Corpus,
+) -> TestResult<Command> {
     let request = directory.join("request.cbor");
     let bundle = directory.join("bundle.cfb1");
     let policy = directory.join("policy.tps1");
     let source = directory.join("source/pigloros-source.tar.gz");
     let provenance = directory.join("provenance.json");
-    fs::write(&request, corpus.request)?;
-    fs::write(&bundle, corpus.archive)?;
-    fs::write(&policy, corpus.trust_policy)?;
+    fs::write(&request, &corpus.request)?;
+    fs::write(&bundle, &corpus.archive)?;
+    fs::write(&policy, &corpus.trust_policy)?;
     write_evaluator_package(directory)?;
     let digest = "01".repeat(32);
     let declaration_digest = "2f".repeat(32);
@@ -162,13 +172,25 @@ fn write_checksum_inventory(directory: &Path) -> TestResult {
 }
 
 fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
-    let record = format!("52 comment={commit}\n");
+    gzip_bytes(&source_tar(commit))
+}
+
+fn source_tar(commit: &str) -> Vec<u8> {
+    let record = pax_record("comment", commit.as_bytes());
     let mut tar = Vec::new();
     tar.extend_from_slice(&tar_header("pax_global_header", record.len(), b'g'));
-    tar.extend_from_slice(record.as_bytes());
+    tar.extend_from_slice(&record);
     tar.resize(tar.len().div_ceil(512) * 512, 0);
+    for path in [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/pos-reference/Cargo.toml",
+        "crates/pos-reference/src/bin/pos-reference-evaluator.rs",
+    ] {
+        tar.extend_from_slice(&tar_header(path, 0, b'0'));
+    }
     tar.extend_from_slice(&[0; 1024]);
-    gzip_bytes(&tar)
+    tar
 }
 
 fn gzip_bytes(bytes: &[u8]) -> TestResult<Vec<u8>> {
@@ -418,6 +440,8 @@ fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
             policy.to_str().ok_or("policy path is not UTF-8")?,
             "--evaluator-source",
             "source",
+            "--evaluator-provenance",
+            "provenance",
             "--declaration-digest",
             digest.as_str(),
             "--shared-code-audit-digest",
@@ -443,6 +467,8 @@ fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
             policy.to_str().ok_or("policy path is not UTF-8")?,
             "--evaluator-source",
             "source",
+            "--evaluator-provenance",
+            "provenance",
             "--declaration-digest",
             digest.as_str(),
             "--shared-code-audit-digest",
@@ -499,6 +525,29 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
 
 #[cfg(unix)]
 #[test]
+fn command_accepts_a_sha256_git_source_commit() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let mut command = complete_command(directory.path())?;
+    let commit = "2".repeat(64);
+    let source = source_archive(&commit)?;
+    rebind_source_archive(directory.path(), &source)?;
+    replace_provenance_field(
+        directory.path(),
+        "source_commit",
+        serde_json::Value::String(commit),
+    )?;
+    write_checksum_inventory(directory.path())?;
+    let output = command.output()?;
+    assert!(
+        output.status.success(),
+        "evaluator stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn command_honours_a_zero_diagnostic_output_cap() -> TestResult {
     let directory = tempfile::tempdir()?;
     let corpus = support::corpus()?;
@@ -511,6 +560,60 @@ fn command_honours_a_zero_diagnostic_output_cap() -> TestResult {
     assert!(output.status.success());
     assert!(!output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_accepts_an_exact_authenticated_profile_byte_cap() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let corpus = support::corpus_with_profile_mutation(
+        support::ProfileMutation::SelectedProfileByteCapExact,
+    )?;
+    let output = command_for_corpus(directory.path(), "/bin/cat", &corpus)?.output()?;
+    assert!(
+        output.status.success(),
+        "evaluator stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let base = complete_command(directory.path())?;
+    let request_path = directory.path().join("request.cbor");
+    let request = fs::read(&request_path)?;
+    fs::remove_file(&request_path)?;
+    assert!(Command::new("mkfifo")
+        .arg(&request_path)
+        .status()?
+        .success());
+
+    let executable = directory.path().join("running-evaluator");
+    fs::copy(env!("CARGO_BIN_EXE_pos-reference-evaluator"), &executable)?;
+    let mut command = Command::new(&executable);
+    command
+        .args(base.get_args())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn()?;
+
+    fs::rename(&executable, directory.path().join("loaded-evaluator"))?;
+    fs::write(&executable, b"replacement path contents")?;
+    OpenOptions::new()
+        .write(true)
+        .open(&request_path)?
+        .write_all(&request)?;
+
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "evaluator stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 
@@ -994,6 +1097,48 @@ fn command_rejects_malformed_embedded_source_identity_records() -> TestResult {
         let directory = tempfile::tempdir()?;
         let mut command = complete_command(directory.path())?;
         rebind_source_archive(directory.path(), &source)?;
+        assert!(!command.output()?.status.success());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_rejects_incomplete_or_ambiguous_source_archives() -> TestResult {
+    let commit = "1".repeat(40);
+    let valid = source_tar(&commit);
+
+    let mut duplicate_commit = valid.clone();
+    duplicate_commit.splice(1024..1024, valid[..1024].iter().copied());
+
+    let mut interrupted_termination = valid.clone();
+    let final_header = interrupted_termination.len() - 512;
+    interrupted_termination[final_header..].copy_from_slice(&tar_header("late", 0, b'0'));
+
+    let mut trailing_nonzero = valid.clone();
+    trailing_nonzero.push(1);
+
+    let mut unsupported_type = valid.clone();
+    let first_source_header = 1024;
+    unsupported_type[first_source_header + 156] = b'x';
+    let mut header =
+        <[u8; 512]>::try_from(&unsupported_type[first_source_header..first_source_header + 512])?;
+    write_tar_checksum(&mut header);
+    unsupported_type[first_source_header..first_source_header + 512].copy_from_slice(&header);
+
+    let mut missing_source_entry = valid;
+    missing_source_entry.drain(1024..1536);
+
+    for tar in [
+        duplicate_commit,
+        interrupted_termination,
+        trailing_nonzero,
+        unsupported_type,
+        missing_source_entry,
+    ] {
+        let directory = tempfile::tempdir()?;
+        let mut command = complete_command(directory.path())?;
+        rebind_source_archive(directory.path(), &gzip_bytes(&tar)?)?;
         assert!(!command.output()?.status.success());
     }
     Ok(())

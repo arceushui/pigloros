@@ -1,7 +1,8 @@
 //! Independent CFB1 closure and signature validation.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
 use ciborium::value::Value;
@@ -16,6 +17,7 @@ use crate::evaluator_protocol::{
 const MAX_ARCHIVE_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MEMBER_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MEMBERS: usize = 65_536;
 const MAX_PATH_BYTES: usize = 256;
 const PROFILE_PATH: &str = "profile/CPF1.cbor";
@@ -100,7 +102,7 @@ pub struct SelectedBundleCaps {
     pub max_total_bundle_bytes: u64,
 }
 
-/// Authenticated CFB1 metadata inspected without retaining member bodies.
+/// Authenticated CFB1 metadata inspected without retaining non-profile member bodies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedBundlePreflight {
     profile_bytes: Vec<u8>,
@@ -262,7 +264,13 @@ pub fn verify_signed_bundle(
     })
 }
 
-/// Authenticate and measure a seekable CFB1 archive without retaining its member bodies.
+/// Authenticate and measure a seekable CFB1 archive without retaining non-profile member bodies.
+///
+/// The input is copied once into private immutable storage while its requested
+/// archive digest and compiled size bound are checked. The staged scan then
+/// authenticates the signed manifest, trust policy, CPF1 bytes, and closure
+/// measurements needed for selected-cap enforcement. Complete canonical CFB1
+/// and member-body validation remains the responsibility of [`verify_signed_bundle`].
 ///
 /// # Errors
 /// Returns a closed failure when the archive identity, canonical structure, signed manifest,
@@ -272,15 +280,17 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
 ) -> Result<AuthenticatedBundlePreflight, BundleError> {
-    preflight_archive(archive, trust_policy_bytes, request)
+    let (mut snapshot, archive_length) =
+        authenticated_snapshot(archive, request.fixture_bundle_digest)?;
+    preflight_archive(&mut snapshot, archive_length, trust_policy_bytes, request)
 }
 
 fn preflight_archive(
     archive: &mut dyn ArchiveReader,
+    archive_length: u64,
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
 ) -> Result<AuthenticatedBundlePreflight, BundleError> {
-    let archive_length = bounded_archive_digest(archive, request.fixture_bundle_digest)?;
     let scanned = scan_archive(archive, archive_length)?;
     let manifest_bytes = read_range(archive, scanned.manifest_range.clone())?;
     let manifest = decode_manifest_bytes(manifest_bytes, request)?;
@@ -318,10 +328,10 @@ fn preflight_archive(
     })
 }
 
-fn bounded_archive_digest<R: Read + Seek + ?Sized>(
+fn authenticated_snapshot<R: Read + Seek>(
     archive: &mut R,
     expected: [u8; 32],
-) -> Result<u64, BundleError> {
+) -> Result<(File, u64), BundleError> {
     let length = archive
         .seek(SeekFrom::End(0))
         .map_err(|_| BundleError::InvalidEncoding)?;
@@ -331,16 +341,31 @@ fn bounded_archive_digest<R: Read + Seek + ?Sized>(
     archive
         .seek(SeekFrom::Start(0))
         .map_err(|_| BundleError::InvalidEncoding)?;
+    let mut snapshot = tempfile::tempfile().map_err(|_| BundleError::InvalidEncoding)?;
     let mut hasher = blake3::Hasher::new();
-    let copied = std::io::copy(&mut (&mut *archive).take(length), &mut hasher)
-        .map_err(|_| BundleError::InvalidEncoding)?;
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    let mut bounded = archive.take(length + 1);
+    loop {
+        let read = bounded
+            .read(&mut buffer)
+            .map_err(|_| BundleError::InvalidEncoding)?;
+        if read == 0 {
+            break;
+        }
+        copied += read as u64;
+        hasher.update(&buffer[..read]);
+        snapshot
+            .write_all(&buffer[..read])
+            .map_err(|_| BundleError::InvalidEncoding)?;
+    }
     if copied != length || *hasher.finalize().as_bytes() != expected {
         return Err(BundleError::DigestMismatch);
     }
-    archive
+    snapshot
         .seek(SeekFrom::Start(0))
         .map_err(|_| BundleError::InvalidEncoding)?;
-    Ok(length)
+    Ok((snapshot, length))
 }
 
 fn scan_archive<R: Read + Seek + ?Sized>(
@@ -396,7 +421,7 @@ fn scan_members<R: Read + ?Sized>(
             return Err(BundleError::FieldOutOfBounds);
         }
         let bytes = if path == PROFILE_PATH {
-            Some(read_bytes(decoder, size, MAX_MEMBER_BYTES)?)
+            Some(read_bytes(decoder, size, MAX_PROFILE_BYTES)?)
         } else {
             drain_bytes(decoder, size)?;
             None

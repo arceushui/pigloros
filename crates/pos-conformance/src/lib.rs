@@ -1178,7 +1178,7 @@ pub struct ConformanceReportV1 {
     pub replay_claim: ReplayClaimV1,
     pub redaction_state: RedactionStateV1,
     pub limitations_digest: [u8; 32],
-    pub provenance_digest: [u8; 32],
+    pub evaluator_build_provenance_digest: [u8; 32],
     pub report_digest: [u8; 32],
 }
 
@@ -1460,7 +1460,10 @@ impl MoatProofEvidenceV1 {
                         + self.causal_trace.len(),
                 )
                 .unwrap_or(u64::MAX),
-                provenance_digest: self.contract.conformance_report.provenance_digest,
+                provenance_digest: self
+                    .contract
+                    .conformance_report
+                    .evaluator_build_provenance_digest,
                 result_digest: [0; 32],
             };
             result.digest().map(|result_digest| {
@@ -3686,7 +3689,7 @@ pub mod strict_codec {
             enum_replay_claim(report.replay_claim),
             enum_redaction_state(report.redaction_state),
             digest(&report.limitations_digest),
-            digest(&report.provenance_digest),
+            digest(&report.evaluator_build_provenance_digest),
         ];
         if include_digest {
             fields.push(digest(&report.report_digest));
@@ -3744,7 +3747,10 @@ pub mod strict_codec {
             replay_claim: decode_replay_claim(&fields[19])?,
             redaction_state: decode_redaction_state(&fields[20])?,
             limitations_digest: bytes(&fields[21], "report_limitations")?,
-            provenance_digest: bytes(&fields[22], "report_provenance")?,
+            evaluator_build_provenance_digest: bytes(
+                &fields[22],
+                "report_evaluator_build_provenance",
+            )?,
             report_digest: bytes(&fields[23], "report_digest")?,
         })
     }
@@ -4900,7 +4906,7 @@ fn validate_conformance_report_shape(report: &ConformanceReportV1) -> Result<(),
         || report.evaluator_binary_digest == [0; 32]
         || report.evaluator_protocol_digest == [0; 32]
         || report.limitations_digest == [0; 32]
-        || report.provenance_digest == [0; 32]
+        || report.evaluator_build_provenance_digest == [0; 32]
         || report.cases.is_empty()
         || report.cases.len() > 65_536
         || report.implementation.implementation_id.is_empty()
@@ -6022,7 +6028,7 @@ pub mod tests {
             replay_claim: ReplayClaimV1::Exact,
             redaction_state: RedactionStateV1::None,
             limitations_digest: [11; 32],
-            provenance_digest: [12; 32],
+            evaluator_build_provenance_digest: [12; 32],
             report_digest: [0; 32],
         };
         report.report_digest = report.digest().unwrap_or([0; 32]);
@@ -6134,7 +6140,7 @@ pub mod tests {
         assert_report_rejects(|report| report.evaluator_binary_digest = [0; 32]);
         assert_report_rejects(|report| report.evaluator_protocol_digest = [0; 32]);
         assert_report_rejects(|report| report.limitations_digest = [0; 32]);
-        assert_report_rejects(|report| report.provenance_digest = [0; 32]);
+        assert_report_rejects(|report| report.evaluator_build_provenance_digest = [0; 32]);
         assert_report_rejects(|report| report.cases.clear());
         assert_report_rejects(|report| report.implementation.implementation_id.clear());
         assert_report_rejects(|report| {

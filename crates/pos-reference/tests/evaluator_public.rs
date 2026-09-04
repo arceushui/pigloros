@@ -49,6 +49,12 @@ struct LengthMismatchArchive {
     inner: Cursor<Vec<u8>>,
 }
 
+struct ChangingArchive {
+    inner: Cursor<Vec<u8>>,
+    replacement: Vec<u8>,
+    starts: usize,
+}
+
 impl FaultingArchive {
     const fn new(bytes: Vec<u8>, fail_on_read: Option<usize>, fail_on_seek: Option<usize>) -> Self {
         Self {
@@ -97,6 +103,24 @@ impl Seek for LengthMismatchArchive {
         } else {
             offset
         })
+    }
+}
+
+impl Read for ChangingArchive {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buffer)
+    }
+}
+
+impl Seek for ChangingArchive {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        if position == SeekFrom::Start(0) {
+            self.starts += 1;
+            if self.starts == 2 {
+                self.inner = Cursor::new(self.replacement.clone());
+            }
+        }
+        self.inner.seek(position)
     }
 }
 
@@ -1224,7 +1248,10 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
 
 #[test]
 fn evaluator_accepts_exact_authenticated_closure_caps() -> TestResult {
-    for mutation in (0..4).map(ProfileMutation::SelectedClosureCapExact) {
+    let mutations = (0..4)
+        .map(ProfileMutation::SelectedClosureCapExact)
+        .chain([ProfileMutation::SelectedProfileByteCapExact]);
+    for mutation in mutations {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
@@ -1263,6 +1290,17 @@ fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> T
         let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
         preflight.enforce_selected_caps(selected_bundle_caps(caps))?;
     }
+    let corpus =
+        support::corpus_with_profile_mutation(ProfileMutation::SelectedProfileByteCapExact)?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let mut archive = Cursor::new(&corpus.archive);
+    let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+    let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
+    assert_eq!(
+        caps.max_profile_bytes,
+        preflight.profile_bytes().len() as u64
+    );
+    preflight.enforce_selected_caps(selected_bundle_caps(caps))?;
     Ok(())
 }
 
@@ -1629,7 +1667,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     )
     .is_err());
 
-    for failing_seek in 1..=5 {
+    for failing_seek in 1..=2 {
         let mut archive = FaultingArchive::new(corpus.archive.clone(), None, Some(failing_seek));
         assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
     }
@@ -1639,6 +1677,13 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         let mut archive = FaultingArchive::new(corpus.archive.clone(), Some(failing_read), None);
         assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
     }
+
+    let mut changing = ChangingArchive {
+        inner: Cursor::new(corpus.archive.clone()),
+        replacement: vec![0; corpus.archive.len()],
+        starts: 0,
+    };
+    preflight_signed_bundle(&mut changing, &corpus.trust_policy, &request)?;
 
     let mut changed_length = LengthMismatchArchive {
         inner: Cursor::new(corpus.archive.clone()),
@@ -1657,7 +1702,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
 }
 
 #[test]
-fn staged_preflight_rejects_a_manifest_above_the_authenticated_bound() -> TestResult {
+fn staged_preflight_rejects_manifest_and_profile_compiled_bounds() -> TestResult {
     let corpus = support::corpus()?;
     let manifest_size = 64_u64 * 1024 * 1024 + 1;
     let mut archive = vec![0x84, 0x5b];
@@ -1667,6 +1712,21 @@ fn staged_preflight_rejects_a_manifest_above_the_authenticated_bound() -> TestRe
     assert!(
         preflight_signed_bundle(&mut Cursor::new(archive), &corpus.trust_policy, &request,)
             .is_err()
+    );
+
+    let profile_size = 16_u64 * 1024 * 1024 + 1;
+    let mut oversized_profile = vec![0x84, 0xf6, 0x81, 0x83, 0x71];
+    oversized_profile.extend_from_slice(b"profile/CPF1.cbor");
+    oversized_profile.push(0x5b);
+    oversized_profile.extend_from_slice(&profile_size.to_be_bytes());
+    let request = request_for_archive(&corpus.request, &oversized_profile)?;
+    assert_eq!(
+        preflight_signed_bundle(
+            &mut Cursor::new(oversized_profile),
+            &corpus.trust_policy,
+            &request,
+        ),
+        Err(pos_reference::signed_bundle::BundleError::FieldOutOfBounds)
     );
     Ok(())
 }
@@ -1702,6 +1762,18 @@ fn authenticated_caps_reject_request_identity_and_size_mismatches() -> TestResul
     assert!(
         Profile::authenticated_hard_caps(preflight.profile_bytes(), &undersized_request).is_err()
     );
+
+    for mutation in [ProfileMutation::Magic, ProfileMutation::Version] {
+        let changed = support::corpus_with_profile_mutation(mutation)?;
+        let changed_request = EvaluationRequest::from_canonical_cbor(&changed.request)?;
+        let mut archive = Cursor::new(&changed.archive);
+        let preflight =
+            preflight_signed_bundle(&mut archive, &changed.trust_policy, &changed_request)?;
+        assert_eq!(
+            Profile::authenticated_hard_caps(preflight.profile_bytes(), &changed_request),
+            Err(ProfileError::UnsupportedVersion)
+        );
+    }
     Ok(())
 }
 

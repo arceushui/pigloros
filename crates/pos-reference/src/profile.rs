@@ -323,6 +323,7 @@ impl Profile {
     ) -> Result<EvaluatorHardCaps, ProfileError> {
         let value = decode_canonical(bytes)?;
         let fields = array(&value, 18)?;
+        decode_profile_header(fields)?;
         let profile_digest = fixed_bytes(&fields[17])?;
         if !contract_digest_matches(
             b"PiglorOS.ConformanceProfile.v1",

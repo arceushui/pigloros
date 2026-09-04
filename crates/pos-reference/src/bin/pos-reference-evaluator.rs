@@ -3,10 +3,10 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use pos_reference::evaluator::{evaluate, EvaluatorIdentity};
 use pos_reference::evaluator_protocol::{EvaluationRequest, IndependenceEvidence, ProtocolError};
 use pos_reference::process_adapter::ProcessAdapter;
@@ -24,7 +24,8 @@ const MAX_DEPENDENCY_LOCK_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SBOM_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LICENCES_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CHECKSUM_BYTES: u64 = 4 * 1024;
-const MAX_TAR_METADATA_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_TAR_METADATA_BYTES: u64 = 4 * 1024;
+const MAX_SOURCE_TAR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const PROVENANCE_SCHEMA: &str = "PiglorOS.EvaluatorBuildProvenance.v1";
 const PROVENANCE_DOMAIN: &[u8] = b"PiglorOS.EvaluatorBuildProvenance.v1";
 const EVIDENCE_FILES: [&str; 6] = [
@@ -34,6 +35,12 @@ const EVIDENCE_FILES: [&str; 6] = [
     "provenance.json",
     "sbom.cdx.json",
     "source/pigloros-source.tar.gz",
+];
+const REQUIRED_SOURCE_ENTRIES: [&str; 4] = [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/pos-reference/Cargo.toml",
+    "crates/pos-reference/src/bin/pos-reference-evaluator.rs",
 ];
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -131,8 +138,7 @@ fn run() -> Result<(), CommandError> {
     })?;
     let evaluator_digests = verified_evaluator_digests(&options)?;
     let trust_policy_bytes = read_bounded(&options.trust_policy, MAX_TRUST_POLICY_BYTES)?;
-    authenticate_selected_archive_bounds(&options, &trust_policy_bytes, &request)?;
-    let archive_bytes = read_bounded(&options.archive, MAX_ARCHIVE_BYTES)?;
+    let archive_bytes = authenticated_archive_bytes(&options, &trust_policy_bytes, &request)?;
     let identity = EvaluatorIdentity {
         source_digest: evaluator_digests.source,
         binary_digest: evaluator_digests.binary,
@@ -174,12 +180,12 @@ fn run() -> Result<(), CommandError> {
     Ok(())
 }
 
-fn authenticate_selected_archive_bounds(
+fn authenticated_archive_bytes(
     options: &Options,
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
-) -> Result<(), CommandError> {
-    let mut archive = File::open(&options.archive).map_err(|_| CommandError::Input)?;
+) -> Result<Vec<u8>, CommandError> {
+    let mut archive = snapshot_bounded(&options.archive, MAX_ARCHIVE_BYTES)?;
     let preflight = preflight_signed_bundle(&mut archive, trust_policy_bytes, request)
         .map_err(|_| CommandError::Evaluation)?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)
@@ -192,7 +198,8 @@ fn authenticate_selected_archive_bounds(
             max_member_bytes: caps.max_member_bytes,
             max_total_bundle_bytes: caps.max_total_bundle_bytes,
         })
-        .map_err(|_| CommandError::Evaluation)
+        .map_err(|_| CommandError::Evaluation)?;
+    read_bounded_file(&mut archive, MAX_ARCHIVE_BYTES)
 }
 
 fn parse_options(arguments: impl Iterator<Item = OsString>) -> Result<Options, CommandError> {
@@ -310,12 +317,16 @@ fn verified_evaluator_digests(options: &Options) -> Result<VerifiedEvaluatorDige
 
     let provenance_bytes = read_bounded(&provenance_path, MAX_EVALUATOR_PROVENANCE_BYTES)?;
     let provenance = parse_build_provenance(&provenance_bytes)?;
-    let source = verified_digest(
-        &source_path,
+    let mut source_archive = snapshot_bounded(&source_path, MAX_EVALUATOR_SOURCE_BYTES)?;
+    let source = verified_file_digest(
+        &mut source_archive,
         MAX_EVALUATOR_SOURCE_BYTES,
         &provenance.evaluator_source_blake3,
     )?;
-    if embedded_git_commit(&source_path)? != provenance.source_commit {
+    source_archive
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| CommandError::Input)?;
+    if embedded_git_commit(&mut source_archive)? != provenance.source_commit {
         return Err(CommandError::Identity);
     }
     let packaged_binary = verified_digest(
@@ -323,10 +334,7 @@ fn verified_evaluator_digests(options: &Options) -> Result<VerifiedEvaluatorDige
         MAX_EVALUATOR_BINARY_BYTES,
         &provenance.evaluator_binary_blake3,
     )?;
-    let running_binary = digest_bounded(
-        &env::current_exe().map_err(|_| CommandError::Identity)?,
-        MAX_EVALUATOR_BINARY_BYTES,
-    )?;
+    let running_binary = running_binary_digest()?;
     if packaged_binary != running_binary {
         return Err(CommandError::Identity);
     }
@@ -415,6 +423,31 @@ fn verified_digest(path: &Path, maximum: u64, expected: &str) -> Result<[u8; 32]
     }
 }
 
+fn verified_file_digest(
+    file: &mut File,
+    maximum: u64,
+    expected: &str,
+) -> Result<[u8; 32], CommandError> {
+    let expected = parse_digest(expected)?;
+    let actual = digest_bounded_file(file, maximum)?;
+    if actual == expected {
+        Ok(actual)
+    } else {
+        Err(CommandError::Identity)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn running_binary_digest() -> Result<[u8; 32], CommandError> {
+    digest_bounded(Path::new("/proc/self/exe"), MAX_EVALUATOR_BINARY_BYTES)
+        .map_err(|_| CommandError::Identity)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_binary_digest() -> Result<[u8; 32], CommandError> {
+    Err(CommandError::Identity)
+}
+
 fn verify_checksum_inventory(
     evidence_root: &Path,
     digests: [[u8; 32]; 6],
@@ -443,20 +476,36 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn embedded_git_commit(path: &Path) -> Result<String, CommandError> {
-    let file = File::open(path).map_err(|_| CommandError::Input)?;
-    let mut archive = GzDecoder::new(file).take(MAX_TAR_METADATA_BYTES);
+fn embedded_git_commit(reader: &mut impl Read) -> Result<String, CommandError> {
+    let mut archive = MultiGzDecoder::new(reader).take(MAX_SOURCE_TAR_BYTES + 1);
+    let mut commit = None;
+    let mut required_entries = [false; REQUIRED_SOURCE_ENTRIES.len()];
+    let mut zero_headers = 0_u8;
     loop {
         let mut header = [0_u8; 512];
         archive
             .read_exact(&mut header)
             .map_err(|_| CommandError::Identity)?;
-        if header == [0; 512] || !valid_tar_checksum(&header) {
+        if header == [0; 512] {
+            zero_headers += 1;
+            if zero_headers == 2 {
+                validate_tar_termination(&mut archive)?;
+                if MAX_SOURCE_TAR_BYTES + 1 - archive.limit() > MAX_SOURCE_TAR_BYTES
+                    || commit.is_none()
+                    || required_entries.contains(&false)
+                {
+                    return Err(CommandError::Identity);
+                }
+                return commit.ok_or(CommandError::Identity);
+            }
+            continue;
+        }
+        if zero_headers != 0 || !valid_tar_checksum(&header) {
             return Err(CommandError::Identity);
         }
         let size = tar_octal(&header[124..136])?;
         if header[156] == b'g' {
-            if size > MAX_EVALUATOR_PROVENANCE_BYTES {
+            if commit.is_some() || size > MAX_TAR_METADATA_BYTES {
                 return Err(CommandError::Identity);
             }
             let record_size = usize::try_from(size).map_err(|_| CommandError::Identity)?;
@@ -465,10 +514,60 @@ fn embedded_git_commit(path: &Path) -> Result<String, CommandError> {
                 .read_exact(&mut records)
                 .map_err(|_| CommandError::Identity)?;
             skip_tar_padding(&mut archive, size)?;
-            return pax_commit(&records);
+            commit = Some(pax_commit(&records)?);
+            continue;
+        }
+        if !matches!(header[156], 0 | b'0' | b'2' | b'5') {
+            return Err(CommandError::Identity);
+        }
+        let path = tar_path(&header)?;
+        if let Some(index) = REQUIRED_SOURCE_ENTRIES
+            .iter()
+            .position(|required| path == *required)
+        {
+            required_entries[index] = true;
         }
         skip_exact(&mut archive, size)?;
         skip_tar_padding(&mut archive, size)?;
+    }
+}
+
+fn tar_path(header: &[u8; 512]) -> Result<String, CommandError> {
+    let name = tar_text(&header[..100])?;
+    if name.is_empty() {
+        return Err(CommandError::Identity);
+    }
+    let prefix = tar_text(&header[345..500])?;
+    Ok(if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}/{name}")
+    })
+}
+
+fn tar_text(field: &[u8]) -> Result<&str, CommandError> {
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
+    if field[end..].iter().any(|byte| *byte != 0) {
+        return Err(CommandError::Identity);
+    }
+    std::str::from_utf8(&field[..end]).map_err(|_| CommandError::Identity)
+}
+
+fn validate_tar_termination(reader: &mut impl Read) -> Result<(), CommandError> {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|_| CommandError::Identity)?;
+        if read == 0 {
+            return Ok(());
+        }
+        if buffer[..read].iter().any(|byte| *byte != 0) {
+            return Err(CommandError::Identity);
+        }
     }
 }
 
@@ -511,6 +610,7 @@ fn skip_exact(reader: &mut impl Read, bytes: u64) -> Result<(), CommandError> {
 
 fn pax_commit(records: &[u8]) -> Result<String, CommandError> {
     let mut offset = 0;
+    let mut commit = None;
     while offset < records.len() {
         let separator = records[offset..]
             .iter()
@@ -524,20 +624,26 @@ fn pax_commit(records: &[u8]) -> Result<String, CommandError> {
         let end = offset.checked_add(length).ok_or(CommandError::Identity)?;
         let record = records
             .get(separator + 1..end)
-            .filter(|record| record.last() == Some(&b'\n'))
+            .filter(|record| !record.is_empty() && record.last() == Some(&b'\n'))
             .ok_or(CommandError::Identity)?;
-        if let Some(commit) = record
+        if let Some(commit_bytes) = record
             .strip_suffix(b"\n")
             .and_then(|record| record.strip_prefix(b"comment="))
         {
-            let commit = std::str::from_utf8(commit).map_err(|_| CommandError::Identity)?;
-            return valid_commit(commit)
-                .then(|| commit.to_owned())
-                .ok_or(CommandError::Identity);
+            if commit_bytes.is_empty() {
+                return Err(CommandError::Identity);
+            }
+            let parsed = std::str::from_utf8(commit_bytes).map_err(|_| CommandError::Identity)?;
+            if !valid_commit(parsed) {
+                return Err(CommandError::Identity);
+            }
+            if commit.replace(parsed.to_owned()).is_some() {
+                return Err(CommandError::Identity);
+            }
         }
         offset = end;
     }
-    Err(CommandError::Identity)
+    commit.ok_or(CommandError::Identity)
 }
 
 const fn is_lower_hexadecimal(value: u8) -> bool {
@@ -596,10 +702,16 @@ const fn hexadecimal_nibble(value: u8) -> Option<u8> {
 }
 
 fn digest_bounded(path: &Path, maximum: u64) -> Result<[u8; 32], CommandError> {
-    let file = File::open(path).map_err(|_| CommandError::Input)?;
+    let mut file = File::open(path).map_err(|_| CommandError::Input)?;
+    digest_bounded_file(&mut file, maximum)
+}
+
+fn digest_bounded_file(file: &mut File, maximum: u64) -> Result<[u8; 32], CommandError> {
     if file.metadata().map_err(|_| CommandError::Input)?.len() > maximum {
         return Err(CommandError::Input);
     }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| CommandError::Input)?;
     let mut bounded = file.take(maximum.saturating_add(1));
     let mut hasher = blake3::Hasher::new();
     let byte_length = io::copy(&mut bounded, &mut hasher).map_err(|_| CommandError::Input)?;
@@ -607,6 +719,36 @@ fn digest_bounded(path: &Path, maximum: u64) -> Result<[u8; 32], CommandError> {
         Err(CommandError::Input)
     } else {
         Ok(*hasher.finalize().as_bytes())
+    }
+}
+
+fn snapshot_bounded(path: &Path, maximum: u64) -> Result<File, CommandError> {
+    let source = File::open(path).map_err(|_| CommandError::Input)?;
+    let mut snapshot = tempfile::tempfile().map_err(|_| CommandError::Input)?;
+    let copied = io::copy(&mut source.take(maximum.saturating_add(1)), &mut snapshot)
+        .map_err(|_| CommandError::Input)?;
+    if copied > maximum {
+        return Err(CommandError::Input);
+    }
+    snapshot
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| CommandError::Input)?;
+    Ok(snapshot)
+}
+
+fn read_bounded_file(file: &mut File, maximum: u64) -> Result<Vec<u8>, CommandError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| CommandError::Input)?;
+    let capacity =
+        usize::try_from(maximum.min(16 * 1024 * 1024)).map_err(|_| CommandError::Input)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| CommandError::Input)?;
+    if bytes.len() as u64 > maximum {
+        Err(CommandError::Input)
+    } else {
+        Ok(bytes)
     }
 }
 

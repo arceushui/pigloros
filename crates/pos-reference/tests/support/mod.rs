@@ -27,6 +27,7 @@ pub enum ProfileMutation {
     DivergenceCoordinateLong,
     SelectedCapBoundary(u8),
     SelectedProfileByteCapBoundary,
+    SelectedProfileByteCapExact,
     SelectedClosureCapBoundary(u8),
     SelectedClosureCapExact(u8),
     ExecutionContractBoundary(u8),
@@ -1076,7 +1077,11 @@ fn support_members(trust: &[u8], execution: &[u8]) -> BTreeMap<String, (Vec<u8>,
         ),
         (
             "support/evaluator-report-v1.cddl".to_owned(),
-            (b"report schema".to_vec(), 4),
+            (
+                include_bytes!("../../../../fixtures/conformance/support/evaluator-report-v1.cddl")
+                    .to_vec(),
+                4,
+            ),
         ),
         (
             "support/evaluator-request-v1.cddl".to_owned(),
@@ -1911,7 +1916,8 @@ fn mutate_profile_boundary(
             profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[1; 129])])]);
         }
         ProfileMutation::SelectedCapBoundary(_)
-        | ProfileMutation::SelectedProfileByteCapBoundary => {}
+        | ProfileMutation::SelectedProfileByteCapBoundary
+        | ProfileMutation::SelectedProfileByteCapExact => {}
         _ => return Ok(false),
     }
     Ok(true)
@@ -3124,6 +3130,18 @@ fn profile_with_selected_closure_caps(
         )
     };
     let mut profile_value = build_profile(hard_caps)?;
+    if matches!(mutation, Some(ProfileMutation::SelectedProfileByteCapExact)) {
+        const MAX_CONVERGENCE_STEPS: usize = 8;
+        for _ in 0..MAX_CONVERGENCE_STEPS {
+            let profile_bytes = encoded_profile_length(&profile_value)?;
+            array_fields_mut(hard_caps)?[0] = uint(profile_bytes);
+            profile_value = build_profile(hard_caps)?;
+            if encoded_profile_length(&profile_value)? == profile_bytes {
+                return Ok(profile_value);
+            }
+        }
+        return Err(io::Error::other("exact profile byte cap did not converge").into());
+    }
     if matches!(mutation, Some(ProfileMutation::SelectedClosureCapExact(3))) {
         const MAX_CONVERGENCE_STEPS: usize = 8;
         for _ in 0..MAX_CONVERGENCE_STEPS {

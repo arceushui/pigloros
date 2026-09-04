@@ -415,7 +415,7 @@ fn conformance_report_fixture() -> ConformanceReportV1 {
         replay_claim: ReplayClaimV1::Exact,
         redaction_state: RedactionStateV1::None,
         limitations_digest: [11; 32],
-        provenance_digest: [12; 32],
+        evaluator_build_provenance_digest: [12; 32],
         report_digest: [0; 32],
     };
     report.report_digest = fixture_ok("compute conformance report digest", report.digest());
