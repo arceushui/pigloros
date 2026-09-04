@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keep the complete workspace ASan gate serialized on hosted runners.
+# Keep Cargo build/link work serialized within each hosted ASan shard.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -27,15 +27,21 @@ run_asan_tests() {
     cargo "${cargo_args[@]}" "$@"
 }
 case "${ASAN_SHARD}" in
-  bundle-contracts)
+  bundle-coverage)
     run_asan_tests -p pos-conformance \\
-      --test bundle_contract_coverage_public \\
+      --test bundle_contract_coverage_public
+    ;;
+  bundle-public)
+    run_asan_tests -p pos-conformance \\
       --test bundle_contract_public
+    ;;
+  moat-proof)
+    run_asan_tests -p pos-conformance \\
+      --test moat_proof_public
     ;;
   remainder)
     run_asan_tests --workspace --exclude pos-conformance --tests
     run_asan_tests -p pos-conformance --lib --bins \\
-      --test moat_proof_public \\
       --test profile_contract_public \\
       --test provider_contract_public
     ;;
@@ -79,7 +85,9 @@ EXPECTED_JOB_KEYS = {
 }
 EXPECTED_STRATEGY = {
     "fail-fast": False,
-    "matrix": {"shard": ["bundle-contracts", "remainder"]},
+    "matrix": {
+        "shard": ["bundle-coverage", "bundle-public", "moat-proof", "remainder"]
+    },
 }
 EXPECTED_GATE_JOB = {
     "name": "asan (address sanitizer)",
