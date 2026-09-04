@@ -726,6 +726,32 @@ fn recovery_rejects_an_indexed_resolution_without_a_frozen_scope() -> Result<(),
 }
 
 #[test]
+fn recovery_rejects_a_missing_resolution_index_entry() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let scope_commitment = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let resolution = resolution(
+        graph.request.reference(),
+        graph.receipt.terminal_state(),
+        scope_commitment.reference(),
+    )?;
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .resolve_administratively(graph.request.reference(), &resolution)?;
+    graph
+        .adapter
+        .insert_resolution(graph.request.reference(), 1, &resolution)?;
+    graph
+        .adapter
+        .remove_resolution(graph.request.reference(), 0);
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), resolution.reference());
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
 fn recovery_rejects_reordered_persisted_acknowledgement_inventory() -> Result<(), ErasureErrorV1> {
     let graph = completed_graph(vec![target(10), target(20)], None)?;
     let changed_inventory = graph.adapter.reverse_attempt_inventory(
