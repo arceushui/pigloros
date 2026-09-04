@@ -493,12 +493,6 @@ impl RecoveryFailureV1 {
     }
 }
 
-impl From<ErasureErrorV1> for RecoveryFailureV1 {
-    fn from(error: ErasureErrorV1) -> Self {
-        Self::new(error, super::reference_zero())
-    }
-}
-
 fn load<T>(
     port: &dyn ErasurePersistencePortV1,
     reference: ErasureReferenceV1,
@@ -549,15 +543,10 @@ fn recover_foundation(
         .resolve_state(manifest.state)
         .map_err(|error| RecoveryFailureV1::new(error, manifest.state))?
         .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, manifest.state))?;
-    if request.reference() != requested || state.request() != requested {
-        let subject = if request.reference() == requested {
-            state.state_digest()
-        } else {
-            request.reference()
-        };
+    if state.request() != requested {
         return Err(RecoveryFailureV1::new(
             ErasureErrorV1::ProvenanceMissing,
-            subject,
+            state.state_digest(),
         ));
     }
     verify_predecessor_chain(state.clone(), port)
