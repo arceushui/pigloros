@@ -1276,9 +1276,12 @@ fn decision_decoder_rejects_inconsistent_evidence() {
 
 #[test]
 fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
-    let request = request(principal(1), entity(10));
-    let encoded =
-        ok(decision_for(&request, &[root_grant(principal(1), vec![entity(10)])]).encode());
+    let request_value = request(principal(1), entity(10));
+    let encoded = ok(decision_for(
+        &request_value,
+        &[root_grant(principal(1), vec![entity(10)])],
+    )
+    .encode());
     let invalid_role = changed_array(&encoded, |fields| {
         fields[3] = Value::Integer(99.into());
     });
@@ -2268,13 +2271,16 @@ fn ancestor_changes_invalidate_every_descendant() {
 
     let mut mismatched_consent_parent = parent_draft.clone();
     mismatched_consent_parent.consent_references = vec![hash(9)];
-    let mut mismatched_consent_child = child.clone();
+    let mut mismatched_consent_child = delegation_child();
     mismatched_consent_child.parent_grant_id = Some(hash(1));
     mismatched_consent_child.consent_references = vec![hash(9)];
     assert_eq!(
         decision_for(
             &delegated_request,
-            &[mismatched_consent_parent, mismatched_consent_child],
+            &[
+                ok(CapabilityGrantV1::try_from_draft(mismatched_consent_parent)),
+                ok(CapabilityGrantV1::try_from_draft(mismatched_consent_child)),
+            ],
         )
         .outcome(),
         AuthorizationOutcomeV1::ParentInvalid
