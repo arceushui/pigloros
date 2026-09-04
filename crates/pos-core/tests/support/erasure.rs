@@ -14,14 +14,14 @@ use pos_core::{
 
 /// Build a deterministic test-only digest reference.
 #[must_use]
-pub const fn reference(value: u8) -> ErasureReferenceV1 {
+pub(crate) const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
 /// Build the common TimelineReplay/DataEncryption target used by persistence
 /// lifecycle scenarios.
 #[must_use]
-pub const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
+pub(crate) const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::TimelineReplay,
         artifact_digest: reference(seed),
@@ -34,7 +34,7 @@ pub const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
 
 /// Build the varied target matrix used by codec and receipt scenarios.
 #[must_use]
-pub const fn target(seed: u8) -> ErasureRequiredTargetV1 {
+pub(crate) const fn target(seed: u8) -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: match seed % 7 {
             0 => ErasureArtifactClassV1::TimelineReplay,
@@ -59,17 +59,17 @@ pub const fn target(seed: u8) -> ErasureRequiredTargetV1 {
 }
 
 /// Named fields for a public ERQ1 fixture.
-pub struct RequestFixtureInput {
-    pub request: ErasureReferenceV1,
-    pub subject: ErasureReferenceV1,
-    pub scope: ErasureScopeV1,
-    pub selectors: Vec<ErasureReferenceV1>,
-    pub requester: ErasureReferenceV1,
-    pub authorization: ErasureReferenceV1,
-    pub policy: ErasureReferenceV1,
-    pub request_position: u64,
-    pub horizon_position: u64,
-    pub provenance: ErasureReferenceV1,
+pub(crate) struct RequestFixtureInput {
+    pub(crate) request: ErasureReferenceV1,
+    pub(crate) subject: ErasureReferenceV1,
+    pub(crate) scope: ErasureScopeV1,
+    pub(crate) selectors: Vec<ErasureReferenceV1>,
+    pub(crate) requester: ErasureReferenceV1,
+    pub(crate) authorization: ErasureReferenceV1,
+    pub(crate) policy: ErasureReferenceV1,
+    pub(crate) request_position: u64,
+    pub(crate) horizon_position: u64,
+    pub(crate) provenance: ErasureReferenceV1,
 }
 
 /// Construct an ERQ1 through the same public constructor used by callers.
@@ -77,7 +77,7 @@ pub struct RequestFixtureInput {
 /// # Errors
 ///
 /// Returns [`ErasureErrorV1`] when the fixture fields violate ERQ1 invariants.
-pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureErrorV1> {
+pub(crate) fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(ErasureRequestInputV1 {
         request: input.request,
         subject: input.subject,
@@ -98,7 +98,7 @@ pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureEr
 ///
 /// Returns [`ErasureErrorV1`] when the target or derived command identity is
 /// not valid for an ERRA1 obligation.
-pub fn obligation_for_category(
+pub(crate) fn obligation_for_category(
     request: ErasureReferenceV1,
     category: ErasureInventoryCategoryV1,
     target: ErasureRequiredTargetV1,
@@ -112,7 +112,7 @@ pub fn obligation_for_category(
 }
 
 /// Build the common artifact obligation for an ERQ1 target.
-pub fn obligation(
+pub(crate) fn obligation(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureObligationV1, ErasureErrorV1> {
@@ -121,16 +121,16 @@ pub fn obligation(
 
 /// Named fields for a retry-admission fixture built from validated obligations.
 #[derive(Clone, Copy)]
-pub struct RetryAdmissionFixture<'a> {
-    pub request: ErasureReferenceV1,
-    pub attempt_ordinal: u64,
-    pub source_receipt: Option<ErasureReferenceV1>,
-    pub obligations: &'a [ErasureObligationV1],
-    pub policy: ErasureReferenceV1,
-    pub trust: ErasureReferenceV1,
-    pub admitted_position: u64,
-    pub deadline_position: u64,
-    pub authorization_provenance: ErasureReferenceV1,
+pub(crate) struct RetryAdmissionFixture<'a> {
+    pub(crate) request: ErasureReferenceV1,
+    pub(crate) attempt_ordinal: u64,
+    pub(crate) source_receipt: Option<ErasureReferenceV1>,
+    pub(crate) obligations: &'a [ErasureObligationV1],
+    pub(crate) policy: ErasureReferenceV1,
+    pub(crate) trust: ErasureReferenceV1,
+    pub(crate) admitted_position: u64,
+    pub(crate) deadline_position: u64,
+    pub(crate) authorization_provenance: ErasureReferenceV1,
 }
 
 /// Construct a retry admission while keeping obligation/command ordering
@@ -140,7 +140,7 @@ pub struct RetryAdmissionFixture<'a> {
 ///
 /// Returns [`ErasureErrorV1`] when the supplied obligation identities do not
 /// form a valid ERRA1 admission.
-pub fn retry_admission(
+pub(crate) fn retry_admission(
     input: RetryAdmissionFixture<'_>,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
     ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
@@ -167,14 +167,14 @@ pub fn retry_admission(
 
 /// Named inputs for one mutually bound admission/authorization fixture.
 #[derive(Clone, Copy)]
-pub struct FreezeEvidenceFixtureInput<'a> {
-    pub request: ErasureReferenceV1,
-    pub scope_commitment: ErasureReferenceV1,
-    pub obligation_set: &'a ErasureObligationSetV1,
-    pub targets: &'a [ErasureRequiredTargetV1],
-    pub obligations: &'a [ErasureObligationV1],
-    pub freeze_position: u64,
-    pub evidence: &'a [u8],
+pub(crate) struct FreezeEvidenceFixtureInput<'a> {
+    pub(crate) request: ErasureReferenceV1,
+    pub(crate) scope_commitment: ErasureReferenceV1,
+    pub(crate) obligation_set: &'a ErasureObligationSetV1,
+    pub(crate) targets: &'a [ErasureRequiredTargetV1],
+    pub(crate) obligations: &'a [ErasureObligationV1],
+    pub(crate) freeze_position: u64,
+    pub(crate) evidence: &'a [u8],
 }
 
 /// Builds mutually bound admission and authorization evidence for a test freeze.
@@ -183,7 +183,7 @@ pub struct FreezeEvidenceFixtureInput<'a> {
 ///
 /// Returns [`ErasureErrorV1`] when the fixture inputs violate an erasure
 /// evidence invariant or canonical encoding fails.
-pub fn freeze_evidence_fixture(
+pub(crate) fn freeze_evidence_fixture(
     input: FreezeEvidenceFixtureInput<'_>,
 ) -> Result<
     (

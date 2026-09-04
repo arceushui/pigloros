@@ -25,7 +25,7 @@ use pos_store::memory::MemoryStore;
 mod erasure_support;
 
 use erasure_support::{
-    freeze_evidence_fixture, obligation, reference, replay_target, request as fixture_request,
+    freeze_evidence_fixture, obligation, reference, request as fixture_request,
     retry_admission as fixture_retry_admission, FreezeEvidenceFixtureInput, RequestFixtureInput,
     RetryAdmissionFixture,
 };
@@ -49,7 +49,7 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
 }
 
 const fn target() -> ErasureRequiredTargetV1 {
-    replay_target(10)
+    erasure_support::target(10)
 }
 
 fn admission(
