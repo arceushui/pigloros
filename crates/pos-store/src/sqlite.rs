@@ -355,7 +355,7 @@ fn erasure_schema_ddl() -> String {
     ERASURE_SCHEMA_TABLES
         .iter()
         .map(|table| {
-            let definitions = table
+            let mut definitions = table
                 .columns
                 .iter()
                 .map(|column| {
