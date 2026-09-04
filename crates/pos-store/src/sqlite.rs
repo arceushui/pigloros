@@ -4494,7 +4494,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
         let request_digest = request.digest();
         let limit = i64::try_from(ERASURE_MAX_RECOVERY_ERRORS + 1).unwrap_or(i64::MAX);
-        let query_params: [&dyn ToSql; 2] = [&request_digest[..], &limit];
+        let query_params: [&dyn ToSql; 2] = [&&request_digest[..], &limit];
         let references = Self::query_prepared(&mut statement, &query_params)
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
             .mapped(|row| row.get::<_, Vec<u8>>(0))
