@@ -890,7 +890,7 @@ impl PublicCoordinatorPort {
             index,
             replacement,
             ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
-            18,
+            MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD,
             |storage| &mut storage.resolutions,
         )?;
         Ok(())

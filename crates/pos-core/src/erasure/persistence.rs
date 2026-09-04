@@ -494,15 +494,6 @@ impl RecoveryFailureV1 {
     }
 }
 
-fn load<T>(
-    port: &dyn ErasurePersistencePortV1,
-    reference: ErasureReferenceV1,
-    decode: impl FnOnce(&[u8]) -> Result<T, ErasureErrorV1>,
-    address: impl FnOnce(&T) -> ErasureReferenceV1,
-) -> Result<T, RecoveryFailureV1> {
-    load_recovery_object(port, reference, decode, address)
-}
-
 fn load_recovery_object<T>(
     port: &dyn ErasurePersistencePortV1,
     reference: ErasureReferenceV1,
@@ -525,7 +516,7 @@ fn optional<T>(
     address: impl FnOnce(&T) -> ErasureReferenceV1 + Copy,
 ) -> Result<Option<T>, RecoveryFailureV1> {
     reference.map_or(Ok(None), |reference| {
-        load(port, reference, decode, address).map(Some)
+        load_recovery_object(port, reference, decode, address).map(Some)
     })
 }
 
@@ -534,7 +525,7 @@ fn recover_foundation(
     requested: ErasureReferenceV1,
     manifest: &ManifestV1,
 ) -> Result<RecoveredFoundationV1, RecoveryFailureV1> {
-    let request = load(
+    let request = load_recovery_object(
         port,
         requested,
         ErasureRequestV1::from_canonical_cbor,
@@ -610,7 +601,7 @@ fn recover_fixed_evidence(
             .iter()
             .copied()
             .map(|reference| {
-                load(
+                load_recovery_object(
                     port,
                     reference,
                     ErasureObligationV1::from_canonical_cbor,
@@ -1168,7 +1159,7 @@ impl RecoveredErasureV1 {
         active: &ActiveAttemptRefV1,
         latest_terminal_state: Option<ErasureReferenceV1>,
     ) -> Result<(), RecoveryFailureV1> {
-        let admission = load(
+        let admission = load_recovery_object(
             port,
             active.admission,
             ErasureRetryAdmissionV1::from_canonical_cbor,
@@ -1246,7 +1237,7 @@ impl RecoveredErasureV1 {
                 .ok_or_else(|| {
                     RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, self.manifest_digest)
                 })?;
-            let page = load(port, reference, AttemptPageV1::decode, |value| {
+            let page = load_recovery_object(port, reference, AttemptPageV1::decode, |value| {
                 value.reference
             })?;
             if (page.request, page.ordinal, page.predecessor)
@@ -1292,19 +1283,19 @@ impl RecoveredErasureV1 {
         page: &AttemptPageV1,
         predecessor_receipt: Option<ErasureReferenceV1>,
     ) -> Result<(ErasureReferenceV1, ErasureReferenceV1), RecoveryFailureV1> {
-        let admission = load(
+        let admission = load_recovery_object(
             port,
             page.retry_admission,
             ErasureRetryAdmissionV1::from_canonical_cbor,
             ErasureRetryAdmissionV1::reference,
         )?;
-        let admitted = load(
+        let admitted = load_recovery_object(
             port,
             page.admitted_inventory,
             InventoryV1::decode,
             |value| value.reference,
         )?;
-        let effective = load(
+        let effective = load_recovery_object(
             port,
             page.effective_inventory,
             InventoryV1::decode,
@@ -1363,19 +1354,19 @@ impl RecoveredErasureV1 {
         effective: &InventoryV1,
         predecessor_receipt: Option<ErasureReferenceV1>,
     ) -> Result<(ErasureReferenceV1, ErasureReferenceV1), RecoveryFailureV1> {
-        let outcome = load(
+        let outcome = load_recovery_object(
             port,
             page.outcome,
             ErasureAttemptOutcomeV1::from_canonical_cbor,
             ErasureAttemptOutcomeV1::reference,
         )?;
-        let receipt = load(
+        let receipt = load_recovery_object(
             port,
             page.receipt,
             ErasureReceiptV1::from_canonical_cbor,
             ErasureReceiptV1::receipt_digest,
         )?;
-        let provenance = load(
+        let provenance = load_recovery_object(
             port,
             page.receipt_provenance,
             ErasureReceiptProvenanceV1::from_canonical_cbor,
@@ -1451,7 +1442,7 @@ impl RecoveredErasureV1 {
     > {
         let mut values = BTreeMap::new();
         for reference in references {
-            let acknowledgement = load(
+            let acknowledgement = load_recovery_object(
                 port,
                 *reference,
                 ErasureAcknowledgementProvenanceV1::from_canonical_cbor,
@@ -1485,12 +1476,10 @@ impl RecoveredErasureV1 {
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<Vec<ErasureDestructionCommandV1>, RecoveryFailureV1> {
-        let Some(obligation_set) = self.obligation_set.as_ref() else {
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
-                admission.reference(),
-            ));
-        };
+        let obligation_set = self.obligation_set.as_ref().ok_or(RecoveryFailureV1 {
+            error: ErasureErrorV1::ProvenanceMissing,
+            subject: admission.reference(),
+        })?;
         let acknowledged = self
             .effective
             .values()
@@ -1666,10 +1655,10 @@ impl RecoveredErasureV1 {
                 .ok_or_else(|| {
                     RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
                 })?;
-            let node = load(port, reference, ScopeNodeV1::decode, |value| {
+            let node = load_recovery_object(port, reference, ScopeNodeV1::decode, |value| {
                 value.reference
             })?;
-            let extension = load(
+            let extension = load_recovery_object(
                 port,
                 node.extension,
                 ErasureScopeExtensionV1::from_canonical_cbor,
@@ -1747,7 +1736,7 @@ impl RecoveredErasureV1 {
                 .ok_or_else(|| {
                     RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
                 })?;
-            let resolution = load(
+            let resolution = load_recovery_object(
                 port,
                 reference,
                 ErasureAdministrativeResolutionV1::from_canonical_cbor,
