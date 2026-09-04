@@ -21,14 +21,16 @@ Do not create artificial micro-PRs that cannot stand on their own. A slice is ap
 
 ## Ticket and PR contract
 
-Each implementation ticket should state:
+The inspection record should map the concrete files, modules, interfaces, tests, migrations, and dependency edges. Each published implementation ticket should state:
 
 - the end-to-end behavior or seam it delivers;
 - explicit in-scope and out-of-scope work;
-- the files/modules or code paths found during inspection, at enough detail to expose blast radius;
+- the stable architectural areas, public seams, and blast radius found during inspection; keep exact file paths in the transient inspection record rather than the published ticket;
 - acceptance tests at the public interface;
 - genuine blockers and the dependency order; and
 - the expected narrow PR boundary, including a warning when a proposed change would touch a large file or many unrelated modules.
+
+When this skill is used with `to-tickets`, follow `to-tickets` for the published-ticket format and its rule to avoid specific file paths. The code inspection still happens first; its file-level findings guide the split without becoming brittle ticket text.
 
 For wide mechanical refactors, use an expand–migrate–contract sequence. Keep the old and new forms compatible during migration, batch call-site changes by a bounded area, and remove the old form only after all callers have moved. Do not disguise a broad refactor as one feature ticket.
 
