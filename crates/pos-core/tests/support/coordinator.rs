@@ -537,6 +537,27 @@ impl PublicCoordinatorPort {
             .insert(reference, canonical_cbor);
     }
 
+    /// Insert one administrative resolution and its ordinal index entry for a
+    /// recovery-boundary fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error when the resolution cannot be encoded.
+    pub fn insert_resolution(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let bytes = resolution.to_canonical_cbor()?;
+        let mut storage = self.storage.borrow_mut();
+        storage.objects.insert(resolution.reference(), bytes);
+        storage
+            .resolutions
+            .insert((request, ordinal), resolution.reference());
+        Ok(())
+    }
+
     /// Insert one deliberately selected immutable state for recovery tests.
     pub fn insert_state(&self, reference: ErasureReferenceV1, canonical_cbor: Vec<u8>) {
         self.storage
