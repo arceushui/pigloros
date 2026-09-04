@@ -561,12 +561,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         mixed_oracles,
         profile_mutation,
     )?;
-    let exact_profile_byte_cap = matches!(
-        profile_mutation,
-        Some(ProfileMutation::SelectedProfileByteCapExact)
-    )
-    .then(|| encoded_profile_length(&profile_value))
-    .transpose()?;
+    let exact_profile_byte_cap = exact_profile_byte_cap(profile_mutation, &profile_value)?;
     if let Some(mutation) = profile_mutation {
         mutate_profile(&mut profile_value, mutation)?;
     }
@@ -595,12 +590,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         evaluator_protocol_digest,
         hard_caps_digest,
     )?;
-    if let Some(limit) = exact_profile_byte_cap {
-        request.output_capability.report_bytes_limit = limit;
-        request.output_capability.capability_digest =
-            request.expected_output_capability_digest()?;
-        request.request_digest = request.digest()?;
-    }
+    bind_exact_profile_output_cap(&mut request, exact_profile_byte_cap)?;
     Ok(Corpus {
         request: request.to_canonical_cbor()?,
         archive,
@@ -608,6 +598,28 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         subject_digest: SUBJECT_DIGEST,
         expected_output,
     })
+}
+
+fn exact_profile_byte_cap(
+    mutation: Option<ProfileMutation>,
+    profile: &Value,
+) -> TestResult<Option<u64>> {
+    matches!(mutation, Some(ProfileMutation::SelectedProfileByteCapExact))
+        .then(|| encoded_profile_length(profile))
+        .transpose()
+}
+
+fn bind_exact_profile_output_cap(
+    request: &mut EvaluationRequest,
+    limit: Option<u64>,
+) -> TestResult<()> {
+    if let Some(limit) = limit {
+        request.output_capability.report_bytes_limit = limit;
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+    }
+    Ok(())
 }
 
 fn evaluation_request(
