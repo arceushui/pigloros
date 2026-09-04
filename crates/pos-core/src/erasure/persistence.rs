@@ -1751,14 +1751,14 @@ impl RecoveredErasureV1 {
         if count == 0 {
             return Ok(());
         }
-        let scope = self.scope.as_ref().ok_or(RecoveryFailureV1::new(
-            ErasureErrorV1::ProvenanceMissing,
-            fallback_subject,
-        ))?;
-        let obligation_set = self.obligation_set.as_ref().ok_or(RecoveryFailureV1::new(
-            ErasureErrorV1::ProvenanceMissing,
-            fallback_subject,
-        ))?;
+        let scope = self.scope.as_ref().ok_or(RecoveryFailureV1 {
+            error: ErasureErrorV1::ProvenanceMissing,
+            subject: fallback_subject,
+        })?;
+        let obligation_set = self.obligation_set.as_ref().ok_or(RecoveryFailureV1 {
+            error: ErasureErrorV1::ProvenanceMissing,
+            subject: fallback_subject,
+        })?;
         let mut predecessor = None;
         for ordinal in 0..count {
             let reference = port
