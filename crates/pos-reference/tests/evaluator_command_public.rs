@@ -3,6 +3,7 @@ pub mod support;
 use std::error::Error;
 #[cfg(unix)]
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -120,7 +121,7 @@ fn write_checksum_inventory(directory: &Path) -> TestResult {
     let mut inventory = String::new();
     for path in paths {
         let digest = blake3::hash(&fs::read(directory.join(path))?);
-        inventory.push_str(&format!("{}  {path}\n", digest.to_hex()));
+        writeln!(inventory, "{}  {path}", digest.to_hex())?;
     }
     fs::write(directory.join("BLAKE3SUMS"), inventory)?;
     Ok(())
