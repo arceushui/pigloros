@@ -298,14 +298,14 @@ impl SubjectAdapter for AdverseAdapter {
     }
 }
 
-fn evaluator_identity() -> VerifiedEvaluatorBuildIdentity {
-    static IDENTITY: OnceLock<VerifiedEvaluatorBuildIdentity> = OnceLock::new();
-    IDENTITY
-        .get_or_init(|| {
-            support::verified_evaluator_identity()
-                .unwrap_or_else(|error| panic!("public evaluator identity setup failed: {error}"))
-        })
-        .clone()
+fn evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentity> {
+    static IDENTITY: OnceLock<Result<VerifiedEvaluatorBuildIdentity, String>> = OnceLock::new();
+    match IDENTITY
+        .get_or_init(|| support::verified_evaluator_identity().map_err(|error| error.to_string()))
+    {
+        Ok(identity) => Ok(identity.clone()),
+        Err(error) => Err(io::Error::other(error.clone()).into()),
+    }
 }
 
 fn request_with_limits(
@@ -364,7 +364,7 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
-        &evaluator_identity(),
+        &evaluator_identity()?,
         &mut first_adapter,
     )?;
     let mut second_adapter = PublicAdapter {
@@ -375,7 +375,7 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
-        &evaluator_identity(),
+        &evaluator_identity()?,
         &mut second_adapter,
     )?;
 
@@ -406,7 +406,7 @@ fn evaluator_accepts_every_current_profile_claim_layer() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         )?;
         assert!(result
@@ -475,7 +475,7 @@ fn evaluator_enforces_profile_independence_requirements() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         ),
         Err(EvaluatorError::Independence)
@@ -496,7 +496,7 @@ fn evaluator_identity_is_verified_before_cnr1_emission() -> TestResult {
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
-        &evaluator_identity(),
+        &evaluator_identity()?,
         &mut adapter,
     )?
     .report;
@@ -520,7 +520,7 @@ fn public_gateway_and_plugin_protocols_execute_complete_profiles() -> TestResult
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         )?;
         assert!(output
@@ -584,7 +584,7 @@ fn replay_claims_accept_each_matching_redaction_state() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         )?;
         let affected = output
@@ -663,7 +663,7 @@ fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -693,7 +693,7 @@ fn signed_bundle_allows_empty_secret_slots_and_noncredential_text() -> TestResul
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         )?;
         assert!(artifacts
@@ -731,7 +731,7 @@ fn evaluator_rejects_empty_archives_and_mismatched_trust_snapshots() -> TestResu
                 request,
                 archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -759,7 +759,7 @@ fn evaluator_returns_typed_nonpass_for_an_unsupported_request_version() -> TestR
             &request_bytes,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         ),
         Err(EvaluatorError::UnsupportedVersion)
@@ -779,7 +779,7 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
-        &evaluator_identity(),
+        &evaluator_identity()?,
         &mut adapter,
     )?;
     assert_eq!(result.report.cases.len(), 7);
@@ -805,7 +805,7 @@ fn evaluator_rejects_semantically_invalid_signed_release_admission() -> TestResu
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         ),
         Err(EvaluatorError::Profile)
@@ -824,7 +824,7 @@ fn evaluator_matches_output_failure_and_divergence_oracles() -> TestResult {
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
-        &evaluator_identity(),
+        &evaluator_identity()?,
         &mut adapter,
     )?;
     assert!(result
@@ -851,7 +851,7 @@ fn evaluator_reports_mismatched_failure_and_divergence_oracles() -> TestResult {
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
-        &evaluator_identity(),
+        &evaluator_identity()?,
         &mut adapter,
     )?;
     assert_eq!(
@@ -884,7 +884,7 @@ fn evaluator_reports_each_closed_adverse_subject_result() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         )?;
         assert!(result
@@ -910,7 +910,7 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut wrong_kind,
         ),
         Err(EvaluatorError::AdapterIdentity)
@@ -924,7 +924,7 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut wrong_adapter,
         ),
         Err(EvaluatorError::AdapterIdentity)
@@ -940,7 +940,7 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
             &request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         ),
         Err(EvaluatorError::OutputLimit)
@@ -957,7 +957,7 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
             &request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         )?
         .diagnostic_bytes
@@ -1074,7 +1074,7 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1096,7 +1096,7 @@ fn evaluator_rejects_each_execution_matrix_contract_boundary() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile),
@@ -1117,7 +1117,7 @@ fn evaluator_accepts_an_executed_matrix_case_with_consistent_counts() -> TestRes
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
-        &evaluator_identity(),
+        &evaluator_identity()?,
         &mut adapter,
     )?;
     Ok(())
@@ -1172,7 +1172,7 @@ fn evaluator_rejects_wrong_types_at_each_required_profile_contract_field() -> Te
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1202,7 +1202,7 @@ fn evaluator_rejects_malformed_profile_contract_containers() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1230,7 +1230,7 @@ fn evaluator_rejects_each_profile_textual_contract_boundary() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1274,7 +1274,7 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             expected
@@ -1298,7 +1298,7 @@ fn evaluator_accepts_exact_authenticated_closure_caps() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         )
         .is_ok());
@@ -1364,7 +1364,7 @@ fn evaluator_rejects_deeply_malformed_profile_values() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1396,7 +1396,7 @@ fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestRes
                 &request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1459,7 +1459,7 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -1875,7 +1875,7 @@ fn evaluator_rejects_profile_inconsistent_expected_result_records() -> TestResul
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1903,7 +1903,7 @@ fn evaluator_rejects_wrong_types_at_each_required_archive_field() -> TestResult 
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -1928,7 +1928,7 @@ fn evaluator_rejects_each_archive_textual_contract_boundary() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -1982,7 +1982,7 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -2008,7 +2008,7 @@ fn evaluator_rejects_wrong_types_at_each_required_trust_policy_field() -> TestRe
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -2034,7 +2034,7 @@ fn evaluator_rejects_each_trust_policy_textual_contract_boundary() -> TestResult
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -2060,7 +2060,7 @@ fn evaluator_accepts_supported_trust_policy_evolution() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
-            &evaluator_identity(),
+            &evaluator_identity()?,
             &mut adapter,
         )?;
         assert!(report
@@ -2101,7 +2101,7 @@ fn evaluator_rejects_each_signed_release_admission_attack() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -2128,7 +2128,7 @@ fn evaluator_rejects_malformed_release_admission_fields() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
-                &evaluator_identity(),
+                &evaluator_identity()?,
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)

@@ -445,7 +445,10 @@ fn append_retired_contract_field(evidence: &ciborium::Value) -> ciborium::Value 
         &evidence_fields[EvidenceField::Contract.index()],
         "decode proof-contract fixture structure",
     );
-    contract_fields.insert(6, ciborium::Value::Text(CONFORMANCE_REPORT_MAGIC_V1.to_owned()));
+    contract_fields.insert(
+        6,
+        ciborium::Value::Text(CONFORMANCE_REPORT_MAGIC_V1.to_owned()),
+    );
     evidence_fields[EvidenceField::Contract.index()] = ciborium::Value::Array(contract_fields);
     ciborium::Value::Array(evidence_fields)
 }

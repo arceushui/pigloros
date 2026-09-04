@@ -80,7 +80,7 @@ impl VerifiedEvaluatorBuildIdentity {
         self.binary_digest
     }
 
-    pub(crate) fn independence(&self) -> &IndependenceEvidence {
+    pub(crate) const fn independence(&self) -> &IndependenceEvidence {
         &self.independence
     }
 

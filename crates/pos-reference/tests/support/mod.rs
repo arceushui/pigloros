@@ -28,6 +28,10 @@ pub struct Corpus {
 
 const SUBJECT_DIGEST: [u8; 32] = [41; 32];
 
+/// Build and verify the current public test executable's evaluator evidence package.
+///
+/// # Errors
+/// Returns an error when the temporary package cannot be written or verified.
 pub fn verified_evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentity> {
     verified_evaluator_identity_with(IndependenceEvidence {
         technical_independent: true,
@@ -39,6 +43,10 @@ pub fn verified_evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentit
     })
 }
 
+/// Build and verify an evaluator evidence package with the supplied independence claims.
+///
+/// # Errors
+/// Returns an error when the temporary package cannot be written or verified.
 pub fn verified_evaluator_identity_with(
     independence: IndependenceEvidence,
 ) -> TestResult<VerifiedEvaluatorBuildIdentity> {
@@ -54,7 +62,14 @@ pub fn verified_evaluator_identity_with(
     .map_err(|error| -> Box<dyn Error> { Box::new(error) })
 }
 
-pub fn evaluator_evidence_rejects_corrupted_checksum() -> TestResult {
+/// Prove that a corrupted canonical checksum inventory cannot authorize report emission.
+///
+/// # Errors
+/// Returns an error when the temporary package cannot be prepared.
+///
+/// # Panics
+/// Panics if the public verifier accepts the corrupted inventory.
+pub fn evaluator_evidence_rejects_corrupted_checksum() -> TestResult<()> {
     let directory = tempfile::tempdir()?;
     write_evaluator_package(directory.path())?;
     fs::write(directory.path().join("BLAKE3SUMS"), b"corrupted\n")?;
@@ -76,7 +91,7 @@ pub fn evaluator_evidence_rejects_corrupted_checksum() -> TestResult {
     Ok(())
 }
 
-fn write_evaluator_package(directory: &Path) -> TestResult {
+fn write_evaluator_package(directory: &Path) -> TestResult<()> {
     fs::create_dir_all(directory.join("source"))?;
     fs::create_dir_all(directory.join("bin"))?;
     let source = source_archive("1111111111111111111111111111111111111111")?;
@@ -95,7 +110,7 @@ fn write_evaluator_package(directory: &Path) -> TestResult {
     write_checksum_inventory(directory)
 }
 
-fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult {
+fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult<()> {
     let binary = fs::read(directory.join("bin/pos-reference-evaluator"))?;
     let lock = fs::read(directory.join("Cargo.lock"))?;
     let sbom = fs::read(directory.join("sbom.cdx.json"))?;
@@ -118,7 +133,7 @@ fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult {
     Ok(())
 }
 
-fn write_checksum_inventory(directory: &Path) -> TestResult {
+fn write_checksum_inventory(directory: &Path) -> TestResult<()> {
     let paths = [
         "Cargo.lock",
         "bin/pos-reference-evaluator",

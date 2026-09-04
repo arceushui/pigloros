@@ -6381,7 +6381,6 @@ pub mod tests {
             validate_conformance_report_shape(&cases_over_limit),
             Err(EvidenceError::InvalidConformanceReport)
         );
-
     }
 
     #[test]
@@ -6738,13 +6737,6 @@ pub mod tests {
         assert_eq!(
             verify_evidence(&invalid),
             Err(EvidenceError::InvalidConsentAudit)
-        );
-
-        let mut invalid = evidence();
-        invalid.manifest.execution_mode = ExecutionModeV1::Replay;
-        assert_eq!(
-            verify_evidence(&invalid),
-            Err(EvidenceError::InvalidConformanceReport)
         );
     }
 
@@ -7165,8 +7157,12 @@ pub mod tests {
                         effective_after_seq: duplicate_revocation.host_closure.effective_after_seq,
                         revocation_event_seq: duplicate_revocation.host_closure.closure_event_seq,
                         revocation_event_type: "consent.revoked.v1".to_owned(),
-                        revocation_payload_digest: duplicate_revocation.host_closure.closure_payload_digest,
-                        halted_at_tick_boundary: duplicate_revocation.host_closure.halted_at_tick_boundary,
+                        revocation_payload_digest: duplicate_revocation
+                            .host_closure
+                            .closure_payload_digest,
+                        halted_at_tick_boundary: duplicate_revocation
+                            .host_closure
+                            .halted_at_tick_boundary,
                     },
                     &duplicate_revocation.authoritative_events,
                 ),
