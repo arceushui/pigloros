@@ -4413,7 +4413,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
             params![request.digest().as_slice()],
             |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
         ).optional().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-            .map(|(digest, bytes)| reference_from_sql(digest).and_then(|digest| StoredErasureManifestV1::new(digest, bytes))).transpose()
+            .map(|(digest, bytes)| reference_from_sql(digest).map(|digest| StoredErasureManifestV1::from_stored(digest, bytes))).transpose()
     }
     fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
         load_sqlite_erasure_evidence(&self.conn, reference)
@@ -4492,9 +4492,9 @@ impl ErasurePersistencePortV1 for SqliteStore {
                  WHERE request_digest=?1 ORDER BY error_digest LIMIT ?2",
             )
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        let request_digest = request.digest().to_vec();
+        let request_digest = request.digest();
         let limit = i64::try_from(ERASURE_MAX_RECOVERY_ERRORS + 1).unwrap_or(i64::MAX);
-        let query_params: [&dyn ToSql; 2] = [&request_digest, &limit];
+        let query_params: [&dyn ToSql; 2] = [&request_digest[..], &limit];
         let references = Self::query_prepared(&mut statement, &query_params)
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
             .mapped(|row| row.get::<_, Vec<u8>>(0))

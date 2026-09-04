@@ -599,6 +599,33 @@ fn public_state_chain_query_requires_the_complete_predecessor_chain() -> Result<
 }
 
 #[test]
+fn recovery_failure_retains_a_malformed_manifest_identity() -> Result<(), ErasureErrorV1> {
+    let graph = active_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    graph
+        .adapter
+        .replace_manifest_raw(request, manifest.digest(), vec![0xff])?;
+
+    let stored = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(stored.digest(), manifest.digest());
+    assert_eq!(stored.canonical_cbor(), &[0xff]);
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].manifest(), Some(manifest.digest()));
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
 fn recovery_failure_identifies_a_missing_predecessor_state() -> Result<(), ErasureErrorV1> {
     let graph = completed_graph(vec![target(10)], None)?;
     let terminal = graph

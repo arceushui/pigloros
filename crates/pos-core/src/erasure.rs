@@ -3290,8 +3290,9 @@ pub trait ErasureRecoveryAuthorizationVerifierV1 {
     ) -> Result<(), ErasureErrorV1>;
 }
 
-/// Exact stored ERCRP1 bytes and their content address. Adapters return this
-/// envelope unchanged; decoding and recovery remain core-owned.
+/// Exact stored ERCRP1 bytes and their recorded content address. Adapters
+/// return this envelope unchanged; content-address verification, decoding, and
+/// recovery remain core-owned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredErasureManifestV1 {
     digest: ErasureReferenceV1,
@@ -3299,7 +3300,7 @@ pub struct StoredErasureManifestV1 {
 }
 
 impl StoredErasureManifestV1 {
-    /// Construct an adapter-returned manifest after checking its content address.
+    /// Construct a manifest after checking its content address.
     ///
     /// # Errors
     ///
@@ -3315,6 +3316,23 @@ impl StoredErasureManifestV1 {
                 canonical_cbor,
             })
             .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    /// Construct an exact envelope from adapter storage.
+    ///
+    /// The adapter must preserve the recorded digest and bytes exactly. Core
+    /// recovery verifies that the digest authenticates the bytes before it
+    /// decodes or uses the manifest.
+    #[must_use]
+    pub fn from_stored(digest: ErasureReferenceV1, canonical_cbor: Vec<u8>) -> Self {
+        Self {
+            digest,
+            canonical_cbor,
+        }
+    }
+
+    pub(super) fn content_address_matches(&self) -> bool {
+        ErasureReferenceV1::from_digest(domain_digest(ERCRP1, &self.canonical_cbor)) == self.digest
     }
 
     /// Return the content address used for CAS.
@@ -3653,7 +3671,10 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     ///
     /// # Errors
     ///
-    /// Returns a closed adapter read or decoding error.
+    /// Returns a closed adapter read or storage-shape error. The returned
+    /// envelope is not decoded or content-address validated by the adapter;
+    /// core recovery performs those checks while retaining its recorded
+    /// manifest identity on failure.
     fn read_manifest(
         &self,
         request: ErasureReferenceV1,

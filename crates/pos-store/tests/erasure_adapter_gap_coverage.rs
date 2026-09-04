@@ -1143,6 +1143,22 @@ fn sqlite_public_reads_reject_malformed_reference_columns() -> Result<(), Box<dy
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
+    let stored_request = reference(2);
+    let stored_digest = reference(3);
+    connection.execute(
+        "INSERT INTO erasure_records(request_digest,manifest_digest,manifest_cbor) VALUES(?1,?2,?3)",
+        rusqlite::params![
+            stored_request.digest().as_slice(),
+            stored_digest.digest().as_slice(),
+            &malformed
+        ],
+    )?;
+    let stored = store
+        .read_manifest(stored_request)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(stored.digest(), stored_digest);
+    assert_eq!(stored.canonical_cbor(), malformed.as_slice());
+
     for (table, read) in [
         ("erasure_attempt_pages", SqliteReadOperation::AttemptRef),
         ("erasure_scope_nodes", SqliteReadOperation::ScopeRef),
