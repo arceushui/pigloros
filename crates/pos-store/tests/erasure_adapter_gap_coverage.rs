@@ -8,8 +8,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[path = "../../pos-core/tests/support/erasure.rs"]
-pub mod erasure_support;
+#[path = "support/erasure.rs"]
+mod erasure_support;
 
 use erasure_support::{
     freeze_evidence_fixture, obligation, reference, request as fixture_request,
