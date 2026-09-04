@@ -190,7 +190,7 @@ fn write_octal(field: &mut [u8], value: u64) {
 }
 
 fn source_archive_with_entry(
-    header: [u8; 512],
+    header: &[u8; 512],
     payload: &[u8],
     pad_and_terminate: bool,
 ) -> TestResult<Vec<u8>> {
@@ -785,41 +785,41 @@ fn command_rejects_malformed_embedded_source_identity_records() -> TestResult {
     let archives = vec![
         gzip_bytes(&[])?,
         gzip_bytes(&[0; 1024])?,
-        source_archive_with_entry(corrupted_checksum, &[], true)?,
-        source_archive_with_entry(invalid_checksum_field, &[], true)?,
-        source_archive_with_entry(invalid_size_field, &[], true)?,
-        source_archive_with_entry(tar_header("pax", 4_097, b'g'), &[], false)?,
-        source_archive_with_entry(tar_header("pax", 52, b'g'), b"short", false)?,
-        source_archive_with_entry(tar_header("file", 10, b'0'), b"x", false)?,
-        source_archive_with_entry(tar_header("file", 0, b'0'), &[], true)?,
-        source_archive_with_entry(tar_header("pax", no_space.len(), b'g'), no_space, true)?,
+        source_archive_with_entry(&corrupted_checksum, &[], true)?,
+        source_archive_with_entry(&invalid_checksum_field, &[], true)?,
+        source_archive_with_entry(&invalid_size_field, &[], true)?,
+        source_archive_with_entry(&tar_header("pax", 4_097, b'g'), &[], false)?,
+        source_archive_with_entry(&tar_header("pax", 52, b'g'), b"short", false)?,
+        source_archive_with_entry(&tar_header("file", 10, b'0'), b"x", false)?,
+        source_archive_with_entry(&tar_header("file", 0, b'0'), &[], true)?,
+        source_archive_with_entry(&tar_header("pax", no_space.len(), b'g'), no_space, true)?,
         source_archive_with_entry(
-            tar_header("pax", non_numeric_length.len(), b'g'),
+            &tar_header("pax", non_numeric_length.len(), b'g'),
             non_numeric_length,
             true,
         )?,
         source_archive_with_entry(
-            tar_header("pax", overflowing_length.len(), b'g'),
+            &tar_header("pax", overflowing_length.len(), b'g'),
             overflowing_length,
             true,
         )?,
         source_archive_with_entry(
-            tar_header("pax", missing_newline.len(), b'g'),
+            &tar_header("pax", missing_newline.len(), b'g'),
             missing_newline,
             true,
         )?,
         source_archive_with_entry(
-            tar_header("pax", unrelated_record.len(), b'g'),
+            &tar_header("pax", unrelated_record.len(), b'g'),
             &unrelated_record,
             true,
         )?,
         source_archive_with_entry(
-            tar_header("pax", invalid_utf8_record.len(), b'g'),
+            &tar_header("pax", invalid_utf8_record.len(), b'g'),
             &invalid_utf8_record,
             true,
         )?,
         source_archive_with_entry(
-            tar_header("pax", short_commit_record.len(), b'g'),
+            &tar_header("pax", short_commit_record.len(), b'g'),
             &short_commit_record,
             true,
         )?,
