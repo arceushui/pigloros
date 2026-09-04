@@ -3044,10 +3044,7 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn assert_live_staging_rejection(
-    mutation: StagingMutation,
-    expected_error: &str,
-) -> TestResult {
+fn assert_live_staging_rejection(mutation: StagingMutation, expected_error: &str) -> TestResult {
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let key = "0707070707070707070707070707070707070707070707070707070707070707";
