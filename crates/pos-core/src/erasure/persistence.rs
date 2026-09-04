@@ -1978,6 +1978,7 @@ fn canonical_acknowledgement_references(
     values.into_iter().map(|value| value.reference()).collect()
 }
 
+#[derive(Clone, Copy)]
 struct FixedGraphV1<'a> {
     requested: ErasureReferenceV1,
     erq: &'a ErasureRequestV1,
@@ -2436,4 +2437,1081 @@ fn resolve_state_provenance_predecessor(
         .resolve_state(previous)
         .map_err(|error| RecoveryFailureV1::new(error, previous))?
         .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, previous))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::{
+        ErasureAcknowledgementProvenanceInputV1, ErasureAdministrativeResolutionInputV1,
+        ErasureApplicabilityDecisionV1, ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
+        ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeApplicabilityRowV1,
+        ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeProvenanceInputV1,
+        ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureObligationInputV1,
+        ErasureObligationSetInputV1, ErasureRequestInputV1, ErasureRetryAdmissionInputV1,
+        ErasureScopeExtensionInputV1, ErasureScopeV1,
+    };
+
+    const fn reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    const fn target() -> ErasureRequiredTargetV1 {
+        ErasureRequiredTargetV1 {
+            artifact_class: super::super::ErasureArtifactClassV1::TimelineReplay,
+            artifact_digest: reference(10),
+            key_role: ErasureKeyRoleV1::DataEncryption,
+            key_digest: reference(11),
+            replica_set: reference(12),
+            replica_id: reference(13),
+        }
+    }
+
+    fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+        ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: reference(1),
+            subject: reference(2),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(3)],
+            requester: reference(4),
+            authorization: reference(5),
+            policy: reference(6),
+            request_position: 7,
+            horizon_position: 8,
+            provenance: reference(9),
+        })
+    }
+
+    fn admission_fixture(
+        request: ErasureReferenceV1,
+        attempt_ordinal: u64,
+        source_receipt: Option<ErasureReferenceV1>,
+        unresolved_obligations: Vec<ErasureReferenceV1>,
+        command_identities: Vec<ErasureReferenceV1>,
+        policy: ErasureReferenceV1,
+        trust: ErasureReferenceV1,
+    ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+        ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            request,
+            attempt_ordinal,
+            source_receipt,
+            unresolved_obligations,
+            command_identities,
+            policy,
+            trust,
+            admitted_position: 10,
+            deadline_position: 20,
+            authorization_provenance: reference(30),
+        })
+    }
+
+    fn obligation(request: ErasureReferenceV1) -> Result<ErasureObligationV1, ErasureErrorV1> {
+        ErasureObligationV1::new(ErasureObligationInputV1 {
+            category: ErasureInventoryCategoryV1::Artifact,
+            target: target(),
+            owner: reference(13),
+            command_identity: destruction_command_reference(request, target()),
+        })
+    }
+
+    fn acknowledgement_fixture(
+        request: ErasureReferenceV1,
+        attempt: ErasureReferenceV1,
+        obligation: ErasureReferenceV1,
+        command: ErasureReferenceV1,
+        scope: ErasureReferenceV1,
+    ) -> Result<ErasureAcknowledgementProvenanceV1, ErasureErrorV1> {
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request,
+            command,
+            attempt,
+            obligation,
+            owner: reference(13),
+            scope,
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(41),
+            policy: reference(6),
+            trust: reference(7),
+        })
+    }
+
+    fn scope(request: ErasureReferenceV1) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
+        ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request,
+            scope_members: vec![reference(42)],
+            target_closure: target_closure_digest(&[target()]),
+            lineage_rule: Some(reference(43)),
+        })
+    }
+
+    struct AcceptFreezeVerifier;
+
+    impl ErasureFreezeAuthorizationVerifierV1 for AcceptFreezeVerifier {
+        fn validate_freeze_authorization(
+            &self,
+            _admission: &ErasureFreezeAdmissionEvidenceV1,
+            _authorization: &ErasureFreezeAuthorizationEvidenceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+    }
+
+    struct FrozenFixture {
+        target: ErasureRequiredTargetV1,
+        scope: ErasureScopeCommitmentV1,
+        admission: ErasureFreezeAdmissionEvidenceV1,
+        authorization: ErasureFreezeAuthorizationEvidenceV1,
+        freeze: ErasureFreezeProvenanceV1,
+        obligation_set: ErasureObligationSetV1,
+        atomic: ErasureAtomicFreezeAdmissionV1,
+    }
+
+    fn frozen_fixture(request: ErasureReferenceV1) -> Result<FrozenFixture, ErasureErrorV1> {
+        let target = target();
+        let target_closure = target_closure_digest(&[target]);
+        let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request,
+            scope_members: vec![reference(42)],
+            target_closure,
+            lineage_rule: None,
+        })?;
+        let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request,
+            obligations: Vec::new(),
+            policy: reference(6),
+            trust: reference(7),
+        })?;
+        let matrix = ErasureInventoryCategoryV1::CANONICAL
+            .into_iter()
+            .map(|category| {
+                ErasureFreezeApplicabilityRowV1::new(
+                    category,
+                    0,
+                    ErasureApplicabilityDecisionV1::Inapplicable,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let admission_input = ErasureFreezeAdmissionEvidenceInputV1 {
+            request,
+            scope_commitment: scope.reference(),
+            obligation_set: obligation_set.reference(),
+            applicability_matrix: matrix,
+            freeze_position: 10,
+            policy: reference(6),
+            trust: reference(7),
+            authorization_provenance: reference(0),
+        };
+        let provisional = ErasureFreezeAdmissionEvidenceV1::new(admission_input.clone())?;
+        let authorization =
+            ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+                admission_body_digest: provisional.authorization_body_digest()?,
+                policy: reference(6),
+                trust: reference(7),
+                evidence: vec![1],
+            })?;
+        let admission =
+            ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+                authorization_provenance: authorization.reference(),
+                ..admission_input
+            })?;
+        let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+            request,
+            scope_commitment: scope.reference(),
+            obligation_set: obligation_set.reference(),
+            freeze_position: 10,
+            host_evidence: admission.reference(),
+        })?;
+        let atomic = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+            targets: vec![target],
+            scope: ErasureScopeCommitmentInputV1 {
+                request,
+                scope_members: vec![reference(42)],
+                target_closure,
+                lineage_rule: None,
+            },
+            obligations: Vec::new(),
+            obligation_set: obligation_set.clone(),
+            freeze_position: 10,
+            freeze_admission_evidence: admission.clone(),
+            freeze_authorization_evidence: authorization.clone(),
+        })?;
+        Ok(FrozenFixture {
+            target,
+            scope,
+            admission,
+            authorization,
+            freeze,
+            obligation_set,
+            atomic,
+        })
+    }
+
+    #[derive(Clone, Copy)]
+    struct FixedGraphInput<'a> {
+        request: &'a ErasureRequestV1,
+        state: &'a ErasureStateV1,
+        targets: &'a [ErasureRequiredTargetV1],
+        scope: Option<&'a ErasureScopeCommitmentV1>,
+        admission: Option<&'a ErasureFreezeAdmissionEvidenceV1>,
+        authorization: Option<&'a ErasureFreezeAuthorizationEvidenceV1>,
+        freeze: Option<&'a ErasureFreezeProvenanceV1>,
+        obligation_set: Option<&'a ErasureObligationSetV1>,
+        obligations: &'a [ErasureObligationV1],
+        manifest: ErasureReferenceV1,
+        verifier: &'a dyn ErasureFreezeAuthorizationVerifierV1,
+    }
+
+    fn fixed_graph(input: FixedGraphInput<'_>) -> FixedGraphV1<'_> {
+        FixedGraphV1 {
+            requested: input.request.reference(),
+            erq: input.request,
+            state: input.state,
+            targets: input.targets,
+            correction: None,
+            rejection: None,
+            scope: input.scope,
+            admission: input.admission,
+            authorization: input.authorization,
+            freeze: input.freeze,
+            failure: None,
+            obligation_set: input.obligation_set,
+            obligations: input.obligations,
+            authorize_provenance: None,
+            target_closure: None,
+            manifest: input.manifest,
+            verifier: input.verifier,
+        }
+    }
+
+    fn record_fixture(request: &ErasureRequestV1) -> Result<RecoveredErasureV1, ErasureErrorV1> {
+        Ok(RecoveredErasureV1::initial(
+            request.clone(),
+            ErasureStateV1::submitted(request.reference(), reference(44), request.provenance())?,
+        ))
+    }
+
+    #[test]
+    fn recovered_attempt_mutations_reject_conflicts() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let admission = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+
+        let mut wrong_request = record_fixture(&request)?;
+        let foreign = admission_fixture(
+            reference(2),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+        assert_eq!(
+            wrong_request.begin_attempt(foreign).map(|_| ()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let mut wrong_ordinal = record_fixture(&request)?;
+        let retry = admission_fixture(
+            request.reference(),
+            1,
+            Some(reference(45)),
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+        assert_eq!(
+            wrong_ordinal.begin_attempt(retry).map(|_| ()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let mut active = record_fixture(&request)?;
+        active.begin_attempt(admission.clone())?;
+        assert_eq!(
+            active.begin_attempt(admission).map(|_| ()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_acknowledgements_and_bounds_reject_conflicts() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let mut acknowledgements = record_fixture(&request)?;
+        let admission = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+        acknowledgements.begin_attempt(admission.clone())?;
+        let valid = acknowledgement_fixture(
+            request.reference(),
+            admission.reference(),
+            reference(46),
+            reference(47),
+            reference(40),
+        )?;
+        let wrong_request = acknowledgement_fixture(
+            reference(2),
+            admission.reference(),
+            reference(46),
+            reference(47),
+            reference(40),
+        )?;
+        assert_eq!(
+            acknowledgements
+                .retain_acknowledgement(&wrong_request)
+                .map(|_| ()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        acknowledgements.retain_acknowledgement(&valid)?;
+        assert_eq!(
+            acknowledgements.retain_acknowledgement(&valid).map(|_| ()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: request.reference(),
+            scope_commitment: reference(48),
+            fork: reference(49),
+            lineage_rule: reference(50),
+            predecessor_extension: None,
+            admission_provenance: reference(51),
+        })?;
+        let mut scope_bound = record_fixture(&request)?;
+        scope_bound.scope_head = Some(RecoveredScopeHeadV1 {
+            node: reference(52),
+            extension: reference(53),
+            ordinal: ERASURE_MAX_SCOPE_EXTENSIONS as u64 - 1,
+        });
+        assert_eq!(
+            scope_bound.append_scope_extension(extension).map(|_| ()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let resolution =
+            ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+                request: request.reference(),
+                affected_digests: vec![reference(54)],
+                action: super::super::ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+                scope_commitment: reference(55),
+                policy: reference(6),
+                trust: reference(7),
+                principal: reference(56),
+                authorization_provenance: reference(57),
+                reason: reference(58),
+                issue_position: 59,
+                predecessor_resolution: None,
+            })?;
+        let mut resolution_bound = record_fixture(&request)?;
+        resolution_bound.administrative_resolution_count =
+            ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64;
+        assert_eq!(
+            resolution_bound
+                .append_administrative_resolution(&resolution)
+                .map(|_| ()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replay_bindings_reject_admissions_inventories_and_dispatch_heads(
+    ) -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let mut record = record_fixture(&request)?;
+        let page = AttemptPageV1 {
+            request: request.reference(),
+            ordinal: 0,
+            retry_admission: reference(60),
+            admitted_inventory: reference(61),
+            effective_inventory: reference(62),
+            outcome: reference(63),
+            receipt: reference(64),
+            receipt_provenance: reference(65),
+            terminal_state: reference(66),
+            predecessor: None,
+            reference: reference(67),
+        };
+        let admitted = InventoryV1::new(request.reference(), 0, INVENTORY_ADMITTED.0, Vec::new())?;
+        let effective =
+            InventoryV1::new(request.reference(), 0, INVENTORY_EFFECTIVE.0, Vec::new())?;
+        let admission = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+        let foreign = admission_fixture(
+            reference(2),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+        assert_eq!(
+            record
+                .validate_replay_page_bindings(&page, &foreign, &admitted, &effective, None)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        assert_eq!(
+            record
+                .validate_replay_page_bindings(&page, &admission, &admitted, &admitted, None)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        record.dispatch_provenance = Some(admission.reference());
+        record
+            .validate_replay_page_bindings(&page, &admission, &admitted, &effective, None)
+            .map_err(RecoveryFailureV1::error)?;
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_admission_matching_rejects_incomplete_bindings() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let obligation = obligation(request.reference())?;
+        let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request: request.reference(),
+            obligations: vec![obligation.reference()],
+            policy: reference(6),
+            trust: reference(7),
+        })?;
+        let mut record = record_fixture(&request)?;
+        let empty_admission = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+        assert_eq!(
+            record
+                .validate_attempt_admission(&empty_admission)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        record.obligation_set = Some(obligation_set);
+        record.obligations = vec![obligation];
+        let wrong_policy = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            vec![obligation.reference()],
+            vec![obligation.command_identity()],
+            reference(8),
+            reference(7),
+        )?;
+        assert_eq!(
+            record
+                .validate_attempt_admission(&wrong_policy)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        let wrong_obligations = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+        assert_eq!(
+            record
+                .validate_attempt_admission(&wrong_obligations)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        let matching = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            vec![obligation.reference()],
+            vec![obligation.command_identity()],
+            reference(6),
+            reference(7),
+        )?;
+        assert_eq!(
+            record
+                .validate_attempt_admission(&matching)
+                .map_err(RecoveryFailureV1::error)?
+                .len(),
+            1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn acknowledgement_matching_rejects_incomplete_bindings() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let obligation = obligation(request.reference())?;
+        let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request: request.reference(),
+            obligations: vec![obligation.reference()],
+            policy: reference(6),
+            trust: reference(7),
+        })?;
+        let mut record = record_fixture(&request)?;
+        record.obligation_set = Some(obligation_set);
+        record.obligations = vec![obligation];
+        let matching = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            vec![obligation.reference()],
+            vec![obligation.command_identity()],
+            reference(6),
+            reference(7),
+        )?;
+        let acknowledgement = acknowledgement_fixture(
+            request.reference(),
+            matching.reference(),
+            obligation.reference(),
+            obligation.command_identity(),
+            reference(40),
+        )?;
+        assert!(!record.acknowledgement_matches_admission(&acknowledgement, &matching));
+        record.scope = Some(scope(request.reference())?);
+        let scope_reference = record
+            .scope
+            .as_ref()
+            .map(ErasureScopeCommitmentV1::reference)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let matching_acknowledgement = acknowledgement_fixture(
+            request.reference(),
+            matching.reference(),
+            obligation.reference(),
+            obligation.command_identity(),
+            scope_reference,
+        )?;
+        assert!(record.acknowledgement_matches_admission(&matching_acknowledgement, &matching));
+        let no_selection = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?;
+        assert!(!record.acknowledgement_matches_admission(&matching_acknowledgement, &no_selection));
+        record.obligations.clear();
+        assert!(!record.acknowledgement_matches_admission(&matching_acknowledgement, &matching));
+        record.obligation_set = None;
+        assert_eq!(
+            record
+                .validate_attempt_admission(&matching)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    struct RepeatingStateResolver(ErasureStateV1);
+
+    impl ErasureStateResolverV1 for RepeatingStateResolver {
+        fn resolve_state(
+            &self,
+            _digest: ErasureReferenceV1,
+        ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    struct RecoveryVerifier;
+
+    impl ErasureRecoveryAuthorizationVerifierV1 for RecoveryVerifier {
+        fn validate_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn validate_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+    }
+
+    struct TestPersistencePort {
+        effect_manifest: Option<ErasureReferenceV1>,
+        effect: ErasureCasEffectV1,
+        resolution_count: u64,
+    }
+
+    impl ErasureStateResolverV1 for TestPersistencePort {
+        fn resolve_state(
+            &self,
+            _digest: ErasureReferenceV1,
+        ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+            Ok(None)
+        }
+    }
+
+    impl ErasurePersistencePortV1 for TestPersistencePort {
+        fn read_manifest(
+            &self,
+            _request: ErasureReferenceV1,
+        ) -> Result<Option<StoredErasureManifestV1>, ErasureErrorV1> {
+            Ok(None)
+        }
+
+        fn read_object(&self, _reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn read_effect(
+            &self,
+            _manifest: ErasureReferenceV1,
+        ) -> Result<ErasureCasEffectV1, ErasureErrorV1> {
+            Ok(self.effect.clone())
+        }
+
+        fn effect_manifest(
+            &self,
+            _subject: ErasureReferenceV1,
+        ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+            Ok(self.effect_manifest)
+        }
+
+        fn attempt_page_ref(
+            &self,
+            _request: ErasureReferenceV1,
+            _ordinal: u64,
+        ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+            Ok(None)
+        }
+
+        fn attempt_index_count(&self, _request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+            Ok(0)
+        }
+
+        fn scope_node_ref(
+            &self,
+            _request: ErasureReferenceV1,
+            _ordinal: u64,
+        ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+            Ok(None)
+        }
+
+        fn scope_index_count(&self, _request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+            Ok(0)
+        }
+
+        fn administrative_resolution_ref(
+            &self,
+            _request: ErasureReferenceV1,
+            _ordinal: u64,
+        ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+            Ok(None)
+        }
+
+        fn administrative_resolution_index_count(
+            &self,
+            _request: ErasureReferenceV1,
+        ) -> Result<u64, ErasureErrorV1> {
+            Ok(self.resolution_count)
+        }
+
+        fn recovery_error_refs(
+            &self,
+            _request: ErasureReferenceV1,
+        ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+            Ok(Vec::new())
+        }
+
+        fn append_recovery_error(
+            &mut self,
+            _object: crate::PreparedErasureRecoveryErrorV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn compare_and_swap(
+            &mut self,
+            _mutation: PreparedErasureCasV1,
+        ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::PolicyConflict)
+        }
+    }
+
+    #[test]
+    fn state_provenance_rejects_a_bounded_cycle() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let state = ErasureStateV1 {
+            request: request.reference(),
+            lifecycle: ErasureLifecycleV1::Authorized,
+            freeze_position: None,
+            coordinator: reference(44),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: super::super::ErasureReplayClaimV1::Exact,
+            previous_state: Some(reference(68)),
+            provenance: reference(69),
+            state_digest: reference(70),
+        };
+        let recovered = record_fixture(&request)?;
+        let failure = validate_state_provenance(
+            &RepeatingStateResolver(state.clone()),
+            &state,
+            &recovered.manifest,
+            reference(71),
+        )
+        .err()
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+        assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
+        assert_eq!(failure.subject(), reference(71));
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_effect_and_resolution_recovery_reject_incomplete_adapters(
+    ) -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let obligation = obligation(request.reference())?;
+        let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request: request.reference(),
+            obligations: vec![obligation.reference()],
+            policy: reference(6),
+            trust: reference(7),
+        })?;
+        let mut record = record_fixture(&request)?;
+        record.obligation_set = Some(obligation_set);
+        record.obligations = vec![obligation];
+        let admission = admission_fixture(
+            request.reference(),
+            0,
+            None,
+            vec![obligation.reference()],
+            vec![obligation.command_identity()],
+            reference(6),
+            reference(7),
+        )?;
+        let commands = record
+            .validate_attempt_admission(&admission)
+            .map_err(RecoveryFailureV1::error)?;
+        let wrong_reservation = ErasureCasEffectV1::AttemptAdmission {
+            reservation: ErasureAttemptQuotaReservationV1::new(reference(79), reference(80)),
+            commands,
+        };
+        let port = TestPersistencePort {
+            effect_manifest: Some(reference(81)),
+            effect: wrong_reservation,
+            resolution_count: 0,
+        };
+        assert_eq!(
+            record
+                .validate_attempt_effect(&port, &admission)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let port = TestPersistencePort {
+            effect_manifest: Some(reference(81)),
+            effect: ErasureCasEffectV1::None,
+            resolution_count: 0,
+        };
+        assert_eq!(
+            record
+                .validate_attempt_effect(&port, &admission)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut missing_resolution_set = record_fixture(&request)?;
+        missing_resolution_set.scope = Some(scope(request.reference())?);
+        missing_resolution_set.administrative_resolution_head = Some(reference(82));
+        let port = TestPersistencePort {
+            effect_manifest: None,
+            effect: ErasureCasEffectV1::None,
+            resolution_count: 1,
+        };
+        assert_eq!(
+            missing_resolution_set
+                .recover_administrative_resolutions(&port, &RecoveryVerifier)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_graph_recovery_checks_missing_and_mismatched_evidence() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let submitted =
+            ErasureStateV1::submitted(request.reference(), reference(44), request.provenance())?;
+        let verifier = AcceptFreezeVerifier;
+        let fixture = frozen_fixture(request.reference())?;
+        let empty_targets = Vec::new();
+        let partial = fixed_graph(FixedGraphInput {
+            request: &request,
+            state: &submitted,
+            targets: &empty_targets,
+            scope: None,
+            admission: None,
+            authorization: None,
+            freeze: None,
+            obligation_set: None,
+            obligations: &[],
+            manifest: reference(72),
+            verifier: &verifier,
+        });
+        assert_eq!(
+            reconstruct_frozen_graph(&partial)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            validate_frozen_bindings(&partial, &fixture.atomic)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let targets = vec![fixture.target];
+        let frozen_state = ErasureStateV1 {
+            request: request.reference(),
+            lifecycle: ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            coordinator: reference(44),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: super::super::ErasureReplayClaimV1::Exact,
+            previous_state: None,
+            provenance: fixture.freeze.reference(),
+            state_digest: reference(73),
+        };
+        let mut graph = fixed_graph(FixedGraphInput {
+            request: &request,
+            state: &frozen_state,
+            targets: &targets,
+            scope: Some(&fixture.scope),
+            admission: Some(&fixture.admission),
+            authorization: Some(&fixture.authorization),
+            freeze: Some(&fixture.freeze),
+            obligation_set: Some(&fixture.obligation_set),
+            obligations: &[],
+            manifest: reference(74),
+            verifier: &verifier,
+        });
+        graph.authorize_provenance = Some(reference(75));
+        graph.target_closure = Some(target_closure_digest(&targets));
+        validate_fixed_graph(&graph).map_err(RecoveryFailureV1::error)?;
+
+        let wrong_scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: request.reference(),
+            scope_members: vec![reference(42)],
+            target_closure: reference(76),
+            lineage_rule: None,
+        })?;
+        assert_eq!(
+            freeze_reconstruction_failure_subject(
+                &graph,
+                &wrong_scope,
+                &fixture.admission,
+                &fixture.freeze,
+                &fixture.obligation_set,
+            ),
+            wrong_scope.reference()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_graph_recovery_rejects_obligation_and_freeze_mismatches() -> Result<(), ErasureErrorV1>
+    {
+        let request = request()?;
+        let verifier = AcceptFreezeVerifier;
+        let fixture = frozen_fixture(request.reference())?;
+        let targets = vec![fixture.target];
+        let frozen_state = ErasureStateV1 {
+            request: request.reference(),
+            lifecycle: ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            coordinator: reference(44),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: super::super::ErasureReplayClaimV1::Exact,
+            previous_state: None,
+            provenance: fixture.freeze.reference(),
+            state_digest: reference(73),
+        };
+        let mut graph = fixed_graph(FixedGraphInput {
+            request: &request,
+            state: &frozen_state,
+            targets: &targets,
+            scope: Some(&fixture.scope),
+            admission: Some(&fixture.admission),
+            authorization: Some(&fixture.authorization),
+            freeze: Some(&fixture.freeze),
+            obligation_set: Some(&fixture.obligation_set),
+            obligations: &[],
+            manifest: reference(74),
+            verifier: &verifier,
+        });
+        graph.authorize_provenance = Some(reference(75));
+        graph.target_closure = Some(target_closure_digest(&targets));
+        validate_fixed_graph(&graph).map_err(RecoveryFailureV1::error)?;
+
+        let mismatched_obligations = vec![obligation(request.reference())?];
+        assert_eq!(
+            freeze_reconstruction_failure_subject(
+                &FixedGraphV1 {
+                    obligations: &mismatched_obligations,
+                    ..graph
+                },
+                &fixture.scope,
+                &fixture.admission,
+                &fixture.freeze,
+                &fixture.obligation_set,
+            ),
+            fixture.obligation_set.reference()
+        );
+
+        let wrong_freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+            request: request.reference(),
+            scope_commitment: reference(77),
+            obligation_set: fixture.obligation_set.reference(),
+            freeze_position: 10,
+            host_evidence: fixture.admission.reference(),
+        })?;
+        assert_eq!(
+            freeze_reconstruction_failure_subject(
+                &graph,
+                &fixture.scope,
+                &fixture.admission,
+                &wrong_freeze,
+                &fixture.obligation_set,
+            ),
+            wrong_freeze.reference()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_graph_recovery_rejects_invalid_obligation_and_falls_back() -> Result<(), ErasureErrorV1>
+    {
+        let request = request()?;
+        let verifier = AcceptFreezeVerifier;
+        let fixture = frozen_fixture(request.reference())?;
+        let targets = vec![fixture.target];
+        let frozen_state = ErasureStateV1 {
+            request: request.reference(),
+            lifecycle: ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            coordinator: reference(44),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: super::super::ErasureReplayClaimV1::Exact,
+            previous_state: None,
+            provenance: fixture.freeze.reference(),
+            state_digest: reference(73),
+        };
+        let mut graph = fixed_graph(FixedGraphInput {
+            request: &request,
+            state: &frozen_state,
+            targets: &targets,
+            scope: Some(&fixture.scope),
+            admission: Some(&fixture.admission),
+            authorization: Some(&fixture.authorization),
+            freeze: Some(&fixture.freeze),
+            obligation_set: Some(&fixture.obligation_set),
+            obligations: &[],
+            manifest: reference(74),
+            verifier: &verifier,
+        });
+        graph.authorize_provenance = Some(reference(75));
+        graph.target_closure = Some(target_closure_digest(&targets));
+        validate_fixed_graph(&graph).map_err(RecoveryFailureV1::error)?;
+
+        let invalid_obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+            category: ErasureInventoryCategoryV1::Artifact,
+            target: fixture.target,
+            owner: fixture.target.replica_id,
+            command_identity: reference(78),
+        })?;
+        let invalid_obligations = vec![invalid_obligation];
+        let invalid_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request: request.reference(),
+            obligations: vec![invalid_obligation.reference()],
+            policy: reference(6),
+            trust: reference(7),
+        })?;
+        let invalid_freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+            request: request.reference(),
+            scope_commitment: fixture.scope.reference(),
+            obligation_set: invalid_set.reference(),
+            freeze_position: 10,
+            host_evidence: fixture.admission.reference(),
+        })?;
+        assert_eq!(
+            freeze_reconstruction_failure_subject(
+                &FixedGraphV1 {
+                    obligations: &invalid_obligations,
+                    ..graph
+                },
+                &fixture.scope,
+                &fixture.admission,
+                &invalid_freeze,
+                &invalid_set,
+            ),
+            invalid_obligation.reference()
+        );
+        assert_eq!(
+            freeze_reconstruction_failure_subject(
+                &graph,
+                &fixture.scope,
+                &fixture.admission,
+                &fixture.freeze,
+                &fixture.obligation_set,
+            ),
+            fixture.admission.reference()
+        );
+        graph.scope = None;
+        assert_eq!(
+            partial_fixed_graph_subject(&graph),
+            fixture.admission.reference()
+        );
+        Ok(())
+    }
 }

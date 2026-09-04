@@ -1502,6 +1502,7 @@ pub(super) fn exact_array(value: &Value, expected: usize) -> Result<&[Value], Er
         _ => Err(ErasureErrorV1::InvalidEncoding),
     }
 }
+
 pub(super) fn string(value: &Value) -> Result<&str, ErasureErrorV1> {
     match value {
         Value::Text(value) => Ok(value),
@@ -1546,4 +1547,64 @@ pub(super) fn domain_digest(domain: &str, bytes: &[u8]) -> [u8; 32] {
     input.push(0);
     input.extend_from_slice(bytes);
     *blake3::hash(&input).as_bytes()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_cbor_helpers_fail_closed_at_each_shape_boundary() {
+        assert_eq!(
+            bounded_array(&[Value::Null], 0),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(array(&Value::Null, 1), Err(ErasureErrorV1::InvalidEncoding));
+        assert_eq!(
+            exact_array(&Value::Null, 0),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            exact_array(&Value::Array(Vec::new()), 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+
+        assert_eq!(
+            cbor_shape_is_bounded(&[0, 0], 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[0x9f], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[0x1f], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[0x81, 0x1f], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_argument(&[], 0, 31),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_argument_bytes(&[0], 0, 2, 256),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_argument_bytes(&[0], 0, 1, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            decode_limited(&[0x18, 0x00], 2, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
 }
