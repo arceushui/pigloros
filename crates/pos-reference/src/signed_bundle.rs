@@ -21,6 +21,10 @@ const MAX_PATH_BYTES: usize = 256;
 const PROFILE_PATH: &str = "profile/CPF1.cbor";
 const TRUST_POLICY_PATH: &str = "authority/trust-policy-snapshot.tps1";
 
+trait ArchiveReader: Read + Seek {}
+
+impl<T: Read + Seek> ArchiveReader for T {}
+
 /// CFB1 verification failures that remain safe to expose to an operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum BundleError {
@@ -268,6 +272,14 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
 ) -> Result<AuthenticatedBundlePreflight, BundleError> {
+    preflight_archive(archive, trust_policy_bytes, request)
+}
+
+fn preflight_archive(
+    archive: &mut dyn ArchiveReader,
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedBundlePreflight, BundleError> {
     let archive_length = bounded_archive_digest(archive, request.fixture_bundle_digest)?;
     let scanned = scan_archive(archive, archive_length)?;
     let manifest_bytes = read_range(archive, scanned.manifest_range.clone(), MAX_MANIFEST_BYTES)?;
@@ -318,7 +330,7 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
     })
 }
 
-fn bounded_archive_digest<R: Read + Seek>(
+fn bounded_archive_digest<R: Read + Seek + ?Sized>(
     archive: &mut R,
     expected: [u8; 32],
 ) -> Result<u64, BundleError> {
@@ -343,7 +355,7 @@ fn bounded_archive_digest<R: Read + Seek>(
     Ok(length)
 }
 
-fn scan_archive<R: Read + Seek>(
+fn scan_archive<R: Read + Seek + ?Sized>(
     archive: &mut R,
     archive_length: u64,
 ) -> Result<ScannedArchive, BundleError> {
@@ -373,7 +385,7 @@ fn scan_archive<R: Read + Seek>(
     })
 }
 
-fn scan_members<R: Read>(
+fn scan_members<R: Read + ?Sized>(
     decoder: &mut Decoder<&mut R>,
 ) -> Result<(Vec<ScannedMember>, Option<Vec<u8>>), BundleError> {
     let count = array_length(decoder)?;
@@ -418,7 +430,7 @@ fn scan_members<R: Read>(
     Ok((members, profile_bytes))
 }
 
-fn skip_cbor_value<R: Read>(
+fn skip_cbor_value<R: Read + ?Sized>(
     decoder: &mut Decoder<&mut R>,
     depth: usize,
 ) -> Result<(), BundleError> {
@@ -437,7 +449,7 @@ fn skip_cbor_value<R: Read>(
     }
 }
 
-fn expect_array<R: Read>(
+fn expect_array<R: Read + ?Sized>(
     decoder: &mut Decoder<&mut R>,
     expected: usize,
 ) -> Result<(), BundleError> {
@@ -448,28 +460,28 @@ fn expect_array<R: Read>(
     }
 }
 
-fn array_length<R: Read>(decoder: &mut Decoder<&mut R>) -> Result<usize, BundleError> {
+fn array_length<R: Read + ?Sized>(decoder: &mut Decoder<&mut R>) -> Result<usize, BundleError> {
     match decoder.pull().map_err(|_| BundleError::InvalidEncoding)? {
         Header::Array(Some(length)) => Ok(length),
         _ => Err(BundleError::InvalidEncoding),
     }
 }
 
-fn bytes_length<R: Read>(decoder: &mut Decoder<&mut R>) -> Result<usize, BundleError> {
+fn bytes_length<R: Read + ?Sized>(decoder: &mut Decoder<&mut R>) -> Result<usize, BundleError> {
     match decoder.pull().map_err(|_| BundleError::InvalidEncoding)? {
         Header::Bytes(Some(length)) => Ok(length),
         _ => Err(BundleError::InvalidEncoding),
     }
 }
 
-fn positive<R: Read>(decoder: &mut Decoder<&mut R>) -> Result<u64, BundleError> {
+fn positive<R: Read + ?Sized>(decoder: &mut Decoder<&mut R>) -> Result<u64, BundleError> {
     match decoder.pull().map_err(|_| BundleError::InvalidEncoding)? {
         Header::Positive(value) => Ok(value),
         _ => Err(BundleError::InvalidEncoding),
     }
 }
 
-fn read_fixed_bytes<const N: usize, R: Read>(
+fn read_fixed_bytes<const N: usize, R: Read + ?Sized>(
     decoder: &mut Decoder<&mut R>,
 ) -> Result<[u8; N], BundleError> {
     let length = bytes_length(decoder)?;
@@ -477,7 +489,7 @@ fn read_fixed_bytes<const N: usize, R: Read>(
     bytes.try_into().map_err(|_| BundleError::InvalidEncoding)
 }
 
-fn read_text<R: Read>(
+fn read_text<R: Read + ?Sized>(
     decoder: &mut Decoder<&mut R>,
     maximum: usize,
 ) -> Result<String, BundleError> {
@@ -500,7 +512,7 @@ fn read_text<R: Read>(
     Ok(output)
 }
 
-fn read_bytes<R: Read>(
+fn read_bytes<R: Read + ?Sized>(
     decoder: &mut Decoder<&mut R>,
     length: usize,
     maximum: usize,
@@ -522,7 +534,10 @@ fn read_bytes<R: Read>(
     Ok(output)
 }
 
-fn drain_bytes<R: Read>(decoder: &mut Decoder<&mut R>, length: usize) -> Result<(), BundleError> {
+fn drain_bytes<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+    length: usize,
+) -> Result<(), BundleError> {
     let mut segments = decoder.bytes(Some(length));
     while let Some(mut segment) = segments.pull().map_err(|_| BundleError::InvalidEncoding)? {
         let mut buffer = [0_u8; 8192];
@@ -535,7 +550,10 @@ fn drain_bytes<R: Read>(decoder: &mut Decoder<&mut R>, length: usize) -> Result<
     Ok(())
 }
 
-fn drain_text<R: Read>(decoder: &mut Decoder<&mut R>, length: usize) -> Result<(), BundleError> {
+fn drain_text<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+    length: usize,
+) -> Result<(), BundleError> {
     let mut segments = decoder.text(Some(length));
     while let Some(mut segment) = segments.pull().map_err(|_| BundleError::InvalidEncoding)? {
         let mut buffer = [0_u8; 8192];
@@ -548,7 +566,7 @@ fn drain_text<R: Read>(decoder: &mut Decoder<&mut R>, length: usize) -> Result<(
     Ok(())
 }
 
-fn read_range<R: Read + Seek>(
+fn read_range<R: Read + Seek + ?Sized>(
     archive: &mut R,
     range: Range<u64>,
     maximum: usize,
