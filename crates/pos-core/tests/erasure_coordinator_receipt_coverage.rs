@@ -1730,6 +1730,23 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         &correction,
     )?;
     assert_correction_recovery_resolve_state_faults(&mutation_base, &corrected)?;
+
+    let missing_terminal = reference(246);
+    let missing_correction = correction_for(original.reference(), missing_terminal, reference(22))?;
+    let missing_request = corrected_request(missing_correction.reference())?;
+    let missing_state = ErasureStateV1::submitted(
+        missing_request.reference(),
+        COORDINATOR,
+        missing_request.provenance(),
+    )?;
+    assert_mutated_correction_is_rejected(
+        &mutation_base,
+        corrected_reference,
+        &missing_request,
+        &missing_state,
+        &missing_correction,
+        missing_terminal,
+    )?;
     Ok(())
 }
 

@@ -3833,23 +3833,7 @@ fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1 + ?Sized>(
 ) -> Result<(), PredecessorChainFailureV1> {
     for _ in 0..maximum_depth {
         if let Some(previous_digest) = current.previous_state() {
-            match resolver.resolve_state(previous_digest) {
-                Ok(Some(previous)) => {
-                    current
-                        .validate_predecessor(&previous)
-                        .map_err(|error| PredecessorChainFailureV1::new(error, previous_digest))?;
-                    current = previous;
-                }
-                Ok(None) => {
-                    return Err(PredecessorChainFailureV1::new(
-                        ErasureErrorV1::ProvenanceMissing,
-                        previous_digest,
-                    ));
-                }
-                Err(error) => {
-                    return Err(PredecessorChainFailureV1::new(error, previous_digest));
-                }
-            }
+            current = resolve_predecessor_state(&current, resolver, previous_digest)?;
         } else if current.lifecycle() == ErasureLifecycleV1::Submitted {
             return Ok(());
         } else {
@@ -3863,6 +3847,27 @@ fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1 + ?Sized>(
         ErasureErrorV1::ProvenanceMissing,
         current.state_digest(),
     ))
+}
+
+fn resolve_predecessor_state<R: ErasureStateResolverV1 + ?Sized>(
+    current: &ErasureStateV1,
+    resolver: &R,
+    previous_digest: ErasureReferenceV1,
+) -> Result<ErasureStateV1, PredecessorChainFailureV1> {
+    let previous = match resolver.resolve_state(previous_digest) {
+        Ok(Some(previous)) => previous,
+        Ok(None) => {
+            return Err(PredecessorChainFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                previous_digest,
+            ));
+        }
+        Err(error) => return Err(PredecessorChainFailureV1::new(error, previous_digest)),
+    };
+    current
+        .validate_predecessor(&previous)
+        .map_err(|error| PredecessorChainFailureV1::new(error, previous_digest))?;
+    Ok(previous)
 }
 
 /// Application-facing erasure lifecycle interface.

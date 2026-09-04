@@ -474,6 +474,13 @@ struct RecoveredFreezeEvidenceV1 {
     failure: Option<ErasureFreezeFailureV1>,
 }
 
+struct CompletedAttemptEvidenceV1 {
+    outcome: ErasureAttemptOutcomeV1,
+    receipt: ErasureReceiptV1,
+    provenance: ErasureReceiptProvenanceV1,
+    terminal: ErasureStateV1,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RecoveryFailureV1 {
     error: ErasureErrorV1,
@@ -507,6 +514,42 @@ fn load_recovery_object<T>(
     (address(&value) == reference)
         .then_some(value)
         .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, reference))
+}
+
+fn load_completed_attempt_evidence(
+    port: &dyn ErasurePersistencePortV1,
+    page: &AttemptPageV1,
+) -> Result<CompletedAttemptEvidenceV1, RecoveryFailureV1> {
+    let outcome = load_recovery_object(
+        port,
+        page.outcome,
+        ErasureAttemptOutcomeV1::from_canonical_cbor,
+        ErasureAttemptOutcomeV1::reference,
+    )?;
+    let receipt = load_recovery_object(
+        port,
+        page.receipt,
+        ErasureReceiptV1::from_canonical_cbor,
+        ErasureReceiptV1::receipt_digest,
+    )?;
+    let provenance = load_recovery_object(
+        port,
+        page.receipt_provenance,
+        ErasureReceiptProvenanceV1::from_canonical_cbor,
+        ErasureReceiptProvenanceV1::reference,
+    )?;
+    let terminal = port
+        .resolve_state(page.terminal_state)
+        .map_err(|error| RecoveryFailureV1::new(error, page.terminal_state))?
+        .ok_or_else(|| {
+            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, page.terminal_state)
+        })?;
+    Ok(CompletedAttemptEvidenceV1 {
+        outcome,
+        receipt,
+        provenance,
+        terminal,
+    })
 }
 
 fn optional<T>(
@@ -1311,37 +1354,13 @@ impl RecoveredErasureV1 {
             InventoryV1::decode,
             |value| value.reference,
         )?;
-        if admission.request() != self.request.reference()
-            || admission.attempt_ordinal() != page.ordinal
-            || admission.source_receipt() != predecessor_receipt
-        {
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
-                admission.reference(),
-            ));
-        }
-        if (admitted.request, admitted.ordinal, admitted.kind)
-            != (self.request.reference(), page.ordinal, INVENTORY_ADMITTED)
-        {
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
-                admitted.reference,
-            ));
-        }
-        if (effective.request, effective.ordinal, effective.kind)
-            != (self.request.reference(), page.ordinal, INVENTORY_EFFECTIVE)
-        {
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
-                effective.reference,
-            ));
-        }
-        if page.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
-                admission.reference(),
-            ));
-        }
+        self.validate_replay_page_bindings(
+            page,
+            &admission,
+            &admitted,
+            &effective,
+            predecessor_receipt,
+        )?;
         self.validate_attempt_effect(port, &admission)?;
         self.effective
             .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
@@ -1364,6 +1383,62 @@ impl RecoveredErasureV1 {
         self.validate_completed_attempt(port, page, &admission, &effective, predecessor_receipt)
     }
 
+    fn validate_replay_page_bindings(
+        &self,
+        page: &AttemptPageV1,
+        admission: &ErasureRetryAdmissionV1,
+        admitted: &InventoryV1,
+        effective: &InventoryV1,
+        predecessor_receipt: Option<ErasureReferenceV1>,
+    ) -> Result<(), RecoveryFailureV1> {
+        let admission_matches = [
+            admission.request() == self.request.reference(),
+            admission.attempt_ordinal() == page.ordinal,
+            admission.source_receipt() == predecessor_receipt,
+        ]
+        .into_iter()
+        .all(|matches| matches);
+        if !admission_matches {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                admission.reference(),
+            ));
+        }
+        Self::validate_replay_inventory(
+            self.request.reference(),
+            page,
+            admitted,
+            INVENTORY_ADMITTED,
+        )?;
+        Self::validate_replay_inventory(
+            self.request.reference(),
+            page,
+            effective,
+            INVENTORY_EFFECTIVE,
+        )?;
+        if page.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                admission.reference(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_replay_inventory(
+        request: ErasureReferenceV1,
+        page: &AttemptPageV1,
+        inventory: &InventoryV1,
+        expected_kind: u64,
+    ) -> Result<(), RecoveryFailureV1> {
+        ((inventory.request, inventory.ordinal, inventory.kind)
+            == (request, page.ordinal, expected_kind))
+            .then_some(())
+            .ok_or_else(|| {
+                RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, inventory.reference)
+            })
+    }
+
     fn validate_completed_attempt(
         &self,
         port: &dyn ErasurePersistencePortV1,
@@ -1372,30 +1447,12 @@ impl RecoveredErasureV1 {
         effective: &InventoryV1,
         predecessor_receipt: Option<ErasureReferenceV1>,
     ) -> Result<(ErasureReferenceV1, ErasureReferenceV1), RecoveryFailureV1> {
-        let outcome = load_recovery_object(
-            port,
-            page.outcome,
-            ErasureAttemptOutcomeV1::from_canonical_cbor,
-            ErasureAttemptOutcomeV1::reference,
-        )?;
-        let receipt = load_recovery_object(
-            port,
-            page.receipt,
-            ErasureReceiptV1::from_canonical_cbor,
-            ErasureReceiptV1::receipt_digest,
-        )?;
-        let provenance = load_recovery_object(
-            port,
-            page.receipt_provenance,
-            ErasureReceiptProvenanceV1::from_canonical_cbor,
-            ErasureReceiptProvenanceV1::reference,
-        )?;
-        let terminal = port
-            .resolve_state(page.terminal_state)
-            .map_err(|error| RecoveryFailureV1::new(error, page.terminal_state))?
-            .ok_or_else(|| {
-                RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, page.terminal_state)
-            })?;
+        let CompletedAttemptEvidenceV1 {
+            outcome,
+            receipt,
+            provenance,
+            terminal,
+        } = load_completed_attempt_evidence(port, page)?;
         validate_recovery_bindings([(
             terminal.request() == self.request.reference(),
             terminal.state_digest(),
@@ -2354,23 +2411,43 @@ fn validate_state_provenance(
             _ => {}
         }
         let Some(previous) = current.previous_state() else {
-            if authorization == manifest.authorize_provenance
-                && dispatch == manifest.dispatch_provenance
-            {
-                return Ok(());
-            }
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
+            return validate_state_provenance_root(
+                authorization,
+                dispatch,
+                manifest,
                 manifest_digest,
-            ));
+            );
         };
-        current = resolver
-            .resolve_state(previous)
-            .map_err(|error| RecoveryFailureV1::new(error, previous))?
-            .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, previous))?;
+        current = resolve_state_provenance_predecessor(resolver, previous)?;
     }
     Err(RecoveryFailureV1::new(
         ErasureErrorV1::ProvenanceMissing,
         manifest_digest,
     ))
+}
+
+fn validate_state_provenance_root(
+    authorization: Option<ErasureReferenceV1>,
+    dispatch: Option<ErasureReferenceV1>,
+    manifest: &ManifestV1,
+    manifest_digest: ErasureReferenceV1,
+) -> Result<(), RecoveryFailureV1> {
+    if authorization == manifest.authorize_provenance && dispatch == manifest.dispatch_provenance {
+        Ok(())
+    } else {
+        Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            manifest_digest,
+        ))
+    }
+}
+
+fn resolve_state_provenance_predecessor(
+    resolver: &dyn ErasureStateResolverV1,
+    previous: ErasureReferenceV1,
+) -> Result<ErasureStateV1, RecoveryFailureV1> {
+    resolver
+        .resolve_state(previous)
+        .map_err(|error| RecoveryFailureV1::new(error, previous))?
+        .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, previous))
 }
