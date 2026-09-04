@@ -411,11 +411,14 @@ fn verify_checksum_inventory(
     evidence_root: &Path,
     digests: [[u8; 32]; 6],
 ) -> Result<(), CommandError> {
-    let expected = EVIDENCE_FILES
-        .iter()
-        .zip(digests)
-        .map(|(path, digest)| format!("{}  {path}\n", blake3::Hash::from_bytes(digest).to_hex()))
-        .collect::<String>();
+    let mut expected = String::new();
+    for (path, digest) in EVIDENCE_FILES.iter().zip(digests) {
+        let encoded = blake3::Hash::from_bytes(digest).to_hex();
+        expected.push_str(encoded.as_str());
+        expected.push_str("  ");
+        expected.push_str(path);
+        expected.push('\n');
+    }
     let actual = read_bounded(&evidence_root.join("BLAKE3SUMS"), MAX_CHECKSUM_BYTES)?;
     if actual == expected.as_bytes() {
         Ok(())
@@ -445,11 +448,11 @@ fn embedded_git_commit(path: &Path) -> Result<String, CommandError> {
         }
         let size = tar_octal(&header[124..136])?;
         if header[156] == b'g' {
-            let size = usize::try_from(size).map_err(|_| CommandError::Identity)?;
-            if size > MAX_EVALUATOR_PROVENANCE_BYTES as usize {
+            if size > MAX_EVALUATOR_PROVENANCE_BYTES {
                 return Err(CommandError::Identity);
             }
-            let mut records = vec![0_u8; size];
+            let record_size = usize::try_from(size).map_err(|_| CommandError::Identity)?;
+            let mut records = vec![0_u8; record_size];
             archive
                 .read_exact(&mut records)
                 .map_err(|_| CommandError::Identity)?;
