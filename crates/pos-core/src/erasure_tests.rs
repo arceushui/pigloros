@@ -81,6 +81,130 @@ fn predecessor_chain_reports_the_state_at_the_depth_limit() {
 }
 
 #[test]
+fn recovered_record_rejects_an_attempt_for_another_request() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let mut recovered = RecoveredErasureV1::initial(
+        request,
+        synthetic_state(ErasureLifecycleV1::Submitted, None, reference(4)),
+    );
+    let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: reference(99),
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: Vec::new(),
+        command_identities: Vec::new(),
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    assert_eq!(
+        recovered.begin_attempt(admission),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovered_record_rejects_scope_extensions_at_the_bound() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let mut recovered = RecoveredErasureV1::initial(
+        request,
+        synthetic_state(ErasureLifecycleV1::Submitted, None, reference(4)),
+    );
+    recovered.scope_head = Some(super::persistence::RecoveredScopeHeadV1 {
+        node: reference(8),
+        extension: reference(9),
+        ordinal: ERASURE_MAX_SCOPE_EXTENSIONS as u64 - 1,
+    });
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: reference(2),
+        fork: reference(3),
+        lineage_rule: reference(4),
+        predecessor_extension: None,
+        admission_provenance: reference(5),
+    })?;
+    assert_eq!(
+        recovered.append_scope_extension(extension),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovered_record_rejects_administrative_resolutions_at_the_bound() -> Result<(), ErasureErrorV1>
+{
+    let request = request()?;
+    let mut recovered = RecoveredErasureV1::initial(
+        request,
+        synthetic_state(ErasureLifecycleV1::Submitted, None, reference(4)),
+    );
+    recovered.administrative_resolution_count = ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64;
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: reference(1),
+            affected_digests: vec![reference(2)],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: reference(3),
+            policy: reference(4),
+            trust: reference(5),
+            principal: reference(6),
+            authorization_provenance: reference(7),
+            reason: reference(8),
+            issue_position: 20,
+            predecessor_resolution: None,
+        })?;
+    assert_eq!(
+        recovered.append_administrative_resolution(&resolution),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovered_record_rejects_an_acknowledgement_bound_to_another_request(
+) -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let mut recovered = RecoveredErasureV1::initial(
+        request.clone(),
+        synthetic_state(ErasureLifecycleV1::Submitted, None, reference(4)),
+    );
+    let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: request.reference(),
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: Vec::new(),
+        command_identities: Vec::new(),
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    recovered.begin_attempt(admission.clone())?;
+    let acknowledgement =
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request: reference(99),
+            command: reference(2),
+            attempt: admission.reference(),
+            obligation: reference(3),
+            owner: reference(4),
+            scope: reference(5),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(6),
+            policy: reference(7),
+            trust: reference(8),
+        })?;
+    assert_eq!(
+        recovered.retain_acknowledgement(&acknowledgement),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
 fn lifecycle_permits_exactly_the_adr_edges() {
     let lifecycles = [
         ErasureLifecycleV1::Submitted,
