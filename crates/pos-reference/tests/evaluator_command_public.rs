@@ -3,7 +3,6 @@ pub mod support;
 use std::error::Error;
 #[cfg(unix)]
 use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
@@ -16,8 +15,6 @@ use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "linux")]
 use std::os::{fd::AsRawFd, unix::fs::symlink};
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
 #[cfg(target_os = "linux")]
 use pos_reference::evaluator_build_identity::{
     verify_evaluator_build_identity, EvaluatorBuildEvidence, EvaluatorBuildIdentityError,
@@ -27,7 +24,11 @@ use pos_reference::evaluator_build_identity::{
 use pos_reference::evaluator_protocol::IndependenceEvidence;
 use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport, EvaluationRequest};
 use pos_reference::profile::Profile;
-use pos_reference::signed_bundle::{preflight_signed_bundle, SelectedBundleCaps};
+use pos_reference::signed_bundle::preflight_signed_bundle;
+use support::{
+    gzip_bytes, pax_record, source_archive, source_tar, tar_header, write_checksum_inventory,
+    write_evaluator_package, write_evaluator_provenance, write_tar_checksum,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -73,7 +74,10 @@ fn command_for_corpus(
     fs::write(&request, &corpus.request)?;
     fs::write(&bundle, &corpus.archive)?;
     fs::write(&policy, &corpus.trust_policy)?;
-    write_evaluator_package(directory)?;
+    write_evaluator_package(
+        directory,
+        Path::new(env!("CARGO_BIN_EXE_pos-reference-evaluator")),
+    )?;
     let digest = "01".repeat(32);
     let declaration_digest = "2f".repeat(32);
     let mut command = evaluator();
@@ -108,88 +112,13 @@ fn verify_staged_corpus() -> TestResult {
     let mut archive = Cursor::new(corpus.archive);
     let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
-    preflight.enforce_selected_caps(SelectedBundleCaps {
-        max_profile_bytes: caps.max_profile_bytes,
-        max_bundle_members: caps.max_bundle_members,
-        max_member_path_bytes: caps.max_member_path_bytes,
-        max_member_bytes: caps.max_member_bytes,
-        max_total_bundle_bytes: caps.max_total_bundle_bytes,
-    })?;
-    Ok(())
-}
-
-fn write_evaluator_provenance(path: &Path, source: &[u8]) -> TestResult {
-    let root = path.parent().ok_or("provenance path has no parent")?;
-    let binary = fs::read(root.join("bin/pos-reference-evaluator"))?;
-    let lock = fs::read(root.join("Cargo.lock"))?;
-    let sbom = fs::read(root.join("sbom.cdx.json"))?;
-    let licences = fs::read(root.join("licences.json"))?;
-    let provenance = serde_json::json!({
-        "build_target": "public-test-target",
-        "cargo_locked": true,
-        "dependency_lock_blake3": blake3::hash(&lock).to_hex().to_string(),
-        "evaluator_binary_blake3": blake3::hash(&binary).to_hex().to_string(),
-        "evaluator_source_blake3": blake3::hash(source).to_hex().to_string(),
-        "licences_blake3": blake3::hash(&licences).to_hex().to_string(),
-        "rust_toolchain": "rustc public-test-toolchain",
-        "sbom_blake3": blake3::hash(&sbom).to_hex().to_string(),
-        "schema": "PiglorOS.EvaluatorBuildProvenance.v1",
-        "source_commit": "1111111111111111111111111111111111111111",
-    });
-    let mut bytes = serde_json::to_vec(&provenance)?;
-    bytes.push(b'\n');
-    fs::write(path, bytes)?;
-    Ok(())
-}
-
-fn write_evaluator_package(directory: &Path) -> TestResult {
-    fs::create_dir_all(directory.join("source"))?;
-    fs::create_dir_all(directory.join("bin"))?;
-    let source = source_archive("1111111111111111111111111111111111111111")?;
-    fs::write(directory.join("source/pigloros-source.tar.gz"), &source)?;
-    fs::copy(
-        env!("CARGO_BIN_EXE_pos-reference-evaluator"),
-        directory.join("bin/pos-reference-evaluator"),
-    )?;
-    fs::write(
-        directory.join("Cargo.lock"),
-        b"public test dependency lock\n",
-    )?;
-    fs::write(directory.join("sbom.cdx.json"), b"{}\n")?;
-    fs::write(directory.join("licences.json"), b"{}\n")?;
-    write_evaluator_provenance(&directory.join("provenance.json"), &source)?;
-    write_checksum_inventory(directory)?;
-    Ok(())
-}
-
-fn write_checksum_inventory(directory: &Path) -> TestResult {
-    let paths = [
-        "Cargo.lock",
-        "bin/pos-reference-evaluator",
-        "licences.json",
-        "provenance.json",
-        "sbom.cdx.json",
-        "source/pigloros-source.tar.gz",
-    ];
-    let mut inventory = String::new();
-    for path in paths {
-        let digest = blake3::hash(&fs::read(directory.join(path))?);
-        writeln!(inventory, "{}  {path}", digest.to_hex())?;
-    }
-    fs::write(directory.join("BLAKE3SUMS"), inventory)?;
+    preflight.enforce_selected_caps(caps.into())?;
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn write_public_verifier_package(directory: &Path) -> TestResult {
-    write_evaluator_package(directory)?;
-    fs::copy(
-        std::env::current_exe()?,
-        directory.join("bin/pos-reference-evaluator"),
-    )?;
-    let source = fs::read(directory.join("source/pigloros-source.tar.gz"))?;
-    write_evaluator_provenance(&directory.join("provenance.json"), &source)?;
-    write_checksum_inventory(directory)
+    write_evaluator_package(directory, &std::env::current_exe()?)
 }
 
 #[cfg(target_os = "linux")]
@@ -222,62 +151,6 @@ fn assert_public_verifier_error(
     );
 }
 
-fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
-    gzip_bytes(&source_tar(commit))
-}
-
-fn source_tar(commit: &str) -> Vec<u8> {
-    let record = pax_record("comment", commit.as_bytes());
-    let mut tar = Vec::new();
-    tar.extend_from_slice(&tar_header("pax_global_header", record.len(), b'g'));
-    tar.extend_from_slice(&record);
-    tar.resize(tar.len().div_ceil(512) * 512, 0);
-    for path in [
-        "Cargo.lock",
-        "Cargo.toml",
-        "crates/pos-reference/Cargo.toml",
-        "crates/pos-reference/src/bin/pos-reference-evaluator.rs",
-    ] {
-        tar.extend_from_slice(&tar_header(path, 0, b'0'));
-    }
-    tar.extend_from_slice(&[0; 1024]);
-    tar
-}
-
-fn gzip_bytes(bytes: &[u8]) -> TestResult<Vec<u8>> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(bytes)?;
-    Ok(encoder.finish()?)
-}
-
-fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
-    let mut header = [0_u8; 512];
-    header[..name.len()].copy_from_slice(name.as_bytes());
-    write_octal(&mut header[100..108], 0o644);
-    write_octal(&mut header[108..116], 0);
-    write_octal(&mut header[116..124], 0);
-    write_octal(&mut header[124..136], size as u64);
-    write_octal(&mut header[136..148], 0);
-    header[148..156].fill(b' ');
-    header[156] = kind;
-    header[257..263].copy_from_slice(b"ustar\0");
-    header[263..265].copy_from_slice(b"00");
-    write_tar_checksum(&mut header);
-    header
-}
-
-fn write_tar_checksum(header: &mut [u8; 512]) {
-    header[148..156].fill(b' ');
-    let checksum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
-    let encoded = format!("{checksum:06o}\0 ");
-    header[148..156].copy_from_slice(encoded.as_bytes());
-}
-
-fn write_octal(field: &mut [u8], value: u64) {
-    let encoded = format!("{:0width$o}\0", value, width = field.len() - 1);
-    field.copy_from_slice(encoded.as_bytes());
-}
-
 fn source_archive_with_entry(
     header: &[u8; 512],
     payload: &[u8],
@@ -290,24 +163,6 @@ fn source_archive_with_entry(
         tar.extend_from_slice(&[0; 1024]);
     }
     gzip_bytes(&tar)
-}
-
-fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
-    let mut body = Vec::from(key.as_bytes());
-    body.push(b'=');
-    body.extend_from_slice(value);
-    body.push(b'\n');
-    let mut length = body.len() + 2;
-    loop {
-        let prefix = format!("{length} ");
-        let encoded_length = prefix.len() + body.len();
-        if encoded_length == length {
-            let mut record = Vec::from(prefix.as_bytes());
-            record.extend_from_slice(&body);
-            return record;
-        }
-        length = encoded_length;
-    }
 }
 
 fn rebind_source_archive(directory: &Path, source: &[u8]) -> TestResult {
@@ -866,7 +721,7 @@ fn command_closes_remaining_public_io_and_identity_boundaries() -> TestResult {
         directory.path().join("bin/pos-reference-evaluator"),
     )?;
     let source = fs::read(directory.path().join("source/pigloros-source.tar.gz"))?;
-    write_evaluator_provenance(&directory.path().join("provenance.json"), &source)?;
+    write_evaluator_provenance(directory.path(), &source)?;
     write_checksum_inventory(directory.path())?;
     assert!(!substituted_binary.output()?.status.success());
 
@@ -1220,7 +1075,7 @@ fn command_rejects_incomplete_or_substituted_evaluator_evidence() -> TestResult 
         directory.path().join("source/pigloros-source.tar.gz"),
         &source,
     )?;
-    write_evaluator_provenance(&directory.path().join("provenance.json"), &source)?;
+    write_evaluator_provenance(directory.path(), &source)?;
     write_checksum_inventory(directory.path())?;
     assert!(!wrong_commit.output()?.status.success());
 

@@ -9,8 +9,7 @@ use crate::profile::{
     DeterministicBudget, Fixture, NamespacedFailure, Profile, ProfileError, StrictOracle,
 };
 use crate::signed_bundle::{
-    preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, SelectedBundleCaps,
-    VerifiedBundle,
+    preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, VerifiedBundle,
 };
 use std::cmp::Ordering;
 
@@ -269,13 +268,7 @@ fn enforce_authenticated_selected_caps(
     let preflight = preflight_signed_bundle_bytes(archive_bytes, trust_policy_bytes, request)?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)?;
     preflight
-        .enforce_selected_caps(SelectedBundleCaps {
-            max_profile_bytes: caps.max_profile_bytes,
-            max_bundle_members: caps.max_bundle_members,
-            max_member_path_bytes: caps.max_member_path_bytes,
-            max_member_bytes: caps.max_member_bytes,
-            max_total_bundle_bytes: caps.max_total_bundle_bytes,
-        })
+        .enforce_selected_caps(caps.into())
         .map_err(|_| EvaluatorError::Profile)
 }
 

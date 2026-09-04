@@ -51,7 +51,7 @@ pub fn verified_evaluator_identity_with(
     independence: IndependenceEvidence,
 ) -> TestResult<VerifiedEvaluatorBuildIdentity> {
     let directory = tempfile::tempdir()?;
-    write_evaluator_package(directory.path())?;
+    write_evaluator_package(directory.path(), &std::env::current_exe()?)?;
     verify_evaluator_build_identity(
         &EvaluatorBuildEvidence::new(
             directory.path().join("source/pigloros-source.tar.gz"),
@@ -71,7 +71,7 @@ pub fn verified_evaluator_identity_with(
 /// Panics if the public verifier accepts the corrupted inventory.
 pub fn evaluator_evidence_rejects_corrupted_checksum() -> TestResult<()> {
     let directory = tempfile::tempdir()?;
-    write_evaluator_package(directory.path())?;
+    write_evaluator_package(directory.path(), &std::env::current_exe()?)?;
     fs::write(directory.path().join("BLAKE3SUMS"), b"corrupted\n")?;
     let result = verify_evaluator_build_identity(
         &EvaluatorBuildEvidence::new(
@@ -91,15 +91,12 @@ pub fn evaluator_evidence_rejects_corrupted_checksum() -> TestResult<()> {
     Ok(())
 }
 
-fn write_evaluator_package(directory: &Path) -> TestResult<()> {
+pub(crate) fn write_evaluator_package(directory: &Path, binary: &Path) -> TestResult<()> {
     fs::create_dir_all(directory.join("source"))?;
     fs::create_dir_all(directory.join("bin"))?;
     let source = source_archive("1111111111111111111111111111111111111111")?;
     fs::write(directory.join("source/pigloros-source.tar.gz"), &source)?;
-    fs::copy(
-        std::env::current_exe()?,
-        directory.join("bin/pos-reference-evaluator"),
-    )?;
+    fs::copy(binary, directory.join("bin/pos-reference-evaluator"))?;
     fs::write(
         directory.join("Cargo.lock"),
         b"public test dependency lock\n",
@@ -110,7 +107,7 @@ fn write_evaluator_package(directory: &Path) -> TestResult<()> {
     write_checksum_inventory(directory)
 }
 
-fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult<()> {
+pub(crate) fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult<()> {
     let binary = fs::read(directory.join("bin/pos-reference-evaluator"))?;
     let lock = fs::read(directory.join("Cargo.lock"))?;
     let sbom = fs::read(directory.join("sbom.cdx.json"))?;
@@ -133,7 +130,7 @@ fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult<()>
     Ok(())
 }
 
-fn write_checksum_inventory(directory: &Path) -> TestResult<()> {
+pub(crate) fn write_checksum_inventory(directory: &Path) -> TestResult<()> {
     let paths = [
         "Cargo.lock",
         "bin/pos-reference-evaluator",
@@ -154,13 +151,11 @@ fn write_checksum_inventory(directory: &Path) -> TestResult<()> {
     Ok(())
 }
 
-fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&source_tar(commit))?;
-    Ok(encoder.finish()?)
+pub(crate) fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
+    gzip_bytes(&source_tar(commit))
 }
 
-fn source_tar(commit: &str) -> Vec<u8> {
+pub(crate) fn source_tar(commit: &str) -> Vec<u8> {
     let record = pax_record("comment", commit.as_bytes());
     let mut tar = Vec::new();
     tar.extend_from_slice(&tar_header("pax_global_header", record.len(), b'g'));
@@ -178,7 +173,13 @@ fn source_tar(commit: &str) -> Vec<u8> {
     tar
 }
 
-fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
+pub(crate) fn gzip_bytes(bytes: &[u8]) -> TestResult<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
+}
+
+pub(crate) fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
     let mut body = Vec::from(key.as_bytes());
     body.push(b'=');
     body.extend_from_slice(value);
@@ -196,7 +197,7 @@ fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
     }
 }
 
-fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
+pub(crate) fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
     let mut header = [0_u8; 512];
     header[..name.len()].copy_from_slice(name.as_bytes());
     write_octal(&mut header[100..108], 0o644);
@@ -212,7 +213,7 @@ fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
     header
 }
 
-fn write_tar_checksum(header: &mut [u8; 512]) {
+pub(crate) fn write_tar_checksum(header: &mut [u8; 512]) {
     header[148..156].fill(b' ');
     let checksum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
     let encoded = format!("{checksum:06o}\0 ");

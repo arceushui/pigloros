@@ -60,12 +60,18 @@ if [[ ! -x ${pinned_rustc} || ! -x ${pinned_cargo} ]]; then
   exit 2
 fi
 toolchain_bin=$(dirname -- "${pinned_rustc}")
-target=$(${pinned_rustc} -vV | sed -n 's/^host: //p')
+system_path=$(command -p getconf PATH)
+if [[ -z ${system_path} ]]; then
+  printf '%s\n' 'cannot determine the trusted system executable path' >&2
+  exit 2
+fi
+build_path=${toolchain_bin}:${system_path}
+target=$("${pinned_rustc}" -vV | sed -n 's/^host: //p')
 if [[ -z ${target} ]]; then
   printf '%s\n' 'selected Rust compiler did not report a host target' >&2
   exit 2
 fi
-toolchain=$(${pinned_rustc} --version)
+toolchain=$("${pinned_rustc}" --version)
 
 target_directory=${work_directory}/target
 build_home=${work_directory}/build-home
@@ -74,7 +80,7 @@ mkdir -p -- "${build_home}" "${cargo_home}"
 (
   cd -- "${source_directory}"
   env -i \
-    PATH="${toolchain_bin}:${PATH}" \
+    PATH="${build_path}" \
     HOME="${build_home}" \
     CARGO_HOME="${cargo_home}" \
     CARGO_TARGET_DIR="${target_directory}" \
@@ -98,7 +104,7 @@ metadata=${work_directory}/cargo-metadata.json
 (
   cd -- "${source_directory}"
   env -i \
-    PATH="${toolchain_bin}:${PATH}" \
+    PATH="${build_path}" \
     HOME="${build_home}" \
     CARGO_HOME="${cargo_home}" \
     RUSTC="${pinned_rustc}" \

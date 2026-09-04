@@ -46,6 +46,8 @@ pub enum BundleError {
     TrustPolicyMismatch,
     #[error("archive contains prohibited secret material")]
     ProhibitedMaterial,
+    #[error("private archive snapshot is unavailable")]
+    SnapshotUnavailable,
 }
 
 impl From<ProtocolError> for BundleError {
@@ -63,6 +65,10 @@ impl From<ProtocolError> for BundleError {
 
 trait InvalidEncodingResult<T> {
     fn map_invalid_encoding(self) -> Result<T, BundleError>;
+}
+
+fn snapshot_unavailable(_: std::io::Error) -> BundleError {
+    BundleError::SnapshotUnavailable
 }
 
 impl<T, E> InvalidEncodingResult<T> for Result<T, E> {
@@ -362,13 +368,17 @@ fn authenticated_snapshot<R: Read + Seek>(
     archive: &mut R,
     expected: [u8; 32],
 ) -> Result<(File, u64), BundleError> {
-    let length = archive.seek(SeekFrom::End(0)).map_invalid_encoding()?;
+    let length = archive
+        .seek(SeekFrom::End(0))
+        .map_err(snapshot_unavailable)?;
     if length == 0 || length > MAX_ARCHIVE_BYTES as u64 {
         return Err(BundleError::FieldOutOfBounds);
     }
-    archive.seek(SeekFrom::Start(0)).map_invalid_encoding()?;
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)?;
     tempfile::tempfile()
-        .map_invalid_encoding()
+        .map_err(snapshot_unavailable)
         .and_then(|snapshot| copy_authenticated_snapshot(archive, snapshot, length, expected))
 }
 
@@ -383,20 +393,22 @@ fn copy_authenticated_snapshot<R: Read + ?Sized>(
     let mut buffer = [0_u8; 8192];
     let mut bounded = archive.take(length + 1);
     loop {
-        let read = bounded.read(&mut buffer).map_invalid_encoding()?;
+        let read = bounded.read(&mut buffer).map_err(snapshot_unavailable)?;
         if read == 0 {
             break;
         }
         copied += read as u64;
         hasher.update(&buffer[..read]);
-        snapshot.write_all(&buffer[..read]).map_invalid_encoding()?;
+        snapshot
+            .write_all(&buffer[..read])
+            .map_err(snapshot_unavailable)?;
     }
     if copied != length || *hasher.finalize().as_bytes() != expected {
         return Err(BundleError::DigestMismatch);
     }
     snapshot
         .seek(SeekFrom::Start(0))
-        .map_invalid_encoding()
+        .map_err(snapshot_unavailable)
         .map(|_| (snapshot, length))
 }
 

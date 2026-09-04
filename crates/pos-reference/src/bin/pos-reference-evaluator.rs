@@ -13,7 +13,7 @@ use pos_reference::evaluator_build_identity::{
 use pos_reference::evaluator_protocol::{EvaluationRequest, IndependenceEvidence, ProtocolError};
 use pos_reference::process_adapter::ProcessAdapter;
 use pos_reference::profile::Profile;
-use pos_reference::signed_bundle::{preflight_signed_bundle, SelectedBundleCaps};
+use pos_reference::signed_bundle::preflight_signed_bundle;
 
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -163,13 +163,7 @@ fn authenticated_archive_bytes(
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)
         .map_evaluation_error()?;
     preflight
-        .enforce_selected_caps(SelectedBundleCaps {
-            max_profile_bytes: caps.max_profile_bytes,
-            max_bundle_members: caps.max_bundle_members,
-            max_member_path_bytes: caps.max_member_path_bytes,
-            max_member_bytes: caps.max_member_bytes,
-            max_total_bundle_bytes: caps.max_total_bundle_bytes,
-        })
+        .enforce_selected_caps(caps.into())
         .map_evaluation_error()?;
     read_bounded_file(&mut archive, MAX_ARCHIVE_BYTES)
 }

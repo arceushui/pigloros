@@ -9,7 +9,7 @@ use crate::evaluator_protocol::{
     array, array_values, bool_value, contract_digest, contract_digest_matches, decode_canonical,
     encode, fixed_bytes, text, uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
-use crate::signed_bundle::{ExpectedResultKey, VerifiedBundle, VerifiedMember};
+use crate::signed_bundle::{ExpectedResultKey, SelectedBundleCaps, VerifiedBundle, VerifiedMember};
 
 const MAX_FIXTURES: usize = 65_536;
 const MAX_AUXILIARY: usize = 64;
@@ -198,6 +198,18 @@ impl EvaluatorHardCaps {
     }
 }
 
+impl From<EvaluatorHardCaps> for SelectedBundleCaps {
+    fn from(caps: EvaluatorHardCaps) -> Self {
+        Self {
+            max_profile_bytes: caps.max_profile_bytes,
+            max_bundle_members: caps.max_bundle_members,
+            max_member_path_bytes: caps.max_member_path_bytes,
+            max_member_bytes: caps.max_member_bytes,
+            max_total_bundle_bytes: caps.max_total_bundle_bytes,
+        }
+    }
+}
+
 /// One selected execution coordinate from CPF1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fixture {
@@ -321,24 +333,7 @@ impl Profile {
         bytes: &[u8],
         request: &EvaluationRequest,
     ) -> Result<EvaluatorHardCaps, ProfileError> {
-        let value = decode_canonical(bytes)?;
-        let fields = array(&value, 18)?;
-        decode_profile_header(fields)?;
-        let profile_digest = fixed_bytes(&fields[17])?;
-        if !contract_digest_matches(
-            b"PiglorOS.ConformanceProfile.v1",
-            &Value::Array(fields[..17].to_vec()),
-            profile_digest,
-        ) || profile_digest != request.profile_digest
-        {
-            return Err(ProfileError::DigestMismatch);
-        }
-        let (evaluator_artifacts, caps) = decode_protocol(&fields[11])?;
-        if evaluator_artifacts[0] != request.evaluator_protocol_digest
-            || caps.digest()? != request.evaluator_hard_caps_digest
-        {
-            return Err(ProfileError::DigestMismatch);
-        }
+        let caps = authenticate_profile(bytes, request)?.hard_caps;
         if bytes.len() as u64 > caps.max_profile_bytes {
             return Err(ProfileError::FieldOutOfBounds);
         }
@@ -356,23 +351,20 @@ impl Profile {
         request: &EvaluationRequest,
     ) -> Result<Self, ProfileError> {
         let bytes = bundle.profile_bytes();
-        let value = decode_canonical(bytes)?;
-        let fields = array(&value, 18)?;
-        let header = decode_profile_header(fields)?;
-        let profile_digest = fixed_bytes(&fields[17])?;
-        if !contract_digest_matches(
-            b"PiglorOS.ConformanceProfile.v1",
-            &Value::Array(fields[..17].to_vec()),
+        let AuthenticatedProfile {
+            value,
+            header,
             profile_digest,
-        ) || profile_digest != bundle.profile_digest
-            || profile_digest != request.profile_digest
-        {
+            evaluator_artifact_digests,
+            hard_caps,
+        } = authenticate_profile(bytes, request)?;
+        let fields = array(&value, 18)?;
+        if profile_digest != bundle.profile_digest {
             return Err(ProfileError::DigestMismatch);
         }
 
         let execution_profile_digests = digest_list(&fields[7])?;
         let (registry, required_providers) = decode_provider_binding(&fields[8])?;
-        let (evaluator_artifact_digests, hard_caps) = decode_protocol(&fields[11])?;
         let fixtures = decode_fixtures(&fields[9], hard_caps)?;
         let allowed_divergences = decode_allowed_divergences(&fields[10])?;
         let (independence_requirements, trust_policy_snapshot_digest) =
@@ -734,6 +726,45 @@ struct ProfileHeader {
     fixture_policy_digest: [u8; 32],
     limitations_digest: [u8; 32],
     publication_digest: [u8; 32],
+}
+
+struct AuthenticatedProfile {
+    value: Value,
+    header: ProfileHeader,
+    profile_digest: [u8; 32],
+    evaluator_artifact_digests: [[u8; 32]; 3],
+    hard_caps: EvaluatorHardCaps,
+}
+
+fn authenticate_profile(
+    bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedProfile, ProfileError> {
+    let value = decode_canonical(bytes)?;
+    let fields = array(&value, 18)?;
+    let header = decode_profile_header(fields)?;
+    let profile_digest = fixed_bytes(&fields[17])?;
+    if !contract_digest_matches(
+        b"PiglorOS.ConformanceProfile.v1",
+        &Value::Array(fields[..17].to_vec()),
+        profile_digest,
+    ) || profile_digest != request.profile_digest
+    {
+        return Err(ProfileError::DigestMismatch);
+    }
+    let (evaluator_artifact_digests, hard_caps) = decode_protocol(&fields[11])?;
+    if evaluator_artifact_digests[0] != request.evaluator_protocol_digest
+        || hard_caps.digest()? != request.evaluator_hard_caps_digest
+    {
+        return Err(ProfileError::DigestMismatch);
+    }
+    Ok(AuthenticatedProfile {
+        value,
+        header,
+        profile_digest,
+        evaluator_artifact_digests,
+        hard_caps,
+    })
 }
 
 fn decode_profile_header(fields: &[Value]) -> Result<ProfileHeader, ProfileError> {

@@ -15,9 +15,7 @@ use pos_reference::evaluator_protocol::{
 use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
 };
-use pos_reference::signed_bundle::{
-    preflight_signed_bundle, verify_signed_bundle, BundleError, SelectedBundleCaps,
-};
+use pos_reference::signed_bundle::{preflight_signed_bundle, verify_signed_bundle, BundleError};
 use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -1356,7 +1354,7 @@ fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> T
         let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
         let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
         assert_eq!(
-            preflight.enforce_selected_caps(selected_bundle_caps(caps)),
+            preflight.enforce_selected_caps(caps.into()),
             Err(pos_reference::signed_bundle::BundleError::FieldOutOfBounds)
         );
     }
@@ -1366,7 +1364,7 @@ fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> T
         let mut archive = Cursor::new(&corpus.archive);
         let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
         let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
-        preflight.enforce_selected_caps(selected_bundle_caps(caps))?;
+        preflight.enforce_selected_caps(caps.into())?;
     }
     let corpus =
         support::corpus_with_profile_mutation(ProfileMutation::SelectedProfileByteCapExact)?;
@@ -1378,18 +1376,8 @@ fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> T
         caps.max_profile_bytes,
         preflight.profile_bytes().len() as u64
     );
-    preflight.enforce_selected_caps(selected_bundle_caps(caps))?;
+    preflight.enforce_selected_caps(caps.into())?;
     Ok(())
-}
-
-const fn selected_bundle_caps(caps: EvaluatorHardCaps) -> SelectedBundleCaps {
-    SelectedBundleCaps {
-        max_profile_bytes: caps.max_profile_bytes,
-        max_bundle_members: caps.max_bundle_members,
-        max_member_path_bytes: caps.max_member_path_bytes,
-        max_member_bytes: caps.max_member_bytes,
-        max_total_bundle_bytes: caps.max_total_bundle_bytes,
-    }
 }
 
 #[test]
@@ -1812,13 +1800,19 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
 
     for failing_seek in 1..=2 {
         let mut archive = FaultingArchive::new(corpus.archive.clone(), None, Some(failing_seek));
-        assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
+        assert_eq!(
+            preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request),
+            Err(BundleError::SnapshotUnavailable)
+        );
     }
     let mut counted = FaultingArchive::new(corpus.archive.clone(), None, None);
     preflight_signed_bundle(&mut counted, &corpus.trust_policy, &request)?;
     for failing_read in 1..=counted.reads {
         let mut archive = FaultingArchive::new(corpus.archive.clone(), Some(failing_read), None);
-        assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
+        assert_eq!(
+            preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request),
+            Err(BundleError::SnapshotUnavailable)
+        );
     }
 
     let mut changing = ChangingArchive {
