@@ -1242,7 +1242,6 @@ pub struct Wave8ProofContractV1 {
     pub authorization_decisions: Vec<FixtureAuthorizationDecisionV1>,
     pub counterfactual: CounterfactualContractV1,
     pub atomicity: Vec<TickAtomicityV1>,
-    pub conformance_report: ConformanceReportV1,
     pub non_interference: Vec<NonInterferenceCaseV1>,
 }
 
@@ -1460,10 +1459,7 @@ impl MoatProofEvidenceV1 {
                         + self.causal_trace.len(),
                 )
                 .unwrap_or(u64::MAX),
-                provenance_digest: self
-                    .contract
-                    .conformance_report
-                    .evaluator_build_provenance_digest,
+                provenance_digest: self.manifest.evaluator_digest,
                 result_digest: [0; 32],
             };
             result.digest().map(|result_digest| {
@@ -3850,7 +3846,6 @@ pub mod strict_codec {
             ),
             encode_counterfactual(&contract.counterfactual),
             Value::Array(contract.atomicity.iter().map(encode_atomicity).collect()),
-            encode_report_value(&contract.conformance_report, true),
             Value::Array(
                 contract
                     .non_interference
@@ -3862,7 +3857,7 @@ pub mod strict_codec {
     }
 
     fn decode_contract(value: &Value) -> Result<Wave8ProofContractV1, StrictCborError> {
-        let fields = array(value, "wave8_contract", 8)?;
+        let fields = array(value, "wave8_contract", 7)?;
         Ok(Wave8ProofContractV1 {
             scenario_room: decode_room(&fields[0])?,
             plugin_boundary: decode_plugin_boundary(&fields[1])?,
@@ -3879,8 +3874,7 @@ pub mod strict_codec {
                 .iter()
                 .map(decode_atomicity)
                 .collect::<Result<Vec<_>, _>>()?,
-            conformance_report: decode_report(&fields[6])?,
-            non_interference: array_values(&fields[7], "non_interference")?
+            non_interference: array_values(&fields[6], "non_interference")?
                 .iter()
                 .map(decode_non_interference_case)
                 .collect::<Result<Vec<_>, _>>()?,
@@ -4190,12 +4184,9 @@ pub mod strict_codec {
             let counterfactual = replace_field(&encode_counterfactual(contract), 8, Value::Null);
             assert!(decode_counterfactual(&counterfactual).is_err());
 
+            let report = super::super::tests::test_report();
             let case = replace_field(
-                &replace_field(
-                    &encode_case(&evidence.contract.conformance_report.cases[0]),
-                    7,
-                    Value::Null,
-                ),
+                &replace_field(&encode_case(&report.cases[0]), 7, Value::Null),
                 8,
                 Value::Null,
             );
@@ -4602,7 +4593,6 @@ fn verify_wave8_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceE
     verify_contract_header(evidence)?;
     verify_knowledge_boundary(evidence)?;
     verify_counterfactual_contract(evidence)?;
-    verify_conformance_report(evidence)?;
     verify_atomicity(evidence)
 }
 
@@ -4868,29 +4858,6 @@ fn verify_intervention_contract(
             < counterfactual.frontier.affected_nodes.len()
     {
         return Err(EvidenceError::IncompleteRecomputationContract);
-    }
-    Ok(())
-}
-
-fn verify_conformance_report(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
-    let contract = &evidence.contract;
-    let report = &contract.conformance_report;
-    report.validate()?;
-    let counterfactual = &contract.counterfactual;
-    let modes = report
-        .cases
-        .iter()
-        .map(|case| case.mode)
-        .collect::<BTreeSet<_>>();
-    if !report
-        .replay_claim
-        .is_no_stronger_than(evidence.manifest.replay_claim)
-        || !counterfactual
-            .replay_claim
-            .is_no_stronger_than(evidence.manifest.replay_claim)
-        || !modes.contains(&evidence.manifest.execution_mode)
-    {
-        return Err(EvidenceError::InvalidConformanceReport);
     }
     Ok(())
 }
@@ -5958,7 +5925,7 @@ pub mod tests {
         }
     }
 
-    fn test_report() -> ConformanceReportV1 {
+    pub(crate) fn test_report() -> ConformanceReportV1 {
         let cases = vec![
             CaseOutcomeV1 {
                 case_id: "scenario-air-gapped".to_owned(),
@@ -6380,7 +6347,7 @@ pub mod tests {
     }
 
     #[test]
-    fn public_report_shape_boundaries_and_verifier_claims_are_exact() {
+    fn public_report_shape_boundaries_are_exact() {
         let mut at_limit = test_report();
         at_limit.implementation.implementation_id = "x".repeat(128);
         at_limit.implementation.organization_id = Some("o".repeat(128));
@@ -6415,30 +6382,6 @@ pub mod tests {
             Err(EvidenceError::InvalidConformanceReport)
         );
 
-        let mut invalid = evidence();
-        invalid.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
-        invalid.contract.conformance_report.replay_claim = ReplayClaimV1::Exact;
-        invalid.contract.counterfactual.replay_claim = ReplayClaimV1::StructuralOnly;
-        assert_eq!(
-            verify_conformance_report(&invalid),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
-
-        let mut invalid = evidence();
-        invalid.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
-        invalid.contract.conformance_report.replay_claim = ReplayClaimV1::StructuralOnly;
-        invalid.contract.counterfactual.replay_claim = ReplayClaimV1::Exact;
-        assert_eq!(
-            verify_conformance_report(&invalid),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
-
-        let mut invalid = evidence();
-        invalid.manifest.execution_mode = ExecutionModeV1::Replay;
-        assert_eq!(
-            verify_conformance_report(&invalid),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
     }
 
     #[test]
@@ -6577,7 +6520,6 @@ pub mod tests {
                 committed: true,
                 failure_class: None,
             }],
-            conformance_report: test_report(),
             non_interference: wave8_non_interference_matrix([1; 32]),
         }
     }
@@ -7706,132 +7648,6 @@ pub mod tests {
                 assert!(!verify_counterfactual_record_shapes(&invalid_shape));
             }
 
-            let mut report_cases = value.clone();
-            let template = report_cases.contract.conformance_report.cases[0].clone();
-            let mut pass = template.clone();
-            pass.case_id = "a-pass".to_owned();
-            pass.mode = ExecutionModeV1::Local;
-            let mut fail = template.clone();
-            fail.case_id = "b-fail".to_owned();
-            fail.mode = ExecutionModeV1::AirGapped;
-            fail.outcome = CaseOutcomeStatusV1::Fail;
-            fail.expected_digest = Some([14; 32]);
-            fail.actual_digest = Some([15; 32]);
-            let mut skip = template.clone();
-            skip.case_id = "c-skip".to_owned();
-            skip.mode = ExecutionModeV1::Replay;
-            skip.outcome = CaseOutcomeStatusV1::Skip;
-            skip.expected_digest = None;
-            skip.actual_digest = Some([15; 32]);
-            let mut unavailable = template.clone();
-            unavailable.case_id = "d-unavailable".to_owned();
-            unavailable.mode = ExecutionModeV1::Fork;
-            unavailable.outcome = CaseOutcomeStatusV1::Unavailable;
-            unavailable.expected_digest = None;
-            unavailable.actual_digest = None;
-            unavailable.expected_error = Some(SafeErrorCodeV1::InvalidEncoding);
-            unavailable.actual_error = None;
-            let mut not_applicable = template;
-            not_applicable.case_id = "e-not-applicable".to_owned();
-            not_applicable.mode = ExecutionModeV1::Local;
-            not_applicable.outcome = CaseOutcomeStatusV1::NotApplicable;
-            not_applicable.expected_digest = None;
-            not_applicable.actual_digest = None;
-            not_applicable.expected_error = None;
-            not_applicable.actual_error = Some(SafeErrorCodeV1::ResourceLimitExceeded);
-            report_cases.contract.conformance_report.cases =
-                vec![pass, fail, skip, unavailable, not_applicable];
-            report_cases.contract.conformance_report.passed = 1;
-            report_cases.contract.conformance_report.failed = 1;
-            report_cases.contract.conformance_report.skipped = 1;
-            report_cases.contract.conformance_report.unavailable = 1;
-            report_cases.contract.conformance_report.not_applicable = 1;
-            refresh_test_report(&mut report_cases.contract.conformance_report);
-            assert_eq!(verify_wave8_contract(&report_cases), Ok(()));
-
-            let mut typed_report = value.clone();
-            typed_report.contract.conformance_report.cases[0].expected_digest = None;
-            typed_report.contract.conformance_report.cases[0].actual_digest = None;
-            typed_report.contract.conformance_report.cases[0].expected_error =
-                Some(SafeErrorCodeV1::ClosureIncomplete);
-            typed_report.contract.conformance_report.cases[0].actual_error =
-                Some(SafeErrorCodeV1::ClosureIncomplete);
-            refresh_test_report(&mut typed_report.contract.conformance_report);
-            assert_eq!(verify_evidence(&typed_report), Ok(()));
-
-            let mut divergence_report = value.clone();
-            divergence_report.contract.conformance_report.cases[0].actual_digest =
-                Some([15; 32]);
-            divergence_report.contract.conformance_report.cases[0].first_coordinate =
-                Some(vec![1, 2]);
-            refresh_test_report(&mut divergence_report.contract.conformance_report);
-            assert_eq!(verify_evidence(&divergence_report), Ok(()));
-
-            let mut redacted_report = value.clone();
-            redacted_report.contract.conformance_report.cases[0].redaction_state =
-                RedactionStateV1::RedactedViews;
-            redacted_report.contract.conformance_report.cases[0].replay_claim =
-                ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
-            redacted_report.contract.conformance_report.redaction_state =
-                RedactionStateV1::RedactedViews;
-            redacted_report.contract.conformance_report.replay_claim =
-                ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
-            refresh_test_report(&mut redacted_report.contract.conformance_report);
-            assert_eq!(verify_evidence(&redacted_report), Ok(()));
-            let mut mismatched_redaction = redacted_report.clone();
-            mismatched_redaction.contract.conformance_report.redaction_state =
-                RedactionStateV1::StructuralOnly;
-            assert_eq!(
-                verify_evidence(&mismatched_redaction),
-                Err(EvidenceError::InvalidConformanceReport)
-            );
-
-            let mut structural_report = value.clone();
-            let structural_case = &mut structural_report.contract.conformance_report.cases[0];
-            structural_case.outcome = CaseOutcomeStatusV1::Pass;
-            structural_case.first_coordinate = None;
-            structural_case.expected_digest = None;
-            structural_case.actual_digest = None;
-            structural_case.expected_error = None;
-            structural_case.actual_error = None;
-            structural_case.replay_claim = ReplayClaimV1::StructuralOnly;
-            structural_case.redaction_state = RedactionStateV1::StructuralOnly;
-            structural_report.contract.conformance_report.redaction_state =
-                RedactionStateV1::StructuralOnly;
-            structural_report.contract.conformance_report.replay_claim =
-                ReplayClaimV1::StructuralOnly;
-            refresh_test_report(&mut structural_report.contract.conformance_report);
-            assert_eq!(verify_evidence(&structural_report), Ok(()));
-
-            let mut missing_report = structural_report.clone();
-            missing_report.contract.conformance_report.cases[0].outcome =
-                CaseOutcomeStatusV1::Fail;
-            missing_report.contract.conformance_report.redaction_state =
-                RedactionStateV1::EvidenceMissing;
-            missing_report.contract.conformance_report.replay_claim =
-                ReplayClaimV1::UnverifiableArtifactsMissing;
-            missing_report.contract.conformance_report.cases[0].redaction_state =
-                RedactionStateV1::EvidenceMissing;
-            missing_report.contract.conformance_report.cases[0].replay_claim =
-                ReplayClaimV1::UnverifiableArtifactsMissing;
-            missing_report.contract.conformance_report.passed = 1;
-            missing_report.contract.conformance_report.failed = 1;
-            refresh_test_report(&mut missing_report.contract.conformance_report);
-            assert_eq!(verify_evidence(&missing_report), Ok(()));
-
-            let mut invalid_report = report_cases.clone();
-            invalid_report.contract.conformance_report.passed = 0;
-            assert_eq!(
-                verify_wave8_contract(&invalid_report),
-                Err(EvidenceError::InvalidConformanceReport)
-            );
-            invalid_report = report_cases.clone();
-            invalid_report.contract.conformance_report.cases.clear();
-            assert_eq!(
-                verify_wave8_contract(&invalid_report),
-                Err(EvidenceError::InvalidConformanceReport)
-            );
-
             let mut invalid_atomicity = value.clone();
             invalid_atomicity.contract.atomicity.clear();
             assert_eq!(
@@ -7993,25 +7809,6 @@ pub mod tests {
             assert_eq!(
                 verify_wave8_contract(&duplicate_consumer),
                 Err(EvidenceError::InvalidDependencyGraph)
-            );
-
-            let mut invalid_coordinate = report_cases.clone();
-            invalid_coordinate.contract.conformance_report.cases[0].first_coordinate =
-                Some(vec![b'x'; 129]);
-            assert_eq!(
-                verify_wave8_contract(&invalid_coordinate),
-                Err(EvidenceError::InvalidConformanceReport)
-            );
-
-            let mut duplicate_reviewers = report_cases.clone();
-            duplicate_reviewers
-                .contract
-                .conformance_report
-                .independence
-                .reviewer_ids = vec!["reviewer".to_owned(), "reviewer".to_owned()];
-            assert_eq!(
-                verify_wave8_contract(&duplicate_reviewers),
-                Err(EvidenceError::InvalidConformanceReport)
             );
 
             let mut unsorted_owner_causes = shape.clone();
