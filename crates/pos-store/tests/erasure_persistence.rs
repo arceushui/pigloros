@@ -929,7 +929,7 @@ fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dy
     schema_connection.execute_batch("DROP TABLE erasure_records")?;
     drop(schema_connection);
     let shared = Rc::new(RefCell::new(store));
-    let coordinator = ErasureCoordinatorStateMachineV1::new(
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
         Host {
             store: shared,
             targets: vec![target()],
