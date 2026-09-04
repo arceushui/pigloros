@@ -5614,4 +5614,30 @@ mod coverage_entrypoints {
             Err(ErasureErrorV1::ScopeInvalid)
         );
     }
+
+    #[test]
+    fn memory_recovery_error_append_rejects_a_new_error_at_the_bound() {
+        let mut store = MemoryStore::new();
+        let request = ErasureReferenceV1::from_digest([251_u8; 32]);
+        store.test_corrupt(TestCorruption::RecoveryErrorIndex {
+            request,
+            references: ERASURE_MAX_RECOVERY_ERRORS.saturating_sub(1),
+        });
+        let failure = pos_core::ErasureRecoveryErrorV1::new(
+            request,
+            None,
+            request,
+            ErasureErrorV1::TrustSnapshotInvalid,
+        )
+        .test_ok();
+        let object = ErasurePersistenceObjectV1::new(
+            failure.reference(),
+            failure.to_canonical_cbor().test_ok(),
+        );
+
+        assert_eq!(
+            store.append_recovery_error(request, object),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
 }
