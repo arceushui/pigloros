@@ -19,7 +19,7 @@ if [[ ! -d ${output_parent} || -L ${output_parent} ]]; then
   exit 2
 fi
 
-for command in b3sum cargo git gzip jq rustc tar; do
+for command in b3sum cargo git gzip jq rustc rustup tar; do
   command -v "${command}" >/dev/null || {
     printf 'required packaging command is unavailable: %s\n' "${command}" >&2
     exit 2
@@ -53,26 +53,66 @@ source_directory=${work_directory}/source-checkout
 mkdir -p -- "${source_directory}"
 tar -xzf "${package_directory}/source/pigloros-source.tar.gz" -C "${source_directory}"
 
+pinned_rustc=$(env -u RUSTUP_TOOLCHAIN rustup which rustc)
+pinned_cargo=$(env -u RUSTUP_TOOLCHAIN rustup which cargo)
+if [[ ! -x ${pinned_rustc} || ! -x ${pinned_cargo} ]]; then
+  printf '%s\n' 'selected Rust toolchain does not contain cargo and rustc executables' >&2
+  exit 2
+fi
+toolchain_bin=$(dirname -- "${pinned_rustc}")
+target=$(${pinned_rustc} -vV | sed -n 's/^host: //p')
+if [[ -z ${target} ]]; then
+  printf '%s\n' 'selected Rust compiler did not report a host target' >&2
+  exit 2
+fi
+toolchain=$(${pinned_rustc} --version)
+
 target_directory=${work_directory}/target
-CARGO_TARGET_DIR=${target_directory} cargo build \
-  --locked \
-  --release \
-  --manifest-path "${source_directory}/Cargo.toml" \
-  --package pos-reference \
-  --bin pos-reference-evaluator
+build_home=${work_directory}/build-home
+cargo_home=${work_directory}/cargo-home
+mkdir -p -- "${build_home}" "${cargo_home}"
+(
+  cd -- "${source_directory}"
+  env -i \
+    PATH="${toolchain_bin}:${PATH}" \
+    HOME="${build_home}" \
+    CARGO_HOME="${cargo_home}" \
+    CARGO_TARGET_DIR="${target_directory}" \
+    RUSTC="${pinned_rustc}" \
+    RUSTC_WRAPPER= \
+    RUSTC_WORKSPACE_WRAPPER= \
+    "${pinned_cargo}" build \
+    --locked \
+    --release \
+    --target "${target}" \
+    --package pos-reference \
+    --bin pos-reference-evaluator
+)
 install -m 0755 -- \
-  "${target_directory}/release/pos-reference-evaluator" \
+  "${target_directory}/${target}/release/pos-reference-evaluator" \
   "${package_directory}/bin/pos-reference-evaluator"
 
 install -m 0644 -- "${source_directory}/Cargo.lock" "${package_directory}/Cargo.lock"
 
 metadata=${work_directory}/cargo-metadata.json
-target=$(rustc -vV | sed -n 's/^host: //p')
-cargo metadata --format-version 1 --locked --filter-platform "${target}" \
-  --manifest-path "${source_directory}/Cargo.toml" >"${metadata}"
+(
+  cd -- "${source_directory}"
+  env -i \
+    PATH="${toolchain_bin}:${PATH}" \
+    HOME="${build_home}" \
+    CARGO_HOME="${cargo_home}" \
+    RUSTC="${pinned_rustc}" \
+    RUSTC_WRAPPER= \
+    RUSTC_WORKSPACE_WRAPPER= \
+    "${pinned_cargo}" metadata \
+    --format-version 1 \
+    --locked \
+    --filter-platform "${target}" >"${metadata}"
+)
 
 jq --sort-keys '
-  (.packages | map({ key: .id, value: . }) | from_entries) as $packages
+  .workspace_root as $workspace_root
+  | (.packages | map({ key: .id, value: . }) | from_entries) as $packages
   | (.resolve.nodes | map({
       key: .id,
       value: [.deps[] | select(any(.dep_kinds[]; .kind != "dev")) | .pkg]
@@ -80,6 +120,31 @@ jq --sort-keys '
   | ($packages | to_entries[] | select(.value.name == "pos-reference") | .key) as $root
   | def closure($id): [$id] + [($edges[$id] // [])[] | closure(.)[]];
     (closure($root) | unique) as $ids
+  | def stable_ref($package):
+      ($workspace_root + "/") as $workspace_prefix
+      | (if $package.source == null then
+           if ($package.manifest_path | startswith($workspace_prefix)) then
+             ($package.manifest_path | ltrimstr($workspace_prefix))
+           else
+             error("path package is outside the archived workspace: " + $package.name)
+           end
+         else
+           null
+         end) as $manifest
+      | ({
+          name: $package.name,
+          version: $package.version,
+          source: ($package.source // "path"),
+          manifest: $manifest
+        } | tojson | @base64)
+      | "urn:pigloros:cargo:" + .;
+    ([$ids[] as $id | { id: $id, ref: stable_ref($packages[$id]) }]) as $selected
+  | if ($selected | group_by(.ref) | any(length != 1)) then
+      error("stable Cargo package references are not unique")
+    else
+      .
+    end
+  | ($selected | map({ key: .id, value: .ref }) | from_entries) as $refs
   | {
       bomFormat: "CycloneDX",
       specVersion: "1.5",
@@ -87,7 +152,7 @@ jq --sort-keys '
       metadata: {
         component: {
           type: "application",
-          "bom-ref": $root,
+          "bom-ref": $refs[$root],
           name: $packages[$root].name,
           version: $packages[$root].version
         }
@@ -97,7 +162,7 @@ jq --sort-keys '
         | $packages[$id]
         | {
             type: (if .source == null then "application" else "library" end),
-            "bom-ref": .id,
+            "bom-ref": $refs[$id],
             name: .name,
             version: .version,
             licenses: (if .license == null then [] else [{ expression: .license }] end)
@@ -106,8 +171,8 @@ jq --sort-keys '
       dependencies: [
         $ids[] as $id
         | {
-            ref: $id,
-            dependsOn: [($edges[$id] // [])[] | select(. as $dependency | $ids | index($dependency))]
+            ref: $refs[$id],
+            dependsOn: [($edges[$id] // [])[] | $refs[.]]
               | sort
           }
       ] | sort_by(.ref)
@@ -138,7 +203,6 @@ binary_digest=$(b3sum "${package_directory}/bin/pos-reference-evaluator" | cut -
 lock_digest=$(b3sum "${package_directory}/Cargo.lock" | cut -d ' ' -f 1)
 sbom_digest=$(b3sum "${package_directory}/sbom.cdx.json" | cut -d ' ' -f 1)
 licences_digest=$(b3sum "${package_directory}/licences.json" | cut -d ' ' -f 1)
-toolchain=$(rustc --version)
 
 jq -cS -n \
   --arg commit "${commit}" \
