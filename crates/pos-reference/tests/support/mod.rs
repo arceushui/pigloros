@@ -542,32 +542,15 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     if let Some(ProfileMutation::SelectedClosureCapExact(index)) = profile_mutation {
         select_closure_cap_exact(&mut hard_caps, &members, index)?;
     }
-    let mut profile_value = profile(
+    let mut profile_value = profile_with_selected_closure_caps(
         &members,
-        fixtures.clone(),
+        &fixtures,
         execution_digest,
         trust_digest,
-        &hard_caps,
+        &mut hard_caps,
         mixed_oracles,
-    )?;
-    if matches!(
         profile_mutation,
-        Some(ProfileMutation::SelectedClosureCapExact(3))
-    ) {
-        for _ in 0..4 {
-            let profile_bytes = encoded_profile_length(&profile_value)?;
-            let total_bytes = closure_member_bytes(&members)?.saturating_add(profile_bytes);
-            array_fields_mut(&mut hard_caps)?[5] = uint(total_bytes);
-            profile_value = profile(
-                &members,
-                fixtures.clone(),
-                execution_digest,
-                trust_digest,
-                &hard_caps,
-                mixed_oracles,
-            )?;
-        }
-    }
+    )?;
     if let Some(mutation) = profile_mutation {
         mutate_profile(&mut profile_value, mutation)?;
     }
@@ -3090,6 +3073,37 @@ fn closure_member_bytes(members: &BTreeMap<String, (Vec<u8>, u8)>) -> TestResult
             .map(|length| total.saturating_add(length))
             .map_err(Into::into)
     })
+}
+
+fn profile_with_selected_closure_caps(
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    fixtures: &[Value],
+    execution_digest: [u8; 32],
+    trust_digest: [u8; 32],
+    hard_caps: &mut Value,
+    mixed_oracles: bool,
+    mutation: Option<ProfileMutation>,
+) -> TestResult<Value> {
+    let build_profile = |caps: &Value| {
+        profile(
+            members,
+            fixtures.to_vec(),
+            execution_digest,
+            trust_digest,
+            caps,
+            mixed_oracles,
+        )
+    };
+    let mut profile_value = build_profile(hard_caps)?;
+    if matches!(mutation, Some(ProfileMutation::SelectedClosureCapExact(3))) {
+        for _ in 0..4 {
+            let profile_bytes = encoded_profile_length(&profile_value)?;
+            let total_bytes = closure_member_bytes(members)?.saturating_add(profile_bytes);
+            array_fields_mut(hard_caps)?[5] = uint(total_bytes);
+            profile_value = build_profile(hard_caps)?;
+        }
+    }
+    Ok(profile_value)
 }
 
 fn encoded_profile_length(profile: &Value) -> TestResult<u64> {
