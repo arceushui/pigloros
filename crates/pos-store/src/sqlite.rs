@@ -7648,6 +7648,32 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_rejects_incompatible_recovery_error_schema() {
+        let file = tempfile::NamedTempFile::new().test_ok();
+        drop(SqliteStore::open(file.path().to_str().test_ok()).test_ok());
+        {
+            let conn = Connection::open(file.path()).test_ok();
+            conn.execute_batch(
+                "DROP TABLE erasure_recovery_errors;
+                 CREATE TABLE erasure_recovery_errors (
+                     request_digest BLOB NOT NULL PRIMARY KEY
+                 );",
+            )
+            .test_ok();
+        }
+        let error = SqliteStore::open(file.path().to_str().test_ok())
+            .err()
+            .test_ok();
+        assert!(matches!(
+            error,
+            CoreError::Storage(message)
+                if message.contains("erasure_recovery_errors")
+                    && message.contains("incompatible schema")
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_rejects_an_events_table_without_role_columns() {
         let file = tempfile::NamedTempFile::new().test_ok();
         drop(SqliteStore::open(file.path().to_str().test_ok()).test_ok());

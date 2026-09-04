@@ -8,6 +8,73 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
+struct EmptyStateResolver;
+
+impl ErasureStateResolverV1 for EmptyStateResolver {
+    fn resolve_state(
+        &self,
+        _digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        Ok(None)
+    }
+}
+
+struct FixedStateResolver {
+    state: ErasureStateV1,
+}
+
+impl ErasureStateResolverV1 for FixedStateResolver {
+    fn resolve_state(
+        &self,
+        _digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        Ok(Some(self.state.clone()))
+    }
+}
+
+fn synthetic_state(
+    lifecycle: ErasureLifecycleV1,
+    previous_state: Option<ErasureReferenceV1>,
+    state_digest: ErasureReferenceV1,
+) -> ErasureStateV1 {
+    ErasureStateV1 {
+        request: reference(1),
+        lifecycle,
+        freeze_position: None,
+        coordinator: reference(2),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        previous_state,
+        provenance: reference(3),
+        state_digest,
+    }
+}
+
+#[test]
+fn predecessor_chain_reports_a_non_submitted_root_without_a_predecessor() {
+    let state = synthetic_state(ErasureLifecycleV1::Authorized, None, reference(4));
+    let failure = verify_predecessor_chain_bounded(state, &EmptyStateResolver, 1)
+        .expect_err("non-submitted root must have a predecessor");
+    assert_eq!(failure.error, ErasureErrorV1::ProvenanceMissing);
+    assert_eq!(failure.subject, reference(4));
+}
+
+#[test]
+fn predecessor_chain_reports_the_state_at_the_depth_limit() {
+    let current = synthetic_state(
+        ErasureLifecycleV1::Authorized,
+        Some(reference(5)),
+        reference(6),
+    );
+    let predecessor = synthetic_state(ErasureLifecycleV1::Submitted, None, reference(5));
+    let failure =
+        verify_predecessor_chain_bounded(current, &FixedStateResolver { state: predecessor }, 1)
+            .expect_err("bounded history must reject an exhausted depth budget");
+    assert_eq!(failure.error, ErasureErrorV1::ProvenanceMissing);
+    assert_eq!(failure.subject, reference(5));
+}
+
 #[test]
 fn lifecycle_permits_exactly_the_adr_edges() {
     let lifecycles = [
