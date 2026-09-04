@@ -617,7 +617,10 @@ fn decode_descriptors(value: Value) -> Result<Vec<Descriptor>, BundleError> {
             })
         })
         .collect::<Result<Vec<_>, BundleError>>()?;
-    if !strictly_ordered(descriptors.iter().map(|value| value.path.as_bytes())) {
+    if descriptors
+        .windows(2)
+        .any(|pair| pair[0].path.as_bytes() >= pair[1].path.as_bytes())
+    {
         return Err(BundleError::NonCanonicalOrder);
     }
     Ok(descriptors)
@@ -747,17 +750,4 @@ fn validated_path(path: &str) -> Result<String, BundleError> {
     } else {
         Ok(path.to_owned())
     }
-}
-
-fn strictly_ordered<'a>(mut values: impl Iterator<Item = &'a [u8]>) -> bool {
-    let Some(mut prior) = values.next() else {
-        return true;
-    };
-    for value in values {
-        if prior >= value {
-            return false;
-        }
-        prior = value;
-    }
-    true
 }
