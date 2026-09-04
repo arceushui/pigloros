@@ -1722,10 +1722,14 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         original_submitted.state_digest(),
         &correction,
     )?;
-    assert_correction_recovery_resolve_state_faults(
-        &mutation_base,
-        &corrected_request(correction.reference())?,
+    let corrected = corrected_request(correction.reference())?;
+    mutation_base.replace_corrected_graph(
+        corrected_reference,
+        &corrected,
+        &corrected_state,
+        &correction,
     )?;
+    assert_correction_recovery_resolve_state_faults(&mutation_base, &corrected)?;
     Ok(())
 }
 
