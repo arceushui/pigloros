@@ -184,6 +184,10 @@ pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureEr
 ///
 /// Keeping this fixture here prevents the backend tests from silently drifting
 /// apart while they exercise the same public persistence contract.
+///
+/// # Errors
+///
+/// Returns [`ErasureErrorV1`] if the shared fixture violates an ERQ1 invariant.
 pub fn persistence_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     request(RequestFixtureInput {
         request: reference(1),
@@ -199,7 +203,7 @@ pub fn persistence_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
-/// Build the deterministic TimelineReplay target shared by persistence tests.
+/// Build the deterministic `TimelineReplay` target shared by persistence tests.
 #[must_use]
 pub const fn persistence_target() -> ErasureRequiredTargetV1 {
     replay_target(10)
