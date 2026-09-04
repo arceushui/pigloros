@@ -5,7 +5,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -14,7 +14,9 @@ use std::os::unix::ffi::OsStringExt;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport};
+use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport, EvaluationRequest};
+use pos_reference::profile::Profile;
+use pos_reference::signed_bundle::{preflight_signed_bundle, SelectedBundleCaps};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -63,6 +65,22 @@ fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<
         adapter,
     ]);
     Ok(command)
+}
+
+fn verify_staged_corpus() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let mut archive = Cursor::new(corpus.archive);
+    let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+    let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
+    preflight.enforce_selected_caps(SelectedBundleCaps {
+        max_profile_bytes: caps.max_profile_bytes,
+        max_bundle_members: caps.max_bundle_members,
+        max_member_path_bytes: caps.max_member_path_bytes,
+        max_member_bytes: caps.max_member_bytes,
+        max_total_bundle_bytes: caps.max_total_bundle_bytes,
+    })?;
+    Ok(())
 }
 
 fn write_evaluator_provenance(path: &Path, source: &[u8]) -> TestResult {
@@ -365,6 +383,7 @@ fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn command_emits_a_self_verified_report_through_the_public_process_boundary() -> TestResult {
+    verify_staged_corpus()?;
     let directory = tempfile::tempdir()?;
     let output = complete_command(directory.path())?
         .args(["--adapter-arg", "--ignored-by-cat"])
