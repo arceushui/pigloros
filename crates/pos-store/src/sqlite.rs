@@ -7656,7 +7656,10 @@ mod tests {
             conn.execute_batch(
                 "DROP TABLE erasure_recovery_errors;
                  CREATE TABLE erasure_recovery_errors (
-                     request_digest BLOB NOT NULL PRIMARY KEY
+                     request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                     error_digest BLOB NOT NULL CHECK (length(error_digest) = 32),
+                     extra INTEGER,
+                     PRIMARY KEY (request_digest, error_digest)
                  );",
             )
             .test_ok();
