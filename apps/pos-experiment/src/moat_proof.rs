@@ -137,102 +137,357 @@ impl MoatProofRun {
     pub fn run(self) -> Result<MoatProofReport, MoatProofError> {
         let input = self.input;
         let mode = self.mode;
-        let failure_probes = failure_probes(input.resource_limit)?;
-        let topology = ProofTopology::new(input.clone())?;
-        let plugin_versions = plugin_versions(&topology)?;
-        let factory_topology = topology.clone();
-        let registry_factory = move || build_registry(&factory_topology);
-        let mut experiment = Experiment::new(ExperimentConfig {
-            name: format!("wave8-{}", input.scenario_id),
-            stop: StopCondition::MaxTicks(input.ticks.saturating_add(1)),
-            store_config: pos_store::StoreConfig::Memory,
+        failure_probes(input.resource_limit).and_then(|failure_probes| {
+            ProofTopology::new(input.clone())
+                .map_err(MoatProofError::from)
+                .and_then(|topology| {
+                    plugin_versions(&topology)
+                        .map_err(MoatProofError::from)
+                        .and_then(|plugin_versions| {
+                            start_proof_sessions(&input, &topology).and_then(
+                                |(parent, child, fork_cut_seq)| {
+                                    complete_proof_sessions(parent, child).and_then(|completed| {
+                                        build_report(
+                                            &input,
+                                            mode,
+                                            &topology,
+                                            &plugin_versions,
+                                            failure_probes,
+                                            fork_cut_seq,
+                                            completed,
+                                        )
+                                    })
+                                },
+                            )
+                        })
+                })
         })
-        .with_fork_registry_factory(registry_factory)
-        .with_resource_limit(input.resource_limit);
-        register_plugins(&mut experiment, &topology)?;
-        let mut parent = experiment.start()?;
-        parent.step_tick()?;
-        let fork_cut_seq = parent
-            .source_events_with_control()?
-            .last()
-            .map(|event| event.seq.as_u64())
-            .ok_or(MoatProofError::MissingForkCut)?;
-        let mut child = parent.fork("counterfactual")?;
-        let proposal = intervention(topology.body, topology.agent, &input, 1)?;
-        child.submit_action(&proposal)?;
-        finish(&mut parent)?;
-        finish(&mut child)?;
-        let host_closure = commit_host_closure(&mut parent, "proof-subject")?;
-        let counterfactual_host_closure = commit_host_closure(&mut child, "proof-subject")?;
-        let baseline_events = parent.source_events_with_control()?;
-        let counterfactual_events = child.source_events_with_control()?;
-        let parent_result = parent.run_to_completion()?;
-        let child_result = child.run_to_completion()?;
-        let (prefix_identical_through_fork, suffix_recomputed) =
-            suffix_audit(&baseline_events, &counterfactual_events, fork_cut_seq);
-        let baseline = evidence(&EvidenceContext {
-            input: &input,
-            mode,
-            timeline_id: parent_result.timeline_id,
-            fork_cut_seq: Some(fork_cut_seq),
-            events: baseline_events.as_slice(),
-            factual_events: baseline_events.as_slice(),
-            projections: &parent_result.projections,
-            topology: &topology,
-            plugin_versions: &plugin_versions,
-            failure_probes: &failure_probes,
-            host_closure: &host_closure,
-        })?;
-        let counterfactual = evidence(&EvidenceContext {
-            input: &input,
+    }
+}
+
+struct CompletedProofSessions {
+    host_closure: HostClosureAuditV1,
+    counterfactual_host_closure: HostClosureAuditV1,
+    baseline_events: Vec<Event>,
+    counterfactual_events: Vec<Event>,
+    parent_result: crate::RunResult,
+    child_result: crate::RunResult,
+}
+
+fn start_proof_sessions(
+    input: &MoatProofInputV1,
+    topology: &ProofTopology,
+) -> Result<(ExperimentSession, ExperimentSession, u64), MoatProofError> {
+    let factory_topology = topology.clone();
+    let registry_factory = move || build_registry(&factory_topology);
+    let mut experiment = Experiment::new(ExperimentConfig {
+        name: format!("wave8-{}", input.scenario_id),
+        stop: StopCondition::MaxTicks(input.ticks.saturating_add(1)),
+        store_config: pos_store::StoreConfig::Memory,
+    })
+    .with_fork_registry_factory(registry_factory)
+    .with_resource_limit(input.resource_limit);
+    register_plugins(&mut experiment, topology)
+        .map_err(MoatProofError::from)
+        .and_then(|()| experiment.start().map_err(MoatProofError::from))
+        .and_then(|mut parent| {
+            parent
+                .step_tick()
+                .map_err(MoatProofError::from)
+                .and_then(|_| {
+                    parent
+                        .source_events_with_control()
+                        .map_err(MoatProofError::from)
+                        .and_then(|events| {
+                            events
+                                .last()
+                                .map(|event| event.seq.as_u64())
+                                .ok_or(MoatProofError::MissingForkCut)
+                        })
+                })
+                .and_then(|fork_cut_seq| {
+                    parent
+                        .fork("counterfactual")
+                        .map_err(MoatProofError::from)
+                        .and_then(|mut child| {
+                            intervention(topology.body, topology.agent, input, 1).and_then(
+                                |proposal| {
+                                    child
+                                        .submit_action(&proposal)
+                                        .map_err(MoatProofError::from)
+                                        .map(|()| (parent, child, fork_cut_seq))
+                                },
+                            )
+                        })
+                })
+        })
+}
+
+fn complete_proof_sessions(
+    mut parent: ExperimentSession,
+    mut child: ExperimentSession,
+) -> Result<CompletedProofSessions, MoatProofError> {
+    finish(&mut parent)
+        .map_err(MoatProofError::from)
+        .and_then(|()| finish(&mut child).map_err(MoatProofError::from))
+        .and_then(|()| commit_host_closure(&mut parent, "proof-subject"))
+        .and_then(|host_closure| {
+            commit_host_closure(&mut child, "proof-subject")
+                .map(|counterfactual_host_closure| (host_closure, counterfactual_host_closure))
+        })
+        .and_then(|(host_closure, counterfactual_host_closure)| {
+            parent
+                .source_events_with_control()
+                .map_err(MoatProofError::from)
+                .map(|baseline_events| (host_closure, counterfactual_host_closure, baseline_events))
+        })
+        .and_then(
+            |(host_closure, counterfactual_host_closure, baseline_events)| {
+                child
+                    .source_events_with_control()
+                    .map_err(MoatProofError::from)
+                    .map(|counterfactual_events| {
+                        (
+                            host_closure,
+                            counterfactual_host_closure,
+                            baseline_events,
+                            counterfactual_events,
+                        )
+                    })
+            },
+        )
+        .and_then(
+            |(
+                host_closure,
+                counterfactual_host_closure,
+                baseline_events,
+                counterfactual_events,
+            )| {
+                parent
+                    .run_to_completion()
+                    .map_err(MoatProofError::from)
+                    .map(|parent_result| {
+                        (
+                            host_closure,
+                            counterfactual_host_closure,
+                            baseline_events,
+                            counterfactual_events,
+                            parent_result,
+                        )
+                    })
+            },
+        )
+        .and_then(
+            |(
+                host_closure,
+                counterfactual_host_closure,
+                baseline_events,
+                counterfactual_events,
+                parent_result,
+            )| {
+                child
+                    .run_to_completion()
+                    .map_err(MoatProofError::from)
+                    .map(|child_result| CompletedProofSessions {
+                        host_closure,
+                        counterfactual_host_closure,
+                        baseline_events,
+                        counterfactual_events,
+                        parent_result,
+                        child_result,
+                    })
+            },
+        )
+}
+
+fn build_report(
+    input: &MoatProofInputV1,
+    mode: ExecutionModeV1,
+    topology: &ProofTopology,
+    plugin_versions: &BTreeMap<String, String>,
+    failure_probes: Vec<PluginFailureV1>,
+    fork_cut_seq: u64,
+    completed: CompletedProofSessions,
+) -> Result<MoatProofReport, MoatProofError> {
+    let CompletedProofSessions {
+        host_closure,
+        counterfactual_host_closure,
+        baseline_events,
+        counterfactual_events,
+        parent_result,
+        child_result,
+    } = completed;
+    let (prefix_identical_through_fork, suffix_recomputed) =
+        suffix_audit(&baseline_events, &counterfactual_events, fork_cut_seq);
+    evidence(&EvidenceContext {
+        input,
+        mode,
+        timeline_id: parent_result.timeline_id,
+        fork_cut_seq: Some(fork_cut_seq),
+        events: baseline_events.as_slice(),
+        factual_events: baseline_events.as_slice(),
+        projections: &parent_result.projections,
+        topology,
+        plugin_versions,
+        failure_probes: &failure_probes,
+        host_closure: &host_closure,
+    })
+    .and_then(|baseline| {
+        evidence(&EvidenceContext {
+            input,
             mode,
             timeline_id: child_result.timeline_id,
             fork_cut_seq: Some(fork_cut_seq),
             events: counterfactual_events.as_slice(),
             factual_events: baseline_events.as_slice(),
             projections: &child_result.projections,
-            topology: &topology,
-            plugin_versions: &plugin_versions,
+            topology,
+            plugin_versions,
             failure_probes: &failure_probes,
             host_closure: &counterfactual_host_closure,
-        })?;
-        verify_evidence(&baseline)?;
-        verify_evidence(&counterfactual)?;
-        verify_counterfactual_fork(&baseline, &counterfactual, EVENT_TYPE_ACTION_V1)?;
-        let baseline_cbor = baseline.to_canonical_cbor()?;
-        let counterfactual_cbor = counterfactual.to_canonical_cbor()?;
-        let baseline_json = baseline.to_json()?;
-        let counterfactual_json = counterfactual.to_json()?;
-        pos_reference::verify_fork_json(
-            &baseline_json,
-            &counterfactual_json,
-            EVENT_TYPE_ACTION_V1,
-        )?;
-        let divergence = compare(&baseline, &counterfactual)?;
-        verify_independent_fixture_reproduction(&baseline, &counterfactual, &divergence)?;
-        compare_with_reference(&baseline, &counterfactual, &divergence)?;
-        let physical_reaction = projection_changed(&baseline, &counterfactual, "world");
-        let agent_reaction = projection_changed(&baseline, &counterfactual, "proof-agent");
-        let society_signal_changed = projection_changed(&baseline, &counterfactual, "society");
-        let report = MoatProofReport {
+        })
+        .map(|counterfactual| (baseline, counterfactual))
+    })
+    .and_then(|(baseline, counterfactual)| {
+        verify_evidence(&baseline)
+            .map_err(MoatProofError::from)
+            .map(|()| (baseline, counterfactual))
+    })
+    .and_then(|(baseline, counterfactual)| {
+        verify_evidence(&counterfactual)
+            .map_err(MoatProofError::from)
+            .map(|()| (baseline, counterfactual))
+    })
+    .and_then(|(baseline, counterfactual)| {
+        verify_counterfactual_fork(&baseline, &counterfactual, EVENT_TYPE_ACTION_V1)
+            .map_err(MoatProofError::from)
+            .map(|()| (baseline, counterfactual))
+    })
+    .and_then(|(baseline, counterfactual)| {
+        baseline
+            .to_canonical_cbor()
+            .map_err(MoatProofError::from)
+            .map(|baseline_cbor| (baseline, counterfactual, baseline_cbor))
+    })
+    .and_then(|(baseline, counterfactual, baseline_cbor)| {
+        counterfactual
+            .to_canonical_cbor()
+            .map_err(MoatProofError::from)
+            .map(|counterfactual_cbor| {
+                (baseline, counterfactual, baseline_cbor, counterfactual_cbor)
+            })
+    })
+    .and_then(
+        |(baseline, counterfactual, baseline_cbor, counterfactual_cbor)| {
+            baseline
+                .to_json()
+                .map_err(MoatProofError::from)
+                .map(|baseline_json| {
+                    (
+                        baseline,
+                        counterfactual,
+                        baseline_cbor,
+                        counterfactual_cbor,
+                        baseline_json,
+                    )
+                })
+        },
+    )
+    .and_then(
+        |(baseline, counterfactual, baseline_cbor, counterfactual_cbor, baseline_json)| {
+            counterfactual
+                .to_json()
+                .map_err(MoatProofError::from)
+                .map(|counterfactual_json| {
+                    (
+                        baseline,
+                        counterfactual,
+                        baseline_cbor,
+                        counterfactual_cbor,
+                        baseline_json,
+                        counterfactual_json,
+                    )
+                })
+        },
+    )
+    .and_then(
+        |(
             baseline,
             counterfactual,
             baseline_cbor,
             counterfactual_cbor,
-            divergence,
-            physical_reaction: physical_reaction.into(),
-            agent_reaction: agent_reaction.into(),
-            society_signal_changed: society_signal_changed.into(),
-            prefix_identical_through_fork: prefix_identical_through_fork.into(),
-            suffix_recomputed: suffix_recomputed.into(),
-            failure_probes,
-            host_closure,
-        };
-        if !report.passes_reaction_gates() {
-            return Err(MoatProofError::ReactionGatesFailed);
-        }
-        Ok(report)
-    }
+            baseline_json,
+            counterfactual_json,
+        )| {
+            pos_reference::verify_fork_json(
+                &baseline_json,
+                &counterfactual_json,
+                EVENT_TYPE_ACTION_V1,
+            )
+            .map_err(MoatProofError::from)
+            .map(|()| (baseline, counterfactual, baseline_cbor, counterfactual_cbor))
+        },
+    )
+    .and_then(
+        |(baseline, counterfactual, baseline_cbor, counterfactual_cbor)| {
+            compare(&baseline, &counterfactual)
+                .map_err(MoatProofError::from)
+                .map(|divergence| {
+                    (
+                        baseline,
+                        counterfactual,
+                        baseline_cbor,
+                        counterfactual_cbor,
+                        divergence,
+                    )
+                })
+        },
+    )
+    .and_then(
+        |(baseline, counterfactual, baseline_cbor, counterfactual_cbor, divergence)| {
+            verify_independent_fixture_reproduction(&baseline, &counterfactual, &divergence).map(
+                |()| {
+                    (
+                        baseline,
+                        counterfactual,
+                        baseline_cbor,
+                        counterfactual_cbor,
+                        divergence,
+                    )
+                },
+            )
+        },
+    )
+    .and_then(
+        |(baseline, counterfactual, baseline_cbor, counterfactual_cbor, divergence)| {
+            compare_with_reference(&baseline, &counterfactual, &divergence).map(|()| {
+                let physical_reaction = projection_changed(&baseline, &counterfactual, "world");
+                let agent_reaction = projection_changed(&baseline, &counterfactual, "proof-agent");
+                let society_signal_changed =
+                    projection_changed(&baseline, &counterfactual, "society");
+                MoatProofReport {
+                    baseline,
+                    counterfactual,
+                    baseline_cbor,
+                    counterfactual_cbor,
+                    divergence,
+                    physical_reaction: physical_reaction.into(),
+                    agent_reaction: agent_reaction.into(),
+                    society_signal_changed: society_signal_changed.into(),
+                    prefix_identical_through_fork: prefix_identical_through_fork.into(),
+                    suffix_recomputed: suffix_recomputed.into(),
+                    failure_probes,
+                    host_closure,
+                }
+            })
+        },
+    )
+    .and_then(|report| {
+        report
+            .passes_reaction_gates()
+            .then_some(report)
+            .ok_or(MoatProofError::ReactionGatesFailed)
+    })
 }
 
 /// Run the same input through Local and Air-Gapped profiles.
@@ -246,29 +501,55 @@ impl MoatProofRun {
 pub fn run_local_and_air_gapped(
     input: MoatProofInputV1,
 ) -> Result<(MoatProofReport, MoatProofReport, ComparisonV1), MoatProofError> {
-    let local = MoatProofRun::new(input.clone(), ExecutionModeV1::Local)?.run()?;
-    let air_gapped = MoatProofRun::new(input, ExecutionModeV1::AirGapped)?.run()?;
-    let comparison = compare_authoritative_outputs(&local.baseline, &air_gapped.baseline)?;
-    if !comparison.equal {
-        return Err(MoatProofError::ExecutionModesDiverged(comparison));
-    }
-    let counterfactual_comparison =
-        compare_authoritative_outputs(&local.counterfactual, &air_gapped.counterfactual)?;
-    if !counterfactual_comparison.equal {
-        return Err(MoatProofError::ExecutionModesDiverged(
-            counterfactual_comparison,
-        ));
-    }
-    Ok((
-        local,
-        air_gapped,
-        pos_conformance::ComparisonV1 {
-            equal: true,
-            divergence: DivergenceClassV1::None,
-            left_digest: comparison.left_digest,
-            right_digest: comparison.right_digest,
-        },
-    ))
+    MoatProofRun::new(input.clone(), ExecutionModeV1::Local)
+        .map_err(MoatProofError::from)
+        .and_then(MoatProofRun::run)
+        .and_then(|local| {
+            MoatProofRun::new(input, ExecutionModeV1::AirGapped)
+                .map_err(MoatProofError::from)
+                .and_then(MoatProofRun::run)
+                .map(|air_gapped| (local, air_gapped))
+        })
+        .and_then(|(local, air_gapped)| {
+            compare_authoritative_outputs(&local.baseline, &air_gapped.baseline)
+                .map_err(MoatProofError::from)
+                .map(|comparison| (local, air_gapped, comparison))
+        })
+        .and_then(|(local, air_gapped, comparison)| {
+            comparison
+                .equal
+                .then_some((local, air_gapped, comparison.clone()))
+                .ok_or(MoatProofError::ExecutionModesDiverged(comparison))
+        })
+        .and_then(|(local, air_gapped, comparison)| {
+            compare_authoritative_outputs(&local.counterfactual, &air_gapped.counterfactual)
+                .map_err(MoatProofError::from)
+                .map(|counterfactual_comparison| {
+                    (local, air_gapped, comparison, counterfactual_comparison)
+                })
+        })
+        .and_then(
+            |(local, air_gapped, comparison, counterfactual_comparison)| {
+                counterfactual_comparison
+                    .equal
+                    .then_some((local, air_gapped, comparison))
+                    .ok_or(MoatProofError::ExecutionModesDiverged(
+                        counterfactual_comparison.clone(),
+                    ))
+            },
+        )
+        .map(|(local, air_gapped, comparison)| {
+            (
+                local,
+                air_gapped,
+                pos_conformance::ComparisonV1 {
+                    equal: true,
+                    divergence: DivergenceClassV1::None,
+                    left_digest: comparison.left_digest,
+                    right_digest: comparison.right_digest,
+                },
+            )
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -310,20 +591,36 @@ fn compare_with_reference(
     counterfactual: &MoatProofEvidenceV1,
     expected: &ComparisonV1,
 ) -> Result<(), MoatProofError> {
-    let reference = pos_reference::compare_json(&baseline.to_json()?, &counterfactual.to_json()?)?;
-    let divergence = match reference.divergence {
-        pos_reference::ReferenceDivergenceV1::Equal => DivergenceClassV1::None,
-        pos_reference::ReferenceDivergenceV1::Metadata => DivergenceClassV1::Metadata,
-        pos_reference::ReferenceDivergenceV1::AuthoritativeEvents => {
-            DivergenceClassV1::AuthoritativeEvents
-        }
-        pos_reference::ReferenceDivergenceV1::Projections => DivergenceClassV1::Projections,
-        pos_reference::ReferenceDivergenceV1::CausalTrace => DivergenceClassV1::CausalTrace,
-        pos_reference::ReferenceDivergenceV1::Observability => DivergenceClassV1::Observability,
-    };
-    (divergence == expected.divergence)
-        .then_some(())
-        .ok_or(MoatProofError::ReferenceDivergenceMismatch)
+    baseline
+        .to_json()
+        .map_err(MoatProofError::from)
+        .and_then(|baseline_json| {
+            counterfactual
+                .to_json()
+                .map_err(MoatProofError::from)
+                .map(|counterfactual_json| (baseline_json, counterfactual_json))
+        })
+        .and_then(|(baseline_json, counterfactual_json)| {
+            pos_reference::compare_json(&baseline_json, &counterfactual_json)
+                .map_err(MoatProofError::from)
+        })
+        .and_then(|reference| {
+            let divergence = match reference.divergence {
+                pos_reference::ReferenceDivergenceV1::Equal => DivergenceClassV1::None,
+                pos_reference::ReferenceDivergenceV1::Metadata => DivergenceClassV1::Metadata,
+                pos_reference::ReferenceDivergenceV1::AuthoritativeEvents => {
+                    DivergenceClassV1::AuthoritativeEvents
+                }
+                pos_reference::ReferenceDivergenceV1::Projections => DivergenceClassV1::Projections,
+                pos_reference::ReferenceDivergenceV1::CausalTrace => DivergenceClassV1::CausalTrace,
+                pos_reference::ReferenceDivergenceV1::Observability => {
+                    DivergenceClassV1::Observability
+                }
+            };
+            (divergence == expected.divergence)
+                .then_some(())
+                .ok_or(MoatProofError::ReferenceDivergenceMismatch)
+        })
 }
 
 fn verify_independent_fixture_reproduction(
@@ -331,14 +628,29 @@ fn verify_independent_fixture_reproduction(
     counterfactual: &MoatProofEvidenceV1,
     expected: &ComparisonV1,
 ) -> Result<(), MoatProofError> {
-    let independent_baseline = pos_reference::reproduce_fixture_json(&baseline.to_json()?)?;
-    let independent_counterfactual =
-        pos_reference::reproduce_fixture_json(&counterfactual.to_json()?)?;
-    if (independent_baseline == independent_counterfactual) == expected.equal {
-        Ok(())
-    } else {
-        Err(MoatProofError::ReferenceDivergenceMismatch)
-    }
+    baseline
+        .to_json()
+        .map_err(MoatProofError::from)
+        .and_then(|baseline_json| {
+            pos_reference::reproduce_fixture_json(&baseline_json).map_err(MoatProofError::from)
+        })
+        .and_then(|independent_baseline| {
+            counterfactual
+                .to_json()
+                .map_err(MoatProofError::from)
+                .and_then(|counterfactual_json| {
+                    pos_reference::reproduce_fixture_json(&counterfactual_json)
+                        .map_err(MoatProofError::from)
+                })
+                .map(|independent_counterfactual| {
+                    (independent_baseline, independent_counterfactual)
+                })
+        })
+        .and_then(|(independent_baseline, independent_counterfactual)| {
+            ((independent_baseline == independent_counterfactual) == expected.equal)
+                .then_some(())
+                .ok_or(MoatProofError::ReferenceDivergenceMismatch)
+        })
 }
 
 fn fixed_id(value: u128) -> EntityId {
@@ -372,22 +684,28 @@ fn intervention(
 ) -> Result<pos_core::ProposedAction, MoatProofError> {
     let mut params = Vec::new();
     ciborium::into_writer(&input.fork_velocity.to_vec(), &mut params)
-        .map_err(|error| MoatProofError::ActionParams(error.to_string()))?;
-    let action = WorldActionV1 {
-        actor_entity_id: actor,
-        body_entity_id: body,
-        action_kind: ActionKindV1::TargetVelocity,
-        params_cbor: params,
-        action_scope: ACTION_SCOPE_SINGLE_BODY,
-        catalogue_version: 1,
-        tick,
-    };
-    Ok(pos_core::ProposedAction::new(
-        Kind::new(EVENT_TYPE_ACTION_V1),
-        actor,
-        action.encode()?,
-        Kind::new("world.action.v1.submit"),
-    ))
+        .map_err(|error| MoatProofError::ActionParams(error.to_string()))
+        .and_then(|()| {
+            WorldActionV1 {
+                actor_entity_id: actor,
+                body_entity_id: body,
+                action_kind: ActionKindV1::TargetVelocity,
+                params_cbor: params,
+                action_scope: ACTION_SCOPE_SINGLE_BODY,
+                catalogue_version: 1,
+                tick,
+            }
+            .encode()
+            .map_err(MoatProofError::from)
+        })
+        .map(|payload| {
+            pos_core::ProposedAction::new(
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                actor,
+                payload,
+                Kind::new("world.action.v1.submit"),
+            )
+        })
 }
 
 #[derive(Clone)]
@@ -405,21 +723,22 @@ struct ProofTopology {
 
 impl ProofTopology {
     fn new(input: MoatProofInputV1) -> Result<Self, pos_core::CoreError> {
-        let input_digest = input.digest()?;
-        let body = room_entity(&input_digest, 1);
-        let agent = room_entity(&input_digest, 2);
-        let society = room_entity(&input_digest, 3);
-        let config_entity = room_entity(&input_digest, 4);
-        Ok(Self {
-            input,
-            input_digest,
-            body,
-            agent,
-            society,
-            config_entity,
-            world_plugin: WorldPlugin::new().with_bodies([body]),
-            agent_plugin: ProofAgentPlugin::new(),
-            society_plugin: ProofSocietyPlugin::new(),
+        input.digest().map(|input_digest| {
+            let body = room_entity(&input_digest, 1);
+            let agent = room_entity(&input_digest, 2);
+            let society = room_entity(&input_digest, 3);
+            let config_entity = room_entity(&input_digest, 4);
+            Self {
+                input,
+                input_digest,
+                body,
+                agent,
+                society,
+                config_entity,
+                world_plugin: WorldPlugin::new().with_bodies([body]),
+                agent_plugin: ProofAgentPlugin::new(),
+                society_plugin: ProofSocietyPlugin::new(),
+            }
         })
     }
 }
@@ -428,61 +747,70 @@ fn register_plugins(
     experiment: &mut Experiment,
     topology: &ProofTopology,
 ) -> Result<(), RuntimeError> {
-    experiment.register_with_approver(
-        &topology.world_plugin,
-        Some(Box::new(WorldReducer)),
-        Some(Box::new(world_driver(
-            &topology.input,
-            topology.body,
-            topology.config_entity,
-        ))),
-        Some(Box::new(topology.world_plugin.clone())),
-        [Kind::new(EVENT_TYPE_ACTION_V1)],
-    )?;
-    experiment.register(
-        &topology.agent_plugin,
-        Some(Box::new(ProofAgentReducer)),
-        Some(Box::new(ProofAgentDriver::new(
-            topology.agent,
-            topology.input.agent_response_threshold,
-        ))),
-    )?;
-    experiment.register(
-        &topology.society_plugin,
-        Some(Box::new(SocietyReducer)),
-        Some(Box::new(ProofSocietyDriver::new(topology.society))),
-    )?;
-    Ok(())
+    experiment
+        .register_with_approver(
+            &topology.world_plugin,
+            Some(Box::new(WorldReducer)),
+            Some(Box::new(world_driver(
+                &topology.input,
+                topology.body,
+                topology.config_entity,
+            ))),
+            Some(Box::new(topology.world_plugin.clone())),
+            [Kind::new(EVENT_TYPE_ACTION_V1)],
+        )
+        .and_then(|()| {
+            experiment.register(
+                &topology.agent_plugin,
+                Some(Box::new(ProofAgentReducer)),
+                Some(Box::new(ProofAgentDriver::new(
+                    topology.agent,
+                    topology.input.agent_response_threshold,
+                ))),
+            )
+        })
+        .and_then(|()| {
+            experiment.register(
+                &topology.society_plugin,
+                Some(Box::new(SocietyReducer)),
+                Some(Box::new(ProofSocietyDriver::new(topology.society))),
+            )
+        })
 }
 
 fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
-    registry.register_with_approver(
-        &topology.world_plugin,
-        Some(Box::new(WorldReducer)),
-        Some(Box::new(world_driver(
-            &topology.input,
-            topology.body,
-            topology.config_entity,
-        ))),
-        Some(Box::new(topology.world_plugin.clone())),
-        [Kind::new(EVENT_TYPE_ACTION_V1)],
-    )?;
-    registry.register(
-        &topology.agent_plugin,
-        Some(Box::new(ProofAgentReducer)),
-        Some(Box::new(ProofAgentDriver::new(
-            topology.agent,
-            topology.input.agent_response_threshold,
-        ))),
-    )?;
-    registry.register(
-        &topology.society_plugin,
-        Some(Box::new(SocietyReducer)),
-        Some(Box::new(ProofSocietyDriver::new(topology.society))),
-    )?;
-    Ok(registry)
+    registry
+        .register_with_approver(
+            &topology.world_plugin,
+            Some(Box::new(WorldReducer)),
+            Some(Box::new(world_driver(
+                &topology.input,
+                topology.body,
+                topology.config_entity,
+            ))),
+            Some(Box::new(topology.world_plugin.clone())),
+            [Kind::new(EVENT_TYPE_ACTION_V1)],
+        )
+        .and_then(|()| {
+            registry.register(
+                &topology.agent_plugin,
+                Some(Box::new(ProofAgentReducer)),
+                Some(Box::new(ProofAgentDriver::new(
+                    topology.agent,
+                    topology.input.agent_response_threshold,
+                ))),
+            )
+        })
+        .and_then(|()| {
+            registry.register(
+                &topology.society_plugin,
+                Some(Box::new(SocietyReducer)),
+                Some(Box::new(ProofSocietyDriver::new(topology.society))),
+            )
+        })
+        .map(|()| registry)
 }
 
 fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityId) -> WorldDriver {
@@ -1567,85 +1895,153 @@ fn failure_probe(
         store_config: pos_store::StoreConfig::Memory,
     })
     .with_resource_limit(resource_limit);
-    experiment.register(
-        &sibling_plugin,
-        None,
-        Some(Box::new(SiblingProbeDriver {
-            steps: Arc::clone(&sibling_steps),
-        })),
-    )?;
-    experiment.register(
-        &plugin,
-        None,
-        Some(Box::new(FailureProbeDriver {
-            class,
-            resource_limit,
-        })),
-    )?;
-    let mut session = experiment.start()?;
-    let before = session.source_events_with_control()?;
-    let step_failed = session.step_tick().is_err();
-    let after = session.source_events_with_control()?;
-    let failure_class = match class {
-        "resource_exhaustion" => PluginFailureClassV1::ResourceExhaustion,
-        _ => PluginFailureClassV1::PluginCrash,
-    };
-    Ok(PluginFailureV1 {
-        plugin: "failure-probe".to_owned(),
-        class: failure_class,
-        tick: 0,
-        committed: !step_failed || before != after,
-        staged_event_count: 0,
-        committed_event_count: u64::try_from(after.len()).unwrap_or(u64::MAX),
-        state_digest_before: serialized_digest(&before),
-        state_digest_after: serialized_digest(&after),
-        sibling_step_count: sibling_steps.load(std::sync::atomic::Ordering::SeqCst),
-    })
+    experiment
+        .register(
+            &sibling_plugin,
+            None,
+            Some(Box::new(SiblingProbeDriver {
+                steps: Arc::clone(&sibling_steps),
+            })),
+        )
+        .map_err(MoatProofError::from)
+        .and_then(|()| {
+            experiment
+                .register(
+                    &plugin,
+                    None,
+                    Some(Box::new(FailureProbeDriver {
+                        class,
+                        resource_limit,
+                    })),
+                )
+                .map_err(MoatProofError::from)
+        })
+        .and_then(|()| experiment.start().map_err(MoatProofError::from))
+        .and_then(|mut session| {
+            session
+                .source_events_with_control()
+                .map_err(MoatProofError::from)
+                .map(|before| (session, before))
+        })
+        .and_then(|(mut session, before)| {
+            let step_failed = session.step_tick().is_err();
+            session
+                .source_events_with_control()
+                .map_err(MoatProofError::from)
+                .map(|after| (before, step_failed, after))
+        })
+        .map(|(before, step_failed, after)| {
+            let failure_class = match class {
+                "resource_exhaustion" => PluginFailureClassV1::ResourceExhaustion,
+                _ => PluginFailureClassV1::PluginCrash,
+            };
+            PluginFailureV1 {
+                plugin: "failure-probe".to_owned(),
+                class: failure_class,
+                tick: 0,
+                committed: !step_failed || before != after,
+                staged_event_count: 0,
+                committed_event_count: u64::try_from(after.len()).unwrap_or(u64::MAX),
+                state_digest_before: serialized_digest(&before),
+                state_digest_after: serialized_digest(&after),
+                sibling_step_count: sibling_steps.load(std::sync::atomic::Ordering::SeqCst),
+            }
+        })
 }
 
 fn commit_host_closure(
     session: &mut ExperimentSession,
     subject: &str,
 ) -> Result<HostClosureAuditV1, MoatProofError> {
-    let boundary_seq = session
-        .source_events_with_control()?
-        .last()
-        .map_or(0, |event| event.seq.as_u64());
-    session.close_session_at_boundary();
-    let post_revocation_append = session.append_events(&[EventDraft::new(
-        fixed_id(5),
-        Kind::new("proof.consent.tick"),
-        CanonicalBytes::from_static(b"post-revocation"),
-    )]);
-    if post_revocation_append.is_ok() {
-        return Err(MoatProofError::ConsentAppendAccepted);
-    }
-    let marker_committed = matches!(
-        session.step_tick()?,
-        crate::TickOutcome::Advanced {
-            emitted_events: 1,
-            ..
-        }
-    );
-    let marker_events = session.source_events_with_control()?;
-    let marker = marker_events
-        .last()
-        .filter(|event| event.event_type.as_str() == crate::EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE)
-        .ok_or(MoatProofError::ConsentMarkerMissing)?;
-    let halted = marker_committed && matches!(session.step_tick()?, crate::TickOutcome::Stopped);
-    let after_seq = session
-        .source_events_with_control()?
-        .last()
-        .map_or(0, |event| event.seq.as_u64());
-    Ok(HostClosureAuditV1 {
-        subject: subject.to_owned(),
-        requested_after_seq: boundary_seq,
-        effective_after_seq: after_seq,
-        closure_event_seq: after_seq,
-        closure_event_type: marker.event_type.as_str().to_owned(),
-        closure_payload_digest: *blake3::hash(marker.payload.as_slice()).as_bytes(),
-        halted_at_tick_boundary: halted,
-    })
+    session
+        .source_events_with_control()
+        .map_err(MoatProofError::from)
+        .map(|events| events.last().map_or(0, |event| event.seq.as_u64()))
+        .and_then(|boundary_seq| {
+            session.close_session_at_boundary();
+            session
+                .append_events(&[EventDraft::new(
+                    fixed_id(5),
+                    Kind::new("proof.consent.tick"),
+                    CanonicalBytes::from_static(b"post-revocation"),
+                )])
+                .is_err()
+                .then_some(boundary_seq)
+                .ok_or(MoatProofError::ConsentAppendAccepted)
+        })
+        .and_then(|boundary_seq| {
+            session
+                .step_tick()
+                .map_err(MoatProofError::from)
+                .map(|outcome| {
+                    let marker_committed = matches!(
+                        outcome,
+                        crate::TickOutcome::Advanced {
+                            emitted_events: 1,
+                            ..
+                        }
+                    );
+                    (boundary_seq, marker_committed)
+                })
+        })
+        .and_then(|(boundary_seq, marker_committed)| {
+            session
+                .source_events_with_control()
+                .map_err(MoatProofError::from)
+                .and_then(|marker_events| {
+                    marker_events
+                        .last()
+                        .filter(|event| {
+                            event.event_type.as_str() == crate::EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
+                        })
+                        .map(|marker| {
+                            (
+                                boundary_seq,
+                                marker_committed,
+                                marker.event_type.as_str().to_owned(),
+                                *blake3::hash(marker.payload.as_slice()).as_bytes(),
+                            )
+                        })
+                        .ok_or(MoatProofError::ConsentMarkerMissing)
+                })
+        })
+        .and_then(
+            |(boundary_seq, marker_committed, closure_event_type, closure_payload_digest)| {
+                marker_committed
+                    .then(|| session.step_tick())
+                    .transpose()
+                    .map_err(MoatProofError::from)
+                    .map(|outcome| {
+                        let halted = outcome
+                            .is_some_and(|outcome| matches!(outcome, crate::TickOutcome::Stopped));
+                        (
+                            boundary_seq,
+                            closure_event_type,
+                            closure_payload_digest,
+                            halted,
+                        )
+                    })
+            },
+        )
+        .and_then(
+            |(boundary_seq, closure_event_type, closure_payload_digest, halted)| {
+                session
+                    .source_events_with_control()
+                    .map_err(MoatProofError::from)
+                    .map(|events| {
+                        let after_seq = events.last().map_or(0, |event| event.seq.as_u64());
+                        HostClosureAuditV1 {
+                            subject: subject.to_owned(),
+                            requested_after_seq: boundary_seq,
+                            effective_after_seq: after_seq,
+                            closure_event_seq: after_seq,
+                            closure_event_type,
+                            closure_payload_digest,
+                            halted_at_tick_boundary: halted,
+                        }
+                    })
+            },
+        )
 }
 
 struct FailureProbePlugin {
