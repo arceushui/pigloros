@@ -858,24 +858,27 @@ fn recovery_rejects_a_missing_resolution_index_entry() -> Result<(), ErasureErro
 
 #[test]
 fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), ErasureErrorV1> {
-    for (manifest_field, object_tag, object_field, replacement) in [
+    for (manifest_field, object_tag, object_field, replacement, expected_error) in [
         (
             7,
             ERASURE_SCOPE_COMMITMENT_TAG_V1,
             4,
             Value::Bytes(reference(250).digest().to_vec()),
+            ErasureErrorV1::ScopeInvalid,
         ),
         (
             10,
             ERASURE_FREEZE_PROVENANCE_TAG_V1,
             3,
             Value::Bytes(reference(251).digest().to_vec()),
+            ErasureErrorV1::ProvenanceMissing,
         ),
         (
             12,
             ERASURE_OBLIGATION_SET_TAG_V1,
             4,
             Value::Bytes(reference(252).digest().to_vec()),
+            ErasureErrorV1::ProvenanceMissing,
         ),
     ] {
         let graph = completed_graph(vec![target(10)], None)?;
@@ -892,7 +895,7 @@ fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), Er
         let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].failure_subject(), subject);
-        assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+        assert_eq!(failures[0].error(), expected_error);
     }
     Ok(())
 }
