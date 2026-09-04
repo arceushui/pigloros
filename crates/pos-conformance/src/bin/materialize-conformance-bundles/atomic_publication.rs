@@ -897,14 +897,12 @@ mod tests {
                 .and_then(directory_entry_identity)
         };
         assert!(classify(&directory, AtFlags::empty()).is_ok());
-        assert_eq!(
-            classify(&regular_file, AtFlags::empty()),
-            Err(MaterializationError::UntrustedOutputDirectory)
-        );
-        assert_eq!(
-            classify(&symbolic_link, AtFlags::SYMLINK_NOFOLLOW),
-            Err(MaterializationError::SymlinkDetected)
-        );
+        assert!(classify(&regular_file, AtFlags::empty())
+            .map(|_| ())
+            .is_err_and(|error| error.to_string() == "untrusted output directory"));
+        assert!(classify(&symbolic_link, AtFlags::SYMLINK_NOFOLLOW)
+            .map(|_| ())
+            .is_err_and(|error| error.to_string() == "symbolic link detected in output path"));
         standard_fs::remove_dir_all(root)?;
         Ok(())
     }
