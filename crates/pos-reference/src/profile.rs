@@ -333,10 +333,9 @@ impl Profile {
         bytes: &[u8],
         request: &EvaluationRequest,
     ) -> Result<EvaluatorHardCaps, ProfileError> {
-        let caps = authenticate_profile(bytes, request)?.hard_caps;
-        if bytes.len() as u64 > caps.max_profile_bytes {
-            return Err(ProfileError::FieldOutOfBounds);
-        }
+        let authenticated = authenticate_profile(bytes, request)?;
+        let caps = authenticated.hard_caps;
+        validate_authenticated_preflight_caps(bytes, &authenticated.value, request, caps)?;
         Ok(caps)
     }
 
@@ -560,7 +559,8 @@ fn decode_fixtures(
     hard_caps: EvaluatorHardCaps,
 ) -> Result<Vec<Fixture>, ProfileError> {
     let values = array_values(value)?;
-    if values.is_empty() || values.len() > MAX_FIXTURES {
+    if values.is_empty() || values.len() > MAX_FIXTURES || values.len() as u64 > hard_caps.max_cases
+    {
         return Err(ProfileError::FieldOutOfBounds);
     }
     let fixtures = values
@@ -765,6 +765,38 @@ fn authenticate_profile(
         evaluator_artifact_digests,
         hard_caps,
     })
+}
+
+fn validate_authenticated_preflight_caps(
+    bytes: &[u8],
+    value: &Value,
+    request: &EvaluationRequest,
+    caps: EvaluatorHardCaps,
+) -> Result<(), ProfileError> {
+    let fields = array(value, 18)?;
+    let fixtures = array_values(&fields[9])?;
+    if bytes.len() as u64 > caps.max_profile_bytes
+        || value_depth(value) as u64 > caps.max_structural_nesting
+        || fixtures.len() as u64 > caps.max_cases
+        || request.output_capability.report_bytes_limit > caps.max_profile_bytes
+        || request.output_capability.diagnostic_bytes_limit > caps.max_diagnostic_bytes
+    {
+        return Err(ProfileError::FieldOutOfBounds);
+    }
+    for fixture in fixtures {
+        let fixture_fields = array(fixture, 24)?;
+        caps.admits(DeterministicBudget::from_value(&fixture_fields[16])?)?;
+    }
+    for divergence in array_values(&fields[10])? {
+        let divergence_fields = array(divergence, 2)?;
+        let Value::Bytes(coordinate) = &divergence_fields[1] else {
+            return Err(ProfileError::InvalidEncoding);
+        };
+        if coordinate.len() as u64 > caps.max_coordinate_bytes {
+            return Err(ProfileError::FieldOutOfBounds);
+        }
+    }
+    Ok(())
 }
 
 fn decode_profile_header(fields: &[Value]) -> Result<ProfileHeader, ProfileError> {

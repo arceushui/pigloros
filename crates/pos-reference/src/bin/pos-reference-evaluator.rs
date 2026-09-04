@@ -12,7 +12,7 @@ use pos_reference::evaluator_build_identity::{
 };
 use pos_reference::evaluator_protocol::{EvaluationRequest, IndependenceEvidence, ProtocolError};
 use pos_reference::process_adapter::ProcessAdapter;
-use pos_reference::profile::Profile;
+use pos_reference::profile::{EvaluatorHardCaps, Profile};
 use pos_reference::signed_bundle::preflight_signed_bundle;
 
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -101,6 +101,9 @@ fn run() -> Result<(), CommandError> {
             CommandError::Input
         }
     })?;
+    let trust_policy_bytes = read_bounded(&options.trust_policy, MAX_TRUST_POLICY_BYTES)?;
+    let (mut archive, caps) =
+        preflight_authenticated_archive(&options, &trust_policy_bytes, &request)?;
     let identity = verify_evaluator_build_identity(
         &options.evaluator_evidence,
         IndependenceEvidence {
@@ -111,13 +114,13 @@ fn run() -> Result<(), CommandError> {
             shared_code_audit_digest: options.shared_code_audit_digest,
             reviewer_ids: options.reviewer_ids.clone(),
         },
+        caps.max_compression_expansion,
     )
     .map_err(|error| match error {
         EvaluatorBuildIdentityError::Input => CommandError::Input,
         EvaluatorBuildIdentityError::Invalid => CommandError::Identity,
     })?;
-    let trust_policy_bytes = read_bounded(&options.trust_policy, MAX_TRUST_POLICY_BYTES)?;
-    let archive_bytes = authenticated_archive_bytes(&options, &trust_policy_bytes, &request)?;
+    let archive_bytes = read_bounded_file(&mut archive, MAX_ARCHIVE_BYTES)?;
     let mut adapter = ProcessAdapter::new(
         request.subject_adapter,
         request.subject_artifact_digest,
@@ -152,11 +155,11 @@ fn write_artifacts(
     Ok(())
 }
 
-fn authenticated_archive_bytes(
+fn preflight_authenticated_archive(
     options: &Options,
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
-) -> Result<Vec<u8>, CommandError> {
+) -> Result<(File, EvaluatorHardCaps), CommandError> {
     let mut archive = snapshot_bounded(&options.archive, MAX_ARCHIVE_BYTES)?;
     let preflight = preflight_signed_bundle(&mut archive, trust_policy_bytes, request)
         .map_evaluation_error()?;
@@ -165,7 +168,7 @@ fn authenticated_archive_bytes(
     preflight
         .enforce_selected_caps(caps.into())
         .map_evaluation_error()?;
-    read_bounded_file(&mut archive, MAX_ARCHIVE_BYTES)
+    Ok((archive, caps))
 }
 
 fn parse_options(arguments: impl Iterator<Item = OsString>) -> Result<Options, CommandError> {

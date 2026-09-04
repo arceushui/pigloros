@@ -66,6 +66,8 @@ impl EvaluatorBuildEvidence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedEvaluatorBuildIdentity {
     source_digest: [u8; 32],
+    source_archive_bytes: u64,
+    source_expanded_bytes: u64,
     binary_digest: [u8; 32],
     build_provenance_digest: [u8; 32],
     independence: IndependenceEvidence,
@@ -86,6 +88,11 @@ impl VerifiedEvaluatorBuildIdentity {
 
     pub(crate) const fn build_provenance_digest(&self) -> [u8; 32] {
         self.build_provenance_digest
+    }
+
+    pub(crate) const fn admits_compression_expansion(&self, maximum: u64) -> bool {
+        maximum != 0
+            && self.source_expanded_bytes <= self.source_archive_bytes.saturating_mul(maximum)
     }
 }
 
@@ -143,10 +150,12 @@ impl Serialize for BuildDigest {
 /// Returns [`EvaluatorBuildIdentityError::Input`] when an evidence artifact
 /// cannot be read within its exact bound, or [`EvaluatorBuildIdentityError::Invalid`]
 /// when any canonicality, digest, source-archive, checksum, or executable
-/// binding check fails.
+/// binding check fails, including when source expansion exceeds the authenticated
+/// `max_compression_expansion` ratio.
 pub fn verify_evaluator_build_identity(
     evidence: &EvaluatorBuildEvidence,
     independence: IndependenceEvidence,
+    max_compression_expansion: u64,
 ) -> Result<VerifiedEvaluatorBuildIdentity, EvaluatorBuildIdentityError> {
     let provenance_path =
         fs::canonicalize(&evidence.provenance).map_err(|_| EvaluatorBuildIdentityError::Input)?;
@@ -164,6 +173,10 @@ pub fn verify_evaluator_build_identity(
     let provenance_bytes = read_bounded(&provenance_path, MAX_EVALUATOR_PROVENANCE_BYTES)?;
     let provenance = parse_build_provenance(&provenance_bytes)?;
     let mut source_archive = snapshot_bounded(&source_path, MAX_EVALUATOR_SOURCE_BYTES)?;
+    let source_archive_bytes = source_archive
+        .metadata()
+        .map_err(|_| EvaluatorBuildIdentityError::Input)?
+        .len();
     let source = verified_file_digest(
         &mut source_archive,
         MAX_EVALUATOR_SOURCE_BYTES,
@@ -172,7 +185,12 @@ pub fn verify_evaluator_build_identity(
     source_archive
         .seek(SeekFrom::Start(0))
         .map_err(|_| EvaluatorBuildIdentityError::Input)?;
-    if embedded_git_commit(&mut source_archive)? != provenance.source_commit {
+    let source_identity = embedded_git_commit(
+        &mut source_archive,
+        source_archive_bytes,
+        max_compression_expansion,
+    )?;
+    if source_identity.commit != provenance.source_commit {
         return Err(EvaluatorBuildIdentityError::Invalid);
     }
     let packaged_binary = verified_digest(
@@ -212,6 +230,8 @@ pub fn verify_evaluator_build_identity(
     )?;
     Ok(VerifiedEvaluatorBuildIdentity {
         source_digest: source,
+        source_archive_bytes,
+        source_expanded_bytes: source_identity.expanded_bytes,
         binary_digest: running_binary,
         build_provenance_digest: domain_digest(PROVENANCE_DOMAIN, &provenance_bytes),
         independence,
@@ -322,8 +342,24 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn embedded_git_commit(reader: &mut impl Read) -> Result<String, EvaluatorBuildIdentityError> {
-    let mut archive = MultiGzDecoder::new(reader).take(MAX_SOURCE_TAR_BYTES + 1);
+struct SourceArchiveIdentity {
+    commit: String,
+    expanded_bytes: u64,
+}
+
+fn embedded_git_commit(
+    reader: &mut impl Read,
+    compressed_bytes: u64,
+    max_compression_expansion: u64,
+) -> Result<SourceArchiveIdentity, EvaluatorBuildIdentityError> {
+    if compressed_bytes == 0 || max_compression_expansion == 0 {
+        return Err(EvaluatorBuildIdentityError::Invalid);
+    }
+    let selected_limit = compressed_bytes
+        .saturating_mul(max_compression_expansion)
+        .min(MAX_SOURCE_TAR_BYTES);
+    let read_limit = selected_limit + 1;
+    let mut archive = MultiGzDecoder::new(reader).take(read_limit);
     let mut commit = None;
     let mut required_entries = [false; REQUIRED_SOURCE_ENTRIES.len()];
     let mut zero_headers = 0_u8;
@@ -336,13 +372,17 @@ fn embedded_git_commit(reader: &mut impl Read) -> Result<String, EvaluatorBuildI
             zero_headers += 1;
             if zero_headers == 2 {
                 validate_tar_termination(&mut archive)?;
-                if MAX_SOURCE_TAR_BYTES + 1 - archive.limit() > MAX_SOURCE_TAR_BYTES
+                let expanded_bytes = read_limit - archive.limit();
+                if expanded_bytes > selected_limit
                     || commit.is_none()
                     || required_entries.contains(&false)
                 {
                     return Err(EvaluatorBuildIdentityError::Invalid);
                 }
-                return commit.ok_or(EvaluatorBuildIdentityError::Invalid);
+                return Ok(SourceArchiveIdentity {
+                    commit: commit.ok_or(EvaluatorBuildIdentityError::Invalid)?,
+                    expanded_bytes,
+                });
             }
             continue;
         }

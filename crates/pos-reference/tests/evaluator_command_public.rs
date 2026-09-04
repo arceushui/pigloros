@@ -126,6 +126,15 @@ fn public_verifier_result(
     directory: &Path,
     source_archive: &Path,
 ) -> Result<VerifiedEvaluatorBuildIdentity, EvaluatorBuildIdentityError> {
+    public_verifier_result_with_expansion(directory, source_archive, 100)
+}
+
+#[cfg(target_os = "linux")]
+fn public_verifier_result_with_expansion(
+    directory: &Path,
+    source_archive: &Path,
+    max_compression_expansion: u64,
+) -> Result<VerifiedEvaluatorBuildIdentity, EvaluatorBuildIdentityError> {
     verify_evaluator_build_identity(
         &EvaluatorBuildEvidence::new(source_archive, directory.join("provenance.json")),
         IndependenceEvidence {
@@ -136,6 +145,7 @@ fn public_verifier_result(
             shared_code_audit_digest: [64; 32],
             reviewer_ids: vec!["reviewer-one".to_owned()],
         },
+        max_compression_expansion,
     )
 }
 
@@ -1050,6 +1060,28 @@ fn public_verifier_rejects_decoder_failures_and_trailing_archive_data() -> TestR
             EvaluatorBuildIdentityError::Invalid,
         );
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_verifier_enforces_selected_compression_expansion() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    write_public_verifier_package(directory.path())?;
+    let source = directory.path().join("source/pigloros-source.tar.gz");
+    let compressed_bytes = fs::metadata(&source)?.len();
+    let expanded_bytes = source_tar("1111111111111111111111111111111111111111").len() as u64;
+    let exact_expansion = expanded_bytes.div_ceil(compressed_bytes);
+
+    public_verifier_result_with_expansion(directory.path(), &source, exact_expansion)?;
+    assert_eq!(
+        public_verifier_result_with_expansion(
+            directory.path(),
+            &source,
+            exact_expansion.saturating_sub(1),
+        ),
+        Err(EvaluatorBuildIdentityError::Invalid)
+    );
     Ok(())
 }
 

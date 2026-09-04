@@ -1,5 +1,50 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
+
+system_path=$(command -p getconf PATH)
+if [[ -z ${system_path} ]]; then
+  printf '%s\n' 'cannot determine the trusted system executable path' >&2
+  exit 2
+fi
+user_home=$(PATH="${system_path}" getent passwd "${EUID}" | PATH="${system_path}" cut -d: -f6)
+if [[ -z ${user_home} || ! -d ${user_home} ]]; then
+  printf '%s\n' 'cannot determine the packaging user home' >&2
+  exit 2
+fi
+rustup_path=$(PATH="${system_path}" command -v rustup || true)
+if [[ -z ${rustup_path} ]]; then
+  rustup_path=${user_home}/.cargo/bin/rustup
+fi
+if [[ ! -x ${rustup_path} ]]; then
+  printf '%s\n' 'trusted Rustup executable is unavailable' >&2
+  exit 2
+fi
+trusted_tool_path=${rustup_path%/*}:${system_path}
+readonly system_path user_home rustup_path trusted_tool_path
+PATH=${trusted_tool_path}
+CDPATH=
+GIT_CONFIG_GLOBAL=/dev/null
+GIT_CONFIG_NOSYSTEM=1
+RUSTUP_HOME=${user_home}/.rustup
+export PATH
+export CDPATH GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM RUSTUP_HOME
+
+trusted_git() {
+  env -i \
+    PATH="${trusted_tool_path}" \
+    HOME="${user_home}" \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 \
+    git "$@"
+}
+
+trusted_rustup() {
+  env -i \
+    PATH="${trusted_tool_path}" \
+    HOME="${user_home}" \
+    RUSTUP_HOME="${RUSTUP_HOME}" \
+    "${rustup_path}" "$@"
+}
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
@@ -26,8 +71,8 @@ for command in b3sum cargo git gzip jq rustc rustup tar; do
   }
 done
 
-commit=$(git rev-parse --verify 'HEAD^{commit}')
-if ! git diff --quiet "${commit}" -- || [[ -n $(git ls-files --others --exclude-standard) ]]; then
+commit=$(trusted_git rev-parse --verify 'HEAD^{commit}')
+if ! trusted_git diff --quiet "${commit}" -- || [[ -n $(trusted_git ls-files --others --exclude-standard) ]]; then
   printf '%s\n' 'evaluator packages must be built from a clean source tree' >&2
   exit 2
 fi
@@ -42,8 +87,8 @@ package_directory=${work_directory}/reference-evaluator
 mkdir -p -- "${package_directory}/bin" "${package_directory}/source"
 
 source_tar=${work_directory}/pigloros-source.tar
-git archive --format=tar "${commit}" >"${source_tar}"
-archived_commit=$(git get-tar-commit-id <"${source_tar}")
+trusted_git archive --format=tar "${commit}" >"${source_tar}"
+archived_commit=$(trusted_git get-tar-commit-id <"${source_tar}")
 if [[ ${archived_commit} != "${commit}" ]]; then
   printf '%s\n' 'source archive commit identity does not match the selected commit' >&2
   exit 2
@@ -53,18 +98,13 @@ source_directory=${work_directory}/source-checkout
 mkdir -p -- "${source_directory}"
 tar -xzf "${package_directory}/source/pigloros-source.tar.gz" -C "${source_directory}"
 
-pinned_rustc=$(env -u RUSTUP_TOOLCHAIN rustup which rustc)
-pinned_cargo=$(env -u RUSTUP_TOOLCHAIN rustup which cargo)
+pinned_rustc=$(trusted_rustup which rustc)
+pinned_cargo=$(trusted_rustup which cargo)
 if [[ ! -x ${pinned_rustc} || ! -x ${pinned_cargo} ]]; then
   printf '%s\n' 'selected Rust toolchain does not contain cargo and rustc executables' >&2
   exit 2
 fi
 toolchain_bin=$(dirname -- "${pinned_rustc}")
-system_path=$(command -p getconf PATH)
-if [[ -z ${system_path} ]]; then
-  printf '%s\n' 'cannot determine the trusted system executable path' >&2
-  exit 2
-fi
 build_path=${toolchain_bin}:${system_path}
 target=$("${pinned_rustc}" -vV | sed -n 's/^host: //p')
 if [[ -z ${target} ]]; then

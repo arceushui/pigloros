@@ -6,7 +6,8 @@ use crate::evaluator_protocol::{
     SubjectAdapterKind,
 };
 use crate::profile::{
-    DeterministicBudget, Fixture, NamespacedFailure, Profile, ProfileError, StrictOracle,
+    DeterministicBudget, EvaluatorHardCaps, Fixture, NamespacedFailure, Profile, ProfileError,
+    StrictOracle,
 };
 use crate::signed_bundle::{
     preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, VerifiedBundle,
@@ -174,6 +175,7 @@ pub fn evaluate(
         request_bytes,
         archive_bytes,
         trust_policy_bytes,
+        evaluator,
         adapter.kind(),
         adapter.subject_artifact_digest(),
     )?;
@@ -245,6 +247,7 @@ fn verified_inputs(
     request_bytes: &[u8],
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    evaluator: &VerifiedEvaluatorBuildIdentity,
     adapter_kind: SubjectAdapterKind,
     subject_artifact_digest: [u8; 32],
 ) -> Result<(EvaluationRequest, VerifiedBundle, Profile), EvaluatorError> {
@@ -254,7 +257,10 @@ fn verified_inputs(
     {
         return Err(EvaluatorError::AdapterIdentity);
     }
-    enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, &request)?;
+    let caps = enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, &request)?;
+    if !evaluator.admits_compression_expansion(caps.max_compression_expansion) {
+        return Err(EvaluatorError::Profile);
+    }
     let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
     let profile = Profile::from_bundle(&bundle, &request)?;
     Ok((request, bundle, profile))
@@ -264,12 +270,13 @@ fn enforce_authenticated_selected_caps(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
-) -> Result<(), EvaluatorError> {
+) -> Result<EvaluatorHardCaps, EvaluatorError> {
     let preflight = preflight_signed_bundle_bytes(archive_bytes, trust_policy_bytes, request)?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)?;
     preflight
         .enforce_selected_caps(caps.into())
-        .map_err(|_| EvaluatorError::Profile)
+        .map_err(|_| EvaluatorError::Profile)?;
+    Ok(caps)
 }
 
 fn evaluate_cases(
@@ -285,6 +292,17 @@ fn evaluate_cases(
         }
         let attempt = case_attempt(bundle, fixture, bundle.mode)?;
         let observation = adapter.execute(&attempt);
+        if matches!(
+            &observation,
+            Ok(SubjectObservation {
+                result: SubjectResult::Divergence { first_coordinate, .. },
+                ..
+            }) if first_coordinate.is_empty()
+                || first_coordinate.len() as u64
+                    > profile.evaluator_hard_caps.max_coordinate_bytes
+        ) {
+            return Err(EvaluatorError::Profile);
+        }
         outcomes.push(case_outcome(fixture, bundle.mode, observation));
     }
     if outcomes.is_empty() {

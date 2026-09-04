@@ -127,6 +127,7 @@ impl Seek for ChangingArchive {
 struct MixedOracleAdapter {
     subject_digest: [u8; 32],
     output: Vec<u8>,
+    coordinate_bytes: Option<usize>,
 }
 
 struct MismatchedOracleAdapter {
@@ -217,7 +218,9 @@ impl SubjectAdapter for MixedOracleAdapter {
             }),
             2 => SubjectResult::Divergence {
                 classification: 2,
-                first_coordinate: vec![1, 2],
+                first_coordinate: self
+                    .coordinate_bytes
+                    .map_or_else(|| vec![1, 2], |length| vec![1; length]),
             },
             _ => SubjectResult::Output(self.output.clone()),
         };
@@ -817,6 +820,7 @@ fn evaluator_matches_output_failure_and_divergence_oracles() -> TestResult {
     let mut adapter = MixedOracleAdapter {
         subject_digest: corpus.subject_digest,
         output: corpus.expected_output,
+        coordinate_bytes: None,
     };
     let result = evaluate(
         &corpus.request,
@@ -1342,6 +1346,62 @@ fn public_evaluator_enforces_selected_caps_before_full_materialization() -> Test
         ),
         Err(EvaluatorError::Profile)
     );
+    Ok(())
+}
+
+#[test]
+fn public_evaluator_rejects_profile_local_caps_before_full_materialization() -> TestResult {
+    for mutation in [
+        ProfileMutation::SelectedCapBoundary(1),
+        ProfileMutation::SelectedCapBoundary(5),
+        ProfileMutation::SelectedCapBoundary(6),
+        ProfileMutation::DivergenceCoordinateLong,
+        ProfileMutation::FixtureBudgetAboveCap,
+        ProfileMutation::SelectedCompressionCapBoundary,
+    ] {
+        let corpus = support::corpus_with_profile_mutation_and_secret(
+            mutation,
+            br#"{"client_secret":"must-not-be-materialized"}"#,
+        )?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity()?,
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_evaluator_enforces_selected_coordinate_cap_on_adapter_output() -> TestResult {
+    for (coordinate_bytes, expected) in [(128, true), (129, false)] {
+        let corpus = support::mixed_oracle_corpus()?;
+        let mut adapter = MixedOracleAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+            coordinate_bytes: Some(coordinate_bytes),
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity()?,
+                &mut adapter,
+            )
+            .is_ok(),
+            expected
+        );
+    }
     Ok(())
 }
 

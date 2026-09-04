@@ -58,6 +58,7 @@ pub fn verified_evaluator_identity_with(
             directory.path().join("provenance.json"),
         ),
         independence,
+        100,
     )
     .map_err(|error| -> Box<dyn Error> { Box::new(error) })
 }
@@ -86,6 +87,7 @@ pub fn evaluator_evidence_rejects_corrupted_checksum() -> TestResult<()> {
             shared_code_audit_digest: [64; 32],
             reviewer_ids: vec!["reviewer-one".to_owned()],
         },
+        100,
     );
     assert!(result.is_err());
     Ok(())
@@ -233,6 +235,7 @@ pub enum ProfileMutation {
     ProviderKeyNumericBoundary(u8),
     DivergenceCoordinateLong,
     SelectedCapBoundary(u8),
+    SelectedCompressionCapBoundary,
     SelectedProfileByteCapBoundary,
     SelectedProfileByteCapExact,
     SelectedClosureCapBoundary(u8),
@@ -692,6 +695,21 @@ pub fn corpus_with_selected_closure_cap_and_secret(
     })
 }
 
+/// Build a signed corpus combining a profile-local selected-cap violation with secret material.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_profile_mutation_and_secret(
+    mutation: ProfileMutation,
+    secret: &[u8],
+) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        extra: Some(secret),
+        profile_mutation: Some(mutation),
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a request-bound corpus containing one signed CFB1 attack shape.
 ///
 /// # Errors
@@ -753,6 +771,12 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let mut hard_caps = hard_caps();
     if let Some(ProfileMutation::SelectedCapBoundary(index)) = profile_mutation {
         select_hard_cap_boundary(&mut hard_caps, index)?;
+    }
+    if matches!(
+        profile_mutation,
+        Some(ProfileMutation::SelectedCompressionCapBoundary)
+    ) {
+        array_fields_mut(&mut hard_caps)?[6] = uint(1);
     }
     if matches!(
         profile_mutation,
@@ -2162,6 +2186,7 @@ fn mutate_profile_boundary(
             profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[1; 129])])]);
         }
         ProfileMutation::SelectedCapBoundary(_)
+        | ProfileMutation::SelectedCompressionCapBoundary
         | ProfileMutation::SelectedProfileByteCapBoundary
         | ProfileMutation::SelectedProfileByteCapExact => {}
         _ => return Ok(false),
