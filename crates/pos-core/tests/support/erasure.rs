@@ -22,13 +22,11 @@ pub(crate) const fn reference(value: u8) -> ErasureReferenceV1 {
 /// lifecycle scenarios.
 #[must_use]
 pub(crate) const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
+    let varied = target(seed);
     ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(seed),
         key_role: ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(seed.wrapping_add(1)),
-        replica_set: reference(seed.wrapping_add(2)),
-        replica_id: reference(seed.wrapping_add(3)),
+        ..varied
     }
 }
 
