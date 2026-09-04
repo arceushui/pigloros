@@ -797,6 +797,11 @@ fn sqlite_public_reads_map_missing_schema_to_closed_storage_errors(
         let connection = rusqlite::Connection::open(path)?;
         let table = operation.table();
         connection.execute_batch(&format!("DROP TABLE {table}"))?;
+        if matches!(operation, SqliteReadOperation::RecoveryErrorRefs) {
+            connection.execute_batch(
+                "CREATE TABLE erasure_recovery_errors (request_digest BLOB NOT NULL)",
+            )?;
+        }
         assert_eq!(
             operation.invoke(&store),
             Err(ErasureErrorV1::ReceiptCommitFailed)
