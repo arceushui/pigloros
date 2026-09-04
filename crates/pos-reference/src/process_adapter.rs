@@ -58,14 +58,16 @@ impl ProcessAdapter {
     fn invoke(&self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
         let request = encode_attempt(attempt).map_err(|_| AdapterError::ProtocolFailure)?;
         let maximum_response = response_limit(attempt);
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(attempt.watchdog_ms))
-            .ok_or(AdapterError::ProtocolFailure)?;
+        let started = Instant::now();
+        let watchdog = Duration::from_millis(attempt.watchdog_ms);
         let mut child = command(&self.program, &self.arguments)
             .spawn()
             .map_err(|_| AdapterError::Unavailable)?;
-        let stdin = child.stdin.take().unwrap_or_else(std::process::abort);
-        let stdout = child.stdout.take().unwrap_or_else(std::process::abort);
+        let (stdin, stdout) = child
+            .stdin
+            .take()
+            .zip(child.stdout.take())
+            .ok_or(AdapterError::ProtocolFailure)?;
         let (writer_tx, writer_rx) = mpsc::sync_channel(1);
         let (reader_tx, reader_rx) = mpsc::sync_channel(1);
         let writer_worker = writer_tx.clone();
@@ -82,17 +84,17 @@ impl ProcessAdapter {
             {
                 break status;
             }
-            if Instant::now() >= deadline {
+            if started.elapsed() >= watchdog {
                 terminate(&mut child);
                 return Err(AdapterError::WatchdogExpired);
             }
             thread::sleep(POLL_INTERVAL);
         };
-        let wrote = receive_before(&writer_rx, deadline).inspect_err(|_| {
+        let wrote = receive_before(&writer_rx, started, watchdog).inspect_err(|_| {
             terminate(&mut child);
         })?;
         drop(writer_tx);
-        let response = receive_before(&reader_rx, deadline).inspect_err(|_| {
+        let response = receive_before(&reader_rx, started, watchdog).inspect_err(|_| {
             terminate(&mut child);
         })?;
         drop(reader_tx);
@@ -131,10 +133,12 @@ fn command(program: &Path, arguments: &[OsString]) -> Command {
     command
 }
 
-fn receive_before<T>(receiver: &mpsc::Receiver<T>, deadline: Instant) -> Result<T, AdapterError> {
-    let remaining = deadline
-        .checked_duration_since(Instant::now())
-        .ok_or(AdapterError::WatchdogExpired)?;
+fn receive_before<T>(
+    receiver: &mpsc::Receiver<T>,
+    started: Instant,
+    watchdog: Duration,
+) -> Result<T, AdapterError> {
+    let remaining = watchdog.saturating_sub(started.elapsed());
     receiver
         .recv_timeout(remaining)
         .map_err(|_| AdapterError::WatchdogExpired)
