@@ -75,6 +75,13 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
+        self.recover_with_evidence(request)
+    }
+
+    fn recover_with_evidence(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
         let stored = match self.port.read_manifest(request) {
             Ok(Some(stored)) => stored,
             Ok(None) => return Ok(None),

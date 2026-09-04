@@ -505,6 +505,15 @@ fn load<T>(
     decode: impl FnOnce(&[u8]) -> Result<T, ErasureErrorV1>,
     address: impl FnOnce(&T) -> ErasureReferenceV1,
 ) -> Result<T, RecoveryFailureV1> {
+    load_recovery_object(port, reference, decode, address)
+}
+
+fn load_recovery_object<T>(
+    port: &dyn ErasurePersistencePortV1,
+    reference: ErasureReferenceV1,
+    decode: impl FnOnce(&[u8]) -> Result<T, ErasureErrorV1>,
+    address: impl FnOnce(&T) -> ErasureReferenceV1,
+) -> Result<T, RecoveryFailureV1> {
     let bytes = port
         .read_object(reference)
         .map_err(|error| RecoveryFailureV1::new(error, reference))?;
