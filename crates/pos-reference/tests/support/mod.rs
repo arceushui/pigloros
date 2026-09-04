@@ -16,6 +16,8 @@ pub struct Corpus {
     pub expected_output: Vec<u8>,
 }
 
+const SUBJECT_DIGEST: [u8; 32] = [41; 32];
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProfileMutation {
     ArtifactEncoding(u8),
@@ -569,14 +571,40 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         bundle_mutation,
     )?;
     let archive_digest = hash(&archive);
-    let subject_digest = [41; 32];
     let hard_caps_digest = hash_contract("PiglorOS.EvaluatorHardCaps.v1", &hard_caps)?;
+    let request = evaluation_request(
+        profile_digest,
+        archive_digest,
+        subject_adapter,
+        execution_digest,
+        trust_digest,
+        evaluator_protocol_digest,
+        hard_caps_digest,
+    )?;
+    Ok(Corpus {
+        request: request.to_canonical_cbor()?,
+        archive,
+        trust_policy,
+        subject_digest: SUBJECT_DIGEST,
+        expected_output,
+    })
+}
+
+fn evaluation_request(
+    profile_digest: [u8; 32],
+    archive_digest: [u8; 32],
+    subject_adapter: SubjectAdapterKind,
+    execution_digest: [u8; 32],
+    trust_digest: [u8; 32],
+    evaluator_protocol_digest: [u8; 32],
+    hard_caps_digest: [u8; 32],
+) -> TestResult<EvaluationRequest> {
     let mut request = EvaluationRequest {
         request_id: [1; 16],
         profile_digest,
         fixture_bundle_digest: archive_digest,
         subject_adapter,
-        subject_artifact_digest: subject_digest,
+        subject_artifact_digest: SUBJECT_DIGEST,
         implementation: ImplementationIdentity {
             implementation_id: "public-subject".to_owned(),
             source_digest: [42; 32],
@@ -598,13 +626,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     };
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
-    Ok(Corpus {
-        request: request.to_canonical_cbor()?,
-        archive,
-        trust_policy,
-        subject_digest,
-        expected_output,
-    })
+    Ok(request)
 }
 
 fn mutate_support_members(
