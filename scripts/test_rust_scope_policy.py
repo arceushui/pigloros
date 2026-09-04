@@ -25,6 +25,27 @@ EXPECTED_EXCLUDES = {
     "!.cursor/**",
     "!docs/**",
 }
+EXPECTED_SCOPE_SCOPED_CI_RESULTS = (
+    "FMT_RESULT",
+    "RUSTDOC_RESULT",
+    "TEST_RESULT",
+    "CLIPPY_RESULT",
+    "AUDIT_RESULT",
+    "DENY_RESULT",
+    "CARGO_SHEAR_RESULT",
+    "GEIGER_RESULT",
+    "ASAN_RESULT",
+    "DOCKER_BUILD_RESULT",
+    "WORLD_CLIENT_WASM_RESULT",
+    "WORLD_CLIENT_BROWSER_PARITY_RESULT",
+)
+EXPECTED_UNCONDITIONAL_CI_RESULTS = (
+    "CONFORMANCE_FIXTURES_RESULT",
+    "MATERIALIZE_CONFORMANCE_BUNDLES_RESULT",
+    "CONFORMANCE_NON_LINUX_RESULT",
+    "COVERAGE_RESULT",
+    "CARGO_CRAP_RESULT",
+)
 
 
 def load_patterns() -> list[str]:
@@ -105,6 +126,34 @@ class RustScopePolicyTests(unittest.TestCase):
     def test_deleted_and_renamed_rust_inputs_require_rust_gate(self) -> None:
         self.assertTrue(rust_gate_required(["old.rs"], self.patterns))
         self.assertTrue(rust_gate_required(["old.rs", "moved.md"], self.patterns))
+
+    def test_ci_gate_distinguishes_scope_skips_from_unconditional_jobs(self) -> None:
+        workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
+        with workflow_path.open(encoding="utf-8") as stream:
+            workflow = yaml.safe_load(stream)
+        gate = workflow["jobs"]["ci-gate"]
+        self.assertIn("ci_change_scope", gate["needs"])
+        self.assertEqual(
+            gate["steps"][0]["env"]["SCOPE_JOB_RESULT"],
+            "${{ needs.ci_change_scope.result }}",
+        )
+        self.assertEqual(
+            gate["steps"][0]["env"]["RUST_SCOPE_RESULT"],
+            "${{ needs.ci_change_scope.outputs.rust }}",
+        )
+        run = gate["steps"][0]["run"]
+        normalized_run = " ".join(run.replace("\\\n", " ").split())
+        self.assertIn(
+            "check_results true " + " ".join(EXPECTED_SCOPE_SCOPED_CI_RESULTS),
+            normalized_run,
+        )
+        self.assertIn(
+            "check_results false " + " ".join(EXPECTED_UNCONDITIONAL_CI_RESULTS),
+            normalized_run,
+        )
+        self.assertIn('"${RUST_SCOPE_RESULT}" == "false"', run)
+        self.assertIn('"${result}" == "skipped"', run)
+        self.assertIn('"${SCOPE_JOB_RESULT}" != "success"', run)
 
 
 if __name__ == "__main__":

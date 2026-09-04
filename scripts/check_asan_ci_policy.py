@@ -84,14 +84,26 @@ EXPECTED_STRATEGY = {
 EXPECTED_GATE_JOB = {
     "name": "asan (address sanitizer)",
     "if": "${{ always() }}",
-    "needs": "asan",
+    "needs": ["ci_change_scope", "asan"],
     "runs-on": "ubuntu-24.04",
     "timeout-minutes": 5,
     "steps": [
         {
             "name": "Require every ASan shard",
-            "env": {"ASAN_SHARDS_RESULT": "${{ needs.asan.result }}"},
-            "run": 'test "${ASAN_SHARDS_RESULT}" = success',
+            "env": {
+                "SCOPE_JOB_RESULT": "${{ needs.ci_change_scope.result }}",
+                "RUST_SCOPE_RESULT": "${{ needs.ci_change_scope.outputs.rust }}",
+                "ASAN_SHARDS_RESULT": "${{ needs.asan.result }}",
+            },
+            "run": (
+                "set -euo pipefail\n"
+                'if [[ "${SCOPE_JOB_RESULT}" == "success" \\\n'
+                '  && "${RUST_SCOPE_RESULT}" == "false" \\\n'
+                '  && "${ASAN_SHARDS_RESULT}" == "skipped" ]]; then\n'
+                "  exit 0\n"
+                "fi\n"
+                'test "${ASAN_SHARDS_RESULT}" = success\n'
+            ),
         }
     ],
 }
