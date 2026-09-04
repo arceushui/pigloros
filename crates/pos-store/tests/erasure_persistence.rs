@@ -200,9 +200,7 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for Host<S> {
         &mut self,
         object: PreparedErasureRecoveryErrorV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.store
-            .borrow_mut()
-            .append_recovery_error(object)
+        self.store.borrow_mut().append_recovery_error(object)
     }
 
     fn compare_and_swap(

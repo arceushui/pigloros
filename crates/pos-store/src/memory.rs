@@ -1265,7 +1265,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
         let mut recovery_errors = self.erasure_recovery_errors.clone();
         let request_errors = recovery_errors.entry(request).or_default();
         if request_errors.insert(reference) && request_errors.len() > ERASURE_MAX_RECOVERY_ERRORS {
-                return Err(ErasureErrorV1::ScopeInvalid);
+            return Err(ErasureErrorV1::ScopeInvalid);
         }
         self.erasure_evidence = evidence;
         self.erasure_recovery_errors = recovery_errors;
