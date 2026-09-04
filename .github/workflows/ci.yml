@@ -160,7 +160,15 @@ jobs:
       - name: Install evaluator packaging tools
         run: sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Build and verify standalone evaluator release evidence
-        run: bash scripts/package-reference-evaluator.sh "${RUNNER_TEMP}/reference-evaluator"
+        run: |
+          shadow_directory="${RUNNER_TEMP}/caller-path-shadow"
+          mkdir -p "${shadow_directory}"
+          for command in b3sum cargo cut dirname env git gzip install jq mkdir mktemp rm rustc rustup sed tar; do
+            printf '#!/bin/sh\nexit 99\n' >"${shadow_directory}/${command}"
+            chmod 0755 "${shadow_directory}/${command}"
+          done
+          PATH="${shadow_directory}:${PATH}" /bin/bash \
+            scripts/package-reference-evaluator.sh "${RUNNER_TEMP}/reference-evaluator"
       - name: Upload standalone evaluator release evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

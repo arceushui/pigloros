@@ -4,12 +4,12 @@ use std::error::Error;
 
 use ciborium::value::Value;
 use pos_reference::evaluator::{
-    evaluate, AdapterError, CaseAttempt, EvaluatorError, EvaluatorIdentity, ResourceUsage,
-    SubjectAdapter, SubjectObservation, SubjectResult,
+    evaluate, AdapterError, CaseAttempt, EvaluatorError, ResourceUsage, SubjectAdapter,
+    SubjectObservation, SubjectResult,
 };
+use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_protocol::{
-    CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, ProtocolError,
-    SubjectAdapterKind,
+    CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
 use pos_reference::profile::ProfileError;
 use pos_reference::signed_bundle::BundleError;
@@ -96,19 +96,8 @@ impl SubjectAdapter for PassingAdapter {
     }
 }
 
-fn evaluator_identity() -> EvaluatorIdentity {
-    EvaluatorIdentity {
-        source_digest: [61; 32],
-        binary_digest: [62; 32],
-        independence: IndependenceEvidence {
-            technical_independent: true,
-            authorship_independent: true,
-            organizational_independent: false,
-            declaration_digest: [47; 32],
-            shared_code_audit_digest: [64; 32],
-            reviewer_ids: vec!["reviewer-one".to_owned()],
-        },
-    }
+fn evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentity> {
+    support::verified_evaluator_identity()
 }
 
 fn valid_request() -> TestResult<EvaluationRequest> {
@@ -126,7 +115,7 @@ fn valid_report() -> TestResult<ConformanceReport> {
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
-        &evaluator_identity(),
+        &evaluator_identity()?,
         &mut adapter,
     )?
     .report)
@@ -651,7 +640,7 @@ fn report_rejects_every_top_level_and_independence_boundary() -> TestResult {
                 6 => report.evaluator_binary_digest = [0; 32],
                 7 => report.evaluator_protocol_digest = [0; 32],
                 8 => report.limitations_digest = [0; 32],
-                _ => report.provenance_digest = [0; 32],
+                _ => report.evaluator_build_provenance_digest = [0; 32],
             },
             ProtocolError::FieldOutOfBounds,
         );
