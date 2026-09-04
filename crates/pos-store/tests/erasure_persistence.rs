@@ -22,7 +22,7 @@ use pos_core::{
 use pos_store::memory::MemoryStore;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
-pub(crate) mod erasure_support;
+pub mod erasure_support;
 
 use erasure_support::{
     freeze_evidence_fixture, obligation, reference, replay_target, request as fixture_request,
