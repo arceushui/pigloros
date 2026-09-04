@@ -1497,15 +1497,12 @@ impl AuthorityEvaluatorV1 {
             grant_chain
                 .grants
                 .iter()
-                .map(CapabilityGrantV1::binding_digest)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_else(|_| {
-                    evaluation = AuthorizationEvaluationV1::denied(
-                        AuthorizationOutcomeV1::IndeterminateFailClosed,
-                        Some(AuthorityErrorV1::ProvenanceMissing),
-                    );
-                    Vec::new()
+                .map(|grant| {
+                    grant
+                        .binding_digest()
+                        .expect("validated capability grants must encode")
                 })
+                .collect()
         } else {
             Vec::new()
         };

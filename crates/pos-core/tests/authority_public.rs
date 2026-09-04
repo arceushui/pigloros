@@ -1294,6 +1294,28 @@ fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
         AuthorizationDecisionV1::decode(&oversized_bindings),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
+
+    let delegated = ok(decision_for(
+        &request(principal(3), entity(10)),
+        &[
+            delegation_parent(),
+            ok(CapabilityGrantV1::try_from_draft(delegation_child())),
+        ],
+    )
+    .encode());
+    let oversized_delegates = changed_array(&delegated, |fields| {
+        let delegates = array_fields_mut(&mut fields[10]);
+        let delegate = delegates[0].clone();
+        delegates.clear();
+        delegates.extend(vec![
+            delegate;
+            usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 2
+        ]);
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&oversized_delegates),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
 }
 
 #[test]
@@ -1389,6 +1411,22 @@ fn delegated_principal_mismatches_emit_round_trip_safe_decisions() {
         assert_eq!(decision.grant_id(), None);
         assert!(decision.grant_chain_bindings().is_empty());
     }
+
+    let missing_capability = decision_for(&request(principal(1), entity(10)), &[]);
+    assert_eq!(
+        missing_capability.outcome(),
+        AuthorizationOutcomeV1::IndeterminateFailClosed
+    );
+    assert_eq!(
+        missing_capability.error(),
+        Some(AuthorityErrorV1::CapabilityMissing)
+    );
+    assert_eq!(
+        ok(AuthorizationDecisionV1::decode(&ok(
+            missing_capability.encode()
+        ))),
+        missing_capability
+    );
 }
 
 #[test]
@@ -1621,6 +1659,9 @@ fn grant_contract_exposes_all_bound_authority_and_plugin_context() {
     assert_eq!(grant.grantee().principal(), &principal);
     assert_eq!(grant.grantee().plugin_id(), Some(plugin_id));
     assert_eq!(grant.grantee().installation_id(), Some([3; 16]));
+    let principal_grantee = AuthorityGranteeV1::Principal(principal.clone());
+    assert_eq!(principal_grantee.plugin_id(), None);
+    assert_eq!(principal_grantee.installation_id(), None);
     assert_eq!(grant.trust_domain(), "local.test");
     assert_eq!(grant.scope().resources(), &["journal", "profile"]);
     assert_eq!(grant.scope().actions(), &["read"]);
@@ -2224,6 +2265,20 @@ fn ancestor_changes_invalidate_every_descendant() {
             AuthorizationOutcomeV1::ParentInvalid
         );
     }
+
+    let mut mismatched_consent_parent = parent_draft.clone();
+    mismatched_consent_parent.consent_references = vec![hash(9)];
+    let mut mismatched_consent_child = child.clone();
+    mismatched_consent_child.parent_grant_id = Some(hash(1));
+    mismatched_consent_child.consent_references = vec![hash(9)];
+    assert_eq!(
+        decision_for(
+            &delegated_request,
+            &[mismatched_consent_parent, mismatched_consent_child],
+        )
+        .outcome(),
+        AuthorizationOutcomeV1::ParentInvalid
+    );
 
     let mut wrong_timeline = parent_draft.clone();
     wrong_timeline.issuance_timeline = timeline(31);
