@@ -655,6 +655,27 @@ fn recover_freeze_evidence(
     })
 }
 
+fn recover_manifest(
+    requested: ErasureReferenceV1,
+    stored: &StoredErasureManifestV1,
+) -> Result<ManifestV1, RecoveryFailureV1> {
+    if !stored.content_address_matches() {
+        return Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            stored.digest(),
+        ));
+    }
+    let manifest = ManifestV1::decode(stored.canonical_cbor())
+        .map_err(|error| RecoveryFailureV1::new(error, stored.digest()))?;
+    if manifest.request != requested {
+        return Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            stored.digest(),
+        ));
+    }
+    Ok(manifest)
+}
+
 impl RecoveredErasureV1 {
     pub(super) const fn initial(request: ErasureRequestV1, state: ErasureStateV1) -> Self {
         let manifest = ManifestV1 {
@@ -714,20 +735,7 @@ impl RecoveredErasureV1 {
         requested: ErasureReferenceV1,
         stored: &StoredErasureManifestV1,
     ) -> Result<Self, RecoveryFailureV1> {
-        if !stored.content_address_matches() {
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
-                stored.digest(),
-            ));
-        }
-        let manifest = ManifestV1::decode(stored.canonical_cbor())
-            .map_err(|error| RecoveryFailureV1::new(error, stored.digest()))?;
-        if manifest.request != requested {
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
-                stored.digest(),
-            ));
-        }
+        let manifest = recover_manifest(requested, stored)?;
         let foundation = recover_foundation(port, requested, &manifest)?;
         let evidence = recover_fixed_evidence(port, &manifest)?;
         validate_fixed_graph(&FixedGraphV1 {
