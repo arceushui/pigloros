@@ -4739,19 +4739,7 @@ fn verify_knowledge_boundary(evidence: &MoatProofEvidenceV1) -> Result<(), Evide
 fn verify_counterfactual_contract(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceError> {
     let contract = &evidence.contract;
     let counterfactual = &contract.counterfactual;
-    if !counterfactual
-        .replay_claim
-        .is_no_stronger_than(evidence.manifest.replay_claim)
-        || counterfactual.contract_digest == [0; 32]
-        || counterfactual.frontier.frontier_digest == [0; 32]
-        || counterfactual.invalidation.invalidation_digest == [0; 32]
-        || counterfactual.frontier.unknown_edge_policy != UnknownEdgePolicyV1::Reject
-        || !counterfactual.frontier.unknown_edge_coordinates.is_empty()
-        || counterfactual.invalidation.new_generation != counterfactual.generation
-        || counterfactual.invalidation.prior_generation != counterfactual.prior_generation
-        || (counterfactual.intervention.is_some()
-            && counterfactual.generation != counterfactual.prior_generation.saturating_add(1))
-    {
+    if !counterfactual_header_is_valid(evidence) {
         return Err(EvidenceError::InvalidDependencyGraph);
     }
     if !verify_counterfactual_record_shapes(counterfactual) {
@@ -4775,6 +4763,22 @@ fn verify_counterfactual_contract(evidence: &MoatProofEvidenceV1) -> Result<(), 
         verify_intervention_contract(evidence, counterfactual, intervention)?;
     }
     Ok(())
+}
+
+fn counterfactual_header_is_valid(evidence: &MoatProofEvidenceV1) -> bool {
+    let counterfactual = &evidence.contract.counterfactual;
+    counterfactual
+        .replay_claim
+        .is_no_stronger_than(evidence.manifest.replay_claim)
+        && counterfactual.contract_digest != [0; 32]
+        && counterfactual.frontier.frontier_digest != [0; 32]
+        && counterfactual.invalidation.invalidation_digest != [0; 32]
+        && counterfactual.frontier.unknown_edge_policy == UnknownEdgePolicyV1::Reject
+        && counterfactual.frontier.unknown_edge_coordinates.is_empty()
+        && counterfactual.invalidation.new_generation == counterfactual.generation
+        && counterfactual.invalidation.prior_generation == counterfactual.prior_generation
+        && (counterfactual.intervention.is_none()
+            || counterfactual.generation == counterfactual.prior_generation.saturating_add(1))
 }
 
 fn verify_intervention_contract(

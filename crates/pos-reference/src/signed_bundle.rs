@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
 use ciborium::value::Value;
@@ -293,6 +293,26 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
     let (mut snapshot, archive_length) =
         authenticated_snapshot(archive, request.fixture_bundle_digest)?;
     preflight_archive(&mut snapshot, archive_length, trust_policy_bytes, request)
+}
+
+pub(crate) fn preflight_signed_bundle_bytes(
+    archive_bytes: &[u8],
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedBundlePreflight, BundleError> {
+    if archive_bytes.is_empty() || archive_bytes.len() > MAX_ARCHIVE_BYTES {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    if *blake3::hash(archive_bytes).as_bytes() != request.fixture_bundle_digest {
+        return Err(BundleError::DigestMismatch);
+    }
+    let archive_length = archive_bytes.len() as u64;
+    preflight_archive(
+        &mut Cursor::new(archive_bytes),
+        archive_length,
+        trust_policy_bytes,
+        request,
+    )
 }
 
 fn preflight_archive(

@@ -16,7 +16,7 @@ use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
 };
 use pos_reference::signed_bundle::{
-    preflight_signed_bundle, verify_signed_bundle, SelectedBundleCaps,
+    preflight_signed_bundle, verify_signed_bundle, BundleError, SelectedBundleCaps,
 };
 use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
 
@@ -1084,6 +1084,16 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
 }
 
 #[test]
+fn profile_decoder_rejects_malformed_bytes_from_an_authenticated_bundle() -> TestResult {
+    let corpus = support::corpus_with_profile_mutation(ProfileMutation::RawProfileField(0))?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let bundle = verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request)?;
+
+    assert!(Profile::from_bundle(&bundle, &request).is_err());
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_each_execution_matrix_contract_boundary() -> TestResult {
     for index in 0..=85 {
         let corpus = support::corpus_with_profile_mutation(ProfileMutation::MatrixBoundary(index))?;
@@ -1473,6 +1483,8 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
     ];
     for mutation in mutations {
         let corpus = support::corpus_with_bundle_mutation(mutation)?;
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        assert!(verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request).is_err());
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,
@@ -1742,6 +1754,14 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     })?;
     let mismatched_archive_request =
         EvaluationRequest::from_canonical_cbor(&mismatched_archive_request)?;
+    assert_eq!(
+        verify_signed_bundle(
+            &corpus.archive,
+            &corpus.trust_policy,
+            &mismatched_archive_request,
+        ),
+        Err(BundleError::DigestMismatch)
+    );
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&corpus.archive),
         &corpus.trust_policy,
@@ -1754,6 +1774,14 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     })?;
     let mismatched_trust_request =
         EvaluationRequest::from_canonical_cbor(&mismatched_trust_request)?;
+    assert_eq!(
+        verify_signed_bundle(
+            &corpus.archive,
+            &corpus.trust_policy,
+            &mismatched_trust_request,
+        ),
+        Err(BundleError::TrustPolicyMismatch)
+    );
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&corpus.archive),
         &corpus.trust_policy,
@@ -1763,6 +1791,10 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
 
     let revoked = support::corpus_with_trust_mutation(TrustMutation::RevokedArtifact)?;
     let revoked_request = EvaluationRequest::from_canonical_cbor(&revoked.request)?;
+    assert_eq!(
+        verify_signed_bundle(&revoked.archive, &revoked.trust_policy, &revoked_request),
+        Err(BundleError::TrustPolicyMismatch)
+    );
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&revoked.archive),
         &revoked.trust_policy,

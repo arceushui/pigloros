@@ -1,8 +1,5 @@
 //! Resource-bounded black-box evaluation behind one public operation.
 
-use std::cmp::Ordering;
-use std::io::Cursor;
-
 use crate::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use crate::evaluator_protocol::{
     CaseOutcome, CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError,
@@ -12,8 +9,10 @@ use crate::profile::{
     DeterministicBudget, Fixture, NamespacedFailure, Profile, ProfileError, StrictOracle,
 };
 use crate::signed_bundle::{
-    preflight_signed_bundle, verify_signed_bundle, BundleError, SelectedBundleCaps, VerifiedBundle,
+    preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, SelectedBundleCaps,
+    VerifiedBundle,
 };
+use std::cmp::Ordering;
 
 /// Deterministic resource consumption reported by a public subject adapter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -172,15 +171,13 @@ pub fn evaluate(
     evaluator: &VerifiedEvaluatorBuildIdentity,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<EvaluationArtifacts, EvaluatorError> {
-    let request = EvaluationRequest::from_canonical_cbor(request_bytes)?;
-    if adapter.kind() != request.subject_adapter
-        || adapter.subject_artifact_digest() != request.subject_artifact_digest
-    {
-        return Err(EvaluatorError::AdapterIdentity);
-    }
-    enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, &request)?;
-    let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
-    let profile = Profile::from_bundle(&bundle, &request)?;
+    let (request, bundle, profile) = verified_inputs(
+        request_bytes,
+        archive_bytes,
+        trust_policy_bytes,
+        adapter.kind(),
+        adapter.subject_artifact_digest(),
+    )?;
     let requirements = profile.independence_requirements;
     let independence = evaluator.independence();
     if requirements.technical && !independence.technical_independent
@@ -245,13 +242,31 @@ pub fn evaluate(
     })
 }
 
+fn verified_inputs(
+    request_bytes: &[u8],
+    archive_bytes: &[u8],
+    trust_policy_bytes: &[u8],
+    adapter_kind: SubjectAdapterKind,
+    subject_artifact_digest: [u8; 32],
+) -> Result<(EvaluationRequest, VerifiedBundle, Profile), EvaluatorError> {
+    let request = EvaluationRequest::from_canonical_cbor(request_bytes)?;
+    if adapter_kind != request.subject_adapter
+        || subject_artifact_digest != request.subject_artifact_digest
+    {
+        return Err(EvaluatorError::AdapterIdentity);
+    }
+    enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, &request)?;
+    let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
+    let profile = Profile::from_bundle(&bundle, &request)?;
+    Ok((request, bundle, profile))
+}
+
 fn enforce_authenticated_selected_caps(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
 ) -> Result<(), EvaluatorError> {
-    let mut archive = Cursor::new(archive_bytes);
-    let preflight = preflight_signed_bundle(&mut archive, trust_policy_bytes, request)?;
+    let preflight = preflight_signed_bundle_bytes(archive_bytes, trust_policy_bytes, request)?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)?;
     preflight
         .enforce_selected_caps(SelectedBundleCaps {
