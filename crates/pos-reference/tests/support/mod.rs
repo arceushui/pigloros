@@ -1,11 +1,21 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::fmt::Write as _;
+use std::fs;
 use std::io;
+use std::io::Write as _;
+use std::path::Path;
 
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use pos_reference::evaluator_build_identity::{
+    verify_evaluator_build_identity, EvaluatorBuildEvidence, VerifiedEvaluatorBuildIdentity,
+};
 use pos_reference::evaluator_protocol::{
-    EvaluationRequest, ImplementationIdentity, OutputCapability, SubjectAdapterKind,
+    EvaluationRequest, ImplementationIdentity, IndependenceEvidence, OutputCapability,
+    SubjectAdapterKind,
 };
 
 pub struct Corpus {
@@ -17,6 +27,187 @@ pub struct Corpus {
 }
 
 const SUBJECT_DIGEST: [u8; 32] = [41; 32];
+
+pub fn verified_evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentity> {
+    verified_evaluator_identity_with(IndependenceEvidence {
+        technical_independent: true,
+        authorship_independent: true,
+        organizational_independent: false,
+        declaration_digest: [47; 32],
+        shared_code_audit_digest: [64; 32],
+        reviewer_ids: vec!["reviewer-one".to_owned()],
+    })
+}
+
+pub fn verified_evaluator_identity_with(
+    independence: IndependenceEvidence,
+) -> TestResult<VerifiedEvaluatorBuildIdentity> {
+    let directory = tempfile::tempdir()?;
+    write_evaluator_package(directory.path())?;
+    verify_evaluator_build_identity(
+        &EvaluatorBuildEvidence::new(
+            directory.path().join("source/pigloros-source.tar.gz"),
+            directory.path().join("provenance.json"),
+        ),
+        independence,
+    )
+    .map_err(|error| -> Box<dyn Error> { Box::new(error) })
+}
+
+pub fn evaluator_evidence_rejects_corrupted_checksum() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    write_evaluator_package(directory.path())?;
+    fs::write(directory.path().join("BLAKE3SUMS"), b"corrupted\n")?;
+    let result = verify_evaluator_build_identity(
+        &EvaluatorBuildEvidence::new(
+            directory.path().join("source/pigloros-source.tar.gz"),
+            directory.path().join("provenance.json"),
+        ),
+        IndependenceEvidence {
+            technical_independent: true,
+            authorship_independent: true,
+            organizational_independent: false,
+            declaration_digest: [47; 32],
+            shared_code_audit_digest: [64; 32],
+            reviewer_ids: vec!["reviewer-one".to_owned()],
+        },
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+fn write_evaluator_package(directory: &Path) -> TestResult {
+    fs::create_dir_all(directory.join("source"))?;
+    fs::create_dir_all(directory.join("bin"))?;
+    let source = source_archive("1111111111111111111111111111111111111111")?;
+    fs::write(directory.join("source/pigloros-source.tar.gz"), &source)?;
+    fs::copy(
+        std::env::current_exe()?,
+        directory.join("bin/pos-reference-evaluator"),
+    )?;
+    fs::write(
+        directory.join("Cargo.lock"),
+        b"public test dependency lock\n",
+    )?;
+    fs::write(directory.join("sbom.cdx.json"), b"{}\n")?;
+    fs::write(directory.join("licences.json"), b"{}\n")?;
+    write_evaluator_provenance(directory, &source)?;
+    write_checksum_inventory(directory)
+}
+
+fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult {
+    let binary = fs::read(directory.join("bin/pos-reference-evaluator"))?;
+    let lock = fs::read(directory.join("Cargo.lock"))?;
+    let sbom = fs::read(directory.join("sbom.cdx.json"))?;
+    let licences = fs::read(directory.join("licences.json"))?;
+    let provenance = serde_json::json!({
+        "build_target": "public-test-target",
+        "cargo_locked": true,
+        "dependency_lock_blake3": blake3::hash(&lock).to_hex().to_string(),
+        "evaluator_binary_blake3": blake3::hash(&binary).to_hex().to_string(),
+        "evaluator_source_blake3": blake3::hash(source).to_hex().to_string(),
+        "licences_blake3": blake3::hash(&licences).to_hex().to_string(),
+        "rust_toolchain": "rustc public-test-toolchain",
+        "sbom_blake3": blake3::hash(&sbom).to_hex().to_string(),
+        "schema": "PiglorOS.EvaluatorBuildProvenance.v1",
+        "source_commit": "1111111111111111111111111111111111111111",
+    });
+    let mut bytes = serde_json::to_vec(&provenance)?;
+    bytes.push(b'\n');
+    fs::write(directory.join("provenance.json"), bytes)?;
+    Ok(())
+}
+
+fn write_checksum_inventory(directory: &Path) -> TestResult {
+    let paths = [
+        "Cargo.lock",
+        "bin/pos-reference-evaluator",
+        "licences.json",
+        "provenance.json",
+        "sbom.cdx.json",
+        "source/pigloros-source.tar.gz",
+    ];
+    let mut inventory = String::new();
+    for path in paths {
+        writeln!(
+            inventory,
+            "{}  {path}",
+            blake3::hash(&fs::read(directory.join(path))?).to_hex()
+        )?;
+    }
+    fs::write(directory.join("BLAKE3SUMS"), inventory)?;
+    Ok(())
+}
+
+fn source_archive(commit: &str) -> TestResult<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&source_tar(commit))?;
+    Ok(encoder.finish()?)
+}
+
+fn source_tar(commit: &str) -> Vec<u8> {
+    let record = pax_record("comment", commit.as_bytes());
+    let mut tar = Vec::new();
+    tar.extend_from_slice(&tar_header("pax_global_header", record.len(), b'g'));
+    tar.extend_from_slice(&record);
+    tar.resize(tar.len().div_ceil(512) * 512, 0);
+    for path in [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/pos-reference/Cargo.toml",
+        "crates/pos-reference/src/bin/pos-reference-evaluator.rs",
+    ] {
+        tar.extend_from_slice(&tar_header(path, 0, b'0'));
+    }
+    tar.extend_from_slice(&[0; 1024]);
+    tar
+}
+
+fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
+    let mut body = Vec::from(key.as_bytes());
+    body.push(b'=');
+    body.extend_from_slice(value);
+    body.push(b'\n');
+    let mut length = body.len() + 2;
+    loop {
+        let prefix = format!("{length} ");
+        let encoded_length = prefix.len() + body.len();
+        if encoded_length == length {
+            let mut record = Vec::from(prefix.as_bytes());
+            record.extend_from_slice(&body);
+            return record;
+        }
+        length = encoded_length;
+    }
+}
+
+fn tar_header(name: &str, size: usize, kind: u8) -> [u8; 512] {
+    let mut header = [0_u8; 512];
+    header[..name.len()].copy_from_slice(name.as_bytes());
+    write_octal(&mut header[100..108], 0o644);
+    write_octal(&mut header[108..116], 0);
+    write_octal(&mut header[116..124], 0);
+    write_octal(&mut header[124..136], size as u64);
+    write_octal(&mut header[136..148], 0);
+    header[148..156].fill(b' ');
+    header[156] = kind;
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+    write_tar_checksum(&mut header);
+    header
+}
+
+fn write_tar_checksum(header: &mut [u8; 512]) {
+    header[148..156].fill(b' ');
+    let checksum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
+    let encoded = format!("{checksum:06o}\0 ");
+    header[148..156].copy_from_slice(encoded.as_bytes());
+}
+
+fn write_octal(field: &mut [u8], value: u64) {
+    let encoded = format!("{:0width$o}\0", value, width = field.len() - 1);
+    field.copy_from_slice(encoded.as_bytes());
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProfileMutation {

@@ -2,23 +2,15 @@
 
 use std::cmp::Ordering;
 
+use crate::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use crate::evaluator_protocol::{
-    CaseOutcome, CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence,
-    ProtocolError, SubjectAdapterKind,
+    CaseOutcome, CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError,
+    SubjectAdapterKind,
 };
 use crate::profile::{
     DeterministicBudget, Fixture, NamespacedFailure, Profile, ProfileError, StrictOracle,
 };
 use crate::signed_bundle::{verify_signed_bundle, BundleError, VerifiedBundle};
-
-/// Evaluator build and review identity recorded in every CNR1 report.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EvaluatorIdentity {
-    pub source_digest: [u8; 32],
-    pub binary_digest: [u8; 32],
-    pub build_provenance_digest: [u8; 32],
-    pub independence: IndependenceEvidence,
-}
 
 /// Deterministic resource consumption reported by a public subject adapter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -174,7 +166,7 @@ pub fn evaluate(
     request_bytes: &[u8],
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
-    evaluator: &EvaluatorIdentity,
+    evaluator: &VerifiedEvaluatorBuildIdentity,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<EvaluationArtifacts, EvaluatorError> {
     let request = EvaluationRequest::from_canonical_cbor(request_bytes)?;
@@ -186,10 +178,11 @@ pub fn evaluate(
     let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
     let profile = Profile::from_bundle(&bundle, &request)?;
     let requirements = profile.independence_requirements;
-    if requirements.technical && !evaluator.independence.technical_independent
-        || requirements.authorship && !evaluator.independence.authorship_independent
-        || requirements.organizational && !evaluator.independence.organizational_independent
-        || requirements.declaration_digest != evaluator.independence.declaration_digest
+    let independence = evaluator.independence();
+    if requirements.technical && !independence.technical_independent
+        || requirements.authorship && !independence.authorship_independent
+        || requirements.organizational && !independence.organizational_independent
+        || requirements.declaration_digest != independence.declaration_digest
     {
         return Err(EvaluatorError::Independence);
     }
@@ -213,16 +206,16 @@ pub fn evaluate(
         normative_spec_digest: profile.normative_spec_digest,
         execution_profile_digest: request.execution_profile_digest,
         fixture_bundle_digest: bundle.archive_digest,
-        evaluator_source_digest: evaluator.source_digest,
-        evaluator_binary_digest: evaluator.binary_digest,
+        evaluator_source_digest: evaluator.source_digest(),
+        evaluator_binary_digest: evaluator.binary_digest(),
         evaluator_protocol_digest: profile.evaluator_protocol_digest,
         implementation: request.implementation.clone(),
-        independence: evaluator.independence.clone(),
+        independence: independence.clone(),
         cases,
         replay_claim,
         redaction_state,
         limitations_digest: profile.limitations_digest,
-        evaluator_build_provenance_digest: evaluator.build_provenance_digest,
+        evaluator_build_provenance_digest: evaluator.build_provenance_digest(),
         report_digest: [0; 32],
     };
     report.report_digest = report

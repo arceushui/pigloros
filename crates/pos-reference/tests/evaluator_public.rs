@@ -2,11 +2,13 @@ pub mod support;
 
 use std::error::Error;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::sync::OnceLock;
 
 use pos_reference::evaluator::{
-    evaluate, AdapterError, CaseAttempt, EvaluatorError, EvaluatorIdentity, ResourceUsage,
-    SubjectAdapter, SubjectObservation, SubjectResult,
+    evaluate, AdapterError, CaseAttempt, EvaluatorError, ResourceUsage, SubjectAdapter,
+    SubjectObservation, SubjectResult,
 };
+use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
 };
@@ -296,20 +298,14 @@ impl SubjectAdapter for AdverseAdapter {
     }
 }
 
-fn evaluator_identity() -> EvaluatorIdentity {
-    EvaluatorIdentity {
-        source_digest: [61; 32],
-        binary_digest: [62; 32],
-        build_provenance_digest: [63; 32],
-        independence: IndependenceEvidence {
-            technical_independent: true,
-            authorship_independent: true,
-            organizational_independent: false,
-            declaration_digest: [47; 32],
-            shared_code_audit_digest: [64; 32],
-            reviewer_ids: vec!["reviewer-one".to_owned()],
-        },
-    }
+fn evaluator_identity() -> VerifiedEvaluatorBuildIdentity {
+    static IDENTITY: OnceLock<VerifiedEvaluatorBuildIdentity> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            support::verified_evaluator_identity()
+                .unwrap_or_else(|error| panic!("public evaluator identity setup failed: {error}"))
+        })
+        .clone()
 }
 
 fn request_with_limits(
@@ -425,14 +421,34 @@ fn evaluator_accepts_every_current_profile_claim_layer() -> TestResult {
 #[test]
 fn evaluator_enforces_profile_independence_requirements() -> TestResult {
     let corpus = support::corpus()?;
-    let updates: [fn(&mut EvaluatorIdentity); 3] = [
-        |identity: &mut EvaluatorIdentity| identity.independence.technical_independent = false,
-        |identity: &mut EvaluatorIdentity| identity.independence.authorship_independent = false,
-        |identity: &mut EvaluatorIdentity| identity.independence.declaration_digest = [99; 32],
+    let rejected = [
+        IndependenceEvidence {
+            technical_independent: false,
+            authorship_independent: true,
+            organizational_independent: false,
+            declaration_digest: [47; 32],
+            shared_code_audit_digest: [64; 32],
+            reviewer_ids: vec!["reviewer-one".to_owned()],
+        },
+        IndependenceEvidence {
+            technical_independent: true,
+            authorship_independent: false,
+            organizational_independent: false,
+            declaration_digest: [47; 32],
+            shared_code_audit_digest: [64; 32],
+            reviewer_ids: vec!["reviewer-one".to_owned()],
+        },
+        IndependenceEvidence {
+            technical_independent: true,
+            authorship_independent: true,
+            organizational_independent: false,
+            declaration_digest: [99; 32],
+            shared_code_audit_digest: [64; 32],
+            reviewer_ids: vec!["reviewer-one".to_owned()],
+        },
     ];
-    for update in updates {
-        let mut identity = evaluator_identity();
-        update(&mut identity);
+    for independence in rejected {
+        let identity = support::verified_evaluator_identity_with(independence)?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output.clone(),
@@ -464,6 +480,27 @@ fn evaluator_enforces_profile_independence_requirements() -> TestResult {
         ),
         Err(EvaluatorError::Independence)
     );
+    Ok(())
+}
+
+#[test]
+fn evaluator_identity_is_verified_before_cnr1_emission() -> TestResult {
+    support::evaluator_evidence_rejects_corrupted_checksum()?;
+
+    let corpus = support::corpus()?;
+    let mut adapter = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+    };
+    let report = evaluate(
+        &corpus.request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity(),
+        &mut adapter,
+    )?
+    .report;
+    assert_eq!(report.independence.declaration_digest, [47; 32]);
     Ok(())
 }
 
