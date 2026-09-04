@@ -1396,11 +1396,50 @@ impl RecoveredErasureV1 {
             .ok_or_else(|| {
                 RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, page.terminal_state)
             })?;
-        if let Some((_, subject)) = [
-            (
-                terminal.request() == self.request.reference(),
-                terminal.state_digest(),
-            ),
+        validate_recovery_bindings([(
+            terminal.request() == self.request.reference(),
+            terminal.state_digest(),
+        )])?;
+        self.validate_completed_outcome(
+            &outcome,
+            admission,
+            effective,
+            &terminal,
+            predecessor_receipt,
+            &provenance,
+        )?;
+        Self::validate_completed_provenance(
+            &provenance,
+            page,
+            admission,
+            effective,
+            predecessor_receipt,
+            self.request.reference(),
+        )?;
+        Self::validate_completed_receipt(&receipt, page, &terminal, &provenance, admission)?;
+        Self::validate_effect_subject(
+            port,
+            receipt.receipt_digest(),
+            &ErasureCasEffectV1::ReceiptAdmission {
+                receipt: receipt.receipt_digest(),
+            },
+        )?;
+        receipt
+            .validate_frozen_obligations(&self.obligations)
+            .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))?;
+        Ok((receipt.receipt_digest(), page.terminal_state))
+    }
+
+    fn validate_completed_outcome(
+        &self,
+        outcome: &ErasureAttemptOutcomeV1,
+        admission: &ErasureRetryAdmissionV1,
+        effective: &InventoryV1,
+        terminal: &ErasureStateV1,
+        predecessor_receipt: Option<ErasureReferenceV1>,
+        provenance: &ErasureReceiptProvenanceV1,
+    ) -> Result<(), RecoveryFailureV1> {
+        validate_recovery_bindings([
             (
                 outcome.request() == self.request.reference(),
                 outcome.reference(),
@@ -1433,10 +1472,19 @@ impl RecoveredErasureV1 {
             ),
             (outcome.policy() == admission.policy(), outcome.reference()),
             (outcome.trust() == admission.trust(), outcome.reference()),
-            (
-                provenance.request() == self.request.reference(),
-                provenance.reference(),
-            ),
+        ])
+    }
+
+    fn validate_completed_provenance(
+        provenance: &ErasureReceiptProvenanceV1,
+        page: &AttemptPageV1,
+        admission: &ErasureRetryAdmissionV1,
+        effective: &InventoryV1,
+        predecessor_receipt: Option<ErasureReferenceV1>,
+        request: ErasureReferenceV1,
+    ) -> Result<(), RecoveryFailureV1> {
+        validate_recovery_bindings([
+            (provenance.request() == request, provenance.reference()),
             (
                 provenance.attempt() == admission.reference(),
                 provenance.reference(),
@@ -1465,62 +1513,43 @@ impl RecoveredErasureV1 {
                 provenance.trust() == admission.trust(),
                 provenance.reference(),
             ),
-            (
-                receipt.request() == self.request.reference(),
-                receipt.receipt_digest(),
-            ),
-            (
-                receipt.receipt_digest() == page.receipt,
-                receipt.receipt_digest(),
-            ),
+        ])
+    }
+
+    fn validate_completed_receipt(
+        receipt: &ErasureReceiptV1,
+        page: &AttemptPageV1,
+        terminal: &ErasureStateV1,
+        provenance: &ErasureReceiptProvenanceV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), RecoveryFailureV1> {
+        let receipt_reference = receipt.receipt_digest();
+        validate_recovery_bindings([
+            (receipt.request() == admission.request(), receipt_reference),
+            (receipt_reference == page.receipt, receipt_reference),
             (
                 receipt.terminal_state() == page.terminal_state,
-                receipt.receipt_digest(),
+                receipt_reference,
             ),
             (
                 receipt.provenance() == page.receipt_provenance,
-                receipt.receipt_digest(),
+                receipt_reference,
             ),
             (
                 receipt.lifecycle() == terminal.lifecycle(),
-                receipt.receipt_digest(),
+                receipt_reference,
             ),
             (
                 receipt.coordinator() == terminal.coordinator(),
-                receipt.receipt_digest(),
+                receipt_reference,
             ),
-            (
-                receipt.policy() == admission.policy(),
-                receipt.receipt_digest(),
-            ),
-            (
-                receipt.trust() == admission.trust(),
-                receipt.receipt_digest(),
-            ),
+            (receipt.policy() == admission.policy(), receipt_reference),
+            (receipt.trust() == admission.trust(), receipt_reference),
             (
                 receipt.issue_position() == provenance.issue_position(),
-                receipt.receipt_digest(),
+                receipt_reference,
             ),
-        ]
-        .into_iter()
-        .find(|(matches, _)| !*matches)
-        {
-            return Err(RecoveryFailureV1::new(
-                ErasureErrorV1::ProvenanceMissing,
-                subject,
-            ));
-        }
-        Self::validate_effect_subject(
-            port,
-            receipt.receipt_digest(),
-            &ErasureCasEffectV1::ReceiptAdmission {
-                receipt: receipt.receipt_digest(),
-            },
-        )?;
-        receipt
-            .validate_frozen_obligations(&self.obligations)
-            .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))?;
-        Ok((receipt.receipt_digest(), page.terminal_state))
+        ])
     }
 
     fn load_acknowledgements(
@@ -1988,7 +2017,7 @@ fn freeze_fields_match_graph(
         && freeze.host_evidence() == admission.reference()
 }
 
-fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV1> {
+fn validate_fixed_bindings(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV1> {
     validate_recovery_bindings([
         (
             graph.erq.reference() == graph.requested,
@@ -2004,7 +2033,7 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
                 .is_none_or(|value| graph.erq.provenance() == value.reference()),
             graph
                 .correction
-                .map_or(graph.manifest, |value| value.reference()),
+                .map_or(graph.manifest, ErasureCorrectionProvenanceV1::reference),
         ),
         (
             graph
@@ -2012,7 +2041,7 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
                 .is_none_or(|value| value.request() == graph.requested),
             graph
                 .rejection
-                .map_or(graph.manifest, |value| value.reference()),
+                .map_or(graph.manifest, ErasureAuthorizationRejectionV1::reference),
         ),
         (
             graph
@@ -2020,7 +2049,7 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
                 .is_none_or(|value| value.request() == graph.requested),
             graph
                 .failure
-                .map_or(graph.manifest, |value| value.reference()),
+                .map_or(graph.manifest, ErasureFreezeFailureV1::reference),
         ),
         (
             graph
@@ -2028,7 +2057,7 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
                 .is_none_or(|value| value.request() == graph.requested),
             graph
                 .scope
-                .map_or(graph.manifest, |value| value.reference()),
+                .map_or(graph.manifest, ErasureScopeCommitmentV1::reference),
         ),
         (
             graph
@@ -2036,7 +2065,7 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
                 .is_none_or(|value| value.request() == graph.requested),
             graph
                 .admission
-                .map_or(graph.manifest, |value| value.reference()),
+                .map_or(graph.manifest, ErasureFreezeAdmissionEvidenceV1::reference),
         ),
         (
             graph
@@ -2044,7 +2073,7 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
                 .is_none_or(|value| value.request() == graph.requested),
             graph
                 .obligation_set
-                .map_or(graph.manifest, |value| value.reference()),
+                .map_or(graph.manifest, ErasureObligationSetV1::reference),
         ),
         (
             graph
@@ -2052,9 +2081,13 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
                 .is_none_or(|value| value.request() == graph.requested),
             graph
                 .freeze
-                .map_or(graph.manifest, |value| value.reference()),
+                .map_or(graph.manifest, ErasureFreezeProvenanceV1::reference),
         ),
     ])?;
+    Ok(())
+}
+
+fn validate_freeze_authorization(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV1> {
     match (graph.admission, graph.authorization) {
         (Some(admission), Some(authorization)) => {
             graph
@@ -2066,98 +2099,152 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
         _ => {
             let subject = graph
                 .admission
-                .map_or(graph.manifest, |value| value.reference());
+                .map_or(graph.manifest, ErasureFreezeAdmissionEvidenceV1::reference);
             return Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
                 subject,
             ));
         }
     }
-    if let (Some(scope), Some(admission), Some(authorization), Some(freeze), Some(set)) = (
+    Ok(())
+}
+
+fn reconstruct_frozen_graph(
+    graph: &FixedGraphV1<'_>,
+) -> Result<ErasureAtomicFreezeAdmissionV1, RecoveryFailureV1> {
+    let (Some(scope), Some(admission), Some(authorization), Some(_freeze), Some(set)) = (
         graph.scope,
         graph.admission,
         graph.authorization,
         graph.freeze,
         graph.obligation_set,
-    ) {
-        let reconstructed =
-            ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
-                targets: graph.targets.to_vec(),
-                scope: ErasureScopeCommitmentInputV1 {
-                    request: scope.request(),
-                    scope_members: scope.scope_members().to_vec(),
-                    target_closure: scope.target_closure(),
-                    lineage_rule: scope.lineage_rule(),
-                },
-                obligations: graph.obligations.to_vec(),
-                obligation_set: set.clone(),
-                freeze_position: admission.freeze_position(),
-                freeze_admission_evidence: admission.clone(),
-                freeze_authorization_evidence: authorization.clone(),
-            })
-            .map_err(|error| {
-                RecoveryFailureV1::new(error, freeze_reconstruction_failure_subject(graph))
-            })?;
-        validate_recovery_bindings([
-            (
-                reconstructed.targets() == graph.targets,
-                graph.target_closure.unwrap_or(graph.manifest),
+    ) else {
+        return Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            partial_fixed_graph_subject(graph),
+        ));
+    };
+    ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+        targets: graph.targets.to_vec(),
+        scope: ErasureScopeCommitmentInputV1 {
+            request: scope.request(),
+            scope_members: scope.scope_members().to_vec(),
+            target_closure: scope.target_closure(),
+            lineage_rule: scope.lineage_rule(),
+        },
+        obligations: graph.obligations.to_vec(),
+        obligation_set: set.clone(),
+        freeze_position: admission.freeze_position(),
+        freeze_admission_evidence: admission.clone(),
+        freeze_authorization_evidence: authorization.clone(),
+    })
+    .map_err(|error| RecoveryFailureV1::new(error, freeze_reconstruction_failure_subject(graph)))
+}
+
+fn validate_frozen_bindings(
+    graph: &FixedGraphV1<'_>,
+    reconstructed: &ErasureAtomicFreezeAdmissionV1,
+) -> Result<(), RecoveryFailureV1> {
+    let (Some(scope), Some(admission), Some(_authorization), Some(freeze), Some(set)) = (
+        graph.scope,
+        graph.admission,
+        graph.authorization,
+        graph.freeze,
+        graph.obligation_set,
+    ) else {
+        return Err(RecoveryFailureV1::new(
+            ErasureErrorV1::ProvenanceMissing,
+            partial_fixed_graph_subject(graph),
+        ));
+    };
+    validate_recovery_bindings([
+        (
+            reconstructed.targets() == graph.targets,
+            graph.target_closure.unwrap_or(graph.manifest),
+        ),
+        (
+            scope.target_closure() == target_closure_digest(graph.targets),
+            scope.reference(),
+        ),
+        (
+            freeze.scope_commitment() == scope.reference(),
+            freeze.reference(),
+        ),
+        (
+            freeze.obligation_set() == set.reference(),
+            freeze.reference(),
+        ),
+        (
+            freeze.host_evidence() == admission.reference(),
+            freeze.reference(),
+        ),
+        (
+            freeze.freeze_position() == admission.freeze_position(),
+            freeze.reference(),
+        ),
+        (
+            graph.state.freeze_position() == Some(admission.freeze_position()),
+            graph.state.state_digest(),
+        ),
+        (set.policy() == graph.erq.policy(), set.reference()),
+        (graph.authorize_provenance.is_some(), graph.manifest),
+        (
+            graph.rejection.is_none(),
+            graph
+                .rejection
+                .map_or(graph.manifest, ErasureAuthorizationRejectionV1::reference),
+        ),
+        (
+            graph.failure.is_none(),
+            graph
+                .failure
+                .map_or(graph.manifest, ErasureFreezeFailureV1::reference),
+        ),
+        (
+            matches!(
+                graph.state.lifecycle(),
+                ErasureLifecycleV1::AccessFrozen
+                    | ErasureLifecycleV1::DestructionDispatched
+                    | ErasureLifecycleV1::AwaitingAcknowledgements
+                    | ErasureLifecycleV1::PartialFailure
+                    | ErasureLifecycleV1::Complete
             ),
-            (
-                scope.target_closure() == target_closure_digest(graph.targets),
-                scope.reference(),
-            ),
-            (
-                freeze.scope_commitment() == scope.reference(),
-                freeze.reference(),
-            ),
-            (
-                freeze.obligation_set() == set.reference(),
-                freeze.reference(),
-            ),
-            (
-                freeze.host_evidence() == admission.reference(),
-                freeze.reference(),
-            ),
-            (
-                freeze.freeze_position() == admission.freeze_position(),
-                freeze.reference(),
-            ),
-            (
-                graph.state.freeze_position() == Some(admission.freeze_position()),
-                graph.state.state_digest(),
-            ),
-            (set.policy() == graph.erq.policy(), set.reference()),
-            (graph.authorize_provenance.is_some(), graph.manifest),
-            (
-                graph.rejection.is_none(),
-                graph
-                    .rejection
-                    .map_or(graph.manifest, |value| value.reference()),
-            ),
-            (
-                graph.failure.is_none(),
-                graph
-                    .failure
-                    .map_or(graph.manifest, |value| value.reference()),
-            ),
-            (
-                matches!(
-                    graph.state.lifecycle(),
-                    ErasureLifecycleV1::AccessFrozen
-                        | ErasureLifecycleV1::DestructionDispatched
-                        | ErasureLifecycleV1::AwaitingAcknowledgements
-                        | ErasureLifecycleV1::PartialFailure
-                        | ErasureLifecycleV1::Complete
-                ),
-                graph.state.state_digest(),
-            ),
-            (
-                graph.state.lifecycle() != ErasureLifecycleV1::AccessFrozen
-                    || graph.state.provenance() == freeze.reference(),
-                graph.state.state_digest(),
-            ),
-        ])?;
+            graph.state.state_digest(),
+        ),
+        (
+            graph.state.lifecycle() != ErasureLifecycleV1::AccessFrozen
+                || graph.state.provenance() == freeze.reference(),
+            graph.state.state_digest(),
+        ),
+    ])
+}
+
+fn partial_fixed_graph_subject(graph: &FixedGraphV1<'_>) -> ErasureReferenceV1 {
+    graph
+        .scope
+        .map(ErasureScopeCommitmentV1::reference)
+        .or_else(|| {
+            graph
+                .admission
+                .map(ErasureFreezeAdmissionEvidenceV1::reference)
+        })
+        .or_else(|| graph.freeze.map(ErasureFreezeProvenanceV1::reference))
+        .or_else(|| graph.obligation_set.map(ErasureObligationSetV1::reference))
+        .or(graph.target_closure)
+        .unwrap_or(graph.manifest)
+}
+
+fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV1> {
+    validate_fixed_bindings(graph)?;
+    validate_freeze_authorization(graph)?;
+    if graph.scope.is_some()
+        && graph.admission.is_some()
+        && graph.authorization.is_some()
+        && graph.freeze.is_some()
+        && graph.obligation_set.is_some()
+    {
+        let reconstructed = reconstruct_frozen_graph(graph)?;
+        validate_frozen_bindings(graph, &reconstructed)?;
     } else if graph.scope.is_some()
         || graph.admission.is_some()
         || graph.freeze.is_some()
@@ -2167,14 +2254,7 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV
     {
         return Err(RecoveryFailureV1::new(
             ErasureErrorV1::ProvenanceMissing,
-            graph
-                .scope
-                .map(|value| value.reference())
-                .or_else(|| graph.admission.map(|value| value.reference()))
-                .or_else(|| graph.freeze.map(|value| value.reference()))
-                .or_else(|| graph.obligation_set.map(|value| value.reference()))
-                .or(graph.target_closure)
-                .unwrap_or(graph.manifest),
+            partial_fixed_graph_subject(graph),
         ));
     }
     validate_unfrozen_graph(graph)?;
@@ -2213,9 +2293,9 @@ fn validate_unfrozen_graph(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailu
             ErasureErrorV1::ProvenanceMissing,
             graph
                 .rejection
-                .map(|value| value.reference())
-                .or_else(|| graph.failure.map(|value| value.reference()))
-                .unwrap_or(graph.state.state_digest()),
+                .map(ErasureAuthorizationRejectionV1::reference)
+                .or_else(|| graph.failure.map(ErasureFreezeFailureV1::reference))
+                .unwrap_or_else(|| graph.state.state_digest()),
         )),
     }
 }
