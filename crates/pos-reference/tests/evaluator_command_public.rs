@@ -369,7 +369,11 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
     let output = complete_command(directory.path())?
         .args(["--adapter-arg", "--ignored-by-cat"])
         .output()?;
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "evaluator stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report = ConformanceReport::from_canonical_cbor(&output.stdout)?;
     assert_eq!(report.cases.len(), 7);
     let source = fs::read(directory.path().join("source/pigloros-source.tar.gz"))?;
@@ -433,7 +437,11 @@ fn command_closes_input_adapter_and_evaluation_failures() -> TestResult {
 
     let directory = tempfile::tempdir()?;
     let unavailable = complete_command_with_adapter(directory.path(), "/bin/false")?.output()?;
-    assert!(unavailable.status.success());
+    assert!(
+        unavailable.status.success(),
+        "evaluator stderr: {}",
+        String::from_utf8_lossy(&unavailable.stderr)
+    );
     let report = ConformanceReport::from_canonical_cbor(&unavailable.stdout)?;
     assert!(report
         .cases
