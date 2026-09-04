@@ -2,6 +2,8 @@
 
 A simulation world you join to preview your decisions.
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/arceushui/pigloros)
+
 > **Current stage:** Pre-product. The product MVP is not shipped yet. Wave 9 is the acceptance target: an independently built third-party client — with the first reference acceptance client being a real 3D client — must operate PiglorOS through documented Gateway contracts, using its own preferences/options and Timeline/Scenario Room inputs, receiving a decision preview, submitting actions, reading committed Events, and exercising Replay/Fork. The current Gateway is only a local-first foundation; its default process has create/poll routes but no authenticated action principal, and the public decision-preview, Replay/Fork, and live 3D contracts remain planned. The old hard-coded `pos-mvp` decision demo was removed and is not counted as an MVP. **Prediction Ledger** is already delivered (#58: public page, TOML curated tier + EventStore live tier, CLI, gateway write route, Docker/CI/CD).
 
 ## Getting started

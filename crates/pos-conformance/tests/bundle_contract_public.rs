@@ -178,7 +178,10 @@ fn await_stopped_process(child: &mut std::process::Child) -> TestResult {
 const fn mutation_requires_staged_files(mutation: StagingMutation) -> bool {
     matches!(
         mutation,
-        StagingMutation::CorruptFiles
+        StagingMutation::ReplaceIdentity
+            | StagingMutation::RelaxPermissions
+            | StagingMutation::RelaxRetainedPermissions
+            | StagingMutation::CorruptFiles
             | StagingMutation::CorruptFileAtSameLength
             | StagingMutation::RemoveFile
             | StagingMutation::ReplaceDirectoryWithSymlink
