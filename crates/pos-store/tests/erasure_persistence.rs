@@ -646,15 +646,15 @@ fn memory_recovery_error_bound_rejects_without_partial_writes(
     let request = reference(30);
     let manifests = (0..=ERASURE_MAX_RECOVERY_ERRORS)
         .map(|ordinal| {
-            let ordinal = u64::try_from(ordinal).expect("recovery-error bound fits in u64");
+            let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::ScopeInvalid)?;
             let mut digest = [0_u8; 32];
             digest[..8].copy_from_slice(&ordinal.to_be_bytes());
-            pos_core::StoredErasureManifestV1::from_stored(
+            Ok(pos_core::StoredErasureManifestV1::from_stored(
                 ErasureReferenceV1::from_digest(digest),
                 vec![0xff_u8],
-            )
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let attempted_manifest = manifests
         .last()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
