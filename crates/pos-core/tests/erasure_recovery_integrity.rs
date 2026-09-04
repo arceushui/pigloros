@@ -306,10 +306,18 @@ impl ErasureStateResolverV1 for StateMapResolver {
 }
 
 fn assert_recovery_fails(adapter: PublicCoordinatorPort, request: &ErasureRequestV1) {
+    assert_recovery_fails_with_error(adapter, request, ErasureErrorV1::ProvenanceMissing);
+}
+
+fn assert_recovery_fails_with_error(
+    adapter: PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+    expected_error: ErasureErrorV1,
+) {
     assert_eq!(
         ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR)
             .submit(request.clone(), request.provenance()),
-        Err(ErasureErrorV1::ProvenanceMissing)
+        Err(expected_error)
     );
 }
 
@@ -317,8 +325,20 @@ fn assert_recovery_fails_and_retains(
     adapter: PublicCoordinatorPort,
     request: &ErasureRequestV1,
 ) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1> {
+    assert_recovery_fails_and_retains_with_error(
+        adapter,
+        request,
+        ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+fn assert_recovery_fails_and_retains_with_error(
+    adapter: PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+    expected_error: ErasureErrorV1,
+) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1> {
     let observer = adapter.clone();
-    assert_recovery_fails(adapter, request);
+    assert_recovery_fails_with_error(adapter, request, expected_error);
     ErasureCoordinatorStateMachineV1::new(observer, COORDINATOR)
         .recovery_errors(request.reference())
 }
@@ -892,7 +912,11 @@ fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), Er
         let subject = graph
             .adapter
             .manifest_object_reference(graph.request.reference(), manifest_field)?;
-        let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+        let failures = assert_recovery_fails_and_retains_with_error(
+            graph.adapter,
+            &graph.request,
+            expected_error,
+        )?;
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].failure_subject(), subject);
         assert_eq!(failures[0].error(), expected_error);
