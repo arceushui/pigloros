@@ -2421,9 +2421,9 @@ impl MemoryStore {
     fn test_corrupt_recovery_error_index(
         &mut self,
         request: ErasureReferenceV1,
-        references: usize,
+        highest_ordinal: usize,
     ) {
-        for ordinal in 0..=references {
+        for ordinal in 0..=highest_ordinal {
             let mut digest = [0_u8; 32];
             let ordinal = u64::try_from(ordinal).unwrap_or(u64::MAX);
             digest[..8].copy_from_slice(&ordinal.to_be_bytes());

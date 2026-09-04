@@ -20,7 +20,7 @@ use super::{
     ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
     ErasureStateResolverV1, ErasureStateV1, ErasureVerifiedStateV1, PreparedErasureCasV1,
-    StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+    RecoveryFailureV1, StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
     ERASURE_ATTEMPT_HISTORY_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
     ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
     ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
@@ -29,8 +29,11 @@ use super::{
 };
 use ciborium::value::Value;
 
-const INVENTORY_ADMITTED: u64 = 0;
-const INVENTORY_EFFECTIVE: u64 = 1;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InventoryKindV1(u64);
+
+const INVENTORY_ADMITTED: InventoryKindV1 = InventoryKindV1(0);
+const INVENTORY_EFFECTIVE: InventoryKindV1 = InventoryKindV1(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ManifestV1 {
@@ -481,24 +484,12 @@ struct CompletedAttemptEvidenceV1 {
     terminal: ErasureStateV1,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct RecoveryFailureV1 {
-    error: ErasureErrorV1,
-    subject: ErasureReferenceV1,
-}
-
-impl RecoveryFailureV1 {
-    const fn new(error: ErasureErrorV1, subject: ErasureReferenceV1) -> Self {
-        Self { error, subject }
-    }
-
-    pub(super) const fn error(self) -> ErasureErrorV1 {
-        self.error
-    }
-
-    pub(super) const fn subject(self) -> ErasureReferenceV1 {
-        self.subject
-    }
+struct CompletedAttemptContextV1<'a> {
+    request: ErasureReferenceV1,
+    page: &'a AttemptPageV1,
+    admission: &'a ErasureRetryAdmissionV1,
+    effective: &'a InventoryV1,
+    predecessor_receipt: Option<ErasureReferenceV1>,
 }
 
 fn load_recovery_object<T>(
@@ -585,7 +576,7 @@ fn recover_foundation(
         ));
     }
     verify_predecessor_chain_with_subject(state.clone(), port)
-        .map_err(|failure| RecoveryFailureV1::new(failure.error, failure.subject))?;
+        .map_err(|failure| RecoveryFailureV1::new(failure.error(), failure.subject()))?;
     let closure = optional(
         port,
         manifest.target_closure,
@@ -1380,7 +1371,14 @@ impl RecoveredErasureV1 {
             ));
         }
 
-        self.validate_completed_attempt(port, page, &admission, &effective, predecessor_receipt)
+        let context = CompletedAttemptContextV1 {
+            request: self.request.reference(),
+            page,
+            admission: &admission,
+            effective: &effective,
+            predecessor_receipt,
+        };
+        self.validate_completed_attempt(port, &context)
     }
 
     fn validate_replay_page_bindings(
@@ -1429,10 +1427,10 @@ impl RecoveredErasureV1 {
         request: ErasureReferenceV1,
         page: &AttemptPageV1,
         inventory: &InventoryV1,
-        expected_kind: u64,
+        expected_kind: InventoryKindV1,
     ) -> Result<(), RecoveryFailureV1> {
         ((inventory.request, inventory.ordinal, inventory.kind)
-            == (request, page.ordinal, expected_kind))
+            == (request, page.ordinal, expected_kind.0))
             .then_some(())
             .ok_or_else(|| {
                 RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, inventory.reference)
@@ -1442,38 +1440,27 @@ impl RecoveredErasureV1 {
     fn validate_completed_attempt(
         &self,
         port: &dyn ErasurePersistencePortV1,
-        page: &AttemptPageV1,
-        admission: &ErasureRetryAdmissionV1,
-        effective: &InventoryV1,
-        predecessor_receipt: Option<ErasureReferenceV1>,
+        context: &CompletedAttemptContextV1<'_>,
     ) -> Result<(ErasureReferenceV1, ErasureReferenceV1), RecoveryFailureV1> {
         let CompletedAttemptEvidenceV1 {
             outcome,
             receipt,
             provenance,
             terminal,
-        } = load_completed_attempt_evidence(port, page)?;
+        } = load_completed_attempt_evidence(port, context.page)?;
         validate_recovery_bindings([(
-            terminal.request() == self.request.reference(),
+            terminal.request() == context.request,
             terminal.state_digest(),
         )])?;
-        self.validate_completed_outcome(
-            &outcome,
-            admission,
-            effective,
+        Self::validate_completed_outcome(&outcome, &terminal, &provenance, context)?;
+        Self::validate_completed_provenance(&provenance, context)?;
+        Self::validate_completed_receipt(
+            &receipt,
+            context.page,
             &terminal,
-            predecessor_receipt,
             &provenance,
+            context.admission,
         )?;
-        Self::validate_completed_provenance(
-            &provenance,
-            page,
-            admission,
-            effective,
-            predecessor_receipt,
-            self.request.reference(),
-        )?;
-        Self::validate_completed_receipt(&receipt, page, &terminal, &provenance, admission)?;
         Self::validate_effect_subject(
             port,
             receipt.receipt_digest(),
@@ -1484,39 +1471,33 @@ impl RecoveredErasureV1 {
         receipt
             .validate_frozen_obligations(&self.obligations)
             .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))?;
-        Ok((receipt.receipt_digest(), page.terminal_state))
+        Ok((receipt.receipt_digest(), context.page.terminal_state))
     }
 
     fn validate_completed_outcome(
-        &self,
         outcome: &ErasureAttemptOutcomeV1,
-        admission: &ErasureRetryAdmissionV1,
-        effective: &InventoryV1,
         terminal: &ErasureStateV1,
-        predecessor_receipt: Option<ErasureReferenceV1>,
         provenance: &ErasureReceiptProvenanceV1,
+        context: &CompletedAttemptContextV1<'_>,
     ) -> Result<(), RecoveryFailureV1> {
         validate_recovery_bindings([
+            (outcome.request() == context.request, outcome.reference()),
             (
-                outcome.request() == self.request.reference(),
+                outcome.attempt() == context.admission.reference(),
                 outcome.reference(),
             ),
             (
-                outcome.attempt() == admission.reference(),
-                outcome.reference(),
-            ),
-            (
-                outcome.source_receipt() == predecessor_receipt,
+                outcome.source_receipt() == context.predecessor_receipt,
                 outcome.reference(),
             ),
             (
                 outcome.selected_obligations()
-                    == selected_obligations_reference(admission.unresolved_obligations()),
+                    == selected_obligations_reference(context.admission.unresolved_obligations()),
                 outcome.reference(),
             ),
             (
                 outcome.acknowledgement_inventory()
-                    == acknowledgement_inventory_reference(&effective.references),
+                    == acknowledgement_inventory_reference(&context.effective.references),
                 outcome.reference(),
             ),
             (
@@ -1527,47 +1508,53 @@ impl RecoveredErasureV1 {
                 outcome.terminal_position() == provenance.issue_position(),
                 outcome.reference(),
             ),
-            (outcome.policy() == admission.policy(), outcome.reference()),
-            (outcome.trust() == admission.trust(), outcome.reference()),
+            (
+                outcome.policy() == context.admission.policy(),
+                outcome.reference(),
+            ),
+            (
+                outcome.trust() == context.admission.trust(),
+                outcome.reference(),
+            ),
         ])
     }
 
     fn validate_completed_provenance(
         provenance: &ErasureReceiptProvenanceV1,
-        page: &AttemptPageV1,
-        admission: &ErasureRetryAdmissionV1,
-        effective: &InventoryV1,
-        predecessor_receipt: Option<ErasureReferenceV1>,
-        request: ErasureReferenceV1,
+        context: &CompletedAttemptContextV1<'_>,
     ) -> Result<(), RecoveryFailureV1> {
         validate_recovery_bindings([
-            (provenance.request() == request, provenance.reference()),
             (
-                provenance.attempt() == admission.reference(),
+                provenance.request() == context.request,
                 provenance.reference(),
             ),
             (
-                provenance.attempt_ordinal() == page.ordinal,
+                provenance.attempt() == context.admission.reference(),
                 provenance.reference(),
             ),
             (
-                provenance.predecessor_receipt() == predecessor_receipt,
+                provenance.attempt_ordinal() == context.page.ordinal,
                 provenance.reference(),
             ),
             (
-                provenance.terminal_state() == page.terminal_state,
+                provenance.predecessor_receipt() == context.predecessor_receipt,
                 provenance.reference(),
             ),
             (
-                provenance.evidence_set() == erasure_evidence_set_reference(&effective.references),
+                provenance.terminal_state() == context.page.terminal_state,
                 provenance.reference(),
             ),
             (
-                provenance.policy() == admission.policy(),
+                provenance.evidence_set()
+                    == erasure_evidence_set_reference(&context.effective.references),
                 provenance.reference(),
             ),
             (
-                provenance.trust() == admission.trust(),
+                provenance.policy() == context.admission.policy(),
+                provenance.reference(),
+            ),
+            (
+                provenance.trust() == context.admission.trust(),
                 provenance.reference(),
             ),
         ])
@@ -1908,13 +1895,11 @@ impl RecoveredErasureV1 {
         if count == 0 {
             return Ok(());
         }
-        let scope = self.scope.as_ref().ok_or(RecoveryFailureV1 {
-            error: ErasureErrorV1::ProvenanceMissing,
-            subject: fallback_subject,
+        let scope = self.scope.as_ref().ok_or_else(|| {
+            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
         })?;
-        let obligation_set = self.obligation_set.as_ref().ok_or(RecoveryFailureV1 {
-            error: ErasureErrorV1::ProvenanceMissing,
-            subject: fallback_subject,
+        let obligation_set = self.obligation_set.as_ref().ok_or_else(|| {
+            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, fallback_subject)
         })?;
         let mut predecessor = None;
         for ordinal in 0..count {

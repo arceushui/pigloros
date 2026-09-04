@@ -12,9 +12,9 @@ use std::rc::Rc;
 pub mod erasure_support;
 
 use erasure_support::{
-    freeze_evidence_fixture, obligation, reference, request as fixture_request,
-    retry_admission as fixture_retry_admission, FreezeEvidenceFixtureInput, RequestFixtureInput,
-    RetryAdmissionFixture,
+    freeze_evidence_fixture, obligation, persistence_request as request,
+    persistence_target as target, reference, retry_admission as fixture_retry_admission,
+    FreezeEvidenceFixtureInput, RetryAdmissionFixture,
 };
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
@@ -31,32 +31,13 @@ use pos_core::{
     ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    PreparedErasureCasV1,
 };
 use pos_store::memory::MemoryStore;
 
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
-
-fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    fixture_request(RequestFixtureInput {
-        request: reference(1),
-        subject: reference(2),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(3)],
-        requester: reference(4),
-        authorization: reference(5),
-        policy: reference(6),
-        request_position: 9,
-        horizon_position: 20,
-        provenance: reference(7),
-    })
-}
-
-const fn target() -> ErasureRequiredTargetV1 {
-    erasure_support::replay_target(10)
-}
 
 const fn freeze_transition() -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
@@ -257,76 +238,7 @@ where
         self.store.borrow().read_object(reference)
     }
 
-    fn read_effect(
-        &self,
-        manifest: ErasureReferenceV1,
-    ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
-        self.store.borrow().read_effect(manifest)
-    }
-
-    fn effect_manifest(
-        &self,
-        subject: ErasureReferenceV1,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().effect_manifest(subject)
-    }
-
-    fn attempt_page_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().attempt_page_ref(request, ordinal)
-    }
-
-    fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        self.store.borrow().attempt_index_count(request)
-    }
-
-    fn scope_node_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().scope_node_ref(request, ordinal)
-    }
-
-    fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        self.store.borrow().scope_index_count(request)
-    }
-
-    fn administrative_resolution_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store
-            .borrow()
-            .administrative_resolution_ref(request, ordinal)
-    }
-
-    fn administrative_resolution_index_count(
-        &self,
-        request: ErasureReferenceV1,
-    ) -> Result<u64, ErasureErrorV1> {
-        self.store
-            .borrow()
-            .administrative_resolution_index_count(request)
-    }
-
-    fn recovery_error_refs(
-        &self,
-        request: ErasureReferenceV1,
-    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().recovery_error_refs(request)
-    }
-
-    fn append_recovery_error(
-        &mut self,
-        object: PreparedErasureRecoveryErrorV1,
-    ) -> Result<(), ErasureErrorV1> {
-        self.store.borrow_mut().append_recovery_error(object)
-    }
+    crate::impl_erasure_persistence_forwarding!();
 
     fn compare_and_swap(
         &mut self,

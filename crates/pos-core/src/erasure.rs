@@ -3816,14 +3816,22 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PredecessorChainFailureV1 {
+pub(super) struct RecoveryFailureV1 {
     error: ErasureErrorV1,
     subject: ErasureReferenceV1,
 }
 
-impl PredecessorChainFailureV1 {
-    const fn new(error: ErasureErrorV1, subject: ErasureReferenceV1) -> Self {
+impl RecoveryFailureV1 {
+    pub(super) const fn new(error: ErasureErrorV1, subject: ErasureReferenceV1) -> Self {
         Self { error, subject }
+    }
+
+    pub(super) const fn error(self) -> ErasureErrorV1 {
+        self.error
+    }
+
+    pub(super) const fn subject(self) -> ErasureReferenceV1 {
+        self.subject
     }
 }
 
@@ -3837,7 +3845,7 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1 + ?Sized>(
 fn verify_predecessor_chain_with_subject<R: ErasureStateResolverV1 + ?Sized>(
     current: ErasureStateV1,
     resolver: &R,
-) -> Result<(), PredecessorChainFailureV1> {
+) -> Result<(), RecoveryFailureV1> {
     verify_predecessor_chain_bounded(
         current,
         resolver,
@@ -3849,20 +3857,20 @@ fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1 + ?Sized>(
     mut current: ErasureStateV1,
     resolver: &R,
     maximum_depth: usize,
-) -> Result<(), PredecessorChainFailureV1> {
+) -> Result<(), RecoveryFailureV1> {
     for _ in 0..maximum_depth {
         if let Some(previous_digest) = current.previous_state() {
             current = resolve_predecessor_state(&current, resolver, previous_digest)?;
         } else if current.lifecycle() == ErasureLifecycleV1::Submitted {
             return Ok(());
         } else {
-            return Err(PredecessorChainFailureV1::new(
+            return Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
                 current.state_digest(),
             ));
         }
     }
-    Err(PredecessorChainFailureV1::new(
+    Err(RecoveryFailureV1::new(
         ErasureErrorV1::ProvenanceMissing,
         current.state_digest(),
     ))
@@ -3872,20 +3880,20 @@ fn resolve_predecessor_state<R: ErasureStateResolverV1 + ?Sized>(
     current: &ErasureStateV1,
     resolver: &R,
     previous_digest: ErasureReferenceV1,
-) -> Result<ErasureStateV1, PredecessorChainFailureV1> {
+) -> Result<ErasureStateV1, RecoveryFailureV1> {
     let previous = match resolver.resolve_state(previous_digest) {
         Ok(Some(previous)) => previous,
         Ok(None) => {
-            return Err(PredecessorChainFailureV1::new(
+            return Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
                 previous_digest,
             ));
         }
-        Err(error) => return Err(PredecessorChainFailureV1::new(error, previous_digest)),
+        Err(error) => return Err(RecoveryFailureV1::new(error, previous_digest)),
     };
     current
         .validate_predecessor(&previous)
-        .map_err(|error| PredecessorChainFailureV1::new(error, previous_digest))?;
+        .map_err(|error| RecoveryFailureV1::new(error, previous_digest))?;
     Ok(previous)
 }
 

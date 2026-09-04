@@ -153,7 +153,7 @@ struct ErasureSchemaTable {
     name: &'static str,
     columns_query: &'static str,
     columns: &'static [ErasureSchemaColumn],
-    required_sql_fragments: &'static [&'static str],
+    constraints: &'static [&'static str],
 }
 
 const ERASURE_INDEX_COLUMNS: &[ErasureSchemaColumn] = &[
@@ -201,13 +201,10 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 primary_key: false,
             },
         ],
-        required_sql_fragments: &[
-            "request_digest",
-            "manifest_digest",
-            "manifest_cbor",
-            "length(request_digest)=32",
-            "length(manifest_digest)=32",
-            "length(manifest_cbor)<=1048576",
+        constraints: &[
+            "CHECK (length(request_digest) = 32)",
+            "CHECK (length(manifest_digest) = 32)",
+            "CHECK (length(manifest_cbor) <= 1048576)",
         ],
     },
     ErasureSchemaTable {
@@ -227,11 +224,9 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 primary_key: false,
             },
         ],
-        required_sql_fragments: &[
-            "reference_digest",
-            "object_cbor",
-            "length(reference_digest)=32",
-            "length(object_cbor)<=16777216",
+        constraints: &[
+            "CHECK (length(reference_digest) = 32)",
+            "CHECK (length(object_cbor) <= 16777216)",
         ],
     },
     ErasureSchemaTable {
@@ -257,13 +252,10 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 primary_key: false,
             },
         ],
-        required_sql_fragments: &[
-            "state_digest",
-            "request_digest",
-            "state_cbor",
-            "length(state_digest)=32",
-            "length(request_digest)=32",
-            "length(state_cbor)<=1048576",
+        constraints: &[
+            "CHECK (length(state_digest) = 32)",
+            "CHECK (length(request_digest) = 32)",
+            "CHECK (length(state_cbor) <= 1048576)",
         ],
     },
     ErasureSchemaTable {
@@ -283,43 +275,39 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 primary_key: true,
             },
         ],
-        required_sql_fragments: &[
-            "length(request_digest)=32",
-            "length(error_digest)=32",
-            "primarykey(request_digest,error_digest)",
+        constraints: &[
+            "CHECK (length(request_digest) = 32)",
+            "CHECK (length(error_digest) = 32)",
         ],
     },
     ErasureSchemaTable {
         name: "erasure_attempt_pages",
         columns_query: "PRAGMA table_info(erasure_attempt_pages)",
         columns: ERASURE_INDEX_COLUMNS,
-        required_sql_fragments: &[
-            "length(request_digest)=32",
-            "ordinal>=0",
-            "length(reference_digest)=32",
-            "primarykey(request_digest,ordinal)",
+        constraints: &[
+            "CHECK (length(request_digest) = 32)",
+            "CHECK (ordinal >= 0)",
+            "CHECK (length(reference_digest) = 32)",
         ],
     },
     ErasureSchemaTable {
         name: "erasure_scope_nodes",
         columns_query: "PRAGMA table_info(erasure_scope_nodes)",
         columns: ERASURE_INDEX_COLUMNS,
-        required_sql_fragments: &[
-            "length(request_digest)=32",
-            "ordinal>=0",
-            "length(reference_digest)=32",
-            "primarykey(request_digest,ordinal)",
+        constraints: &[
+            "CHECK (length(request_digest) = 32)",
+            "CHECK (ordinal >= 0)",
+            "CHECK (length(reference_digest) = 32)",
         ],
     },
     ErasureSchemaTable {
         name: "erasure_administrative_resolutions",
         columns_query: "PRAGMA table_info(erasure_administrative_resolutions)",
         columns: ERASURE_INDEX_COLUMNS,
-        required_sql_fragments: &[
-            "length(request_digest)=32",
-            "ordinal>=0",
-            "length(reference_digest)=32",
-            "primarykey(request_digest,ordinal)",
+        constraints: &[
+            "CHECK (length(request_digest) = 32)",
+            "CHECK (ordinal >= 0)",
+            "CHECK (length(reference_digest) = 32)",
         ],
     },
     ErasureSchemaTable {
@@ -351,66 +339,65 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 primary_key: false,
             },
         ],
-        required_sql_fragments: &[
-            "length(manifest_digest)=32",
-            "length(effect_digest)=32",
-            "subject_digestisnullorlength(subject_digest)=32",
-            "length(effect_cbor)<=16777216",
-            "unique(subject_digest)",
+        constraints: &[
+            "CHECK (length(manifest_digest) = 32)",
+            "CHECK (length(effect_digest) = 32)",
+            "CHECK (subject_digest IS NULL OR length(subject_digest) = 32)",
+            "CHECK (length(effect_cbor) <= 16777216)",
+            "UNIQUE (subject_digest)",
         ],
     },
 ];
 
-// Keep the erasure DDL in one authoritative batch. `ERASURE_SCHEMA_TABLES`
-// describes the independent validation contract below; it must not become a
-// second source for creating or evolving SQLite tables.
-const ERASURE_SCHEMA_DDL: &str = "
-             CREATE TABLE IF NOT EXISTS erasure_records (
-                 request_digest BLOB NOT NULL PRIMARY KEY CHECK (length(request_digest) = 32),
-                 manifest_digest BLOB NOT NULL CHECK (length(manifest_digest) = 32),
-                 manifest_cbor BLOB NOT NULL CHECK (length(manifest_cbor) <= 1048576)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_evidence (
-                 reference_digest BLOB NOT NULL PRIMARY KEY CHECK (length(reference_digest) = 32),
-                 object_cbor BLOB NOT NULL CHECK (length(object_cbor) <= 16777216)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_recovery_errors (
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 error_digest BLOB NOT NULL CHECK (length(error_digest) = 32),
-                 PRIMARY KEY (request_digest, error_digest)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_states (
-                 state_digest BLOB NOT NULL PRIMARY KEY CHECK (length(state_digest) = 32),
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 state_cbor BLOB NOT NULL CHECK (length(state_cbor) <= 1048576)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_attempt_pages (
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
-                 PRIMARY KEY (request_digest, ordinal)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_scope_nodes (
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
-                 PRIMARY KEY (request_digest, ordinal)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_administrative_resolutions (
-                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
-                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-                 reference_digest BLOB NOT NULL CHECK (length(reference_digest) = 32),
-                 PRIMARY KEY (request_digest, ordinal)
-             );
-             CREATE TABLE IF NOT EXISTS erasure_effects (
-                 manifest_digest BLOB NOT NULL PRIMARY KEY CHECK (length(manifest_digest) = 32),
-                 effect_digest BLOB NOT NULL CHECK (length(effect_digest) = 32),
-                 subject_digest BLOB CHECK (
-                     subject_digest IS NULL OR length(subject_digest) = 32
-                 ),
-                 effect_cbor BLOB NOT NULL CHECK (length(effect_cbor) <= 16777216),
-                 UNIQUE (subject_digest)
-             );";
+/// Build the current erasure schema from the same table and constraint
+/// declarations used by schema validation.
+fn erasure_schema_ddl() -> String {
+    ERASURE_SCHEMA_TABLES
+        .iter()
+        .map(|table| {
+            let definitions = table
+                .columns
+                .iter()
+                .map(|column| {
+                    format!(
+                        "{} {}{}",
+                        column.name,
+                        column.kind,
+                        if column.not_null { " NOT NULL" } else { "" }
+                    )
+                })
+                .chain(
+                    table
+                        .constraints
+                        .iter()
+                        .map(|constraint| (*constraint).to_owned()),
+                )
+                .collect::<Vec<_>>();
+            let primary_key = table
+                .columns
+                .iter()
+                .filter(|column| column.primary_key)
+                .map(|column| column.name)
+                .collect::<Vec<_>>();
+            if !primary_key.is_empty() {
+                definitions.push(format!("PRIMARY KEY ({})", primary_key.join(", ")));
+            }
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} ({});",
+                table.name,
+                definitions.join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.to_ascii_lowercase()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
 
 impl SqliteStore {
     fn configure_busy_timeout(conn: &Connection) -> rusqlite::Result<()> {
@@ -905,7 +892,7 @@ impl SqliteStore {
             .map_err(|error| Self::storage_error(&error))
             .and_then(|()| {
                 self.conn
-                    .execute_batch(ERASURE_SCHEMA_DDL)
+                    .execute_batch(&erasure_schema_ddl())
                     .map_err(|error| Self::storage_error(&error))
             })
             .and_then(|()| self.validate_erasure_schema())
@@ -930,15 +917,11 @@ impl SqliteStore {
             .ok_or_else(|| {
                 CoreError::Storage(format!("SQLite schema is missing {} table", table.name))
             })?;
-        let normalized = sql
-            .to_ascii_lowercase()
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect::<String>();
+        let normalized = normalize_schema_sql(&sql);
         if table
-            .required_sql_fragments
+            .constraints
             .iter()
-            .any(|fragment| !normalized.contains(*fragment))
+            .any(|constraint| !normalized.contains(&normalize_schema_sql(constraint)))
         {
             return Err(CoreError::Storage(format!(
                 "SQLite {} table has an incompatible schema",

@@ -15,6 +15,93 @@ use pos_core::{
     ErasureRetryAdmissionV1, ErasureScopeV1,
 };
 
+/// Expand the persistence-port methods that are identical for test hosts.
+///
+/// Hosts retain their scenario-specific manifest/object/CAS behavior locally;
+/// this shared forwarding block keeps the public read/index surface in one
+/// place for backend-parity tests.
+#[macro_export]
+macro_rules! impl_erasure_persistence_forwarding {
+    () => {
+        fn read_effect(
+            &self,
+            manifest: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_core::ErasureCasEffectV1, pos_core::ErasureErrorV1> {
+            self.store.borrow().read_effect(manifest)
+        }
+
+        fn effect_manifest(
+            &self,
+            subject: pos_core::ErasureReferenceV1,
+        ) -> Result<Option<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store.borrow().effect_manifest(subject)
+        }
+
+        fn attempt_page_ref(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store.borrow().attempt_page_ref(request, ordinal)
+        }
+
+        fn attempt_index_count(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+        ) -> Result<u64, pos_core::ErasureErrorV1> {
+            self.store.borrow().attempt_index_count(request)
+        }
+
+        fn scope_node_ref(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store.borrow().scope_node_ref(request, ordinal)
+        }
+
+        fn scope_index_count(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+        ) -> Result<u64, pos_core::ErasureErrorV1> {
+            self.store.borrow().scope_index_count(request)
+        }
+
+        fn administrative_resolution_ref(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store
+                .borrow()
+                .administrative_resolution_ref(request, ordinal)
+        }
+
+        fn administrative_resolution_index_count(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+        ) -> Result<u64, pos_core::ErasureErrorV1> {
+            self.store
+                .borrow()
+                .administrative_resolution_index_count(request)
+        }
+
+        fn recovery_error_refs(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+        ) -> Result<Vec<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store.borrow().recovery_error_refs(request)
+        }
+
+        fn append_recovery_error(
+            &mut self,
+            object: pos_core::PreparedErasureRecoveryErrorV1,
+        ) -> Result<(), pos_core::ErasureErrorV1> {
+            self.store.borrow_mut().append_recovery_error(object)
+        }
+    };
+}
+
 /// Build a deterministic test-only digest reference.
 #[must_use]
 pub const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -91,6 +178,31 @@ pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureEr
         horizon_position: input.horizon_position,
         provenance: input.provenance,
     })
+}
+
+/// Build the deterministic ERQ1 shared by the persistence integration suites.
+///
+/// Keeping this fixture here prevents the backend tests from silently drifting
+/// apart while they exercise the same public persistence contract.
+pub fn persistence_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+    request(RequestFixtureInput {
+        request: reference(1),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(3)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 9,
+        horizon_position: 20,
+        provenance: reference(7),
+    })
+}
+
+/// Build the deterministic TimelineReplay target shared by persistence tests.
+#[must_use]
+pub const fn persistence_target() -> ErasureRequiredTargetV1 {
+    replay_target(10)
 }
 
 /// Build one category-scoped obligation for an ERQ1 target.

@@ -33,6 +33,9 @@ pub const MANIFEST_REQUEST_FIELD: usize = 2;
 pub const MANIFEST_STATE_FIELD: usize = 3;
 pub const MANIFEST_TARGET_CLOSURE_FIELD: usize = 4;
 pub const MANIFEST_CORRECTION_FIELD: usize = 5;
+pub const MANIFEST_SCOPE_COMMITMENT_FIELD: usize = 7;
+pub const MANIFEST_FREEZE_PROVENANCE_FIELD: usize = 10;
+pub const MANIFEST_OBLIGATION_SET_FIELD: usize = 12;
 pub const MANIFEST_SCOPE_EXTENSION_HEAD_FIELD: usize = 13;
 pub const MANIFEST_ACTIVE_FIELD: usize = 14;
 pub const MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD: usize = 15;
@@ -48,6 +51,12 @@ pub const ACTIVE_ADMISSION_FIELD: usize = 1;
 pub const ATTEMPT_ADMITTED_INVENTORY_FIELD: usize = 5;
 pub const ATTEMPT_EFFECTIVE_INVENTORY_FIELD: usize = 6;
 pub const SCOPE_NODE_EXTENSION_FIELD: usize = 4;
+
+/// Field positions in the immutable object arrays used by recovery fixtures.
+pub const SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD: usize = 4;
+pub const FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD: usize = 3;
+pub const OBLIGATION_SET_POLICY_FIELD: usize = 4;
+pub const OBLIGATION_SET_TRUST_FIELD: usize = 5;
 
 /// Configuration for the host side of the public coordinator fixture.
 #[derive(Clone)]

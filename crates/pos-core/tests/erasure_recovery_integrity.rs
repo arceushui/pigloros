@@ -16,8 +16,11 @@ pub mod erasure_support;
 use coordinator_support::{
     PublicCoordinatorFault, PublicCoordinatorOperation, PublicCoordinatorPort,
     PublicCoordinatorPortConfig, ATTEMPT_ADMITTED_INVENTORY_FIELD,
-    MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD, MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
-    MANIFEST_LATEST_RECEIPT_FIELD, MANIFEST_STATE_FIELD, MANIFEST_TARGET_CLOSURE_FIELD,
+    FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD, MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD,
+    MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD, MANIFEST_FREEZE_PROVENANCE_FIELD,
+    MANIFEST_LATEST_RECEIPT_FIELD, MANIFEST_OBLIGATION_SET_FIELD, MANIFEST_SCOPE_COMMITMENT_FIELD,
+    MANIFEST_STATE_FIELD, MANIFEST_TARGET_CLOSURE_FIELD, OBLIGATION_SET_POLICY_FIELD,
+    OBLIGATION_SET_TRUST_FIELD, SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD,
 };
 use erasure_support::{
     obligation as fixture_obligation, reference, replay_target as target,
@@ -892,30 +895,30 @@ fn recovery_rejects_a_missing_resolution_index_entry() -> Result<(), ErasureErro
 fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), ErasureErrorV1> {
     for (manifest_field, object_tag, object_field, replacement, expected_error) in [
         (
-            7,
+            MANIFEST_SCOPE_COMMITMENT_FIELD,
             ERASURE_SCOPE_COMMITMENT_TAG_V1,
-            4,
+            SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD,
             Value::Bytes(reference(250).digest().to_vec()),
             ErasureErrorV1::ScopeInvalid,
         ),
         (
-            10,
+            MANIFEST_FREEZE_PROVENANCE_FIELD,
             ERASURE_FREEZE_PROVENANCE_TAG_V1,
-            3,
+            FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD,
             Value::Bytes(reference(251).digest().to_vec()),
             ErasureErrorV1::ProvenanceMissing,
         ),
         (
-            12,
+            MANIFEST_OBLIGATION_SET_FIELD,
             ERASURE_OBLIGATION_SET_TAG_V1,
-            4,
+            OBLIGATION_SET_POLICY_FIELD,
             Value::Bytes(reference(252).digest().to_vec()),
             ErasureErrorV1::ProvenanceMissing,
         ),
         (
-            12,
+            MANIFEST_OBLIGATION_SET_FIELD,
             ERASURE_OBLIGATION_SET_TAG_V1,
-            5,
+            OBLIGATION_SET_TRUST_FIELD,
             Value::Bytes(reference(253).digest().to_vec()),
             ErasureErrorV1::ProvenanceMissing,
         ),

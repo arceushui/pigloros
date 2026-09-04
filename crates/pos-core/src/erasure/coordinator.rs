@@ -66,13 +66,13 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
 
     fn recovery_failure_error(
         &mut self,
-        request: ErasureReferenceV1,
-        manifest: Option<ErasureReferenceV1>,
-        failure_subject: ErasureReferenceV1,
-        error: ErasureErrorV1,
+        recovery_error: Result<ErasureRecoveryErrorV1, ErasureErrorV1>,
     ) -> ErasureErrorV1 {
-        ErasureRecoveryErrorV1::new(request, manifest, failure_subject, error)
-            .and_then(|recovery_error| self.retain_recovery_error(recovery_error).map(|()| error))
+        recovery_error
+            .and_then(|recovery_error| {
+                let error = recovery_error.error();
+                self.retain_recovery_error(recovery_error).map(|()| error)
+            })
             .unwrap_or_else(std::convert::identity)
     }
 
@@ -83,12 +83,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<RecoveredErasureV1, ErasureErrorV1> {
         RecoveredErasureV1::recover(&self.port, &self.port, &self.port, request, stored).map_err(
             |failure| {
-                self.recovery_failure_error(
+                self.recovery_failure_error(ErasureRecoveryErrorV1::new(
                     request,
                     Some(stored.digest()),
                     failure.subject(),
                     failure.error(),
-                )
+                ))
             },
         )
     }
@@ -97,10 +97,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
-        let stored = self
-            .port
-            .read_manifest(request)
-            .map_err(|error| self.recovery_failure_error(request, None, request, error))?;
+        let stored = self.port.read_manifest(request).map_err(|error| {
+            self.recovery_failure_error(ErasureRecoveryErrorV1::new(request, None, request, error))
+        })?;
         stored
             .as_ref()
             .map(|stored| self.recover_stored(request, stored))
