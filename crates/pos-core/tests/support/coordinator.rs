@@ -1278,11 +1278,10 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if !storage.objects.contains_key(&reference) {
-            storage
-                .objects
-                .insert(reference, object.canonical_cbor().to_vec());
-        }
+        storage
+            .objects
+            .entry(reference)
+            .or_insert_with(|| object.canonical_cbor().to_vec());
         storage
             .recovery_errors
             .entry(request)
