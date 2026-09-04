@@ -539,7 +539,9 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - bundle-contracts
+          - bundle-coverage
+          - bundle-public
+          - moat-proof
           - remainder
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -601,15 +603,21 @@ jobs:
               cargo "${cargo_args[@]}" "$@"
           }
           case "${ASAN_SHARD}" in
-            bundle-contracts)
+            bundle-coverage)
               run_asan_tests -p pos-conformance \
-                --test bundle_contract_coverage_public \
+                --test bundle_contract_coverage_public
+              ;;
+            bundle-public)
+              run_asan_tests -p pos-conformance \
                 --test bundle_contract_public
+              ;;
+            moat-proof)
+              run_asan_tests -p pos-conformance \
+                --test moat_proof_public
               ;;
             remainder)
               run_asan_tests --workspace --exclude pos-conformance --tests
               run_asan_tests -p pos-conformance --lib --bins \
-                --test moat_proof_public \
                 --test profile_contract_public \
                 --test provider_contract_public
               ;;
