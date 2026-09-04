@@ -205,6 +205,82 @@ fn recovered_record_rejects_an_acknowledgement_bound_to_another_request(
 }
 
 #[test]
+fn recovered_record_rejects_a_duplicate_acknowledgement() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let mut recovered = RecoveredErasureV1::initial(
+        request.clone(),
+        synthetic_state(ErasureLifecycleV1::Submitted, None, reference(4)),
+    );
+    let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: request.reference(),
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: Vec::new(),
+        command_identities: Vec::new(),
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    recovered.begin_attempt(admission.clone())?;
+    let acknowledgement =
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request: request.reference(),
+            command: reference(2),
+            attempt: admission.reference(),
+            obligation: reference(3),
+            owner: reference(4),
+            scope: reference(5),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(6),
+            policy: reference(7),
+            trust: reference(8),
+        })?;
+    recovered.retain_acknowledgement(&acknowledgement)?;
+    assert_eq!(
+        recovered.retain_acknowledgement(&acknowledgement),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn state_transition_rejects_empty_completion_and_overlapping_owner_sets() {
+    let awaiting = synthetic_state(
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        Some(reference(2)),
+        reference(3),
+    );
+    assert_eq!(
+        awaiting.transition(ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::Complete,
+            freeze_position: Some(10),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            provenance: reference(4),
+        }),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let submitted = synthetic_state(ErasureLifecycleV1::Submitted, None, reference(5));
+    assert_eq!(
+        submitted.transition(ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::Authorized,
+            freeze_position: None,
+            pending_owners: vec![reference(6)],
+            failed_owners: vec![reference(6)],
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            provenance: reference(7),
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+}
+
+#[test]
 fn lifecycle_permits_exactly_the_adr_edges() {
     let lifecycles = [
         ErasureLifecycleV1::Submitted,
