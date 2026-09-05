@@ -19,11 +19,18 @@ publishing or materially revising the ADR.
 
 1. Read `CONTEXT.md`, `README.md`, relevant ticket(s), related Redmine ADRs,
    and the affected public interfaces.
+   Fetch accepted ADRs from canonical Redmine and classify the proposed work as
+   already covered, a clarification, or a genuinely new decision before opening
+   another ADR.
 2. State one decision question. Split unrelated choices into separate ADRs.
 3. Identify the decision owner, affected Timeline/event/replay boundaries, and
    acceptance criteria. Use exact project vocabulary.
 4. Invoke `start-work` and journal the investigation when the work has a
    Redmine ticket. Invoke `adr-wiki` for Redmine hierarchy and formatting.
+5. Separate the requested architectural decision from external enabling
+   prerequisites. Record prerequisites as activation blockers/non-goals unless
+   the user explicitly authorizes deciding them or the architecture cannot be
+   evaluated without that choice.
 
 ## 2. Research before recommending
 
@@ -70,6 +77,13 @@ inference). Specify:
 - privacy/security controls and explicit non-goals;
 - migration/upcasting and rollback plan where persisted data is affected;
 - risks, mitigations, and conditions that would trigger a new ADR.
+
+For configurable policy that changes deterministic interpretation, bind the
+selected value into the canonical identity/digest contract and keep compiled
+constants as outer admissibility maxima. For machine-readable schemas, review
+formal cardinality/optionality operators as code. Enumerate positional fields,
+signers, digest preimages, and outbound digest references; reject accidental
+self-edges/cycles and require closed numeric-enum mappings before review.
 
 Reject alternatives with concrete reasons. Do not write vague conclusions such
 as “more flexible” or “industry standard.”
@@ -150,6 +164,11 @@ Before presenting the ADR, re-read it and verify:
       decorative visual was added.
 - [ ] Replay, security/privacy, compatibility/migration, operational, and
       licence/supply-chain effects are addressed or declared out of scope.
+- [ ] Existing canonical ADR scope was checked before proposing new design work.
+- [ ] Enabling prerequisites did not silently broaden the decision boundary.
+- [ ] Formal cardinalities, field labels, enum mappings, and digest dependency
+      graph agree with the prose and are acyclic where required.
+- [ ] Deterministic configurable policy is identity-bound, not only range-checked.
 - [ ] Risks include a mitigation or an explicit acceptance decision.
 - [ ] Redmine page is Markdown, parented under `ADR`, marked Proposed, and
       journaled on the ticket.

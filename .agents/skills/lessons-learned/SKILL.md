@@ -10,7 +10,7 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 ## Commits and worktrees
 
-- **Never `git add -A`.** It stages everything including skills files with pre-existing yamllint issues, stray config files (`opencode.json`, `skills-lock.json`). Stage only the files you changed: `git add path/to/changed/file.rs`.
+- **Never `git add -A`.** It stages everything including skills files with pre-existing yamllint issues and unrelated local configuration. Stage only the files you changed: `git add path/to/changed/file.rs`.
 
 - **Worktree changes can be lost.** When a worktree is force-removed, uncommitted changes in it are gone. Commit from the worktree before removing it. Push from the worktree, then merge into main from the main checkout.
 
@@ -24,11 +24,17 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Reconcile a shared PR immediately before pushing.** Concurrent workers can land equivalent or overlapping fixes while a rebase or hook is running. Fetch the PR branch, compare the merge base and commits, rebase onto its current tip, and drop patches already present. Never force-push a shared branch to replace a concurrent update.
 
+- **Publish only dependency-complete shared-branch commits.** Parallel agents may prepare disjoint edits, but a slice that depends on uncommitted coordinator work must not be pushed alone. Integrate and commit one coherent state, or isolate independently mergeable commits in separate worktrees.
+
+- **Respect explicit local resource limits.** When local Cargo, coverage, mutation, or formatter work would violate a stated storage/memory constraint, use unchanged hosted gates for that evidence and record the limitation. Do not lower scope or thresholds, and do not treat a capacity estimate as authorization to run locally.
+
 ## Code edits
 
 - **Use the repository edit tool for multi-line changes.** `sed` and inline rewrite scripts can corrupt source when a pattern or snapshot is stale. Prefer `apply_patch`, keep the change narrow, and inspect the diff immediately.
 
 - **Restore a corrupted file from a known baseline before repairing it.** Preserve any intended changes first, then use a file-scoped restore and reapply the change with the edit tool. Never repair a damaged file by guessing at the original text.
+
+- **Audit compile-facing public paths when Cargo must run remotely.** Trace every new integration-test import through the crate root, check edited scopes for helper-name shadowing, and inspect the complete namespace-facing diff. A public item inside a module is not necessarily exported from the crate root, and formatting cannot prove name resolution.
 
 - **Removing an implementation does not remove its product claim.** After deleting code, search the README, examples, roadmap pages, and external documentation for stale promises and update or remove them.
 
@@ -44,9 +50,13 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Coverage rule: delete, don't exempt.** If new code can't be covered by a test, remove the code — don't use `coverage(off)` on production code. Treat the coverage threshold as a design constraint.
 
+- **Close coverage gaps in material semantic batches.** Use the exact hosted artifact to group missed changed regions by file and behavior, then add public-boundary tests or remove unreachable branches in one coherent batch. Report per-file before/after counts; crossing the aggregate threshold alone does not prove changed code is adequately exercised.
+
 - **Run every applicable quality gate after each code change.** Include review fixes and restart gates from the new commit. Run the documented local format, test, lint, and coverage checks; only when the documented coverage instrumentation exhausts local memory may the unchanged hosted coverage gate serve as the fallback, with thresholds intact and logs inspected.
 
 - **Choose Rust constructs deliberately when coverage evidence matters.** Equivalent macros and control-flow forms can create different LLVM regions; prefer the idiomatic form that keeps behavior clear and measurable.
+
+- **Treat coverage and complexity as coupled constraints.** Helper extraction, error propagation, and decoder flattening can improve one metric while adding uncovered residual regions or pathological formatter work. Accept the refactor only when control flow remains linearly auditable and both machine-readable reports improve without weakened semantics.
 
 - **Do not trade error semantics for coverage.** Converting a fallible public or codec API into an unconditional abort merely to remove a coverage region weakens diagnostics and changes the contract. Preserve the `Result` boundary, then cover its success and error behavior through the public seam.
 

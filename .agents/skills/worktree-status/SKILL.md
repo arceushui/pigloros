@@ -22,6 +22,8 @@ agents unless the user separately asks for an action.
 3. For a worktree with an active or completed implementation agent, report the
    latest known tests, coverage, review, and merge status. Say `unknown` when
    no evidence is available; do not claim a gate passed from an old result.
+   Keep three facts separate: focused/component gate results, the complete
+   pull-request required-check rollup, and the hosting service's merge state.
 4. Query canonical Redmine ADRs only when the user asks for ADR review status.
    Local worktrees do not mirror Redmine wiki pages, so distinguish local code
    state from canonical ADR status.
@@ -47,6 +49,9 @@ Use clear delivery states: `active`, `awaiting review`, `ready to merge`,
 `blocked`, `dormant`, `stale`, or `cleanup candidate`. Do not call a worktree
 ready to merge while it has uncommitted changes, unresolved review findings,
 failed/missing required gates, or an unreviewed required ADR.
+Passing focused tests is not completion or merge readiness when the aggregate
+rollup is red, pending, skipped unexpectedly, or unknown—even if the failure
+appears inherited or unrelated.
 
 ## Your intervention
 
@@ -85,5 +90,6 @@ Before sending the status:
 - [ ] Separate live-agent status from worktree state.
 - [ ] Mark unknown evidence as unknown.
 - [ ] Do not confuse a local search with canonical Redmine ADR status.
+- [ ] Report component gates, aggregate PR checks, and merge state separately.
 - [ ] Do not recommend deletion of dirty worktrees without explicit approval.
 - [ ] Include the **Your intervention** section, even when it says none.

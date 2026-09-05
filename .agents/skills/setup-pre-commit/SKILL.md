@@ -34,6 +34,11 @@ npx husky init
 
 This creates `.husky/` dir and adds `prepare: "husky"` to package.json.
 
+If the repository already uses a managed hook directory, repair or regenerate
+it through the owning tool rather than recreating individual hook files by
+hand. Verify the configured hook path and executable lifecycle hooks separately
+from running the quality checks themselves.
+
 ### 4. Create `.husky/pre-commit`
 
 Write this file (no shebang needed for Husky v9+):
@@ -45,6 +50,13 @@ npm run test
 ```
 
 **Adapt**: Replace `npm` with detected package manager. If repo has no `typecheck` or `test` script in package.json, omit those lines and tell the user.
+
+Map the complete hook before adding commands. Each expensive deterministic
+transformation (formatter, generator, type build) runs at most once per commit;
+later checks must consume the staged/resulting bytes rather than launch the same
+tool again. Prefer staged-file scope when it preserves the repository policy,
+and emit per-tool start/finish timing so slow work is distinguishable from a
+deadlock.
 
 ### 5. Create `.lintstagedrc`
 
@@ -77,10 +89,13 @@ Only create if no Prettier config exists. Use these defaults:
 - [ ] `prepare` script in package.json is `"husky"`
 - [ ] `prettier` config exists
 - [ ] Run `npx lint-staged` to verify it works
+- [ ] No expensive formatter or generator is invoked by more than one hook phase
+- [ ] Timing output identifies the active tool during long hook execution
 
 ### 8. Commit
 
-Stage all changed/created files and commit with message: `Add pre-commit hooks (husky + lint-staged + prettier)`
+Stage only the hook/configuration files changed by this task and commit with
+message: `Add pre-commit hooks (husky + lint-staged + prettier)`
 
 This will run through the new pre-commit hooks — a good smoke test that everything works.
 

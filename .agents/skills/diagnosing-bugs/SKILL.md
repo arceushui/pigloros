@@ -37,6 +37,8 @@ Treat the loop as a product. Once you have _a_ loop, **tighten** it:
 - Can I make it faster? (Cache setup, skip unrelated init, narrow the test scope.)
 - Can I make the signal sharper? (Assert on the specific symptom, not "didn't crash".)
 - Can I make it more deterministic? (Pin time, seed RNG, isolate filesystem, freeze network.)
+- Does the runner preserve process-local fixture caches and setup amortization,
+  or does per-test process isolation repeat expensive work?
 
 A 30-second flaky loop is barely better than no loop; a 2-second deterministic one is tight — a debugging superpower.
 
@@ -68,6 +70,28 @@ Confirm:
 - [ ] The loop produces the failure mode the **user** described — not a different failure that happens to be nearby. Wrong bug = wrong fix.
 - [ ] The failure is reproducible across multiple runs (or, for non-deterministic bugs, reproducible at a high enough rate to debug against).
 - [ ] You have captured the exact symptom (error message, wrong output, slow timing) so later phases can verify the fix actually addresses it.
+
+Classify the failing layer before editing: compile/lint, behavior, coverage,
+mutation build, mutation test, workflow metadata/fan-in, transport, or hosted
+tool execution. A failed formatter process with no source finding is not a
+formatting defect; retry the exact hosted job once, then isolate its file batch,
+cache, and runner state if it repeats.
+
+For a hosted failure outside the feature diff, compare current `main`, open
+fixes, and independently green commits before expanding scope. Retry the exact
+job once; if an independently validated fix owns the failure, record that owner
+instead of duplicating it. For fan-in failures, use the change-scope decision to
+distinguish an expected path-scoped `skipped` result from an omitted required
+job.
+
+Preserve stable boundary context in command-line errors so a hosted-only run
+identifies the failing construction, encoding, signing, persistence, or
+verification layer while retaining the underlying typed error.
+
+For mutation timeouts, inspect the scenario outcome and individual log. Separate
+cold `cargo test --no-run` build allowance from the strict Test-phase timeout.
+If tests started, trace the last running tests and shared fixture complexity at
+domain maxima before changing timeout policy.
 
 ### Minimise
 
@@ -105,6 +129,21 @@ Tool preference:
 
 **Perf branch.** For performance regressions, logs are usually wrong. Instead: establish a baseline measurement (timing harness, `performance.now()`, profiler, query plan), then bisect. Measure first, fix second.
 
+Vary one cost axis at a time and preserve raw samples plus environment metadata.
+After adding a guard, inspect every caller and prove that the guard dominates
+the named expensive operation; a correct guard placed after the work is not a
+performance fix.
+
+For numeric regression gates, compare underlying values independently of the
+tool's categorical label and define representational equality explicitly (for
+example, an agreed ULP bound). Lock misleading labels and boundary noise with
+deterministic fixtures.
+
+For asynchronous tests, synchronize on the exact semantic prerequisite with a
+bounded deadline and child-exit detection—not sleeps or incidental file counts.
+When exact coverage baselines expose scheduling-dependent paths, replace
+incidental race coverage with deterministic failure injection at the public seam.
+
 ## Phase 5 — Fix + regression test
 
 Write the regression test **before the fix** — but only if there is a **correct seam** for it.
@@ -121,6 +160,18 @@ If a correct seam exists:
 4. Watch it pass.
 5. Re-run the Phase 1 feedback loop against the original (un-minimised) scenario.
 
+When a mandatory security check moves earlier, update negative tests to assert
+the earliest rejecting boundary. Keep separate downstream tests whose inputs
+remain valid through every earlier gate.
+
+For coverage-only failures, compare file totals, mapped zero-count source
+segments, and zero-count generic instantiations before adding tests. If mapped
+source is fully exercised, classify residual monomorphization/reporting gaps and
+seek an explicit engineering decision before reshaping a sound abstraction.
+Intersect zero-count mapped segments with changed diff hunks and classify them
+as baseline, meaningful behavior, test-fixture code, or unreachable defensive
+code; an aggregate percentage is not changed-region evidence.
+
 ## Phase 6 — Cleanup + post-mortem
 
 Required before declaring done:
@@ -130,5 +181,6 @@ Required before declaring done:
 - [ ] All `[DEBUG-...]` instrumentation removed (`grep` the prefix)
 - [ ] Throwaway prototypes deleted (or moved to a clearly-marked debug location)
 - [ ] The hypothesis that turned out correct is stated in the commit / PR message — so the next debugger learns
+- [ ] The fix is proven at the full caller boundary, not only in an isolated helper
 
 **Then ask: what would have prevented this bug?** If the answer involves architectural change (no good test seam, tangled callers, hidden coupling) hand off to the `/improve-codebase-architecture` skill with the specifics. Make the recommendation **after** the fix is in, not before — you have more information now than when you started.

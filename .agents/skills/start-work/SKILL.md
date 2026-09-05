@@ -39,6 +39,11 @@ Status ID 2 = "In Progress". Always use the `X-Redmine-API-Key` header.
 
 ## Step 4 — Log the start
 
+Prefer the configured structured Redmine tool. Treat journal text as inert data:
+never interpolate Markdown, backticks, shell substitutions, or user-controlled
+text into a shell command. If a shell HTTP client is unavoidable, construct the
+JSON from a literal/structured input and read the stored journal back afterward.
+
 Add a journal note recording that work has begun:
 
 ```bash
@@ -79,4 +84,10 @@ Add a final journal note summarising the work before closing.
 
 ## Completion criterion
 
-The ticket's journal contains notes for every significant action taken during the session, and the status reflects the current state (`In Progress` during work, `Resolved`/`Accepted` when done).
+The ticket's journal contains notes for every significant action taken during
+the session, and the status reflects the current state (`In Progress` during
+work, `Resolved`/`Accepted` when done). Before resolving, audit every evidence
+class required by the ticket, ADR, repository policy, or standing instruction:
+final-head hosted gates and an independent full-diff review are separate. Do
+not resolve while a required final review is missing or has unresolved blockers.
+Read the canonical ticket back after the final update.
