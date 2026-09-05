@@ -13,7 +13,6 @@ use pos_core::{
     ids::{EntityId, EventId, TimelineId},
     State,
 };
-use pos_state::ProjectionRegistry;
 use std::borrow::Cow;
 
 /// One host-validated Timeline interval in recovery evidence.
@@ -210,22 +209,11 @@ impl SnapshotAnchor {
 
 impl ObservationSnapshot {
     #[must_use]
-    #[cfg(test)]
     pub(crate) fn from_subscriptions<'a>(
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
         state_for: impl Fn(&ProjectionKey) -> Option<State>,
     ) -> Self {
         Self::capture(None, subscriptions, state_for)
-    }
-
-    #[must_use]
-    pub(crate) fn from_projection_registry<'a>(
-        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
-        projections: &ProjectionRegistry,
-    ) -> Self {
-        Self::capture(None, subscriptions, |key| {
-            projections.state_for(key.entity_id()).cloned()
-        })
     }
 
     #[must_use]

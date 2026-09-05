@@ -1491,14 +1491,21 @@ impl AuthorityEvaluatorV1 {
         grant_chain: &DelegationChainV1,
         trusted_registry: &AuthorityRegistrySnapshotV1,
     ) -> AuthorizationDecisionV1 {
-        let evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
+        let mut evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
         let request_digest = request_digest(request);
         let grant_chain_bindings = if evaluation.grant_evidence_is_trusted {
             grant_chain
                 .grants
                 .iter()
-                .map(|grant| grant.binding_digest().unwrap_or(Hash::zero()))
-                .collect()
+                .map(CapabilityGrantV1::binding_digest)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|_| {
+                    evaluation = AuthorizationEvaluationV1::denied(
+                        AuthorizationOutcomeV1::IndeterminateFailClosed,
+                        Some(AuthorityErrorV1::ProvenanceMissing),
+                    );
+                    Vec::new()
+                })
         } else {
             Vec::new()
         };
@@ -2793,7 +2800,9 @@ fn validate_decision(
         .and_then(|()| validate_plugin_context(decoded.plugin_id, decoded.installation_id))
         .and_then(|()| validate_decision_evidence(&decoded))
         .and_then(|()| {
-            if decision_digest(&decoded) == decoded.decision_digest {
+            if decoded.acting_delegates.len() > usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1 {
+                Err(AuthorityErrorV1::FieldOutOfBounds)
+            } else if decision_digest(&decoded) == decoded.decision_digest {
                 Ok(decoded)
             } else {
                 Err(AuthorityErrorV1::DigestMismatch)

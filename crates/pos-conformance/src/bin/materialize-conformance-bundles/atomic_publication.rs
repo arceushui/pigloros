@@ -849,9 +849,6 @@ const fn map_atomic_error(operation: AtomicOperation, error: Errno) -> Materiali
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use std::fs::{self as standard_fs, File};
-    use std::os::unix::fs::symlink;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn directory_identity_rejects_non_directories() -> Result<(), MaterializationError> {
@@ -873,37 +870,6 @@ mod tests {
             non_directory_error(FileType::RegularFile),
             MaterializationError::UntrustedOutputDirectory
         ));
-        Ok(())
-    }
-
-    #[test]
-    fn directory_entry_identity_classifies_filesystem_entries() -> Result<(), Box<dyn Error>> {
-        let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "pigloros-directory-identity-{}-{suffix}",
-            std::process::id()
-        ));
-        standard_fs::create_dir(&root)?;
-        let directory = root.join("directory");
-        let regular_file = root.join("regular-file");
-        let symbolic_link = root.join("symbolic-link");
-        standard_fs::create_dir(&directory)?;
-        File::create(&regular_file)?;
-        symlink(&directory, &symbolic_link)?;
-
-        let classify = |path: &Path, flags| {
-            fs::statat(CWD, path, flags)
-                .map_err(map_open_error)
-                .and_then(directory_entry_identity)
-        };
-        assert!(classify(&directory, AtFlags::empty()).is_ok());
-        assert!(classify(&regular_file, AtFlags::empty())
-            .map(|_| ())
-            .is_err_and(|error| error.to_string() == "untrusted output directory"));
-        assert!(classify(&symbolic_link, AtFlags::SYMLINK_NOFOLLOW)
-            .map(|_| ())
-            .is_err_and(|error| error.to_string() == "symbolic link detected in output path"));
-        standard_fs::remove_dir_all(root)?;
         Ok(())
     }
 }

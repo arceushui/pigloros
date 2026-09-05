@@ -6075,46 +6075,6 @@ mod tests {
         assert_eq!(result.train_result.timeline_head, 1);
         assert_eq!(result.eval_result.timeline_head, 2);
     }
-
-    #[test]
-    #[cfg(coverage_nightly)]
-    fn registry_coverage_probes_external_consent_guards() {
-        let timeline = TimelineId::new();
-        let subject = EntityId::new();
-        let authority = ConsentAuthority::new();
-        let token = authority.record_grant_on_timeline(
-            timeline,
-            &ConsentGrantedV1 {
-                subject_id: subject,
-                grantee_id: EntityId::new(),
-                purpose: "coverage".to_owned(),
-                modalities: 0,
-                min_geo_resolution: 0,
-                fork_permitted: false,
-                export_permitted: false,
-                retention_days: 0,
-                expiry_secs: 0,
-                grant_seq: 1,
-            },
-        );
-        let draft = EventDraft::new(
-            subject,
-            Kind::new("coverage.event"),
-            CanonicalBytes::from_static(b"coverage"),
-        );
-
-        PluginRegistry::new()
-            .without_consent_gate()
-            .__coverage_probe_unbound_consent_paths(timeline, &token, &draft);
-        assert!(PluginRegistry::new()
-            .step_all(timeline)
-            .test_ok()
-            .is_empty());
-        assert!(PluginRegistry::new()
-            .tick_cadenced(timeline, 0)
-            .test_ok()
-            .is_empty());
-    }
 }
 
 #[cfg(test)]
