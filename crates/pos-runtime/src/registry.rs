@@ -2739,6 +2739,10 @@ mod tests {
         );
         let unbound = PluginRegistry::new();
         assert!(unbound.clone_consent_gate().is_some());
+        assert!(PluginRegistry::new()
+            .with_consent_gate(Arc::new(ConsentAuthority::new()))
+            .clone_consent_gate()
+            .is_some());
         assert!(matches!(
             unbound.projection_state_for_reducer(
                 timeline,
@@ -3598,6 +3602,104 @@ mod tests {
                 )
                 .test_err(),
             RuntimeError::ConsentDraft { .. }
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_covers_empty_success_and_rejection_paths() {
+        let timeline = TimelineId::new();
+
+        let mut no_pending = PluginRegistry::new();
+        let mut no_pending_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(matches!(
+            no_pending.append_and_commit_step_at(no_pending_store.as_mut(), Seq::ZERO, 0, &[]),
+            Err(RuntimeError::PendingDriverStep)
+        ));
+
+        let mut public_success = PluginRegistry::new();
+        public_success
+            .step_all_anchored(timeline, Seq::ZERO)
+            .test_ok();
+        let mut public_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(public_success
+            .append_and_commit_step_at(public_store.as_mut(), Seq::ZERO, 0, &[])
+            .test_ok()
+            .is_empty());
+
+        let mut public_store_error = PluginRegistry::new();
+        public_store_error
+            .step_all_anchored(timeline, Seq::ZERO)
+            .test_ok();
+        let mut failing_store = AppendFailStore;
+        assert!(matches!(
+            public_store_error
+                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &[])
+                .test_err(),
+            RuntimeError::Store(CoreError::Storage(_))
+        ));
+
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(
+            timeline,
+            &ConsentGrantedV1 {
+                subject_id: subject,
+                grantee_id: EntityId::new(),
+                purpose: "append-success".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let mut protected_success = PluginRegistry::new().with_consent_authority(authority);
+        protected_success
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .test_ok();
+        let mut protected_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(protected_success
+            .append_and_commit_step_at(protected_store.as_mut(), Seq::ZERO, 0, &[])
+            .test_ok()
+            .is_empty());
+
+        let reject_authority = ConsentAuthority::new();
+        let reject_token = reject_authority.record_grant_on_timeline(
+            timeline,
+            &ConsentGrantedV1 {
+                subject_id: subject,
+                grantee_id: EntityId::new(),
+                purpose: "append-reject".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let mut protected_reject = PluginRegistry::new().with_consent_authority(reject_authority);
+        protected_reject
+            .step_all_anchored_protected(timeline, Seq::ZERO, reject_token, 0, &[])
+            .test_ok();
+        let forged = [EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            CanonicalBytes::from_static(b"forged"),
+        )];
+        let mut protected_reject_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(matches!(
+            protected_reject.append_and_commit_step_at(
+                protected_reject_store.as_mut(),
+                Seq::ZERO,
+                0,
+                &forged,
+            ),
+            Err(RuntimeError::ConsentDraft { .. })
         ));
     }
 

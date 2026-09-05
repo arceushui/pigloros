@@ -1167,4 +1167,17 @@ fn public_registry_registration_and_metadata_cover_library_paths() {
             [Kind::new("action.type")],
         )
         .is_err());
+
+    let timeline = TimelineId::new();
+    let mut anchored = PluginRegistry::new();
+    assert!(test_ok(anchored.tick_cadenced_anchored(timeline, 0, Seq::ZERO)).is_empty());
+    test_ok(anchored.commit_step_at(Seq::ZERO, 0));
+
+    use pos_store::{open_store, StoreConfig};
+    let mut append = PluginRegistry::new();
+    test_ok(append.step_all_anchored(timeline, Seq::ZERO));
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    assert!(
+        test_ok(append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[],)).is_empty()
+    );
 }
