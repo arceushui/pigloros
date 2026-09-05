@@ -167,10 +167,10 @@ mod coverage_focused {
             CanonicalBytes::from_vec(vec![0; MAX_PROPOSED_ACTION_PAYLOAD_BYTES + 1]),
             Kind::new("coverage.action.submit"),
         );
-        assert_eq!(
+        assert!(matches!(
             PluginRegistry::new().submit_action(&proposal),
             Err(ActionRejected::PayloadTooLarge { .. })
-        );
+        ));
 
         let unknown = ProposedAction::new(
             Kind::new("coverage.action"),
