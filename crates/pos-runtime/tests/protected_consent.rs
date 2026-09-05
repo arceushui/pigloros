@@ -846,7 +846,12 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
 #[test]
 fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
     let timeline = TimelineId::new();
+    assert_recovery_evidence_errors(timeline);
+    assert_empty_registry_paths(timeline);
+    assert_public_authorization_edges(timeline);
+}
 
+fn assert_recovery_evidence_errors(timeline: TimelineId) {
     let first_event_is_not_one = [projection_event(EntityId::new(), "recovery.event", 2)];
     assert!(matches!(
         test_err(PluginRegistry::new().restore_driver_state(
@@ -882,7 +887,9 @@ fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
             reason: "source Events must reach the final Timeline bound"
         }
     ));
+}
 
+fn assert_empty_registry_paths(timeline: TimelineId) {
     let mut driverless = PluginRegistry::new();
     let plugin = configured_plugin("driverless", &[], false, false);
     test_ok(driverless.register(&plugin, None, None));
@@ -926,7 +933,9 @@ fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
         test_err(subscribed_anchored.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
+}
 
+fn assert_public_authorization_edges(timeline: TimelineId) {
     drop(test_ok(PluginRegistry::new().into_authorized_projections(
         timeline,
         Seq::from_u64(1),
