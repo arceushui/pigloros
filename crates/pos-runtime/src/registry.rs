@@ -1056,6 +1056,36 @@ impl PluginRegistry {
         Ok(())
     }
 
+    /// Exercise defensive consent guards from an external coverage target.
+    ///
+    /// This seam exists only in coverage builds because the normal public
+    /// operation fence rejects an unbound registry before either private guard
+    /// can be reached.
+    #[cfg(coverage_nightly)]
+    #[doc(hidden)]
+    pub fn __coverage_probe_unbound_consent_paths(
+        &self,
+        timeline: pos_core::ids::TimelineId,
+        token: &ConsentCapabilityToken,
+        draft: &pos_core::event::EventDraft,
+    ) {
+        let _ = self.authorize_snapshot_subscriptions(
+            timeline,
+            Seq::ZERO,
+            &OperationContext::Protected {
+                token: token.clone(),
+                now_secs: 0,
+            },
+            &[],
+        );
+        let _ = self.validate_protected_drafts(
+            timeline,
+            &OperationContext::Public,
+            Seq::ZERO,
+            std::slice::from_ref(draft),
+        );
+    }
+
     fn reject_unanchored_drivers(&self) -> Result<(), RuntimeError> {
         self.plugins
             .values()
