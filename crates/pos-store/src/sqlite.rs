@@ -11529,6 +11529,275 @@ mod tests {
             Err(ErasureErrorV1::ReceiptCommitFailed)
         );
     }
+
+    #[test]
+    fn erasure_sql_helpers_reject_conflicting_exact_rows_and_indexes() {
+        let store = new_store();
+        let request = ErasureReferenceV1::from_digest([1; 32]);
+        let first = ErasureReferenceV1::from_digest([2; 32]);
+        let second = ErasureReferenceV1::from_digest([3; 32]);
+
+        assert_eq!(reference_from_sql(vec![2; 32]).test_ok(), first);
+        assert_eq!(
+            reference_from_sql(vec![2; 31]),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        insert_sqlite_exact(&store.conn, first, b"first").test_ok();
+        insert_sqlite_exact(&store.conn, first, b"first").test_ok();
+        assert_eq!(
+            insert_sqlite_exact(&store.conn, first, b"second"),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            load_sqlite_erasure_evidence(&store.conn, first).test_ok(),
+            b"first"
+        );
+        assert_eq!(
+            load_sqlite_erasure_evidence(&store.conn, second),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let indexes = [
+            (
+                SqliteErasureIndex::Attempt,
+                ErasureIndexInsertV1::AttemptPage {
+                    ordinal: 0,
+                    reference: first,
+                },
+            ),
+            (
+                SqliteErasureIndex::Scope,
+                ErasureIndexInsertV1::ScopeNode {
+                    ordinal: 1,
+                    reference: first,
+                },
+            ),
+            (
+                SqliteErasureIndex::AdministrativeResolution,
+                ErasureIndexInsertV1::AdministrativeResolution {
+                    ordinal: 2,
+                    reference: first,
+                },
+            ),
+        ];
+        for (kind, insert) in indexes {
+            insert_sqlite_index(&store.conn, request, insert).test_ok();
+            insert_sqlite_index(&store.conn, request, insert).test_ok();
+            let ordinal = match insert {
+                ErasureIndexInsertV1::AttemptPage { ordinal, .. }
+                | ErasureIndexInsertV1::ScopeNode { ordinal, .. }
+                | ErasureIndexInsertV1::AdministrativeResolution { ordinal, .. } => ordinal,
+            };
+            assert_eq!(
+                sqlite_index_ref(&store.conn, kind, request, ordinal).test_ok(),
+                Some(first)
+            );
+            assert_eq!(sqlite_index_count(&store.conn, kind, request).test_ok(), 1);
+        }
+        assert_eq!(
+            insert_sqlite_index(
+                &store.conn,
+                request,
+                ErasureIndexInsertV1::AttemptPage {
+                    ordinal: 0,
+                    reference: second,
+                },
+            ),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            insert_sqlite_index(
+                &store.conn,
+                request,
+                ErasureIndexInsertV1::AttemptPage {
+                    ordinal: u64::MAX,
+                    reference: second,
+                },
+            ),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            sqlite_index_ref(&store.conn, SqliteErasureIndex::Attempt, request, u64::MAX,),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+    }
+
+    #[test]
+    fn erasure_sql_helpers_validate_durable_state_and_effect_rows() {
+        let store = new_store();
+        let request = ErasureReferenceV1::from_digest([4; 32]);
+        let state = ErasureReferenceV1::from_digest([5; 32]);
+        let missing = ErasureReferenceV1::from_digest([6; 32]);
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_states(state_digest,request_digest,state_cbor)
+                 VALUES(?1,?2,?3)",
+                params![
+                    state.digest().as_slice(),
+                    request.digest().as_slice(),
+                    b"state"
+                ],
+            )
+            .test_ok();
+        validate_sqlite_state_row(&store.conn, request, state, b"state").test_ok();
+        assert_eq!(
+            validate_sqlite_state_row(&store.conn, request, state, b"other"),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            validate_sqlite_state_row(&store.conn, missing, state, b"state"),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            validate_sqlite_state_row(&store.conn, request, missing, b"state"),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let manifest = ErasureReferenceV1::from_digest([7; 32]);
+        let effect = pos_core::ErasureCasEffectV1::None;
+        let bytes = effect.to_canonical_cbor().test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor)
+                 VALUES(?1,?2,NULL,?3)",
+                params![
+                    manifest.digest().as_slice(),
+                    effect.identity().digest().as_slice(),
+                    bytes
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            load_sqlite_erasure_effect(&store.conn, manifest).test_ok(),
+            effect
+        );
+        assert_eq!(
+            load_sqlite_erasure_effect(&store.conn, missing),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET effect_digest=?1 WHERE manifest_digest=?2",
+                params![missing.digest().as_slice(), manifest.digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            load_sqlite_erasure_effect(&store.conn, manifest),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET effect_digest=zeroblob(31) WHERE manifest_digest=?1",
+                params![manifest.digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            load_sqlite_erasure_effect(&store.conn, manifest),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET effect_digest=?1,effect_cbor=X'FF'
+                 WHERE manifest_digest=?2",
+                params![
+                    effect.identity().digest().as_slice(),
+                    manifest.digest().as_slice()
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            load_sqlite_erasure_effect(&store.conn, manifest),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_states SET request_digest=zeroblob(31) WHERE state_digest=?1",
+                params![state.digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            validate_sqlite_state_row(&store.conn, request, state, b"state"),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn erasure_sql_helpers_map_missing_tables_and_invalid_rows() {
+        assert!(erasure_schema_ddl().contains("PRIMARY KEY (request_digest, error_digest)"));
+
+        let request = ErasureReferenceV1::from_digest([8; 32]);
+        let reference = ErasureReferenceV1::from_digest([9; 32]);
+        let store = new_store();
+        store
+            .conn
+            .execute_batch("DROP TABLE erasure_attempt_pages")
+            .test_ok();
+        assert_eq!(
+            sqlite_index_ref(&store.conn, SqliteErasureIndex::Attempt, request, 0),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        assert_eq!(
+            sqlite_index_count(&store.conn, SqliteErasureIndex::Attempt, request),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        assert_eq!(
+            insert_sqlite_index(
+                &store.conn,
+                request,
+                ErasureIndexInsertV1::AttemptPage {
+                    ordinal: 0,
+                    reference,
+                },
+            ),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let state_store = new_store();
+        state_store
+            .conn
+            .execute_batch("DROP TABLE erasure_states")
+            .test_ok();
+        assert_eq!(
+            load_sqlite_erasure_state_row(&state_store.conn, reference).map(|_| ()),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        let effect_store = new_store();
+        effect_store
+            .conn
+            .execute_batch("DROP TABLE erasure_effects")
+            .test_ok();
+        assert_eq!(
+            load_sqlite_erasure_effect(&effect_store.conn, reference),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        let evidence_store = new_store();
+        evidence_store
+            .conn
+            .execute_batch("DROP TABLE erasure_evidence")
+            .test_ok();
+        assert_eq!(
+            insert_sqlite_exact(&evidence_store.conn, reference, b"object"),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        assert_eq!(
+            load_sqlite_erasure_evidence(&evidence_store.conn, reference),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+    }
 }
 
 #[cfg(test)]

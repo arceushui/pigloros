@@ -5405,10 +5405,27 @@ mod tests {
     }
 
     #[test]
-    fn memory_effect_insert_accepts_only_exact_duplicates() {
+    fn memory_erasure_staging_accepts_only_exact_duplicates() {
         let manifest = ErasureReferenceV1::from_digest([1; 32]);
         let effect = pos_core::ErasureCasEffectV1::None;
         let bytes = effect.to_canonical_cbor().test_ok();
+
+        let reference = ErasureReferenceV1::from_digest([2; 32]);
+        let mut exact = BTreeMap::new();
+        let mut staged_exact = BTreeMap::new();
+        assert!(stage_exact(&exact, &mut staged_exact, reference, b"first").is_ok());
+        assert!(stage_exact(&exact, &mut staged_exact, reference, b"first").is_ok());
+        assert_eq!(
+            stage_exact(&exact, &mut staged_exact, reference, b"second"),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        exact.insert(reference, b"first".to_vec());
+        assert!(stage_exact(&exact, &mut BTreeMap::new(), reference, b"first").is_ok());
+        assert_eq!(
+            stage_exact(&exact, &mut BTreeMap::new(), reference, b"second"),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
         let mut effects = BTreeMap::new();
         assert!(insert_effect_exact(&mut effects, manifest, &effect, &bytes).is_ok());
         assert!(insert_effect_exact(&mut effects, manifest, &effect, &bytes).is_ok());
@@ -5418,6 +5435,53 @@ mod tests {
         };
         let other_bytes = other.to_canonical_cbor().test_ok();
         assert!(insert_effect_exact(&mut effects, manifest, &other, &other_bytes).is_err());
+        assert!(stage_effect(&effects, &mut BTreeMap::new(), manifest, &effect, &bytes,).is_ok());
+        assert_eq!(
+            stage_effect(
+                &effects,
+                &mut BTreeMap::new(),
+                manifest,
+                &other,
+                &other_bytes,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut staged_effects = BTreeMap::new();
+        assert!(stage_effect(
+            &BTreeMap::new(),
+            &mut staged_effects,
+            manifest,
+            &effect,
+            &bytes,
+        )
+        .is_ok());
+        assert!(stage_effect(
+            &BTreeMap::new(),
+            &mut staged_effects,
+            manifest,
+            &effect,
+            &bytes,
+        )
+        .is_ok());
+        assert_eq!(
+            stage_effect(
+                &BTreeMap::new(),
+                &mut staged_effects,
+                manifest,
+                &other,
+                &other_bytes,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            decode_memory_effect(&(effect.identity(), vec![0xff])),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            decode_memory_effect(&(ErasureReferenceV1::from_digest([9; 32]), bytes.clone())),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
 
         let request = ErasureReferenceV1::from_digest([3; 32]);
         let mut indexes = BTreeMap::new();
@@ -5427,6 +5491,19 @@ mod tests {
         assert!(insert_index(&mut indexes, request, 0, first).is_ok());
         assert_eq!(
             insert_index(&mut indexes, request, 0, second),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let mut staged_indexes = BTreeMap::new();
+        assert!(stage_index(&BTreeMap::new(), &mut staged_indexes, request, 0, first,).is_ok());
+        assert!(stage_index(&BTreeMap::new(), &mut staged_indexes, request, 0, first,).is_ok());
+        assert_eq!(
+            stage_index(&BTreeMap::new(), &mut staged_indexes, request, 0, second,),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert!(stage_index(&indexes, &mut BTreeMap::new(), request, 0, first,).is_ok());
+        assert_eq!(
+            stage_index(&indexes, &mut BTreeMap::new(), request, 0, second,),
             Err(ErasureErrorV1::PolicyConflict)
         );
     }
