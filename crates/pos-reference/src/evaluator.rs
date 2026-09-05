@@ -54,13 +54,28 @@ pub struct CaseAttempt {
     pub family: u8,
     pub mode: u8,
     pub fixture_digest: [u8; 32],
-    pub schema: Vec<u8>,
-    pub payload: Vec<u8>,
-    pub auxiliary: Vec<Vec<u8>>,
+    pub schema: AttemptArtifact,
+    pub payload: AttemptArtifact,
+    pub auxiliary: Vec<AttemptArtifact>,
     pub budget: DeterministicBudget,
     pub watchdog_ms: u64,
     pub network_allowed: bool,
     pub capability_ids: Vec<String>,
+    pub transport_caps: AttemptTransportCaps,
+}
+
+/// One authenticated CPF1 member supplied to a public adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptArtifact {
+    pub digest: [u8; 32],
+    pub bytes: Vec<u8>,
+}
+
+/// Authenticated CPF1 limits that bound one adapter transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AttemptTransportCaps {
+    pub max_member_bytes: u64,
+    pub max_attempt_bytes: u64,
 }
 
 /// Closed semantic result returned by a public adapter.
@@ -309,7 +324,7 @@ fn evaluate_case(
     fixture: &Fixture,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
-    let attempt = case_attempt(bundle, fixture, bundle.mode)?;
+    let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
     let observation = adapter.execute(&attempt);
     enforce_observed_coordinate_limit(
         &observation,
@@ -341,19 +356,23 @@ fn case_attempt(
     bundle: &VerifiedBundle,
     fixture: &Fixture,
     mode: u8,
+    hard_caps: EvaluatorHardCaps,
 ) -> Result<CaseAttempt, EvaluatorError> {
-    let member_bytes = |path: &str| {
+    let member = |descriptor: &crate::profile::ArtifactDescriptor| {
         bundle
-            .member(path)
-            .map(|member| member.bytes.clone())
+            .member(&descriptor.member_path)
+            .map(|member| AttemptArtifact {
+                digest: descriptor.digest,
+                bytes: member.bytes.clone(),
+            })
             .ok_or(EvaluatorError::Bundle)
     };
-    let schema = member_bytes(&fixture.schema.member_path)?;
-    let payload = member_bytes(&fixture.payload.member_path)?;
+    let schema = member(&fixture.schema)?;
+    let payload = member(&fixture.payload)?;
     let auxiliary = fixture
         .auxiliary
         .iter()
-        .map(|descriptor| member_bytes(&descriptor.member_path))
+        .map(member)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(CaseAttempt {
         case_id: fixture.case_id.clone(),
@@ -368,6 +387,10 @@ fn case_attempt(
         watchdog_ms: fixture.watchdog_ms,
         network_allowed: fixture.network_allowed,
         capability_ids: fixture.capability_ids.clone(),
+        transport_caps: AttemptTransportCaps {
+            max_member_bytes: hard_caps.max_member_bytes,
+            max_attempt_bytes: hard_caps.max_total_bundle_bytes,
+        },
     })
 }
 

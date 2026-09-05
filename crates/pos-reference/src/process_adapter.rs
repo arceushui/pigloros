@@ -1,7 +1,6 @@
 //! Shell-free process adapter for public subject protocol executables.
 
 use std::ffi::OsString;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -13,15 +12,11 @@ use rustix::process::{kill_process_group, Pid, Signal};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use crate::adapter_transport::{decode_observation, encode_attempt};
+use crate::adapter_transport::{read_observation, write_attempt};
 use crate::evaluator::{AdapterError, CaseAttempt, SubjectAdapter, SubjectObservation};
 use crate::evaluator_protocol::SubjectAdapterKind;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
-const TRANSPORT_OVERHEAD_BYTES: u64 = 64 * 1024;
-const MAX_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
-const MAX_RESPONSE_BYTES_U64: u64 = 128 * 1024 * 1024;
-
 /// Out-of-process public adapter identity and executable invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessAdapter {
@@ -56,8 +51,6 @@ impl ProcessAdapter {
     }
 
     fn invoke(&self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
-        let request = encode_attempt(attempt).map_err(|_| AdapterError::ProtocolFailure)?;
-        let maximum_response = response_limit(attempt);
         let started = Instant::now();
         let watchdog = Duration::from_millis(attempt.watchdog_ms);
         let mut child = command(&self.program, &self.arguments)
@@ -72,10 +65,13 @@ impl ProcessAdapter {
         let (reader_tx, reader_rx) = mpsc::sync_channel(1);
         let writer_worker = writer_tx.clone();
         let reader_worker = reader_tx.clone();
-        let _writer =
-            thread::spawn(move || drop(writer_worker.send(write_request(stdin, &request))));
+        let request = attempt.clone();
+        let maximum_output = attempt.budget.output_bytes;
+        let _writer = thread::spawn(move || {
+            let _ignored = writer_worker.send(write_attempt(stdin, &request));
+        });
         let _reader = thread::spawn(move || {
-            drop(reader_worker.send(read_response(stdout, maximum_response)));
+            let _ignored = reader_worker.send(read_observation(stdout, maximum_output));
         });
         let status = loop {
             if let Some(status) = child
@@ -101,8 +97,7 @@ impl ProcessAdapter {
         if !status.success() || wrote.is_err() {
             return Err(AdapterError::Unavailable);
         }
-        let response = response.map_err(|_| AdapterError::ProtocolFailure)?;
-        decode_observation(&response).map_err(|_| AdapterError::ProtocolFailure)
+        response.map_err(|_| AdapterError::ProtocolFailure)
     }
 }
 
@@ -156,45 +151,4 @@ fn terminate(child: &mut std::process::Child) {
 fn terminate(child: &mut std::process::Child) {
     drop(child.kill());
     drop(child.wait());
-}
-
-fn response_limit(attempt: &CaseAttempt) -> usize {
-    let requested = attempt
-        .budget
-        .output_bytes
-        .saturating_add(TRANSPORT_OVERHEAD_BYTES)
-        .min(MAX_RESPONSE_BYTES_U64);
-    usize::try_from(requested).unwrap_or(MAX_RESPONSE_BYTES)
-}
-
-fn write_request(mut stdin: std::process::ChildStdin, request: &[u8]) -> std::io::Result<()> {
-    stdin.write_all(request)
-}
-
-fn read_response(
-    mut stdout: std::process::ChildStdout,
-    maximum: usize,
-) -> std::io::Result<Vec<u8>> {
-    let mut response = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    let mut oversized = false;
-    loop {
-        let count = stdout.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        if response.len().saturating_add(count) <= maximum {
-            response.extend_from_slice(&buffer[..count]);
-        } else {
-            oversized = true;
-        }
-    }
-    if oversized {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::FileTooLarge,
-            "adapter response exceeds deterministic output authority",
-        ))
-    } else {
-        Ok(response)
-    }
 }
