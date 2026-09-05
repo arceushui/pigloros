@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -14,6 +16,9 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_cargo_crap_ci_policy.py"
+RESOLVER_PATH = ROOT / "scripts" / "resolve_cargo_crap_baseline.sh"
+BOOTSTRAP_BASE_SHA = "45bdac85b29d273573583f846ba7acd2b3a12573"
+EXAMPLE_BASE_SHA = "a" * 40
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load {CHECKER_PATH}")
@@ -36,9 +41,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 CHECKER.check_workflow(fixture)
 
     def assert_resolver_rejected(self, mutate) -> None:
-        resolver = (ROOT / "scripts" / "resolve_cargo_crap_baseline.sh").read_text(
-            encoding="utf-8"
-        )
+        resolver = RESOLVER_PATH.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory) / "resolve_cargo_crap_baseline.sh"
             fixture.write_text(mutate(resolver), encoding="utf-8")
@@ -46,6 +49,78 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 CHECKER.check_workflow(
                     ROOT / ".github" / "workflows" / "ci.yml", fixture
                 )
+
+    def run_resolver(
+        self,
+        gh_response: str,
+        *,
+        base_sha: str = EXAMPLE_BASE_SHA,
+        git_status: int = 1,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory)
+            tools = fixture / "bin"
+            tools.mkdir()
+            logs = {
+                "output": str(fixture / "github-output"),
+                "gh_args": str(fixture / "gh-args"),
+                "gh_calls": str(fixture / "gh-calls"),
+                "sleep_calls": str(fixture / "sleep-calls"),
+                "git_calls": str(fixture / "git-calls"),
+            }
+            self.write_executable(
+                tools / "gh",
+                "printf '%s\\n' \"$@\" >> \"${GH_ARGS}\"\n"
+                "printf 'call\\n' >> \"${GH_CALLS}\"\n"
+                "printf '%s' \"${GH_RESPONSE}\"\n",
+            )
+            self.write_executable(
+                tools / "sleep", "printf '%s\\n' \"$@\" >> \"${SLEEP_CALLS}\"\n"
+            )
+            self.write_executable(
+                tools / "git",
+                "printf '%s\\n' \"$@\" >> \"${GIT_CALLS}\"\n"
+                "exit \"${FAKE_GIT_STATUS}\"\n",
+            )
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{tools}:{environment['PATH']}",
+                    "EVENT_NAME": "pull_request",
+                    "BASE_SHA": base_sha,
+                    "GITHUB_OUTPUT": logs["output"],
+                    "GITHUB_REPOSITORY": "owner/repository",
+                    "GH_ARGS": logs["gh_args"],
+                    "GH_CALLS": logs["gh_calls"],
+                    "GH_RESPONSE": gh_response,
+                    "SLEEP_CALLS": logs["sleep_calls"],
+                    "GIT_CALLS": logs["git_calls"],
+                    "FAKE_GIT_STATUS": str(git_status),
+                }
+            )
+            result = subprocess.run(
+                [str(RESOLVER_PATH)],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            contents = {
+                name: pathlib.Path(path).read_text(encoding="utf-8")
+                if pathlib.Path(path).exists()
+                else ""
+                for name, path in logs.items()
+            }
+            return result, contents
+
+    @staticmethod
+    def write_executable(path: pathlib.Path, body: str) -> None:
+        path.write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n" + body,
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
 
     def cargo_crap_step(self, workflow: dict, name: str) -> dict:
         return next(
@@ -56,6 +131,43 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github/workflows/ci.yml")
+
+    def test_resolver_executes_the_exact_trusted_artifact_query(self) -> None:
+        result, logs = self.run_resolver("4242\n")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(logs["output"], "run-id=4242\nbootstrap=false\n")
+        self.assertEqual(logs["gh_calls"], "call\n")
+        self.assertEqual(logs["sleep_calls"], "")
+        self.assertEqual(logs["git_calls"], "")
+        for argument in (
+            "repos/owner/repository/actions/artifacts",
+            f"name=cargo-crap-baseline-{EXAMPLE_BASE_SHA}",
+            "select(.expired == false)",
+            'select(.workflow_run.head_branch == "main")',
+            f'select(.workflow_run.head_sha == "{EXAMPLE_BASE_SHA}")',
+            "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
+        ):
+            with self.subTest(argument=argument):
+                self.assertIn(argument, logs["gh_args"])
+
+    def test_resolver_fails_closed_after_the_bounded_retry_window(self) -> None:
+        result, logs = self.run_resolver("")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        self.assertEqual(logs["gh_calls"].count("call\n"), 30)
+        self.assertEqual(logs["sleep_calls"].count("10\n"), 29)
+        self.assertEqual(logs["git_calls"], "")
+
+    def test_resolver_executes_only_the_approved_bootstrap(self) -> None:
+        result, logs = self.run_resolver(
+            "", base_sha=BOOTSTRAP_BASE_SHA, git_status=0
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(logs["output"], "bootstrap=true\n")
+        self.assertIn(f"{BOOTSTRAP_BASE_SHA}...HEAD", logs["git_calls"])
 
     def test_rejects_unpinned_cargo_crap(self) -> None:
         self.assert_rejected(
