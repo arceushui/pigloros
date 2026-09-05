@@ -47,9 +47,13 @@ Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so
 newly merged functions become existing baseline entries on the next change.
 The pull request job polls for the artifact for up to five minutes to cover the
-short interval while the corresponding `main` workflow is still finishing. If
-that trusted artifact has expired or the base never completes green CI, the
-pull request must rebase onto a green `main` commit.
+short interval while the corresponding `main` cargo-crap job is still finishing.
+It trusts only an unexpired artifact attached to the exact base commit on the
+repository's `main` branch; it does not wait for unrelated slower jobs such as
+ASan. The aggregate `main` gate remains responsible for keeping `main` green.
+If that trusted artifact has expired or no successful `main` cargo-crap job has
+published one for the base, the pull request must rebase onto a newer `main`
+commit with a trusted baseline.
 
 PR #58 has one explicit initialization exception for pre-gate base
 `45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,

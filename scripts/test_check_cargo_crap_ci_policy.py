@@ -169,6 +169,23 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_requires_artifact_based_baseline_resolution(self) -> None:
+        self.assert_resolver_rejected(
+            lambda resolver: resolver.replace(
+                '"repos/${GITHUB_REPOSITORY}/actions/artifacts"',
+                '"repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"',
+            )
+        )
+
+    def test_rejects_whole_workflow_completion_dependency(self) -> None:
+        self.assert_resolver_rejected(
+            lambda resolver: resolver.replace(
+                'BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${BASE_SHA}"',
+                'BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${BASE_SHA}"\n'
+                'LEGACY_LOOKUP="-f status=success"',
+            )
+        )
+
     def test_requires_main_baseline_publication(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"]["steps"].pop()

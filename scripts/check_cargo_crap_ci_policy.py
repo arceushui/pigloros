@@ -80,6 +80,30 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline resolver retry delay is not enforced",
         ),
         (
+            '"repos/${GITHUB_REPOSITORY}/actions/artifacts"',
+            "baseline resolver must inspect repository artifacts directly",
+        ),
+        (
+            '-f name="${BASELINE_ARTIFACT_NAME}"',
+            "baseline resolver must request the exact baseline artifact",
+        ),
+        (
+            "select(.expired == false)",
+            "baseline resolver must reject expired artifacts",
+        ),
+        (
+            'select(.workflow_run.head_branch == "main")',
+            "baseline resolver must require a main-branch artifact",
+        ),
+        (
+            'select(.workflow_run.head_sha == "${BASE_SHA}")',
+            "baseline resolver must require the exact base commit",
+        ),
+        (
+            "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
+            "baseline resolver must reject fork artifacts",
+        ),
+        (
             'test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"',
             "baseline bootstrap is not restricted to the approved base",
         ),
@@ -90,6 +114,14 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
     )
     for fragment, message in required_fragments:
         require(fragment in resolver, message)
+    require(
+        '"repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"' not in resolver,
+        "baseline resolver must not wait for unrelated main workflow jobs",
+    )
+    require(
+        "-f status=success" not in resolver,
+        "baseline resolver must not require whole-workflow completion",
+    )
 
 
 def check_workflow(

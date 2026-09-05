@@ -10,21 +10,23 @@ if [[ "${EVENT_NAME}" != "pull_request" ]]; then
   exit 0
 fi
 
+BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${BASE_SHA}"
+
 for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do
   run_ids="$(gh api --method GET --paginate \
-    "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-    -f branch=main -f event=push -f status=success -f per_page=100 \
-    --jq ".workflow_runs[] | select(.head_sha == \"${BASE_SHA}\") | .id")"
+    "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+    -f name="${BASELINE_ARTIFACT_NAME}" -f per_page=100 \
+    --jq ".artifacts[] |
+      select(.expired == false) |
+      select(.workflow_run.head_branch == \"main\") |
+      select(.workflow_run.head_sha == \"${BASE_SHA}\") |
+      select(.workflow_run.head_repository_id == .workflow_run.repository_id) |
+      .workflow_run.id")"
   run_id=''
   while IFS= read -r candidate; do
     [[ -n "${candidate}" ]] || continue
-    artifact_id="$(gh api --method GET \
-      "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts" \
-      --jq ".artifacts[] | select(.name == \"cargo-crap-baseline-${BASE_SHA}\") | .id")"
-    if [[ -n "${artifact_id}" ]]; then
-      run_id="${candidate}"
-      break
-    fi
+    run_id="${candidate}"
+    break
   done <<< "${run_ids}"
   if [[ -n "${run_id}" ]]; then
     echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
