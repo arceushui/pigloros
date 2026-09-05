@@ -1308,12 +1308,17 @@ fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
     .encode());
     let oversized_delegates = changed_array(&delegated_bytes, |fields| {
         let delegate_values = array_fields_mut(&mut fields[10]);
-        let delegate = delegate_values[0].clone();
+        let template = delegate_values[0].clone();
         delegate_values.clear();
-        delegate_values.extend(vec![
-            delegate;
-            usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 2
-        ]);
+        delegate_values.extend(
+            (10_u8..)
+                .take(usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 2)
+                .map(|identity| {
+                    let mut delegate = template.clone();
+                    array_fields_mut(&mut delegate)[2] = Value::Bytes(vec![identity; 16]);
+                    delegate
+                }),
+        );
     });
     assert_eq!(
         AuthorizationDecisionV1::decode(&oversized_delegates),
