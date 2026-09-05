@@ -750,11 +750,8 @@ impl PluginRegistry {
         PluginComposition { plugins, schemas }
     }
 
-    fn snapshot_for_subscriptions<'a>(
-        &self,
-        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
-    ) -> ObservationSnapshot {
-        ObservationSnapshot::from_subscriptions(subscriptions, |key| {
+    fn snapshot_for_subscriptions(&self, subscriptions: &[ProjectionKey]) -> ObservationSnapshot {
+        ObservationSnapshot::from_subscriptions(subscriptions.iter(), |key| {
             self.projections.state_for(key.entity_id()).cloned()
         })
     }
@@ -776,23 +773,17 @@ impl PluginRegistry {
             extend_unique_subscriptions(&mut subscriptions, &mut seen, entry.subscriptions());
         }
 
-        self.authorize_snapshot_subscriptions(
-            timeline,
-            timeline_head,
-            operation,
-            subscriptions.iter(),
-        )?;
-        Ok(self.snapshot_for_subscriptions(subscriptions.iter()))
+        self.authorize_snapshot_subscriptions(timeline, timeline_head, operation, &subscriptions)?;
+        Ok(self.snapshot_for_subscriptions(&subscriptions))
     }
 
-    fn authorize_snapshot_subscriptions<'a>(
+    fn authorize_snapshot_subscriptions(
         &self,
         timeline: pos_core::ids::TimelineId,
         timeline_head: Seq,
         operation: &OperationContext,
-        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
+        subscriptions: &[ProjectionKey],
     ) -> Result<(), RuntimeError> {
-        let subscriptions: Vec<ProjectionKey> = subscriptions.into_iter().cloned().collect();
         match operation {
             OperationContext::Public if !subscriptions.is_empty() => {
                 Err(RuntimeError::Consent(ConsentError::NoConsent))
@@ -802,7 +793,7 @@ impl PluginRegistry {
                 let Some(gate) = self.consent_gate.as_ref() else {
                     return Err(RuntimeError::ConsentOperationUnavailable);
                 };
-                for key in &subscriptions {
+                for key in subscriptions {
                     gate.authorize_projection(
                         timeline,
                         *key.entity_id(),
@@ -1199,7 +1190,7 @@ impl PluginRegistry {
             timeline,
             observed_through,
             &operation,
-            subscriptions.iter(),
+            &subscriptions,
         )?;
         let snapshot =
             ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
@@ -1525,6 +1516,18 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(plugin, reducer, driver, approver, &approver_event_types)
+    }
+
+    fn register_with_approver_slice(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: &[Kind],
+    ) -> Result<(), RuntimeError> {
         let id = plugin.id();
         let name = plugin.name().to_owned();
 
@@ -1533,7 +1536,6 @@ impl PluginRegistry {
         }
 
         let cap = plugin.capability();
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
 
         if let Some(kind) = cap
             .owned_event_types
@@ -1620,7 +1622,7 @@ impl PluginRegistry {
 
         // Index action approver if present
         if approver.is_some() {
-            for kind in &approver_event_types {
+            for kind in approver_event_types {
                 self.approver_map.insert(kind.clone(), id);
             }
         }
@@ -1784,9 +1786,9 @@ impl PluginRegistry {
             timeline,
             Seq::ZERO,
             &OperationContext::Public,
-            due_subscriptions.iter(),
+            &due_subscriptions,
         )?;
-        let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
+        let snapshot = self.snapshot_for_subscriptions(&due_subscriptions);
         for (id, entry) in &mut self.plugins {
             if due_driver_ids.remove(id) {
                 let driver_result = entry
@@ -3436,7 +3438,7 @@ mod tests {
         let observed = ProjectionKey::new(observed_entity);
         let missing = ProjectionKey::new(missing_entity);
         let subscriptions = vec![observed.clone(), observed.clone(), missing.clone()];
-        let snapshot = reg.snapshot_for_subscriptions(subscriptions.iter());
+        let snapshot = reg.snapshot_for_subscriptions(&subscriptions);
         let view = snapshot.view_for(&subscriptions);
 
         assert_eq!(view.len(), 2);
