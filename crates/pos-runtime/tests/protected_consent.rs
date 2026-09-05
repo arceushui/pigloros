@@ -960,8 +960,8 @@ fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
 
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
-    let grant = grant(subject);
-    let token = authority.record_grant_on_timeline(timeline, &grant);
+    let consent_grant = grant(subject);
+    let token = authority.record_grant_on_timeline(timeline, &consent_grant);
     let mut revoked = PluginRegistry::new().with_consent_authority(authority.clone());
     revoked.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
     test_ok(revoked.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
@@ -969,8 +969,8 @@ fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
         timeline,
         &pos_core::ConsentRevokedV1 {
             subject_id: subject,
-            grantee_id: grant.grantee_id,
-            grant_seq: grant.grant_seq,
+            grantee_id: consent_grant.grantee_id,
+            grant_seq: consent_grant.grant_seq,
             fence_seq: 1,
         },
     ));
