@@ -4297,4 +4297,41 @@ mod tests {
             Err(ActionRejected::UnknownEventType)
         );
     }
+
+    #[test]
+    fn coverage_registry_direct_edge_paths() {
+        let key = ProjectionKey::new(EntityId::new());
+        let mut subscriptions = Vec::new();
+        let mut seen = HashSet::new();
+        extend_unique_subscriptions(&mut subscriptions, &mut seen, std::slice::from_ref(&key));
+        extend_unique_subscriptions(&mut subscriptions, &mut seen, std::slice::from_ref(&key));
+        assert_eq!(subscriptions, [key]);
+
+        let geographic = EventDraft::new(
+            EntityId::new(),
+            Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE),
+            CanonicalBytes::from_static(b"coverage"),
+        );
+        assert!(matches!(
+            reject_host_owned_draft_slice(&[geographic]),
+            Err(RuntimeError::GeographicDraft { .. })
+        ));
+
+        let mut driverless = PluginRegistry::new();
+        let plugin = simple_plugin("coverage-driverless", &[]);
+        driverless.register(&plugin, None, None).test_ok();
+        driverless.tick_cadenced(TimelineId::new(), 0).test_ok();
+        driverless.commit_step_at(Seq::ZERO, 0).test_ok();
+
+        let proposal = ProposedAction::new(
+            Kind::new("replay.event"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"coverage"),
+            Kind::new("replay.event.submit"),
+        );
+        assert_eq!(
+            PluginRegistry::new_replay().submit_action(&proposal),
+            Err(ActionRejected::UnknownEventType)
+        );
+    }
 }
