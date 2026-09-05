@@ -5,7 +5,7 @@
 //! Multi-level fork chains are supported: a child of a child walks the chain recursively.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
     time::Instant,
 };
 
@@ -43,9 +43,10 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta},
     ConsentAppendPermit, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
-    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
-    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
+    ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1, PreparedErasureCasV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -1291,34 +1292,44 @@ impl ErasurePersistencePortV1 for MemoryStore {
         mutation: PreparedErasureCasV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         let request = mutation.request();
-        let next = mutation.next_manifest();
-        let current_digest = self
-            .erasure_records
+        self.erasure_records
             .get(&request)
             .map(|(digest, bytes)| {
                 StoredErasureManifestV1::new(*digest, bytes.clone()).map(|stored| stored.digest())
             })
-            .transpose()?;
-        if self
-            .erasure_records
-            .get(&request)
-            .is_some_and(|(digest, bytes)| {
-                *digest == next.digest() && bytes.as_slice() == next.canonical_cbor()
-            })
-        {
-            return memory_mutation_is_exact(self, &mutation)
-                .then_some(ErasureCasOutcomeV1::ExactRetry)
-                .ok_or(ErasureErrorV1::PolicyConflict);
-        }
-        if current_digest != mutation.expected_manifest_digest() {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        let delta = stage_memory_erasure_delta(self, &mutation)?;
-        apply_memory_erasure_delta(self, delta);
-        self.erasure_records
-            .insert(request, (next.digest(), next.canonical_cbor().to_vec()));
-        Ok(ErasureCasOutcomeV1::Applied)
+            .transpose()
+            .and_then(|current_digest| apply_memory_erasure_cas(self, &mutation, current_digest))
     }
+}
+
+fn apply_memory_erasure_cas(
+    store: &mut MemoryStore,
+    mutation: &PreparedErasureCasV1,
+    current_digest: Option<ErasureReferenceV1>,
+) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+    let request = mutation.request();
+    let next = mutation.next_manifest();
+    if store
+        .erasure_records
+        .get(&request)
+        .is_some_and(|(digest, bytes)| {
+            *digest == next.digest() && bytes.as_slice() == next.canonical_cbor()
+        })
+    {
+        return memory_mutation_is_exact(store, mutation)
+            .then_some(ErasureCasOutcomeV1::ExactRetry)
+            .ok_or(ErasureErrorV1::PolicyConflict);
+    }
+    if current_digest != mutation.expected_manifest_digest() {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    stage_memory_erasure_delta(store, mutation).map(|delta| {
+        apply_memory_erasure_delta(store, delta);
+        store
+            .erasure_records
+            .insert(request, (next.digest(), next.canonical_cbor().to_vec()));
+        ErasureCasOutcomeV1::Applied
+    })
 }
 
 // Own only the bounded mutation delta. All fallible validation completes
@@ -1340,35 +1351,66 @@ fn stage_memory_erasure_delta(
     mutation: &PreparedErasureCasV1,
 ) -> Result<MemoryErasureCasDelta, ErasureErrorV1> {
     let mut delta = MemoryErasureCasDelta::default();
-    let request = mutation.request();
-    let next = mutation.next_manifest();
-    for object in mutation.new_objects() {
+    stage_memory_objects(store, mutation.new_objects(), &mut delta)
+        .and_then(|()| stage_memory_states(store, mutation.new_states(), &mut delta))
+        .and_then(|()| stage_memory_indexes(store, mutation, &mut delta))
+        .and_then(|()| stage_memory_effect(store, mutation, &mut delta))
+        .map(|()| delta)
+}
+
+fn stage_memory_objects(
+    store: &MemoryStore,
+    objects: &[ErasurePersistenceObjectV1],
+    delta: &mut MemoryErasureCasDelta,
+) -> Result<(), ErasureErrorV1> {
+    objects.iter().try_for_each(|object| {
         stage_exact(
             &store.erasure_evidence,
             &mut delta.evidence,
             object.reference(),
             object.canonical_cbor(),
-        )?;
-    }
-    for state in mutation.new_states() {
-        if let Some(previous) = state.state().previous_state() {
-            let bytes = delta
-                .states
-                .get(&previous)
-                .or_else(|| store.erasure_states.get(&previous))
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            state
-                .state()
-                .validate_predecessor(&pos_core::ErasureStateV1::from_canonical_cbor(bytes)?)?;
-        }
-        stage_exact(
-            &store.erasure_states,
-            &mut delta.states,
-            state.reference(),
-            state.canonical_cbor(),
-        )?;
-    }
-    for index in mutation.index_inserts() {
+        )
+    })
+}
+
+fn stage_memory_states(
+    store: &MemoryStore,
+    states: &[ErasurePersistedStateV1],
+    delta: &mut MemoryErasureCasDelta,
+) -> Result<(), ErasureErrorV1> {
+    states.iter().try_for_each(|state| {
+        validate_memory_state_predecessor(store, &delta.states, state).and_then(|()| {
+            stage_exact(
+                &store.erasure_states,
+                &mut delta.states,
+                state.reference(),
+                state.canonical_cbor(),
+            )
+        })
+    })
+}
+
+fn validate_memory_state_predecessor(
+    store: &MemoryStore,
+    staged: &BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    state: &ErasurePersistedStateV1,
+) -> Result<(), ErasureErrorV1> {
+    state.state().previous_state().map_or(Ok(()), |previous| {
+        staged
+            .get(&previous)
+            .or_else(|| store.erasure_states.get(&previous))
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|bytes| pos_core::ErasureStateV1::from_canonical_cbor(bytes))
+            .and_then(|previous_state| state.state().validate_predecessor(&previous_state))
+    })
+}
+
+fn stage_memory_indexes(
+    store: &MemoryStore,
+    mutation: &PreparedErasureCasV1,
+    delta: &mut MemoryErasureCasDelta,
+) -> Result<(), ErasureErrorV1> {
+    mutation.index_inserts().iter().try_for_each(|index| {
         let (existing, staged, ordinal, reference) = match *index {
             ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (
                 &store.erasure_attempt_pages,
@@ -1389,28 +1431,52 @@ fn stage_memory_erasure_delta(
                 reference,
             ),
         };
-        stage_index(existing, staged, request, ordinal, reference)?;
-    }
-    let effect_bytes = mutation.effect().to_canonical_cbor()?;
-    stage_effect(
-        &store.erasure_effects,
-        &mut delta.effects,
-        next.digest(),
-        mutation.effect(),
-        &effect_bytes,
-    )?;
-    if let Some(subject) = mutation.effect().subject() {
-        match store.erasure_effect_subjects.get(&subject) {
-            Some(existing) if *existing != next.digest() => {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
-            Some(_) => {}
-            None => {
-                delta.effect_subjects.insert(subject, next.digest());
-            }
+        stage_index(existing, staged, mutation.request(), ordinal, reference)
+    })
+}
+
+fn stage_memory_effect(
+    store: &MemoryStore,
+    mutation: &PreparedErasureCasV1,
+    delta: &mut MemoryErasureCasDelta,
+) -> Result<(), ErasureErrorV1> {
+    let manifest = mutation.next_manifest().digest();
+    mutation
+        .effect()
+        .to_canonical_cbor()
+        .and_then(|effect_bytes| {
+            stage_effect(
+                &store.erasure_effects,
+                &mut delta.effects,
+                manifest,
+                mutation.effect(),
+                &effect_bytes,
+            )
+        })
+        .and_then(|()| {
+            stage_effect_subject(
+                &store.erasure_effect_subjects,
+                &mut delta.effect_subjects,
+                mutation.effect().subject(),
+                manifest,
+            )
+        })
+}
+
+fn stage_effect_subject(
+    existing: &BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+    staged: &mut BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+    subject: Option<ErasureReferenceV1>,
+    manifest: ErasureReferenceV1,
+) -> Result<(), ErasureErrorV1> {
+    subject.map_or(Ok(()), |subject| match existing.get(&subject) {
+        Some(current) if *current != manifest => Err(ErasureErrorV1::PolicyConflict),
+        Some(_) => Ok(()),
+        None => {
+            staged.insert(subject, manifest);
+            Ok(())
         }
-    }
-    Ok(delta)
+    })
 }
 
 fn apply_memory_erasure_delta(store: &mut MemoryStore, delta: MemoryErasureCasDelta) {
@@ -1454,14 +1520,12 @@ fn stage_exact(
             .then_some(())
             .ok_or(ErasureErrorV1::ProvenanceMissing);
     }
-    match staged.get(&reference) {
-        Some(value) if value.as_slice() != bytes => Err(ErasureErrorV1::ProvenanceMissing),
-        Some(_) => Ok(()),
-        None => {
-            staged.insert(reference, bytes.to_vec());
-            Ok(())
-        }
-    }
+    insert_or_verify_staged(
+        staged,
+        reference,
+        bytes.to_vec(),
+        ErasureErrorV1::ProvenanceMissing,
+    )
 }
 
 fn stage_effect(
@@ -1472,10 +1536,11 @@ fn stage_effect(
     bytes: &[u8],
 ) -> Result<(), ErasureErrorV1> {
     if let Some(value) = existing.get(&manifest) {
-        let stored = decode_memory_effect(value)?;
-        return (stored == *effect && value.1.as_slice() == bytes)
-            .then_some(())
-            .ok_or(ErasureErrorV1::ProvenanceMissing);
+        return decode_memory_effect(value).and_then(|stored| {
+            (stored == *effect && value.1.as_slice() == bytes)
+                .then_some(())
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+        });
     }
     insert_effect_exact(staged, manifest, effect, bytes)
 }
@@ -1493,6 +1558,21 @@ fn stage_index(
             .ok_or(ErasureErrorV1::PolicyConflict);
     }
     insert_index(staged, request, ordinal, reference)
+}
+
+fn insert_or_verify_staged<K: Ord, V: Eq>(
+    staged: &mut BTreeMap<K, V>,
+    key: K,
+    value: V,
+    conflict: ErasureErrorV1,
+) -> Result<(), ErasureErrorV1> {
+    match staged.entry(key) {
+        Entry::Occupied(entry) => (entry.get() == &value).then_some(()).ok_or(conflict),
+        Entry::Vacant(entry) => {
+            entry.insert(value);
+            Ok(())
+        }
+    }
 }
 
 fn memory_mutation_is_exact(store: &MemoryStore, mutation: &PreparedErasureCasV1) -> bool {
@@ -1537,10 +1617,11 @@ fn memory_mutation_is_exact(store: &MemoryStore, mutation: &PreparedErasureCasV1
 fn decode_memory_effect(
     (digest, bytes): &(ErasureReferenceV1, Vec<u8>),
 ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
-    let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes)?;
-    (effect.identity() == *digest)
-        .then_some(effect)
-        .ok_or(ErasureErrorV1::ProvenanceMissing)
+    pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes).and_then(|effect| {
+        (effect.identity() == *digest)
+            .then_some(effect)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    })
 }
 
 fn insert_effect_exact(
@@ -1549,14 +1630,19 @@ fn insert_effect_exact(
     effect: &pos_core::ErasureCasEffectV1,
     bytes: &[u8],
 ) -> Result<(), ErasureErrorV1> {
-    if let Some(existing) = map.get(&manifest) {
-        let stored = decode_memory_effect(existing)?;
-        (stored == *effect && existing.1.as_slice() == bytes)
-            .then_some(())
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
-    } else {
-        map.insert(manifest, (effect.identity(), bytes.to_vec()));
-        Ok(())
+    match map.entry(manifest) {
+        Entry::Vacant(entry) => {
+            entry.insert((effect.identity(), bytes.to_vec()));
+            Ok(())
+        }
+        Entry::Occupied(entry) => {
+            let existing = entry.get();
+            decode_memory_effect(existing).and_then(|stored| {
+                (stored == *effect && existing.1.as_slice() == bytes)
+                    .then_some(())
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
+        }
     }
 }
 
@@ -1566,14 +1652,12 @@ fn insert_index(
     ordinal: u64,
     reference: ErasureReferenceV1,
 ) -> Result<(), ErasureErrorV1> {
-    match map.get(&(request, ordinal)) {
-        Some(existing) if *existing != reference => Err(ErasureErrorV1::PolicyConflict),
-        Some(_) => Ok(()),
-        None => {
-            map.insert((request, ordinal), reference);
-            Ok(())
-        }
-    }
+    insert_or_verify_staged(
+        map,
+        (request, ordinal),
+        reference,
+        ErasureErrorV1::PolicyConflict,
+    )
 }
 
 fn memory_index_count(
@@ -5504,6 +5588,30 @@ mod tests {
         assert!(stage_index(&indexes, &mut BTreeMap::new(), request, 0, first,).is_ok());
         assert_eq!(
             stage_index(&indexes, &mut BTreeMap::new(), request, 0, second,),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+    }
+
+    #[test]
+    fn memory_effect_subject_staging_preserves_exact_identity() {
+        let subject = ErasureReferenceV1::from_digest([1; 32]);
+        let manifest = ErasureReferenceV1::from_digest([2; 32]);
+        let conflicting = ErasureReferenceV1::from_digest([3; 32]);
+        let mut staged = BTreeMap::new();
+
+        assert!(stage_effect_subject(&BTreeMap::new(), &mut staged, None, manifest).is_ok());
+        assert!(staged.is_empty());
+        assert!(
+            stage_effect_subject(&BTreeMap::new(), &mut staged, Some(subject), manifest,).is_ok()
+        );
+        assert_eq!(staged.get(&subject), Some(&manifest));
+
+        let existing = BTreeMap::from([(subject, manifest)]);
+        assert!(
+            stage_effect_subject(&existing, &mut BTreeMap::new(), Some(subject), manifest,).is_ok()
+        );
+        assert_eq!(
+            stage_effect_subject(&existing, &mut BTreeMap::new(), Some(subject), conflicting,),
             Err(ErasureErrorV1::PolicyConflict)
         );
     }

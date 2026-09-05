@@ -379,9 +379,10 @@ fn erasure_schema_ddl() -> String {
                 .filter(|column| column.primary_key)
                 .map(|column| column.name)
                 .collect::<Vec<_>>();
-            if !primary_key.is_empty() {
-                definitions.push(format!("PRIMARY KEY ({})", primary_key.join(", ")));
-            }
+            definitions.extend(
+                (!primary_key.is_empty())
+                    .then(|| format!("PRIMARY KEY ({})", primary_key.join(", "))),
+            );
             format!(
                 "CREATE TABLE IF NOT EXISTS {} ({});",
                 table.name,
@@ -681,7 +682,7 @@ impl SqliteStore {
                 [],
                 |row| row.get::<_, bool>(0),
             )
-            .map_err(|error| Self::storage_error(&error))
+            .map_err(Self::into_storage_error)
     }
 
     /// Open a `SQLite` store with a trusted admission clock.
@@ -889,11 +890,11 @@ impl SqliteStore {
                  PRIMARY KEY (consent_record_id, consent_revision)
              );",
             )
-            .map_err(|error| Self::storage_error(&error))
+            .map_err(Self::into_storage_error)
             .and_then(|()| {
                 self.conn
                     .execute_batch(&erasure_schema_ddl())
-                    .map_err(|error| Self::storage_error(&error))
+                    .map_err(Self::into_storage_error)
             })
             .and_then(|()| self.validate_erasure_schema())
     }
