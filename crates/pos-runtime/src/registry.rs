@@ -3605,22 +3605,21 @@ mod tests {
         let protected_timeline = protected_store
             .create_timeline("append-protected")
             .test_ok();
+        let consent_grant = |purpose: &str| ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: purpose.to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
         let authority = ConsentAuthority::new();
-        let token = authority.record_grant_on_timeline(
-            protected_timeline.id(),
-            &ConsentGrantedV1 {
-                subject_id: subject,
-                grantee_id: EntityId::new(),
-                purpose: "append-success".to_owned(),
-                modalities: 0,
-                min_geo_resolution: 0,
-                fork_permitted: false,
-                export_permitted: false,
-                retention_days: 0,
-                expiry_secs: 0,
-                grant_seq: 1,
-            },
-        );
+        let token = authority
+            .record_grant_on_timeline(protected_timeline.id(), &consent_grant("append-success"));
         let mut protected_success = PluginRegistry::new().with_consent_authority(authority);
         protected_success
             .step_all_anchored_protected(protected_timeline.id(), Seq::ZERO, token, 0, &[])
@@ -3631,21 +3630,8 @@ mod tests {
             .is_empty());
 
         let reject_authority = ConsentAuthority::new();
-        let reject_token = reject_authority.record_grant_on_timeline(
-            protected_timeline.id(),
-            &ConsentGrantedV1 {
-                subject_id: subject,
-                grantee_id: EntityId::new(),
-                purpose: "append-reject".to_owned(),
-                modalities: 0,
-                min_geo_resolution: 0,
-                fork_permitted: false,
-                export_permitted: false,
-                retention_days: 0,
-                expiry_secs: 0,
-                grant_seq: 1,
-            },
-        );
+        let reject_token = reject_authority
+            .record_grant_on_timeline(protected_timeline.id(), &consent_grant("append-reject"));
         let mut protected_reject = PluginRegistry::new().with_consent_authority(reject_authority);
         protected_reject
             .step_all_anchored_protected(protected_timeline.id(), Seq::ZERO, reject_token, 0, &[])

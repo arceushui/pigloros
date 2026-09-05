@@ -1305,7 +1305,7 @@ fn decision_decoder_rejects_zero_hash_binding() {
 }
 
 #[test]
-fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
+fn decision_decoder_rejects_unknown_role() {
     let request_value = request(principal(1), entity(10));
     let encoded = ok(decision_for(
         &request_value,
@@ -1319,6 +1319,16 @@ fn decision_decoder_rejects_unknown_role_and_oversized_hash_sequence() {
         AuthorizationDecisionV1::decode(&invalid_role),
         Err(AuthorityErrorV1::UnknownEnum)
     );
+}
+
+#[test]
+fn decision_decoder_rejects_oversized_hash_sequence() {
+    let request_value = request(principal(1), entity(10));
+    let encoded = ok(decision_for(
+        &request_value,
+        &[root_grant(principal(1), vec![entity(10)])],
+    )
+    .encode());
     let oversized_bindings = changed_array(&encoded, |fields| {
         let bindings = array_fields_mut(&mut fields[12]);
         bindings.extend((2_u8..=18).map(|value| Value::Bytes(hash(value).as_bytes().to_vec())));
@@ -2029,19 +2039,6 @@ fn malformed_requests_are_rejected_before_evaluation() {
         AuthorizationRequestV1::try_from_draft(invalid),
         Err(AuthorityErrorV1::NonCanonicalOrder)
     );
-    assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(Hash::zero(), vec![hash(1)], vec![hash(2)], vec![]),
-        Err(AuthorityErrorV1::FieldOutOfBounds)
-    );
-    assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![], vec![], vec![]),
-        Err(AuthorityErrorV1::FieldOutOfBounds)
-    );
-    assert_eq!(
-        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![hash(2)], vec![], vec![Hash::zero()]),
-        Err(AuthorityErrorV1::FieldOutOfBounds)
-    );
-
     let mut invalid = request_draft(authenticated(principal.clone()), actor);
     invalid.plugin_id = Some(plugin(1));
     assert_eq!(
@@ -2052,6 +2049,22 @@ fn malformed_requests_are_rejected_before_evaluation() {
     invalid.installation_id = Some([1; 16]);
     assert_eq!(
         AuthorizationRequestV1::try_from_draft(invalid),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn registry_snapshot_rejects_missing_or_zero_bindings() {
+    assert_eq!(
+        AuthorityRegistrySnapshotV1::try_new(Hash::zero(), vec![hash(1)], vec![hash(2)], vec![]),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![], vec![], vec![]),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![hash(2)], vec![], vec![Hash::zero()]),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 }

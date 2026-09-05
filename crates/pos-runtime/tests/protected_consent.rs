@@ -894,11 +894,18 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
 }
 
 #[test]
-fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
-    let timeline = TimelineId::new();
-    assert_recovery_evidence_errors(timeline);
-    assert_empty_registry_paths(timeline);
-    assert_public_authorization_edges(timeline);
+fn public_registry_rejects_invalid_recovery_evidence() {
+    assert_recovery_evidence_errors(TimelineId::new());
+}
+
+#[test]
+fn public_registry_handles_empty_driver_paths() {
+    assert_empty_registry_paths(TimelineId::new());
+}
+
+#[test]
+fn public_registry_enforces_authorization_edges() {
+    assert_public_authorization_edges(TimelineId::new());
 }
 
 fn assert_recovery_evidence_errors(timeline: TimelineId) {
@@ -1063,10 +1070,17 @@ fn assert_public_authorization_edges(timeline: TimelineId) {
 }
 
 #[test]
-fn public_registry_error_edges_cover_unusual_runtime_guards() {
-    let timeline = TimelineId::new();
-    assert_driver_error_edges(timeline);
-    assert_action_error_edges(timeline);
+fn public_registry_enforces_driver_lifecycle_guards() {
+    assert_driver_error_edges(TimelineId::new());
+}
+
+#[test]
+fn public_registry_enforces_action_guards() {
+    assert_action_error_edges(TimelineId::new());
+}
+
+#[test]
+fn public_registry_enforces_append_guards() {
     assert_append_error_edges();
 }
 
@@ -1566,7 +1580,7 @@ fn public_registry_rejects_invalid_approver_routes() {
 }
 
 #[test]
-fn public_registry_registration_and_metadata_cover_library_paths() {
+fn public_registry_reports_registered_plugin_metadata() {
     let mut registry = PluginRegistry::new();
     assert!(registry.is_empty());
     let plugin = configured_plugin("metadata", &["metadata.event"], false, false);
@@ -1583,7 +1597,10 @@ fn public_registry_registration_and_metadata_cover_library_paths() {
         .with_consent_gate(Arc::new(ConsentAuthority::new()))
         .clone_consent_gate()
         .is_some());
+}
 
+#[test]
+fn public_registry_reports_driver_metadata_and_ticks() {
     assert!(PluginRegistry::default().is_empty());
     let mut normal = PluginRegistry::default();
     normal.register_driver(Box::new(EmptyDriver));
@@ -1596,14 +1613,20 @@ fn public_registry_registration_and_metadata_cover_library_paths() {
         [("empty-public-seam", "0.1.0")]
     );
     assert!(test_ok(normal.tick_cadenced(TimelineId::new(), 0)).is_empty());
+}
 
+#[test]
+fn public_registry_requires_snapshot_anchors() {
     let mut unanchored = PluginRegistry::default();
     unanchored.register_driver(Box::new(AnchoredEmptyDriver));
     assert!(matches!(
         test_err(unanchored.step_all(TimelineId::new())),
         RuntimeError::MissingSnapshotAnchor { .. }
     ));
+}
 
+#[test]
+fn public_registry_commits_and_appends_empty_anchored_steps() {
     let mut store = test_ok(open_store(StoreConfig::Memory));
     let timeline = test_ok(store.create_timeline("registry-metadata"));
     let mut anchored = PluginRegistry::new();
