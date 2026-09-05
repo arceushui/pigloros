@@ -671,12 +671,12 @@ struct PluginEntry {
 }
 
 #[inline(never)]
-fn plugin_name(entry: &PluginEntry) -> &str {
+const fn plugin_name(entry: &PluginEntry) -> &str {
     entry.name.as_str()
 }
 
 #[inline(never)]
-fn plugin_name_and_version(entry: &PluginEntry) -> (&str, &str) {
+const fn plugin_name_and_version(entry: &PluginEntry) -> (&str, &str) {
     (entry.name.as_str(), entry.version.as_str())
 }
 

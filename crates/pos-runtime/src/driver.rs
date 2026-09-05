@@ -210,6 +210,7 @@ impl SnapshotAnchor {
 
 impl ObservationSnapshot {
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn from_subscriptions<'a>(
         subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
         state_for: impl Fn(&ProjectionKey) -> Option<State>,
