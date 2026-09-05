@@ -536,9 +536,8 @@ fn command_process_boundary_exercises_output_failure_and_divergence_oracles() ->
 
 #[cfg(unix)]
 #[test]
-fn command_process_boundary_classifies_resource_protocol_and_lifecycle_failures() -> TestResult {
+fn command_process_boundary_classifies_resource_exhaustion() -> TestResult {
     let corpus = support::corpus()?;
-
     let directory = tempfile::tempdir()?;
     let mut usage = [0; 8];
     usage[0] = 101;
@@ -550,7 +549,13 @@ fn command_process_boundary_classifies_resource_protocol_and_lifecycle_failures(
     assert_report_counts(&report, [0, 7, 0, 0, 0]);
     assert_eq!(report_case(&report, "case-0")?[10], unsigned(13));
     assert_diagnostic_digest(&output.stderr, &report)?;
+    Ok(())
+}
 
+#[cfg(unix)]
+#[test]
+fn command_process_boundary_classifies_protocol_failures() -> TestResult {
+    let corpus = support::corpus()?;
     for response in [
         independent_observation_bytes(IndependentObservation::Unavailable, [0; 8])?,
         independent_observation_bytes(IndependentObservation::Output(vec![0; 101]), [0; 8])?,
@@ -563,12 +568,23 @@ fn command_process_boundary_classifies_resource_protocol_and_lifecycle_failures(
         assert_report_counts(&report, [0, 0, 0, 7, 0]);
         assert_diagnostic_digest(&output.stderr, &report)?;
     }
+    Ok(())
+}
 
+#[cfg(unix)]
+#[test]
+fn command_process_boundary_classifies_process_crashes() -> TestResult {
+    let corpus = support::corpus()?;
     let directory = tempfile::tempdir()?;
     let output = command_for_corpus(directory.path(), "/bin/false", &corpus)?.output()?;
     assert!(output.status.success());
     assert_report_counts(&independent_report(&output.stdout)?, [0, 0, 0, 7, 0]);
+    Ok(())
+}
 
+#[cfg(unix)]
+#[test]
+fn command_process_boundary_enforces_the_fixture_watchdog() -> TestResult {
     let directory = tempfile::tempdir()?;
     let short_watchdog = support::corpus_with_watchdog_ms(25)?;
     let capture_directory = directory.path().join("attempts");
