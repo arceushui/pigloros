@@ -853,7 +853,7 @@ mod tests {
     fn directory_identity_rejects_non_directories() -> Result<(), MaterializationError> {
         let directory =
             fs::statat(CWD, Path::new("."), AtFlags::empty()).map_err(map_open_error)?;
-        assert!(matches!(directory_entry_identity(directory), Ok(_)));
+        assert!(directory_entry_identity(directory).is_ok());
 
         let regular_file =
             fs::statat(CWD, Path::new("/dev/null"), AtFlags::empty()).map_err(map_open_error)?;
