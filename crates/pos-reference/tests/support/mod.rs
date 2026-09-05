@@ -571,6 +571,7 @@ struct FixtureExpectation {
 struct CorpusOptions<'a> {
     mode: u64,
     claim_layer: u64,
+    watchdog_ms: u64,
     subject_adapter: SubjectAdapterKind,
     extra: Option<&'a [u8]>,
     release_mutation: Option<ReleaseMutation>,
@@ -587,6 +588,7 @@ impl Default for CorpusOptions<'_> {
         Self {
             mode: 0,
             claim_layer: 0,
+            watchdog_ms: 1_000,
             subject_adapter: SubjectAdapterKind::ExportedArtifact,
             extra: None,
             release_mutation: None,
@@ -648,6 +650,17 @@ pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
 pub fn air_gapped_corpus() -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
         mode: 1,
+        ..CorpusOptions::default()
+    })
+}
+
+/// Build a complete corpus with one selected operational watchdog.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_watchdog_ms(watchdog_ms: u64) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        watchdog_ms,
         ..CorpusOptions::default()
     })
 }
@@ -776,6 +789,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let CorpusOptions {
         mode,
         claim_layer,
+        watchdog_ms,
         subject_adapter,
         extra,
         release_mutation: _,
@@ -1545,7 +1559,7 @@ fn fixtures(
                 uint(u64::from(replay_claim)),
                 uint(u64::from(replay_claim)),
                 array(vec![uint(100); 8]),
-                array(vec![uint(1_000)]),
+                array(vec![uint(watchdog_ms)]),
                 array(vec![
                     Value::Bool(false),
                     array(vec![text("read-public-bundle")]),
