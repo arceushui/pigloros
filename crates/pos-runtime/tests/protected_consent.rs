@@ -898,7 +898,7 @@ fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
     assert!(test_ok(empty_driver.step_all(timeline)).is_empty());
     assert!(test_ok(empty_driver.tick_cadenced(timeline, 0)).is_empty());
 
-    let no_gate = PluginRegistry::new().without_consent_gate();
+    let mut no_gate = PluginRegistry::new().without_consent_gate();
     assert!(matches!(
         test_err(no_gate.step_all(timeline)),
         RuntimeError::ConsentOperationUnavailable
