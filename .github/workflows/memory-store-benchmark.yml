@@ -9,6 +9,7 @@ on:
       - .github/workflows/memory-store-benchmark.yml
       - crates/pos-core/src/erasure.rs
       - crates/pos-core/src/erasure/**
+      - crates/pos-core/tests/support/erasure.rs
       - crates/pos-store/Cargo.toml
       - crates/pos-store/benches/**
       - crates/pos-store/src/memory.rs

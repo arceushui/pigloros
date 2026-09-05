@@ -38,14 +38,14 @@ const DEFAULT_SAMPLES: usize = 10;
 type SharedStore = Rc<RefCell<MemoryStore>>;
 type ReadLog = Rc<RefCell<BTreeSet<ErasureReferenceV1>>>;
 
-struct Host {
+struct BenchmarkErasureHost {
     store: SharedStore,
     targets: Vec<ErasureRequiredTargetV1>,
     failed_object: Option<ErasureReferenceV1>,
     reads: ReadLog,
 }
 
-impl ErasureStateResolverV1 for Host {
+impl ErasureStateResolverV1 for BenchmarkErasureHost {
     fn resolve_state(
         &self,
         digest: ErasureReferenceV1,
@@ -54,7 +54,7 @@ impl ErasureStateResolverV1 for Host {
     }
 }
 
-impl ErasurePersistencePortV1 for Host {
+impl ErasurePersistencePortV1 for BenchmarkErasureHost {
     fn read_manifest(
         &self,
         request: ErasureReferenceV1,
@@ -81,7 +81,7 @@ impl ErasurePersistencePortV1 for Host {
     }
 }
 
-impl ErasureFreezeAuthorizationVerifierV1 for Host {
+impl ErasureFreezeAuthorizationVerifierV1 for BenchmarkErasureHost {
     fn validate_freeze_authorization(
         &self,
         admission: &ErasureFreezeAdmissionEvidenceV1,
@@ -91,7 +91,7 @@ impl ErasureFreezeAuthorizationVerifierV1 for Host {
     }
 }
 
-impl ErasureRecoveryAuthorizationVerifierV1 for Host {
+impl ErasureRecoveryAuthorizationVerifierV1 for BenchmarkErasureHost {
     fn validate_scope_extension(
         &self,
         _extension: &ErasureScopeExtensionV1,
@@ -107,7 +107,7 @@ impl ErasureRecoveryAuthorizationVerifierV1 for Host {
     }
 }
 
-impl ErasureCoordinatorPortV1 for Host {
+impl ErasureCoordinatorPortV1 for BenchmarkErasureHost {
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
@@ -148,12 +148,12 @@ impl ErasureCoordinatorPortV1 for Host {
                 .iter()
                 .map(ErasureObligationV1::reference)
                 .collect(),
-            policy: reference(6, 0),
-            trust: reference(8, 0),
+            policy: benchmark_reference(6, 0),
+            trust: benchmark_reference(8, 0),
         })?;
         let scope = ErasureScopeCommitmentInputV1 {
             request,
-            scope_members: vec![reference(9, 0)],
+            scope_members: vec![benchmark_reference(9, 0)],
             target_closure: target_closure_digest(&targets),
             lineage_rule: None,
         };
@@ -227,9 +227,28 @@ impl ErasureCoordinatorPortV1 for Host {
     }
 }
 
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum BenchmarkScenario {
+    ManifestCas,
+    AcknowledgementAdmission,
+    RecoveryErrorAppend,
+    RecoveryErrorRead,
+}
+
+impl BenchmarkScenario {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ManifestCas => "manifest-cas",
+            Self::AcknowledgementAdmission => "acknowledgement-admission",
+            Self::RecoveryErrorAppend => "recovery-error-append",
+            Self::RecoveryErrorRead => "recovery-error-read",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Measurement {
-    scenario: &'static str,
+    scenario: BenchmarkScenario,
     cardinality: usize,
     sample: usize,
     elapsed_nanos: u128,
@@ -237,61 +256,61 @@ struct Measurement {
 
 struct AcknowledgementWorkload {
     store: SharedStore,
-    coordinator: ErasureCoordinatorStateMachineV1<Host>,
-    request: ErasureReferenceV1,
+    state_machine: ErasureCoordinatorStateMachineV1<BenchmarkErasureHost>,
+    request_reference: ErasureReferenceV1,
     entries: Vec<(ErasureRequiredTargetV1, ErasureReferenceV1)>,
 }
 
-fn reference(namespace: u8, value: usize) -> ErasureReferenceV1 {
+fn benchmark_reference(namespace: u8, value: usize) -> ErasureReferenceV1 {
     let mut digest = [namespace; 32];
     let value = u64::try_from(value).unwrap_or(u64::MAX);
     digest[..8].copy_from_slice(&value.to_be_bytes());
     ErasureReferenceV1::from_digest(digest)
 }
 
-fn request(value: usize) -> Result<ErasureRequestV1, ErasureErrorV1> {
+fn benchmark_request(value: usize) -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: reference(1, value),
-        subject: reference(2, value),
+        request: benchmark_reference(1, value),
+        subject: benchmark_reference(2, value),
         scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(3, value)],
-        requester: reference(4, value),
-        authorization: reference(5, value),
-        policy: reference(6, 0),
+        selectors: vec![benchmark_reference(3, value)],
+        requester: benchmark_reference(4, value),
+        authorization: benchmark_reference(5, value),
+        policy: benchmark_reference(6, 0),
         request_position: 9,
         horizon_position: 20,
-        provenance: reference(7, value),
+        provenance: benchmark_reference(7, value),
     })
 }
 
-fn target(value: usize) -> ErasureRequiredTargetV1 {
+fn benchmark_target(value: usize) -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
-        artifact_digest: reference(20, value),
-        key_digest: reference(21, value),
-        replica_set: reference(22, value),
-        replica_id: reference(23, value),
+        artifact_digest: benchmark_reference(20, value),
+        key_digest: benchmark_reference(21, value),
+        replica_set: benchmark_reference(22, value),
+        replica_id: benchmark_reference(23, value),
         ..erasure_support::persistence_target()
     }
 }
 
-fn coordinator(
+fn benchmark_coordinator(
     store: SharedStore,
     targets: Vec<ErasureRequiredTargetV1>,
     failed_object: Option<ErasureReferenceV1>,
     reads: ReadLog,
-) -> ErasureCoordinatorStateMachineV1<Host> {
+) -> ErasureCoordinatorStateMachineV1<BenchmarkErasureHost> {
     ErasureCoordinatorStateMachineV1::new(
-        Host {
+        BenchmarkErasureHost {
             store,
             targets,
             failed_object,
             reads,
         },
-        reference(30, 0),
+        benchmark_reference(30, 0),
     )
 }
 
-fn transition() -> ErasureStateTransitionV1 {
+fn access_frozen_transition() -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle: ErasureLifecycleV1::AccessFrozen,
         freeze_position: Some(10),
@@ -299,7 +318,7 @@ fn transition() -> ErasureStateTransitionV1 {
         failed_owners: Vec::new(),
         acknowledged_targets: Vec::new(),
         replay_claim: pos_core::ErasureReplayClaimV1::Exact,
-        provenance: reference(31, 0),
+        provenance: benchmark_reference(31, 0),
     }
 }
 
@@ -318,11 +337,11 @@ fn retry_admission(
         attempt_ordinal: 0,
         source_receipt: None,
         obligations: &obligations,
-        policy: reference(6, 0),
-        trust: reference(8, 0),
+        policy: benchmark_reference(6, 0),
+        trust: benchmark_reference(8, 0),
         admitted_position: 11,
         deadline_position: 20,
-        authorization_provenance: reference(32, 0),
+        authorization_provenance: benchmark_reference(32, 0),
     })?;
     Ok((admission, obligations))
 }
@@ -336,27 +355,27 @@ fn acknowledgement(
         obligation,
         target,
         owner: target.replica_id,
-        evidence: reference(40, value),
+        evidence: benchmark_reference(40, value),
         outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
     }
 }
 
-fn prepared_acknowledgement_store(
+fn acknowledgement_workload(
     acknowledged: usize,
 ) -> Result<AcknowledgementWorkload, ErasureErrorV1> {
-    let targets = (0..=acknowledged).map(target).collect::<Vec<_>>();
+    let targets = (0..=acknowledged).map(benchmark_target).collect::<Vec<_>>();
     let store = Rc::new(RefCell::new(MemoryStore::new()));
-    let mut coordinator = coordinator(
+    let mut coordinator = benchmark_coordinator(
         Rc::clone(&store),
         targets.clone(),
         None,
         Rc::new(RefCell::new(BTreeSet::new())),
     );
-    let request = request(0)?;
+    let request = benchmark_request(0)?;
     let request_reference = request.reference();
-    coordinator.submit(request, reference(7, 0))?;
-    coordinator.authorize(request_reference, reference(33, 0))?;
-    coordinator.freeze_inventory(request_reference, &transition())?;
+    coordinator.submit(request, benchmark_reference(7, 0))?;
+    coordinator.authorize(request_reference, benchmark_reference(33, 0))?;
+    coordinator.freeze_inventory(request_reference, &access_frozen_transition())?;
     let (admission, obligations) = retry_admission(request_reference, &targets)?;
     coordinator.dispatch_attempt(request_reference, &admission)?;
     let entries = obligations
@@ -371,8 +390,8 @@ fn prepared_acknowledgement_store(
     }
     Ok(AcknowledgementWorkload {
         store,
-        coordinator,
-        request: request_reference,
+        state_machine: coordinator,
+        request_reference,
         entries,
     })
 }
@@ -381,21 +400,24 @@ fn measure_cas(samples: usize, measurements: &mut Vec<Measurement>) -> Result<()
     for cardinality in CAS_CARDINALITIES {
         for sample in 0..samples {
             let store = Rc::new(RefCell::new(MemoryStore::new()));
-            let mut coordinator = coordinator(
+            let mut coordinator = benchmark_coordinator(
                 store,
                 Vec::new(),
                 None,
                 Rc::new(RefCell::new(BTreeSet::new())),
             );
             for value in 0..cardinality {
-                coordinator.submit(request(value)?, reference(7, value))?;
+                coordinator.submit(benchmark_request(value)?, benchmark_reference(7, value))?;
             }
             let started = Instant::now();
-            let state = coordinator.submit(request(cardinality)?, reference(7, cardinality))?;
+            let state = coordinator.submit(
+                benchmark_request(cardinality)?,
+                benchmark_reference(7, cardinality),
+            )?;
             let elapsed_nanos = started.elapsed().as_nanos();
             black_box(state);
             measurements.push(Measurement {
-                scenario: "manifest-cas",
+                scenario: BenchmarkScenario::ManifestCas,
                 cardinality,
                 sample,
                 elapsed_nanos,
@@ -411,17 +433,17 @@ fn measure_acknowledgements(
 ) -> Result<(), ErasureErrorV1> {
     for cardinality in ACKNOWLEDGEMENT_CARDINALITIES {
         for sample in 0..samples {
-            let mut workload = prepared_acknowledgement_store(cardinality)?;
+            let mut workload = acknowledgement_workload(cardinality)?;
             let (target, obligation) = workload.entries[cardinality];
             let started = Instant::now();
-            let state = workload.coordinator.acknowledge(
-                workload.request,
+            let state = workload.state_machine.acknowledge(
+                workload.request_reference,
                 acknowledgement(target, obligation, cardinality),
             )?;
             let elapsed_nanos = started.elapsed().as_nanos();
             black_box(state);
             measurements.push(Measurement {
-                scenario: "acknowledgement-admission",
+                scenario: BenchmarkScenario::AcknowledgementAdmission,
                 cardinality,
                 sample,
                 elapsed_nanos,
@@ -437,7 +459,7 @@ fn recovery_read_set(
     request: ErasureReferenceV1,
 ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
     let reads = Rc::new(RefCell::new(BTreeSet::new()));
-    coordinator(Rc::clone(store), targets.to_vec(), None, Rc::clone(&reads))
+    benchmark_coordinator(Rc::clone(store), targets.to_vec(), None, Rc::clone(&reads))
         .verified_state(request)?;
     let result = reads.borrow().iter().copied().collect();
     Ok(result)
@@ -449,7 +471,7 @@ fn retain_recovery_error(
     request: ErasureReferenceV1,
     failed_object: ErasureReferenceV1,
 ) -> Result<(), ErasureErrorV1> {
-    let result = coordinator(
+    let result = benchmark_coordinator(
         Rc::clone(store),
         targets.to_vec(),
         Some(failed_object),
@@ -469,43 +491,49 @@ fn measure_recovery_errors(
 ) -> Result<(), ErasureErrorV1> {
     for cardinality in RECOVERY_ERROR_CARDINALITIES {
         for sample in 0..samples {
-            let workload = prepared_acknowledgement_store(32)?;
-            let targets = (0..=32).map(target).collect::<Vec<_>>();
-            let read_set = recovery_read_set(&workload.store, &targets, workload.request)?;
+            let workload = acknowledgement_workload(32)?;
+            let targets = (0..=32).map(benchmark_target).collect::<Vec<_>>();
+            let read_set =
+                recovery_read_set(&workload.store, &targets, workload.request_reference)?;
             if read_set.len() <= cardinality {
                 return Err(ErasureErrorV1::ScopeInvalid);
             }
             let measured_failure = *read_set.last().ok_or(ErasureErrorV1::ScopeInvalid)?;
             for failed_object in read_set.iter().take(cardinality) {
-                retain_recovery_error(&workload.store, &targets, workload.request, *failed_object)?;
+                retain_recovery_error(
+                    &workload.store,
+                    &targets,
+                    workload.request_reference,
+                    *failed_object,
+                )?;
             }
             let started = Instant::now();
             retain_recovery_error(
                 &workload.store,
                 &targets,
-                workload.request,
+                workload.request_reference,
                 measured_failure,
             )?;
             let append_nanos = started.elapsed().as_nanos();
             measurements.push(Measurement {
-                scenario: "recovery-error-append",
+                scenario: BenchmarkScenario::RecoveryErrorAppend,
                 cardinality,
                 sample,
                 elapsed_nanos: append_nanos,
             });
 
-            let observer = coordinator(
+            let observer = benchmark_coordinator(
                 workload.store,
                 targets,
                 None,
                 Rc::new(RefCell::new(BTreeSet::new())),
             );
             let started = Instant::now();
-            let errors = observer.recovery_errors(workload.request)?;
+            let errors = observer.recovery_errors(workload.request_reference)?;
             let read_nanos = started.elapsed().as_nanos();
             black_box(errors);
             measurements.push(Measurement {
-                scenario: "recovery-error-read",
+                scenario: BenchmarkScenario::RecoveryErrorRead,
                 cardinality: cardinality + 1,
                 sample,
                 elapsed_nanos: read_nanos,
@@ -543,7 +571,7 @@ fn write_measurements(
         writeln!(
             output,
             "{},{},{},{}",
-            measurement.scenario,
+            measurement.scenario.label(),
             measurement.cardinality,
             measurement.sample,
             measurement.elapsed_nanos
@@ -571,7 +599,8 @@ fn print_summaries(output: &mut impl Write, measurements: &[Measurement]) -> Res
         let p95_index = (values.len() * 95).div_ceil(100).saturating_sub(1);
         writeln!(
             output,
-            "scenario={scenario} cardinality={cardinality} samples={} median_ns={median} p95_ns={}",
+            "scenario={} cardinality={cardinality} samples={} median_ns={median} p95_ns={}",
+            scenario.label(),
             values.len(),
             values[p95_index]
         )?;
