@@ -11,10 +11,12 @@ use std::rc::Rc;
 #[path = "../../pos-core/tests/support/erasure.rs"]
 pub mod erasure_support;
 
-use erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
-use pos_core::erasure::{
-    destruction_command_reference, target_closure_digest, ErasureAuthorizationDecisionV1,
+use erasure_support::{
+    freeze_evidence_fixture, obligation, persistence_request as request,
+    persistence_target as target, reference, retry_admission as fixture_retry_admission,
+    FreezeEvidenceFixtureInput, RetryAdmissionFixture,
 };
+use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
@@ -24,49 +26,18 @@ use pos_core::{
     ErasureCoordinatorPortV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
     ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
-    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationInputV1,
-    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
-    ErasureStateTransitionV1, ErasureStateV1, PreparedErasureCasV1,
+    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    PreparedErasureCasV1,
 };
 use pos_store::memory::MemoryStore;
 
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
-
-const fn reference(value: u8) -> ErasureReferenceV1 {
-    ErasureReferenceV1::from_digest([value; 32])
-}
-
-const fn target() -> ErasureRequiredTargetV1 {
-    ErasureRequiredTargetV1 {
-        artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(10),
-        key_role: pos_core::ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(11),
-        replica_set: reference(12),
-        replica_id: reference(13),
-    }
-}
-
-fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: reference(1),
-        subject: reference(2),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(3)],
-        requester: reference(4),
-        authorization: reference(5),
-        policy: reference(6),
-        request_position: 9,
-        horizon_position: 20,
-        provenance: reference(7),
-    })
-}
 
 const fn freeze_transition() -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
@@ -134,18 +105,12 @@ fn retry_admission(
     attempt_ordinal: u64,
     source_receipt: Option<ErasureReferenceV1>,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
-    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })?;
-    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+    let obligation = obligation(request, target)?;
+    fixture_retry_admission(RetryAdmissionFixture {
         request,
         attempt_ordinal,
         source_receipt,
-        unresolved_obligations: vec![obligation.reference()],
-        command_identities: vec![obligation.command_identity()],
+        obligations: std::slice::from_ref(&obligation),
         policy: reference(6),
         trust: reference(8),
         admitted_position: 11 + attempt_ordinal,
@@ -160,12 +125,7 @@ fn acknowledgement(
     evidence: ErasureReferenceV1,
     outcome: ErasureAcknowledgementOutcomeV1,
 ) -> Result<ErasureAcknowledgementV1, ErasureErrorV1> {
-    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })?;
+    let obligation = obligation(request, target)?;
     Ok(ErasureAcknowledgementV1 {
         obligation: obligation.reference(),
         target,
@@ -278,62 +238,7 @@ where
         self.store.borrow().read_object(reference)
     }
 
-    fn read_effect(
-        &self,
-        manifest: ErasureReferenceV1,
-    ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
-        self.store.borrow().read_effect(manifest)
-    }
-
-    fn effect_manifest(
-        &self,
-        subject: ErasureReferenceV1,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().effect_manifest(subject)
-    }
-
-    fn attempt_page_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().attempt_page_ref(request, ordinal)
-    }
-
-    fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        self.store.borrow().attempt_index_count(request)
-    }
-
-    fn scope_node_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().scope_node_ref(request, ordinal)
-    }
-
-    fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        self.store.borrow().scope_index_count(request)
-    }
-
-    fn administrative_resolution_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store
-            .borrow()
-            .administrative_resolution_ref(request, ordinal)
-    }
-
-    fn administrative_resolution_index_count(
-        &self,
-        request: ErasureReferenceV1,
-    ) -> Result<u64, ErasureErrorV1> {
-        self.store
-            .borrow()
-            .administrative_resolution_index_count(request)
-    }
+    crate::impl_erasure_persistence_forwarding!();
 
     fn compare_and_swap(
         &mut self,
@@ -426,14 +331,7 @@ where
             .targets
             .iter()
             .copied()
-            .map(|target| {
-                ErasureObligationV1::new(ErasureObligationInputV1 {
-                    category: ErasureInventoryCategoryV1::Artifact,
-                    target,
-                    owner: target.replica_id,
-                    command_identity: destruction_command_reference(request, target),
-                })
-            })
+            .map(|target| obligation(request, target))
             .collect::<Result<Vec<_>, _>>()?;
         obligations.sort_unstable_by_key(ErasureObligationV1::reference);
         let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
@@ -768,6 +666,7 @@ fn sqlite_public_reads_map_missing_schema_to_closed_storage_errors(
         SqliteReadOperation::ScopeCount,
         SqliteReadOperation::ResolutionRef,
         SqliteReadOperation::ResolutionCount,
+        SqliteReadOperation::RecoveryErrorRefs,
         SqliteReadOperation::State,
     ] {
         let database = tempfile::NamedTempFile::new()?;
@@ -792,6 +691,7 @@ fn sqlite_public_reads_map_missing_schema_to_closed_storage_errors(
 enum SqliteFaultKind {
     MissingObject,
     MismatchedState,
+    MissingStateTable,
     MissingIndex,
     MismatchedEffect,
     ApplyWithMismatchedState,
@@ -810,6 +710,7 @@ enum SqliteReadOperation {
     ScopeCount,
     ResolutionRef,
     ResolutionCount,
+    RecoveryErrorRefs,
     State,
 }
 
@@ -823,6 +724,7 @@ impl SqliteReadOperation {
             Self::AttemptRef | Self::AttemptCount => "erasure_attempt_pages",
             Self::ScopeRef | Self::ScopeCount => "erasure_scope_nodes",
             Self::ResolutionRef | Self::ResolutionCount => "erasure_administrative_resolutions",
+            Self::RecoveryErrorRefs => "erasure_recovery_errors",
             Self::State => "erasure_states",
         }
     }
@@ -843,6 +745,7 @@ impl SqliteReadOperation {
             Self::ResolutionCount => store
                 .administrative_resolution_index_count(reference(1))
                 .map(|_| ()),
+            Self::RecoveryErrorRefs => store.recovery_error_refs(reference(1)).map(|_| ()),
             Self::State => store.resolve_state(reference(1)).map(|_| ()),
         }
     }
@@ -855,6 +758,7 @@ impl SqliteFaultKind {
             Self::MissingIndex => 4,
             Self::MissingObject
             | Self::MismatchedState
+            | Self::MissingStateTable
             | Self::MismatchedEffect
             | Self::ApplyWithMismatchedState => 1,
         }
@@ -863,6 +767,7 @@ impl SqliteFaultKind {
     const fn expected_error(self) -> ErasureErrorV1 {
         match self {
             Self::ApplyWithMismatchedState => ErasureErrorV1::ProvenanceMissing,
+            Self::MissingStateTable => ErasureErrorV1::ReceiptCommitFailed,
             Self::MissingObject
             | Self::MismatchedState
             | Self::MissingIndex
@@ -933,6 +838,11 @@ impl SqliteFaultHook {
                         )
                         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
                 }
+            }
+            SqliteFaultKind::MissingStateTable => {
+                connection
+                    .execute_batch("DROP TABLE erasure_states")
+                    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
             }
             SqliteFaultKind::MissingIndex => {
                 let index = mutation
@@ -1047,6 +957,7 @@ fn sqlite_exact_retry_rechecks_each_public_durable_component(
     for kind in [
         SqliteFaultKind::MissingObject,
         SqliteFaultKind::MismatchedState,
+        SqliteFaultKind::MissingStateTable,
         SqliteFaultKind::MissingIndex,
         SqliteFaultKind::MismatchedEffect,
     ] {
@@ -1143,6 +1054,22 @@ fn sqlite_public_reads_reject_malformed_reference_columns() -> Result<(), Box<dy
         store.read_manifest(reference(1)),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+
+    let stored_request = reference(2);
+    let stored_digest = reference(3);
+    connection.execute(
+        "INSERT INTO erasure_records(request_digest,manifest_digest,manifest_cbor) VALUES(?1,?2,?3)",
+        rusqlite::params![
+            stored_request.digest().as_slice(),
+            stored_digest.digest().as_slice(),
+            &malformed
+        ],
+    )?;
+    let stored = store
+        .read_manifest(stored_request)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(stored.digest(), stored_digest);
+    assert_eq!(stored.canonical_cbor(), malformed.as_slice());
 
     for (table, read) in [
         ("erasure_attempt_pages", SqliteReadOperation::AttemptRef),

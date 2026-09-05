@@ -843,3 +843,32 @@ const fn map_atomic_error(operation: AtomicOperation, error: Errno) -> Materiali
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_identity_rejects_non_directories() -> Result<(), MaterializationError> {
+        let directory =
+            fs::statat(CWD, Path::new("."), AtFlags::empty()).map_err(map_open_error)?;
+        assert!(directory_entry_identity(directory).is_ok());
+
+        let regular_file =
+            fs::statat(CWD, Path::new("/dev/null"), AtFlags::empty()).map_err(map_open_error)?;
+        assert!(matches!(
+            directory_entry_identity(regular_file),
+            Err(MaterializationError::UntrustedOutputDirectory)
+        ));
+        assert!(matches!(
+            non_directory_error(FileType::Symlink),
+            MaterializationError::SymlinkDetected
+        ));
+        assert!(matches!(
+            non_directory_error(FileType::RegularFile),
+            MaterializationError::UntrustedOutputDirectory
+        ));
+        Ok(())
+    }
+}
