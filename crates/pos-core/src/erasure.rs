@@ -872,9 +872,13 @@ impl ErasureFreezeAuthorizationEvidenceV1 {
         &self,
         admission: &ErasureFreezeAdmissionEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        (self.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        admission
+            .authorization_body_digest()
+            .and_then(|body_digest| {
+                (self.admission_body_digest() == body_digest)
+                    .then_some(())
+                    .ok_or(ErasureErrorV1::Unauthorized)
+            })
     }
 
     /// Encode the exact retained authorization-evidence object.
@@ -3404,11 +3408,9 @@ pub struct PreparedErasureRecoveryErrorV1 {
 
 impl PreparedErasureRecoveryErrorV1 {
     pub(crate) fn new(record: ErasureRecoveryErrorV1) -> Result<Self, ErasureErrorV1> {
-        let object =
-            ErasurePersistenceObjectV1::new(record.reference(), record.to_canonical_cbor()?);
-        Ok(Self {
+        record.to_canonical_cbor().map(|bytes| Self {
             request: record.request(),
-            object,
+            object: ErasurePersistenceObjectV1::new(record.reference(), bytes),
         })
     }
 

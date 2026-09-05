@@ -186,9 +186,10 @@ impl TargetClosureV1 {
             targets,
             reference: super::reference_zero(),
         };
-        let bytes = value.canonical_cbor()?;
-        value.reference = addressed(ERASURE_TARGET_CLOSURE_TAG_V1, &bytes);
-        Ok(value)
+        value.canonical_cbor().map(|bytes| {
+            value.reference = addressed(ERASURE_TARGET_CLOSURE_TAG_V1, &bytes);
+            value
+        })
     }
 
     pub(super) fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
@@ -250,9 +251,10 @@ impl InventoryV1 {
             references,
             reference: super::reference_zero(),
         };
-        let bytes = value.canonical_cbor()?;
-        value.reference = addressed(ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, &bytes);
-        Ok(value)
+        value.canonical_cbor().map(|bytes| {
+            value.reference = addressed(ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, &bytes);
+            value
+        })
     }
 
     pub(super) fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
@@ -862,19 +864,20 @@ impl RecoveredErasureV1 {
         index_inserts: Vec<ErasureIndexInsertV1>,
         effect: ErasureCasEffectV1,
     ) -> Result<PreparedErasureCasV1, ErasureErrorV1> {
-        self.manifest.validate_shape()?;
-        self.manifest.canonical_cbor().and_then(|bytes| {
-            let digest = addressed(ERCRP1, &bytes);
-            StoredErasureManifestV1::new(digest, bytes).map(|next_manifest| {
-                PreparedErasureCasV1::new(
-                    self.request.reference(),
-                    expected_manifest_digest,
-                    next_manifest,
-                    new_objects,
-                    new_states,
-                    index_inserts,
-                    effect,
-                )
+        self.manifest.validate_shape().and_then(|()| {
+            self.manifest.canonical_cbor().and_then(|bytes| {
+                let digest = addressed(ERCRP1, &bytes);
+                StoredErasureManifestV1::new(digest, bytes).map(|next_manifest| {
+                    PreparedErasureCasV1::new(
+                        self.request.reference(),
+                        expected_manifest_digest,
+                        next_manifest,
+                        new_objects,
+                        new_states,
+                        index_inserts,
+                        effect,
+                    )
+                })
             })
         })
     }
@@ -931,55 +934,66 @@ impl RecoveredErasureV1 {
         scope: ErasureScopeCommitmentV1,
         freeze: ErasureFreezeProvenanceV1,
     ) -> Result<Vec<ErasurePersistenceObjectV1>, ErasureErrorV1> {
-        let closure = TargetClosureV1::new(self.request.reference(), admission.targets().to_vec())?;
-        let mut objects = [
-            encoded_persistence_object(closure.reference, closure.canonical_cbor()),
-            encoded_persistence_object(scope.reference(), scope.to_canonical_cbor()),
-            encoded_persistence_object(
-                admission.freeze_admission_evidence().reference(),
-                admission.freeze_admission_evidence().to_canonical_cbor(),
-            ),
-            encoded_persistence_object(
-                admission.freeze_authorization_evidence().reference(),
-                admission
-                    .freeze_authorization_evidence()
-                    .to_canonical_cbor(),
-            ),
-            encoded_persistence_object(freeze.reference(), freeze.to_canonical_cbor()),
-            encoded_persistence_object(
-                admission.obligation_set().reference(),
-                admission.obligation_set().to_canonical_cbor(),
-            ),
-        ]
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-        objects.extend(
-            admission
-                .obligations()
-                .iter()
-                .map(|obligation| {
+        TargetClosureV1::new(self.request.reference(), admission.targets().to_vec()).and_then(
+            |closure| {
+                [
+                    encoded_persistence_object(closure.reference, closure.canonical_cbor()),
+                    encoded_persistence_object(scope.reference(), scope.to_canonical_cbor()),
                     encoded_persistence_object(
-                        obligation.reference(),
-                        obligation.to_canonical_cbor(),
-                    )
+                        admission.freeze_admission_evidence().reference(),
+                        admission.freeze_admission_evidence().to_canonical_cbor(),
+                    ),
+                    encoded_persistence_object(
+                        admission.freeze_authorization_evidence().reference(),
+                        admission
+                            .freeze_authorization_evidence()
+                            .to_canonical_cbor(),
+                    ),
+                    encoded_persistence_object(freeze.reference(), freeze.to_canonical_cbor()),
+                    encoded_persistence_object(
+                        admission.obligation_set().reference(),
+                        admission.obligation_set().to_canonical_cbor(),
+                    ),
+                ]
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|mut objects| {
+                    admission
+                        .obligations()
+                        .iter()
+                        .map(|obligation| {
+                            encoded_persistence_object(
+                                obligation.reference(),
+                                obligation.to_canonical_cbor(),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|obligation_objects| {
+                            objects.extend(obligation_objects);
+                            objects
+                        })
                 })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-        self.manifest.target_closure = Some(closure.reference);
-        self.manifest.scope = Some(scope.reference());
-        self.manifest.freeze_admission = Some(admission.freeze_admission_evidence().reference());
-        self.manifest.freeze_authorization =
-            Some(admission.freeze_authorization_evidence().reference());
-        self.manifest.freeze_provenance = Some(freeze.reference());
-        self.manifest.obligation_set = Some(admission.obligation_set().reference());
-        self.targets = closure.targets;
-        self.scope = Some(scope);
-        self.freeze_admission = Some(admission.freeze_admission_evidence().clone());
-        self.freeze_authorization = Some(admission.freeze_authorization_evidence().clone());
-        self.freeze_provenance = Some(freeze);
-        self.obligation_set = Some(admission.obligation_set().clone());
-        self.obligations = admission.obligations().to_vec();
-        Ok(objects)
+                .map(|objects| {
+                    self.manifest.target_closure = Some(closure.reference);
+                    self.manifest.scope = Some(scope.reference());
+                    self.manifest.freeze_admission =
+                        Some(admission.freeze_admission_evidence().reference());
+                    self.manifest.freeze_authorization =
+                        Some(admission.freeze_authorization_evidence().reference());
+                    self.manifest.freeze_provenance = Some(freeze.reference());
+                    self.manifest.obligation_set = Some(admission.obligation_set().reference());
+                    self.targets = closure.targets;
+                    self.scope = Some(scope);
+                    self.freeze_admission = Some(admission.freeze_admission_evidence().clone());
+                    self.freeze_authorization =
+                        Some(admission.freeze_authorization_evidence().clone());
+                    self.freeze_provenance = Some(freeze);
+                    self.obligation_set = Some(admission.obligation_set().clone());
+                    self.obligations = admission.obligations().to_vec();
+                    objects
+                })
+            },
+        )
     }
 
     pub(super) fn set_freeze_failure(
@@ -1033,28 +1047,31 @@ impl RecoveredErasureV1 {
         &mut self,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
-        let (active, manifest_active) = self
-            .active
+        self.active
             .as_mut()
             .zip(self.manifest.active.as_mut())
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if acknowledgement.request() != self.request.reference()
-            || acknowledgement.attempt() != active.admission.reference()
-        {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        let identity = (acknowledgement.obligation(), acknowledgement.owner());
-        if active.admitted.contains_key(&identity) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        let reference = acknowledgement.reference();
-        acknowledgement.to_canonical_cbor().map(|bytes| {
-            active.admitted.insert(identity, *acknowledgement);
-            self.effective.insert(identity, *acknowledgement);
-            manifest_active.acknowledgements =
-                canonical_acknowledgement_references(active.admitted.values().copied());
-            persistence_object(reference, bytes)
-        })
+            .map_or_else(
+                || Err(ErasureErrorV1::ProvenanceMissing),
+                |(active, manifest_active)| {
+                    if acknowledgement.request() != self.request.reference()
+                        || acknowledgement.attempt() != active.admission.reference()
+                    {
+                        return Err(ErasureErrorV1::ProvenanceMissing);
+                    }
+                    let identity = (acknowledgement.obligation(), acknowledgement.owner());
+                    if active.admitted.contains_key(&identity) {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
+                    let reference = acknowledgement.reference();
+                    acknowledgement.to_canonical_cbor().map(|bytes| {
+                        active.admitted.insert(identity, *acknowledgement);
+                        self.effective.insert(identity, *acknowledgement);
+                        manifest_active.acknowledgements =
+                            canonical_acknowledgement_references(active.admitted.values().copied());
+                        persistence_object(reference, bytes)
+                    })
+                },
+            )
     }
 
     pub(super) fn append_scope_extension(
@@ -1130,67 +1147,91 @@ impl RecoveredErasureV1 {
         receipt_provenance: &ErasureReceiptProvenanceV1,
         receipt: &ErasureReceiptV1,
     ) -> Result<(Vec<ErasurePersistenceObjectV1>, ErasureIndexInsertV1), ErasureErrorV1> {
-        let active = self
-            .active
-            .as_ref()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let ordinal = active.ordinal;
-        let admitted = InventoryV1::new(
-            self.request.reference(),
-            ordinal,
-            INVENTORY_ADMITTED.0,
-            canonical_acknowledgement_references(active.admitted.values().copied()),
-        )?;
-        let effective = InventoryV1::new(
-            self.request.reference(),
-            ordinal,
-            INVENTORY_EFFECTIVE.0,
-            canonical_acknowledgement_references(self.effective.values().copied()),
-        )?;
-        let page = AttemptPageV1 {
-            request: self.request.reference(),
-            ordinal,
-            retry_admission: active.admission.reference(),
-            admitted_inventory: admitted.reference,
-            effective_inventory: effective.reference,
-            outcome: outcome.reference(),
-            receipt: receipt.receipt_digest(),
-            receipt_provenance: receipt_provenance.reference(),
-            terminal_state: self.state.state_digest(),
-            predecessor: self.attempt_history_head,
-            reference: super::reference_zero(),
-        };
-        let page_bytes = page.canonical_cbor()?;
-        let page_reference = addressed(ERASURE_ATTEMPT_HISTORY_TAG_V1, &page_bytes);
-        let mut objects = [
-            encoded_persistence_object(admitted.reference, admitted.canonical_cbor()),
-            encoded_persistence_object(effective.reference, effective.canonical_cbor()),
-            encoded_persistence_object(outcome.reference(), outcome.to_canonical_cbor()),
-            encoded_persistence_object(
-                receipt_provenance.reference(),
-                receipt_provenance.to_canonical_cbor(),
-            ),
-            encoded_persistence_object(receipt.receipt_digest(), receipt.to_canonical_cbor()),
-        ]
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-        objects.push(persistence_object(page_reference, page_bytes));
-        self.manifest.active = None;
-        self.manifest.attempt_history_head = Some(page_reference);
-        let completed = ordinal + 1;
-        self.manifest.completed_attempt_count = completed;
-        self.manifest.latest_receipt = Some(receipt.receipt_digest());
-        self.active = None;
-        self.attempt_history_head = Some(page_reference);
-        self.completed_attempt_count = completed;
-        self.latest_receipt = Some(receipt.receipt_digest());
-        Ok((
-            objects,
-            ErasureIndexInsertV1::AttemptPage {
-                ordinal,
-                reference: page_reference,
+        self.active.as_ref().map_or_else(
+            || Err(ErasureErrorV1::ProvenanceMissing),
+            |active| {
+                let ordinal = active.ordinal;
+                let retry_admission = active.admission.reference();
+                let admitted_references =
+                    canonical_acknowledgement_references(active.admitted.values().copied());
+                InventoryV1::new(
+                    self.request.reference(),
+                    ordinal,
+                    INVENTORY_ADMITTED.0,
+                    admitted_references,
+                )
+                .and_then(|admitted| {
+                    InventoryV1::new(
+                        self.request.reference(),
+                        ordinal,
+                        INVENTORY_EFFECTIVE.0,
+                        canonical_acknowledgement_references(self.effective.values().copied()),
+                    )
+                    .and_then(|effective| {
+                        let page = AttemptPageV1 {
+                            request: self.request.reference(),
+                            ordinal,
+                            retry_admission,
+                            admitted_inventory: admitted.reference,
+                            effective_inventory: effective.reference,
+                            outcome: outcome.reference(),
+                            receipt: receipt.receipt_digest(),
+                            receipt_provenance: receipt_provenance.reference(),
+                            terminal_state: self.state.state_digest(),
+                            predecessor: self.attempt_history_head,
+                            reference: super::reference_zero(),
+                        };
+                        page.canonical_cbor().and_then(|page_bytes| {
+                            let page_reference =
+                                addressed(ERASURE_ATTEMPT_HISTORY_TAG_V1, &page_bytes);
+                            [
+                                encoded_persistence_object(
+                                    admitted.reference,
+                                    admitted.canonical_cbor(),
+                                ),
+                                encoded_persistence_object(
+                                    effective.reference,
+                                    effective.canonical_cbor(),
+                                ),
+                                encoded_persistence_object(
+                                    outcome.reference(),
+                                    outcome.to_canonical_cbor(),
+                                ),
+                                encoded_persistence_object(
+                                    receipt_provenance.reference(),
+                                    receipt_provenance.to_canonical_cbor(),
+                                ),
+                                encoded_persistence_object(
+                                    receipt.receipt_digest(),
+                                    receipt.to_canonical_cbor(),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect::<Result<Vec<_>, _>>()
+                            .map(|mut objects| {
+                                objects.push(persistence_object(page_reference, page_bytes));
+                                self.manifest.active = None;
+                                self.manifest.attempt_history_head = Some(page_reference);
+                                let completed = ordinal + 1;
+                                self.manifest.completed_attempt_count = completed;
+                                self.manifest.latest_receipt = Some(receipt.receipt_digest());
+                                self.active = None;
+                                self.attempt_history_head = Some(page_reference);
+                                self.completed_attempt_count = completed;
+                                self.latest_receipt = Some(receipt.receipt_digest());
+                                (
+                                    objects,
+                                    ErasureIndexInsertV1::AttemptPage {
+                                        ordinal,
+                                        reference: page_reference,
+                                    },
+                                )
+                            })
+                        })
+                    })
+                })
             },
-        ))
+        )
     }
 
     fn recover_active_attempt(
@@ -1438,36 +1479,47 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
         context: &CompletedAttemptContextV1<'_>,
     ) -> Result<(ErasureReferenceV1, ErasureReferenceV1), RecoveryFailureV1> {
-        let CompletedAttemptEvidenceV1 {
-            outcome,
-            receipt,
-            provenance,
-            terminal,
-        } = load_completed_attempt_evidence(port, context.page)?;
-        validate_recovery_bindings([(
-            terminal.request() == context.request,
-            terminal.state_digest(),
-        )])?;
-        Self::validate_completed_outcome(&outcome, &terminal, &provenance, context)?;
-        Self::validate_completed_provenance(&provenance, context)?;
-        Self::validate_completed_receipt(
-            &receipt,
-            context.page,
-            &terminal,
-            &provenance,
-            context.admission,
-        )?;
-        Self::validate_effect_subject(
-            port,
-            receipt.receipt_digest(),
-            &ErasureCasEffectV1::ReceiptAdmission {
-                receipt: receipt.receipt_digest(),
+        load_completed_attempt_evidence(port, context.page).and_then(
+            |CompletedAttemptEvidenceV1 {
+                 outcome,
+                 receipt,
+                 provenance,
+                 terminal,
+             }| {
+                validate_recovery_bindings([(
+                    terminal.request() == context.request,
+                    terminal.state_digest(),
+                )])
+                .and_then(|()| {
+                    Self::validate_completed_outcome(&outcome, &terminal, &provenance, context)
+                })
+                .and_then(|()| Self::validate_completed_provenance(&provenance, context))
+                .and_then(|()| {
+                    Self::validate_completed_receipt(
+                        &receipt,
+                        context.page,
+                        &terminal,
+                        &provenance,
+                        context.admission,
+                    )
+                })
+                .and_then(|()| {
+                    Self::validate_effect_subject(
+                        port,
+                        receipt.receipt_digest(),
+                        &ErasureCasEffectV1::ReceiptAdmission {
+                            receipt: receipt.receipt_digest(),
+                        },
+                    )
+                })
+                .and_then(|()| {
+                    receipt
+                        .validate_frozen_obligations(&self.obligations)
+                        .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))
+                })
+                .map(|()| (receipt.receipt_digest(), context.page.terminal_state))
             },
-        )?;
-        receipt
-            .validate_frozen_obligations(&self.obligations)
-            .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))?;
-        Ok((receipt.receipt_digest(), context.page.terminal_state))
+        )
     }
 
     fn validate_completed_outcome(
@@ -2126,24 +2178,22 @@ fn validate_fixed_bindings(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailu
 
 fn validate_freeze_authorization(graph: &FixedGraphV1<'_>) -> Result<(), RecoveryFailureV1> {
     match (graph.admission, graph.authorization) {
-        (Some(admission), Some(authorization)) => {
-            graph
-                .verifier
-                .validate_freeze_authorization(admission, authorization)
-                .map_err(|error| RecoveryFailureV1::new(error, authorization.reference()))?;
-        }
-        (None, None) => {}
+        (Some(admission), Some(authorization)) => graph
+            .verifier
+            .validate_freeze_authorization(admission, authorization)
+            .map_err(|error| RecoveryFailureV1::new(error, authorization.reference()))
+            .map(|()| ()),
+        (None, None) => Ok(()),
         _ => {
             let subject = graph
                 .admission
                 .map_or(graph.manifest, ErasureFreezeAdmissionEvidenceV1::reference);
-            return Err(RecoveryFailureV1::new(
+            Err(RecoveryFailureV1::new(
                 ErasureErrorV1::ProvenanceMissing,
                 subject,
-            ));
+            ))
         }
     }
-    Ok(())
 }
 
 fn reconstruct_frozen_graph(
@@ -2430,8 +2480,18 @@ fn resolve_state_provenance_predecessor(
 ) -> Result<ErasureStateV1, RecoveryFailureV1> {
     resolver
         .resolve_state(previous)
-        .map_err(|error| RecoveryFailureV1::new(error, previous))?
-        .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, previous))
+        .map_err(|error| RecoveryFailureV1::new(error, previous))
+        .and_then(|state| {
+            state.map_or_else(
+                || {
+                    Err(RecoveryFailureV1::new(
+                        ErasureErrorV1::ProvenanceMissing,
+                        previous,
+                    ))
+                },
+                Ok,
+            )
+        })
 }
 
 #[cfg(test)]
