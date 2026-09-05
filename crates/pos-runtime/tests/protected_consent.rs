@@ -11,6 +11,7 @@ use pos_core::{
 use pos_runtime::{
     Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
 };
+use pos_store::{open_store, StoreConfig};
 use std::{
     fmt::Debug,
     sync::{Arc, Mutex},
@@ -1070,24 +1071,7 @@ fn public_cadence_and_empty_registry_cover_ready_and_overflow_boundaries() {
 }
 
 #[test]
-fn public_registry_registration_and_metadata_cover_library_paths() {
-    let mut registry = PluginRegistry::new();
-    assert!(registry.is_empty());
-    let plugin = configured_plugin("metadata", &["metadata.event"], false, false);
-    test_ok(registry.register(&plugin, None, None));
-    assert!(registry.contains(&plugin.id));
-    assert_eq!(registry.len(), 1);
-    assert_eq!(registry.plugin_names().collect::<Vec<_>>(), ["metadata"]);
-    assert_eq!(
-        registry.plugin_versions().collect::<Vec<_>>(),
-        [("metadata", "0.1.0")]
-    );
-    assert!(PluginRegistry::new_replay().is_empty());
-    assert!(PluginRegistry::new()
-        .with_consent_gate(Arc::new(ConsentAuthority::new()))
-        .clone_consent_gate()
-        .is_some());
-
+fn public_registry_rejects_invalid_capabilities() {
     for event_type in [
         pos_core::GEOGRAPHIC_EVENT_TYPE,
         pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
@@ -1098,7 +1082,7 @@ fn public_registry_registration_and_metadata_cover_library_paths() {
             .register(
                 &configured_plugin("reserved", &[event_type], false, false),
                 None,
-                None
+                None,
             )
             .is_err());
     }
@@ -1130,7 +1114,10 @@ fn public_registry_registration_and_metadata_cover_library_paths() {
             None,
         )
         .is_err());
+}
 
+#[test]
+fn public_registry_rejects_invalid_approver_routes() {
     let mut approvers = PluginRegistry::new();
     let owned = configured_plugin("approver", &["action.type"], false, false);
     test_ok(approvers.register_with_approver(
@@ -1167,13 +1154,32 @@ fn public_registry_registration_and_metadata_cover_library_paths() {
             [Kind::new("action.type")],
         )
         .is_err());
+}
+
+#[test]
+fn public_registry_registration_and_metadata_cover_library_paths() {
+    let mut registry = PluginRegistry::new();
+    assert!(registry.is_empty());
+    let plugin = configured_plugin("metadata", &["metadata.event"], false, false);
+    test_ok(registry.register(&plugin, None, None));
+    assert!(registry.contains(&plugin.id));
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.plugin_names().collect::<Vec<_>>(), ["metadata"]);
+    assert_eq!(
+        registry.plugin_versions().collect::<Vec<_>>(),
+        [("metadata", "0.1.0")]
+    );
+    assert!(PluginRegistry::new_replay().is_empty());
+    assert!(PluginRegistry::new()
+        .with_consent_gate(Arc::new(ConsentAuthority::new()))
+        .clone_consent_gate()
+        .is_some());
 
     let timeline = TimelineId::new();
     let mut anchored = PluginRegistry::new();
     assert!(test_ok(anchored.tick_cadenced_anchored(timeline, 0, Seq::ZERO)).is_empty());
     test_ok(anchored.commit_step_at(Seq::ZERO, 0));
 
-    use pos_store::{open_store, StoreConfig};
     let mut append = PluginRegistry::new();
     test_ok(append.step_all_anchored(timeline, Seq::ZERO));
     let mut store = test_ok(open_store(StoreConfig::Memory));
