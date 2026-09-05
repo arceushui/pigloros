@@ -1482,8 +1482,10 @@ impl AuthorizationDecisionV1 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuthorityEvaluatorV1;
 
-// Keep the defensive provenance failure transition isolated so its fail-closed
-// result can be verified without weakening the validated grant API.
+// Private-seam coverage exception: validated grants cannot make `binding_digest`
+// fail, but this original defensive branch must remain fail-closed. Keep the
+// transition isolated so that invariant can be verified without weakening the
+// public grant constructors or changing authorization behavior.
 const fn deny_missing_grant_provenance(evaluation: &mut AuthorizationEvaluationV1) -> Vec<Hash> {
     *evaluation = AuthorizationEvaluationV1::denied(
         AuthorizationOutcomeV1::IndeterminateFailClosed,

@@ -894,21 +894,8 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
 }
 
 #[test]
-fn public_registry_rejects_invalid_recovery_evidence() {
-    assert_recovery_evidence_errors(TimelineId::new());
-}
-
-#[test]
-fn public_registry_handles_empty_driver_paths() {
-    assert_empty_registry_paths(TimelineId::new());
-}
-
-#[test]
-fn public_registry_enforces_authorization_edges() {
-    assert_public_authorization_edges(TimelineId::new());
-}
-
-fn assert_recovery_evidence_errors(timeline: TimelineId) {
+fn public_registry_rejects_recovery_that_does_not_start_at_one() {
+    let timeline = TimelineId::new();
     let first_event_is_not_one = [projection_event(EntityId::new(), "recovery.event", 2)];
     assert!(matches!(
         test_err(PluginRegistry::new().restore_driver_state(
@@ -919,7 +906,11 @@ fn assert_recovery_evidence_errors(timeline: TimelineId) {
             reason: "source Events must begin at sequence 1"
         }
     ));
+}
 
+#[test]
+fn public_registry_rejects_noncontiguous_recovery_events() {
+    let timeline = TimelineId::new();
     let events_are_not_contiguous = [
         projection_event(EntityId::new(), "recovery.event", 1),
         projection_event(EntityId::new(), "recovery.event", 3),
@@ -933,7 +924,11 @@ fn assert_recovery_evidence_errors(timeline: TimelineId) {
             reason: "source Events must be contiguous"
         }
     ));
+}
 
+#[test]
+fn public_registry_rejects_recovery_that_does_not_reach_its_bound() {
+    let timeline = TimelineId::new();
     let events_do_not_reach_the_bound = [projection_event(EntityId::new(), "recovery.event", 1)];
     assert!(matches!(
         test_err(PluginRegistry::new().restore_driver_state(
@@ -946,22 +941,36 @@ fn assert_recovery_evidence_errors(timeline: TimelineId) {
     ));
 }
 
-fn assert_empty_registry_paths(timeline: TimelineId) {
+#[test]
+fn public_registry_steps_a_registered_driverless_plugin() {
+    let timeline = TimelineId::new();
     let mut driverless = PluginRegistry::new();
     let plugin = configured_plugin("driverless", &[], false, false);
     test_ok(driverless.register(&plugin, None, None));
     assert!(test_ok(driverless.step_all_anchored(timeline, Seq::ZERO)).is_empty());
     test_ok(driverless.commit_step_at(Seq::ZERO, 0));
+}
 
+#[test]
+fn public_registry_steps_and_commits_without_drivers() {
+    let timeline = TimelineId::new();
     let mut empty = PluginRegistry::new();
     test_ok(empty.commit_step_at(Seq::ZERO, 0));
     assert!(test_ok(empty.step_all(timeline)).is_empty());
+}
 
+#[test]
+fn public_registry_steps_an_empty_output_driver() {
+    let timeline = TimelineId::new();
     let mut empty_driver = PluginRegistry::new();
     empty_driver.register_driver(Box::new(EmptyDriver));
     assert!(test_ok(empty_driver.step_all(timeline)).is_empty());
     assert!(test_ok(empty_driver.tick_cadenced(timeline, 0)).is_empty());
+}
 
+#[test]
+fn public_registry_requires_a_consent_gate_for_unanchored_steps() {
+    let timeline = TimelineId::new();
     let mut no_gate = PluginRegistry::new().without_consent_gate();
     assert!(matches!(
         test_err(no_gate.step_all(timeline)),
@@ -973,7 +982,11 @@ fn assert_empty_registry_paths(timeline: TimelineId) {
         test_err(no_gate_tick.tick_cadenced(timeline, 0)),
         RuntimeError::ConsentOperationUnavailable
     ));
+}
 
+#[test]
+fn public_registry_requires_consent_for_subscribed_projections() {
+    let timeline = TimelineId::new();
     let mut subscribed_tick = PluginRegistry::new();
     subscribed_tick.register_driver(Box::new(SubscribedDriver {
         key: pos_runtime::ProjectionKey::new(EntityId::new()),
@@ -992,7 +1005,9 @@ fn assert_empty_registry_paths(timeline: TimelineId) {
     ));
 }
 
-fn assert_public_authorization_edges(timeline: TimelineId) {
+#[test]
+fn public_registry_distinguishes_public_and_protected_projection_events() {
+    let timeline = TimelineId::new();
     drop(test_ok(PluginRegistry::new().into_authorized_projections(
         timeline,
         Seq::from_u64(1),
@@ -1010,7 +1025,11 @@ fn assert_public_authorization_edges(timeline: TimelineId) {
         ),
         Err(RuntimeError::ConsentOperationUnavailable)
     ));
+}
 
+#[test]
+fn public_registry_rejects_a_protected_driver_without_matching_consent() {
+    let timeline = TimelineId::new();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
@@ -1023,7 +1042,11 @@ fn assert_public_authorization_edges(timeline: TimelineId) {
         test_err(protected.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[])),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
+}
 
+#[test]
+fn public_registry_rechecks_revocation_when_committing() {
+    let timeline = TimelineId::new();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
     let consent_grant = grant(subject);
@@ -1044,7 +1067,11 @@ fn assert_public_authorization_edges(timeline: TimelineId) {
         test_err(revoked.commit_step_at(Seq::from_u64(1), 2)),
         RuntimeError::Consent(ConsentError::Revoked)
     ));
+}
 
+#[test]
+fn public_registry_requires_a_gate_for_protected_projection_state() {
+    let timeline = TimelineId::new();
     let projection_authority = ConsentAuthority::new();
     let projection_subject = EntityId::new();
     let projection_token =
@@ -1070,21 +1097,8 @@ fn assert_public_authorization_edges(timeline: TimelineId) {
 }
 
 #[test]
-fn public_registry_enforces_driver_lifecycle_guards() {
-    assert_driver_error_edges(TimelineId::new());
-}
-
-#[test]
-fn public_registry_enforces_action_guards() {
-    assert_action_error_edges(TimelineId::new());
-}
-
-#[test]
-fn public_registry_enforces_append_guards() {
-    assert_append_error_edges();
-}
-
-fn assert_driver_error_edges(timeline: TimelineId) {
+fn public_registry_reports_abort_and_commit_panics() {
+    let timeline = TimelineId::new();
     let mut aborting = PluginRegistry::new();
     aborting.register_driver(Box::new(PanickingAbortDriver));
     assert!(matches!(
@@ -1095,7 +1109,11 @@ fn assert_driver_error_edges(timeline: TimelineId) {
         test_err(aborting.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::DriverCommitPanicked { .. }
     ));
+}
 
+#[test]
+fn public_registry_reports_a_cadenced_commit_panic() {
+    let timeline = TimelineId::new();
     let mut committing = PluginRegistry::new();
     committing.register_driver(Box::new(PanickingCommitDriver));
     test_ok(committing.step_all_anchored(timeline, Seq::ZERO));
@@ -1104,7 +1122,11 @@ fn assert_driver_error_edges(timeline: TimelineId) {
         test_err(committing.tick_cadenced(timeline, 0)),
         RuntimeError::DriverCommitPanicked { .. }
     ));
+}
 
+#[test]
+fn public_registry_rejects_a_second_step_while_one_is_pending() {
+    let timeline = TimelineId::new();
     let mut pending = PluginRegistry::new();
     test_ok(pending.step_all_anchored(timeline, Seq::ZERO));
     assert!(matches!(
@@ -1112,14 +1134,22 @@ fn assert_driver_error_edges(timeline: TimelineId) {
         RuntimeError::PendingDriverStep
     ));
     pending.abort_step();
+}
 
+#[test]
+fn public_registry_requires_a_snapshot_anchor_when_requested() {
+    let timeline = TimelineId::new();
     let mut unanchored = PluginRegistry::new();
     unanchored.register_driver(Box::new(AnchoredEmptyDriver));
     assert!(matches!(
         test_err(unanchored.tick_cadenced(timeline, 0)),
         RuntimeError::MissingSnapshotAnchor { .. }
     ));
+}
 
+#[test]
+fn public_registry_propagates_driver_step_failures() {
+    let timeline = TimelineId::new();
     let mut step_failure = PluginRegistry::new();
     step_failure.register_driver(Box::new(FailingStepDriver));
     assert!(matches!(
@@ -1136,7 +1166,11 @@ fn assert_driver_error_edges(timeline: TimelineId) {
             reason: "public step failure"
         }
     ));
+}
 
+#[test]
+fn public_registry_deduplicates_subscriptions_before_authorization() {
+    let timeline = TimelineId::new();
     let duplicate_key = pos_runtime::ProjectionKey::new(EntityId::new());
     let mut duplicate_subscriptions = PluginRegistry::new();
     duplicate_subscriptions.register_driver(Box::new(SubscribedDriver {
@@ -1147,7 +1181,11 @@ fn assert_driver_error_edges(timeline: TimelineId) {
         test_err(duplicate_subscriptions.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
+}
 
+#[test]
+fn public_registry_enforces_the_driver_resource_limit() {
+    let timeline = TimelineId::new();
     let mut limited = PluginRegistry::new().with_resource_limit(0);
     limited.register_driver(Box::new(CadencedDraftDriver {
         entity: EntityId::new(),
@@ -1158,12 +1196,17 @@ fn assert_driver_error_edges(timeline: TimelineId) {
     ));
 }
 
-fn assert_action_error_edges(timeline: TimelineId) {
+#[test]
+fn public_registry_requires_authorization_context_for_projections() {
+    let timeline = TimelineId::new();
     assert!(matches!(
         PluginRegistry::new().into_authorized_projections(timeline, Seq::ZERO, 0, None, None,),
         Err(RuntimeError::ConsentOperationUnavailable)
     ));
+}
 
+#[test]
+fn public_registry_rejects_oversized_actions() {
     let mut action_registry = PluginRegistry::new();
     let action_plugin = configured_plugin("action", &["action.type"], false, false);
     test_ok(action_registry.register_with_approver(
@@ -1184,6 +1227,11 @@ fn assert_action_error_edges(timeline: TimelineId) {
         action_registry.submit_action(&oversized),
         Err(ActionRejected::PayloadTooLarge { .. })
     ));
+}
+
+#[test]
+fn public_registry_rejects_unknown_actions_in_live_and_replay_modes() {
+    let actor = EntityId::new();
     let unknown = ProposedAction::new(
         Kind::new("unknown.type"),
         actor,
@@ -1191,7 +1239,7 @@ fn assert_action_error_edges(timeline: TimelineId) {
         Kind::new("unknown.type.submit"),
     );
     assert!(matches!(
-        action_registry.submit_action(&unknown),
+        PluginRegistry::new().submit_action(&unknown),
         Err(ActionRejected::UnknownEventType)
     ));
     assert!(matches!(
@@ -1200,7 +1248,8 @@ fn assert_action_error_edges(timeline: TimelineId) {
     ));
 }
 
-fn assert_append_error_edges() {
+#[test]
+fn public_registry_propagates_public_append_store_errors() {
     let mut store = test_ok(open_store(StoreConfig::Memory));
     let orphan_timeline = TimelineId::new();
     let mut public_append = PluginRegistry::new();
@@ -1209,7 +1258,12 @@ fn assert_append_error_edges() {
         public_append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
         Err(RuntimeError::Store(_))
     ));
+}
 
+#[test]
+fn public_registry_propagates_protected_append_store_errors() {
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let orphan_timeline = TimelineId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
     let mut protected_append = PluginRegistry::new().with_consent_authority(authority);
@@ -1224,7 +1278,12 @@ fn assert_append_error_edges() {
         protected_append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
         Err(RuntimeError::Store(_))
     ));
+}
 
+#[test]
+fn public_registry_requires_a_gate_for_protected_append() {
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let orphan_timeline = TimelineId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
     let mut protected_missing_gate = PluginRegistry::new().with_consent_authority(authority);
@@ -1240,7 +1299,12 @@ fn assert_append_error_edges() {
         protected_missing_gate.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
         Err(RuntimeError::ConsentOperationUnavailable)
     ));
+}
 
+#[test]
+fn public_registry_requires_a_gate_for_public_append() {
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let orphan_timeline = TimelineId::new();
     let mut public_missing_gate = PluginRegistry::new();
     test_ok(public_missing_gate.step_all_anchored(orphan_timeline, Seq::ZERO));
     public_missing_gate = public_missing_gate.without_consent_gate();

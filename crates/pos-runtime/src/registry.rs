@@ -11,8 +11,8 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::PluginId,
-    ActionApprover, ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentError,
-    ConsentGate, Plugin, ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
+    ConsentError, ConsentGate, Plugin, ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::ProjectionRegistry;
 
@@ -1480,7 +1480,8 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        self.register_with_approver_slice(plugin, reducer, driver, None, &[])
+        let context = self.registration_context(plugin)?;
+        self.register_with_approver_slice(plugin, reducer, driver, None, &[], context)
     }
 
     /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
@@ -1499,8 +1500,30 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-        self.register_with_approver_slice(plugin, reducer, driver, approver, &approver_event_types)
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            &approver_event_types,
+            context,
+        )
+    }
+
+    fn registration_context(
+        &self,
+        plugin: &dyn Plugin,
+    ) -> Result<(PluginId, String, Capability), RuntimeError> {
+        let id = plugin.id();
+        let name = plugin.name().to_owned();
+
+        if self.plugins.contains_key(&id) {
+            return Err(RuntimeError::DuplicatePlugin { id, name });
+        }
+
+        Ok((id, name, plugin.capability()))
     }
 
     fn register_with_approver_slice(
@@ -1510,15 +1533,9 @@ impl PluginRegistry {
         driver: Option<Box<dyn Driver>>,
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: &[Kind],
+        context: (PluginId, String, Capability),
     ) -> Result<(), RuntimeError> {
-        let id = plugin.id();
-        let name = plugin.name().to_owned();
-
-        if self.plugins.contains_key(&id) {
-            return Err(RuntimeError::DuplicatePlugin { id, name });
-        }
-
-        let cap = plugin.capability();
+        let (id, name, cap) = context;
         if let Some(kind) = cap
             .owned_event_types
             .iter()
@@ -2797,6 +2814,31 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn duplicate_plugin_does_not_consume_approver_event_types() {
+        let mut reg = PluginRegistry::new();
+        let id = PluginId::new();
+        let plugin = TestPlugin {
+            id,
+            name: "dup",
+            cap: Capability::default(),
+        };
+        reg.register(&plugin, None, None).test_ok();
+
+        let consumed = std::cell::Cell::new(false);
+        let event_types = std::iter::once_with(|| {
+            consumed.set(true);
+            Kind::new("must.not.be.consumed")
+        });
+        let error = reg
+            .register_with_approver(&plugin, None, None, None, event_types)
+            .test_err();
+
+        assert!(matches!(error, RuntimeError::DuplicatePlugin { .. }));
+        assert!(!consumed.get());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn contains_len_is_empty() {
         let mut reg = PluginRegistry::new();
         assert!(reg.is_empty());
@@ -3582,14 +3624,18 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_covers_empty_success_and_rejection_paths() {
+    fn append_commit_rejects_when_no_step_is_pending() {
         let mut no_pending = PluginRegistry::new();
         let mut no_pending_store = open_store(StoreConfig::Memory).test_ok();
         assert!(matches!(
             no_pending.append_and_commit_step_at(no_pending_store.as_mut(), Seq::ZERO, 0, &[]),
             Err(RuntimeError::PendingDriverStep)
         ));
+    }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_accepts_an_empty_public_step() {
         let mut public_store = open_store(StoreConfig::Memory).test_ok();
         let public_timeline = public_store.create_timeline("append-public").test_ok();
         let mut public_success = PluginRegistry::new();
@@ -3600,10 +3646,15 @@ mod tests {
             .append_and_commit_step_at(public_store.as_mut(), Seq::ZERO, 0, &[])
             .test_ok()
             .is_empty());
+    }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_propagates_store_failures() {
+        let timeline = TimelineId::new();
         let mut public_store_error = PluginRegistry::new();
         public_store_error
-            .step_all_anchored(public_timeline.id(), Seq::ZERO)
+            .step_all_anchored(timeline, Seq::ZERO)
             .test_ok();
         let mut failing_store = AppendFailStore;
         assert!(matches!(
@@ -3612,16 +3663,13 @@ mod tests {
                 .test_err(),
             RuntimeError::Store(CoreError::Storage(_))
         ));
+    }
 
-        let subject = EntityId::new();
-        let mut protected_store = open_store(StoreConfig::Memory).test_ok();
-        let protected_timeline = protected_store
-            .create_timeline("append-protected")
-            .test_ok();
-        let consent_grant = |purpose: &str| ConsentGrantedV1 {
-            subject_id: subject,
+    fn append_grant(subject_id: EntityId) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
             grantee_id: EntityId::new(),
-            purpose: purpose.to_owned(),
+            purpose: "append-coverage".to_owned(),
             modalities: 0,
             min_geo_resolution: 0,
             fork_permitted: false,
@@ -3629,10 +3677,20 @@ mod tests {
             retention_days: 0,
             expiry_secs: 0,
             grant_seq: 1,
-        };
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_accepts_an_empty_protected_step() {
+        let subject = EntityId::new();
+        let mut protected_store = open_store(StoreConfig::Memory).test_ok();
+        let protected_timeline = protected_store
+            .create_timeline("append-protected")
+            .test_ok();
         let authority = ConsentAuthority::new();
-        let token = authority
-            .record_grant_on_timeline(protected_timeline.id(), &consent_grant("append-success"));
+        let token =
+            authority.record_grant_on_timeline(protected_timeline.id(), &append_grant(subject));
         let mut protected_success = PluginRegistry::new().with_consent_authority(authority);
         protected_success
             .step_all_anchored_protected(protected_timeline.id(), Seq::ZERO, token, 0, &[])
@@ -3641,10 +3699,19 @@ mod tests {
             .append_and_commit_step_at(protected_store.as_mut(), Seq::ZERO, 0, &[])
             .test_ok()
             .is_empty());
+    }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_rejects_a_forged_protected_draft() {
+        let subject = EntityId::new();
+        let mut protected_store = open_store(StoreConfig::Memory).test_ok();
+        let protected_timeline = protected_store
+            .create_timeline("append-protected-reject")
+            .test_ok();
         let reject_authority = ConsentAuthority::new();
         let reject_token = reject_authority
-            .record_grant_on_timeline(protected_timeline.id(), &consent_grant("append-reject"));
+            .record_grant_on_timeline(protected_timeline.id(), &append_grant(subject));
         let mut protected_reject = PluginRegistry::new().with_consent_authority(reject_authority);
         protected_reject
             .step_all_anchored_protected(protected_timeline.id(), Seq::ZERO, reject_token, 0, &[])
