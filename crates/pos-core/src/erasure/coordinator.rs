@@ -427,9 +427,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                         .map(|object| (object, record.clone()))
                 })
                 .and_then(|(object, record)| {
+                    let expected = record.manifest_digest;
                     self.commit_delta(
                         record,
-                        Some(record.manifest_digest),
+                        Some(expected),
                         vec![object],
                         Vec::new(),
                         ErasureCasEffectV1::None,
@@ -529,9 +530,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .map(|objects| (objects, record.clone()))
             })
             .and_then(|(objects, record)| {
+                let expected = record.manifest_digest;
                 self.commit_delta(
                     record,
-                    Some(record.manifest_digest),
+                    Some(expected),
                     objects,
                     Vec::new(),
                     ErasureCasEffectV1::None,
@@ -567,9 +569,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .map(|object| (object, record.clone()))
             })
             .and_then(|(object, record)| {
+                let expected = record.manifest_digest;
                 self.commit_delta(
                     record,
-                    Some(record.manifest_digest),
+                    Some(expected),
                     vec![object],
                     Vec::new(),
                     ErasureCasEffectV1::None,
@@ -848,7 +851,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         {
             return Err(ErasureErrorV1::Unauthorized);
         }
-        let obligation = record
+        let obligation = *record
             .obligations
             .iter()
             .find(|value| value.reference() == acknowledgement.obligation)
@@ -858,70 +861,66 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         {
             return Err(ErasureErrorV1::Unauthorized);
         }
-        record.active.as_ref().map_or_else(
-            || Err(ErasureErrorV1::ProvenanceMissing),
-            |active| {
-                let admitted = active
-                    .admission
-                    .unresolved_obligations()
-                    .binary_search(&acknowledgement.obligation)
-                    .is_ok_and(|index| {
-                        active.admission.command_identities()[index]
-                            == obligation.command_identity()
-                    });
-                if !admitted {
-                    return Err(ErasureErrorV1::Unauthorized);
-                }
-                record.scope.as_ref().map_or_else(
-                    || Err(ErasureErrorV1::ProvenanceMissing),
-                    |scope| {
-                        ErasureAcknowledgementProvenanceV1::new(
-                            ErasureAcknowledgementProvenanceInputV1 {
-                                request,
-                                command: obligation.command_identity(),
-                                attempt: active.admission.reference(),
-                                obligation: acknowledgement.obligation,
-                                owner: acknowledgement.owner,
-                                scope: scope.reference(),
-                                outcome: acknowledgement.outcome,
-                                evidence: acknowledgement.evidence,
-                                policy: active.admission.policy(),
-                                trust: active.admission.trust(),
-                            },
-                        )
-                        .and_then(|provenance| {
-                            if active
-                                .admitted
-                                .values()
-                                .any(|existing| existing == &provenance)
-                            {
-                                return Ok(record.state);
-                            }
-                            if active
-                                .admitted
-                                .contains_key(&(provenance.obligation(), provenance.owner()))
-                            {
-                                return Err(ErasureErrorV1::PolicyConflict);
-                            }
-                            self.port
-                                .admit_acknowledgement(&provenance)
-                                .and_then(|()| record.retain_acknowledgement(&provenance))
-                                .and_then(|object| {
-                                    self.commit_delta(
-                                        record.clone(),
-                                        Some(record.manifest_digest),
-                                        vec![object],
-                                        Vec::new(),
-                                        ErasureCasEffectV1::AcknowledgementAdmission {
-                                            acknowledgement: provenance.reference(),
-                                        },
-                                    )
-                                })
-                        })
-                    },
-                )
-            },
-        )
+        let active = match record.active.clone() {
+            Some(active) => active,
+            None => return Err(ErasureErrorV1::ProvenanceMissing),
+        };
+        let scope = match record.scope.clone() {
+            Some(scope) => scope,
+            None => return Err(ErasureErrorV1::ProvenanceMissing),
+        };
+        if !active
+            .admission
+            .unresolved_obligations()
+            .binary_search(&acknowledgement.obligation)
+            .is_ok_and(|index| {
+                active.admission.command_identities()[index] == obligation.command_identity()
+            })
+        {
+            return Err(ErasureErrorV1::Unauthorized);
+        }
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request,
+            command: obligation.command_identity(),
+            attempt: active.admission.reference(),
+            obligation: acknowledgement.obligation,
+            owner: acknowledgement.owner,
+            scope: scope.reference(),
+            outcome: acknowledgement.outcome,
+            evidence: acknowledgement.evidence,
+            policy: active.admission.policy(),
+            trust: active.admission.trust(),
+        })
+        .and_then(|provenance| {
+            if active
+                .admitted
+                .values()
+                .any(|existing| existing == &provenance)
+            {
+                return Ok(record.state.clone());
+            }
+            if active
+                .admitted
+                .contains_key(&(provenance.obligation(), provenance.owner()))
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            self.port
+                .admit_acknowledgement(&provenance)
+                .and_then(|()| record.retain_acknowledgement(&provenance))
+                .and_then(|object| {
+                    let expected = record.manifest_digest;
+                    self.commit_delta(
+                        record.clone(),
+                        Some(expected),
+                        vec![object],
+                        Vec::new(),
+                        ErasureCasEffectV1::AcknowledgementAdmission {
+                            acknowledgement: provenance.reference(),
+                        },
+                    )
+                })
+        })
     }
 
     fn finalize_exact_retry(
@@ -1224,42 +1223,41 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .as_ref()
             .map(super::ErasureScopeCommitmentV1::reference)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        record.obligation_set.as_ref().map_or_else(
-            || Err(ErasureErrorV1::ProvenanceMissing),
-            |obligations| {
-                if (
-                    resolution.request(),
-                    resolution.scope_commitment(),
-                    resolution.policy(),
-                    resolution.trust(),
-                    resolution.predecessor_resolution(),
-                ) != (
-                    request,
-                    scope,
-                    record.request.policy(),
-                    obligations.trust(),
-                    record.administrative_resolution_head,
-                ) {
-                    return Err(ErasureErrorV1::PolicyConflict);
-                }
-                record
-                    .append_administrative_resolution(resolution)
-                    .and_then(|(object, index)| {
-                        self.port
-                            .admit_administrative_resolution(resolution)
-                            .map(|()| (object, index))
-                    })
-                    .and_then(|(object, index)| {
-                        self.commit_delta(
-                            record.clone(),
-                            Some(record.manifest_digest),
-                            vec![object],
-                            vec![index],
-                            ErasureCasEffectV1::None,
-                        )
-                    })
-            },
-        )
+        let obligations = match record.obligation_set.clone() {
+            Some(obligations) => obligations,
+            None => return Err(ErasureErrorV1::ProvenanceMissing),
+        };
+        let policy = record.request.policy();
+        let predecessor = record.administrative_resolution_head;
+        let expected = record.manifest_digest;
+        {
+            if (
+                resolution.request(),
+                resolution.scope_commitment(),
+                resolution.policy(),
+                resolution.trust(),
+                resolution.predecessor_resolution(),
+            ) != (request, scope, policy, obligations.trust(), predecessor)
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            record
+                .append_administrative_resolution(resolution)
+                .and_then(|(object, index)| {
+                    self.port
+                        .admit_administrative_resolution(resolution)
+                        .map(|()| (object, index))
+                })
+                .and_then(|(object, index)| {
+                    self.commit_delta(
+                        record.clone(),
+                        Some(expected),
+                        vec![object],
+                        vec![index],
+                        ErasureCasEffectV1::None,
+                    )
+                })
+        }
     }
 }
 

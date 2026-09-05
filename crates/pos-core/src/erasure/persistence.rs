@@ -1147,91 +1147,83 @@ impl RecoveredErasureV1 {
         receipt_provenance: &ErasureReceiptProvenanceV1,
         receipt: &ErasureReceiptV1,
     ) -> Result<(Vec<ErasurePersistenceObjectV1>, ErasureIndexInsertV1), ErasureErrorV1> {
-        self.active.as_ref().map_or_else(
-            || Err(ErasureErrorV1::ProvenanceMissing),
-            |active| {
-                let ordinal = active.ordinal;
-                let retry_admission = active.admission.reference();
-                let admitted_references =
-                    canonical_acknowledgement_references(active.admitted.values().copied());
-                InventoryV1::new(
-                    self.request.reference(),
+        let (ordinal, retry_admission, admitted_references) = match self.active.as_ref() {
+            Some(active) => (
+                active.ordinal,
+                active.admission.reference(),
+                canonical_acknowledgement_references(active.admitted.values().copied()),
+            ),
+            None => return Err(ErasureErrorV1::ProvenanceMissing),
+        };
+        InventoryV1::new(
+            self.request.reference(),
+            ordinal,
+            INVENTORY_ADMITTED.0,
+            admitted_references,
+        )
+        .and_then(|admitted| {
+            InventoryV1::new(
+                self.request.reference(),
+                ordinal,
+                INVENTORY_EFFECTIVE.0,
+                canonical_acknowledgement_references(self.effective.values().copied()),
+            )
+            .and_then(|effective| {
+                let page = AttemptPageV1 {
+                    request: self.request.reference(),
                     ordinal,
-                    INVENTORY_ADMITTED.0,
-                    admitted_references,
-                )
-                .and_then(|admitted| {
-                    InventoryV1::new(
-                        self.request.reference(),
-                        ordinal,
-                        INVENTORY_EFFECTIVE.0,
-                        canonical_acknowledgement_references(self.effective.values().copied()),
-                    )
-                    .and_then(|effective| {
-                        let page = AttemptPageV1 {
-                            request: self.request.reference(),
-                            ordinal,
-                            retry_admission,
-                            admitted_inventory: admitted.reference,
-                            effective_inventory: effective.reference,
-                            outcome: outcome.reference(),
-                            receipt: receipt.receipt_digest(),
-                            receipt_provenance: receipt_provenance.reference(),
-                            terminal_state: self.state.state_digest(),
-                            predecessor: self.attempt_history_head,
-                            reference: super::reference_zero(),
-                        };
-                        page.canonical_cbor().and_then(|page_bytes| {
-                            let page_reference =
-                                addressed(ERASURE_ATTEMPT_HISTORY_TAG_V1, &page_bytes);
-                            [
-                                encoded_persistence_object(
-                                    admitted.reference,
-                                    admitted.canonical_cbor(),
-                                ),
-                                encoded_persistence_object(
-                                    effective.reference,
-                                    effective.canonical_cbor(),
-                                ),
-                                encoded_persistence_object(
-                                    outcome.reference(),
-                                    outcome.to_canonical_cbor(),
-                                ),
-                                encoded_persistence_object(
-                                    receipt_provenance.reference(),
-                                    receipt_provenance.to_canonical_cbor(),
-                                ),
-                                encoded_persistence_object(
-                                    receipt.receipt_digest(),
-                                    receipt.to_canonical_cbor(),
-                                ),
-                            ]
-                            .into_iter()
-                            .collect::<Result<Vec<_>, _>>()
-                            .map(|mut objects| {
-                                objects.push(persistence_object(page_reference, page_bytes));
-                                self.manifest.active = None;
-                                self.manifest.attempt_history_head = Some(page_reference);
-                                let completed = ordinal + 1;
-                                self.manifest.completed_attempt_count = completed;
-                                self.manifest.latest_receipt = Some(receipt.receipt_digest());
-                                self.active = None;
-                                self.attempt_history_head = Some(page_reference);
-                                self.completed_attempt_count = completed;
-                                self.latest_receipt = Some(receipt.receipt_digest());
-                                (
-                                    objects,
-                                    ErasureIndexInsertV1::AttemptPage {
-                                        ordinal,
-                                        reference: page_reference,
-                                    },
-                                )
-                            })
-                        })
+                    retry_admission,
+                    admitted_inventory: admitted.reference,
+                    effective_inventory: effective.reference,
+                    outcome: outcome.reference(),
+                    receipt: receipt.receipt_digest(),
+                    receipt_provenance: receipt_provenance.reference(),
+                    terminal_state: self.state.state_digest(),
+                    predecessor: self.attempt_history_head,
+                    reference: super::reference_zero(),
+                };
+                page.canonical_cbor().and_then(|page_bytes| {
+                    let page_reference = addressed(ERASURE_ATTEMPT_HISTORY_TAG_V1, &page_bytes);
+                    [
+                        encoded_persistence_object(admitted.reference, admitted.canonical_cbor()),
+                        encoded_persistence_object(effective.reference, effective.canonical_cbor()),
+                        encoded_persistence_object(
+                            outcome.reference(),
+                            outcome.to_canonical_cbor(),
+                        ),
+                        encoded_persistence_object(
+                            receipt_provenance.reference(),
+                            receipt_provenance.to_canonical_cbor(),
+                        ),
+                        encoded_persistence_object(
+                            receipt.receipt_digest(),
+                            receipt.to_canonical_cbor(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|mut objects| {
+                        objects.push(persistence_object(page_reference, page_bytes));
+                        self.manifest.active = None;
+                        self.manifest.attempt_history_head = Some(page_reference);
+                        let completed = ordinal + 1;
+                        self.manifest.completed_attempt_count = completed;
+                        self.manifest.latest_receipt = Some(receipt.receipt_digest());
+                        self.active = None;
+                        self.attempt_history_head = Some(page_reference);
+                        self.completed_attempt_count = completed;
+                        self.latest_receipt = Some(receipt.receipt_digest());
+                        (
+                            objects,
+                            ErasureIndexInsertV1::AttemptPage {
+                                ordinal,
+                                reference: page_reference,
+                            },
+                        )
                     })
                 })
-            },
-        )
+            })
+        })
     }
 
     fn recover_active_attempt(
