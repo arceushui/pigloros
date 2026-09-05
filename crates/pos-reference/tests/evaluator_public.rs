@@ -1363,6 +1363,7 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
         .map(ProfileMutation::ProviderKeyNumericBoundary)
         .chain(std::iter::once(ProfileMutation::DivergenceCoordinateLong))
         .chain((0..7).map(ProfileMutation::SelectedCapBoundary))
+        .chain(std::iter::once(ProfileMutation::InvertedTransportCaps))
         .chain((0..4).map(ProfileMutation::SelectedClosureCapBoundary))
         .chain((0..10).map(ProfileMutation::ExecutionContractBoundary))
         .chain((0..10).map(ProfileMutation::FixtureSemanticBoundary))

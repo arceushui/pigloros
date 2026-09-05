@@ -1763,7 +1763,7 @@ fn decode_hard_caps(value: &Value) -> Result<EvaluatorHardCaps, ProfileError> {
         65_536,
         65_536,
         256,
-        64 * 1024 * 1024,
+        (64 * 1024 * 1024).min(values[5]),
         1024 * 1024 * 1024,
         100,
         32,
