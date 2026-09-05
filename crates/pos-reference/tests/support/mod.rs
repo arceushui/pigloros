@@ -660,7 +660,7 @@ pub fn air_gapped_corpus() -> TestResult<Corpus> {
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_watchdog_ms(watchdog_ms: u64) -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
-        watchdog_ms,
+        watchdog_ms: _,
         ..CorpusOptions::default()
     })
 }
@@ -1559,7 +1559,7 @@ fn fixtures(
                 uint(u64::from(replay_claim)),
                 uint(u64::from(replay_claim)),
                 array(vec![uint(100); 8]),
-                array(vec![uint(watchdog_ms)]),
+                array(vec![uint(options.watchdog_ms)]),
                 array(vec![
                     Value::Bool(false),
                     array(vec![text("read-public-bundle")]),
