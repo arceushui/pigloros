@@ -5,8 +5,8 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
-    Capability, ConsentAuthority, ConsentCapabilityToken, ConsentError, ConsentGate,
-    ConsentGrantedV1, Plugin, PluginId, Reducer, State,
+    ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
+    ConsentError, ConsentGate, ConsentGrantedV1, Plugin, PluginId, ProposedAction, Reducer, State,
 };
 use pos_runtime::{
     Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
@@ -143,6 +143,56 @@ impl Plugin for ProjectionPlugin {
             has_driver: false,
             has_reducer: true,
         }
+    }
+}
+
+struct ConfiguredPlugin {
+    id: PluginId,
+    name: &'static str,
+    capability: Capability,
+}
+
+impl Plugin for ConfiguredPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn capability(&self) -> Capability {
+        self.capability.clone()
+    }
+}
+
+fn configured_plugin(
+    name: &'static str,
+    event_types: &[&str],
+    has_driver: bool,
+    has_reducer: bool,
+) -> ConfiguredPlugin {
+    ConfiguredPlugin {
+        id: PluginId::new(),
+        name,
+        capability: Capability {
+            owned_event_types: event_types.iter().map(|event| Kind::new(*event)).collect(),
+            owned_entity_kinds: Vec::new(),
+            has_driver,
+            has_reducer,
+        },
+    }
+}
+
+struct AcceptingApprover;
+
+impl ActionApprover for AcceptingApprover {
+    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+        Ok(EventDraft::new(
+            proposal.actor_entity_id,
+            proposal.event_type.clone(),
+            proposal.payload.clone(),
+        ))
     }
 }
 
@@ -1017,4 +1067,104 @@ fn public_cadence_and_empty_registry_cover_ready_and_overflow_boundaries() {
         test_err(registry.tick_cadenced(timeline, u128::MAX)),
         RuntimeError::CadenceOverflow { .. }
     ));
+}
+
+#[test]
+fn public_registry_registration_and_metadata_cover_library_paths() {
+    let mut registry = PluginRegistry::new();
+    assert!(registry.is_empty());
+    let plugin = configured_plugin("metadata", &["metadata.event"], false, false);
+    test_ok(registry.register(&plugin, None, None));
+    assert!(registry.contains(&plugin.id));
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.plugin_names().collect::<Vec<_>>(), ["metadata"]);
+    assert_eq!(
+        registry.plugin_versions().collect::<Vec<_>>(),
+        [("metadata", "0.1.0")]
+    );
+    assert!(PluginRegistry::new_replay().is_empty());
+    assert!(PluginRegistry::new()
+        .with_consent_gate(Arc::new(ConsentAuthority::new()))
+        .clone_consent_gate()
+        .is_some());
+
+    for event_type in [
+        pos_core::GEOGRAPHIC_EVENT_TYPE,
+        pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
+        pos_core::EVENT_TYPE_CONSENT_GRANTED_V1,
+        pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
+    ] {
+        assert!(PluginRegistry::new()
+            .register(
+                &configured_plugin("reserved", &[event_type], false, false),
+                None,
+                None
+            )
+            .is_err());
+    }
+    assert!(PluginRegistry::new()
+        .register(
+            &configured_plugin("driver-required", &[], true, false),
+            None,
+            None,
+        )
+        .is_err());
+    assert!(PluginRegistry::new()
+        .register(
+            &configured_plugin("unexpected-driver", &[], false, false),
+            None,
+            Some(Box::new(EmptyDriver)),
+        )
+        .is_err());
+    assert!(PluginRegistry::new()
+        .register(
+            &configured_plugin("reducer-required", &[], false, true),
+            None,
+            None,
+        )
+        .is_err());
+    assert!(PluginRegistry::new()
+        .register(
+            &configured_plugin("unexpected-reducer", &[], false, false),
+            Some(Box::new(CountingReducer)),
+            None,
+        )
+        .is_err());
+
+    let mut approvers = PluginRegistry::new();
+    let owned = configured_plugin("approver", &["action.type"], false, false);
+    test_ok(approvers.register_with_approver(
+        &owned,
+        None,
+        None,
+        Some(Box::new(AcceptingApprover)),
+        [Kind::new("action.type")],
+    ));
+    assert!(approvers
+        .register_with_approver(
+            &configured_plugin("missing-approver", &["missing.type"], false, false),
+            None,
+            None,
+            None,
+            [Kind::new("missing.type")],
+        )
+        .is_err());
+    assert!(approvers
+        .register_with_approver(
+            &configured_plugin("foreign-approver", &["owned.type"], false, false),
+            None,
+            None,
+            Some(Box::new(AcceptingApprover)),
+            [Kind::new("not-owned.type")],
+        )
+        .is_err());
+    assert!(approvers
+        .register_with_approver(
+            &configured_plugin("duplicate-approver", &["action.type"], false, false),
+            None,
+            None,
+            Some(Box::new(AcceptingApprover)),
+            [Kind::new("action.type")],
+        )
+        .is_err());
 }
