@@ -534,6 +534,7 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
     fs::rename(&executable, directory.path().join("loaded-evaluator"))?;
     fs::write(&executable, b"replacement path contents")?;
     request_writer.write_all(&request)?;
+    drop(request_writer);
 
     let output = child.wait_with_output()?;
     assert!(
