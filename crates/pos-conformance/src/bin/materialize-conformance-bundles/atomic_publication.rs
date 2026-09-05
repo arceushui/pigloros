@@ -467,6 +467,7 @@ fn directory_entry_identity(
 }
 
 #[cfg(target_os = "linux")]
+#[inline(never)]
 fn non_directory_error(file_type: FileType) -> MaterializationError {
     if file_type == FileType::Symlink {
         MaterializationError::SymlinkDetected
