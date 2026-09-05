@@ -1122,6 +1122,17 @@ fn assert_driver_error_edges(timeline: TimelineId) {
             reason: "public step failure"
         }
     ));
+
+    let duplicate_key = pos_runtime::ProjectionKey::new(EntityId::new());
+    let mut duplicate_subscriptions = PluginRegistry::new();
+    duplicate_subscriptions.register_driver(Box::new(SubscribedDriver {
+        key: duplicate_key.clone(),
+    }));
+    duplicate_subscriptions.register_driver(Box::new(SubscribedDriver { key: duplicate_key }));
+    assert!(matches!(
+        test_err(duplicate_subscriptions.step_all_anchored(timeline, Seq::ZERO)),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
 }
 
 fn assert_action_error_edges(timeline: TimelineId) {
