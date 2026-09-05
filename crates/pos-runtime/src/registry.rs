@@ -4402,7 +4402,7 @@ mod coverage_private_error_paths {
     }
 
     #[test]
-    fn unbound_and_revoked_private_fences_are_exercised() {
+    fn unbound_and_revoked_private_fences_are_exercised() -> Result<(), String> {
         let timeline = TimelineId::new();
         let subject = EntityId::new();
         let other_subject = EntityId::new();
@@ -4457,10 +4457,8 @@ mod coverage_private_error_paths {
             )
             .is_ok());
 
-        let mut store = match open_store(StoreConfig::Memory) {
-            Ok(store) => store,
-            Err(error) => panic!("opening the in-memory store failed: {error:?}"),
-        };
+        let mut store = open_store(StoreConfig::Memory)
+            .map_err(|error| format!("opening the in-memory store failed: {error:?}"))?;
         assert!(fenced_append
             .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &[])
             .is_err());
@@ -4484,5 +4482,7 @@ mod coverage_private_error_paths {
         assert!(public_append
             .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
             .is_err());
+
+        Ok(())
     }
 }
