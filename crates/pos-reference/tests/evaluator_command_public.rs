@@ -528,12 +528,12 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
         .stderr(Stdio::piped());
     let child = command.spawn()?;
 
+    // Opening the FIFO synchronizes with the evaluator after exec and before
+    // the executable path is replaced.
+    let mut request_writer = OpenOptions::new().write(true).open(&request_path)?;
     fs::rename(&executable, directory.path().join("loaded-evaluator"))?;
     fs::write(&executable, b"replacement path contents")?;
-    OpenOptions::new()
-        .write(true)
-        .open(&request_path)?
-        .write_all(&request)?;
+    request_writer.write_all(&request)?;
 
     let output = child.wait_with_output()?;
     assert!(
