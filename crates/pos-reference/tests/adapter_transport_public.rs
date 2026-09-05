@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::Write as _;
+use std::io;
 
 use ciborium::value::Value;
 use pos_reference::adapter_transport::{
@@ -19,6 +20,24 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 const ATTEMPT_DOMAIN: &[u8] = b"PiglorOS.EvaluatorAttemptStream.v1\0";
 const OBSERVATION_DOMAIN: &[u8] = b"PiglorOS.EvaluatorObservationStream.v1\0";
 const CHUNK_BYTES: usize = 64 * 1024;
+
+struct FailAfterWrites {
+    successful_writes_remaining: usize,
+}
+
+impl io::Write for FailAfterWrites {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if self.successful_writes_remaining == 0 {
+            return Err(io::Error::other("intentional writer failure"));
+        }
+        self.successful_writes_remaining -= 1;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 const fn budget() -> DeterministicBudget {
     DeterministicBudget {
@@ -241,6 +260,17 @@ fn attempt_writer_rejects_invalid_public_values() {
     assert_eq!(
         encoded_attempt(&oversized_output_authority),
         Err(TransportError::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn attempt_writer_reports_capability_frame_failures() {
+    let writer = FailAfterWrites {
+        successful_writes_remaining: 2,
+    };
+    assert_eq!(
+        write_attempt(writer, &attempt()),
+        Err(TransportError::InvalidEncoding)
     );
 }
 
