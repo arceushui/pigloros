@@ -35,6 +35,18 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             with self.assertRaises(CHECKER.PolicyError):
                 CHECKER.check_workflow(fixture)
 
+    def assert_resolver_rejected(self, mutate) -> None:
+        resolver = (ROOT / "scripts" / "resolve_cargo_crap_baseline.sh").read_text(
+            encoding="utf-8"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory) / "resolve_cargo_crap_baseline.sh"
+            fixture.write_text(mutate(resolver), encoding="utf-8")
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_workflow(
+                    ROOT / ".github" / "workflows" / "ci.yml", fixture
+                )
+
     def cargo_crap_step(self, workflow: dict, name: str) -> dict:
         return next(
             step
@@ -109,16 +121,12 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         )
 
     def test_rejects_unpinned_bootstrap_base(self) -> None:
-        def weaken_bootstrap(workflow: dict) -> None:
-            step = self.cargo_crap_step(
-                workflow, "Resolve trusted cargo-crap baseline"
-            )
-            step["run"] = step["run"].replace(
+        self.assert_resolver_rejected(
+            lambda resolver: resolver.replace(
                 'test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"',
                 "true",
             )
-
-        self.assert_rejected(weaken_bootstrap)
+        )
 
     def test_requires_centralized_baseline_resolver(self) -> None:
         self.assert_rejected(
@@ -154,13 +162,12 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         )
 
     def test_requires_baseline_retry_delay(self) -> None:
-        def remove_delay(workflow: dict) -> None:
-            step = self.cargo_crap_step(
-                workflow, "Resolve trusted cargo-crap baseline"
+        self.assert_resolver_rejected(
+            lambda resolver: resolver.replace(
+                "BASELINE_RETRY_DELAY_SECONDS=10",
+                "BASELINE_RETRY_DELAY_SECONDS=1",
             )
-            step["run"] = step["run"].replace("sleep 10", "sleep 1")
-
-        self.assert_rejected(remove_delay)
+        )
 
     def test_requires_main_baseline_publication(self) -> None:
         self.assert_rejected(

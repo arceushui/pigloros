@@ -59,8 +59,8 @@ def named_step(steps: list[object], name: str) -> dict:
     return matches[0]
 
 
-def check_baseline_resolver() -> None:
-    path = pathlib.Path(__file__).with_name("resolve_cargo_crap_baseline.sh")
+def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
+    path = path or pathlib.Path(__file__).with_name("resolve_cargo_crap_baseline.sh")
     resolver = path.read_text(encoding="utf-8")
     required_fragments = (
         ("#!/usr/bin/env bash\n", "baseline resolver must be an executable Bash script"),
@@ -92,8 +92,11 @@ def check_baseline_resolver() -> None:
         require(fragment in resolver, message)
 
 
-def check_workflow(workflow_path: pathlib.Path) -> None:
-    check_baseline_resolver()
+def check_workflow(
+    workflow_path: pathlib.Path,
+    baseline_resolver_path: pathlib.Path | None = None,
+) -> None:
+    check_baseline_resolver(baseline_resolver_path)
     with workflow_path.open(encoding="utf-8") as stream:
         workflow = yaml.safe_load(stream)
 
