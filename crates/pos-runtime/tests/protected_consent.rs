@@ -1175,14 +1175,14 @@ fn public_registry_registration_and_metadata_cover_library_paths() {
         .clone_consent_gate()
         .is_some());
 
-    let timeline = TimelineId::new();
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let timeline = test_ok(store.create_timeline("registry-metadata"));
     let mut anchored = PluginRegistry::new();
-    assert!(test_ok(anchored.tick_cadenced_anchored(timeline, 0, Seq::ZERO)).is_empty());
+    assert!(test_ok(anchored.tick_cadenced_anchored(timeline.id(), 0, Seq::ZERO)).is_empty());
     test_ok(anchored.commit_step_at(Seq::ZERO, 0));
 
     let mut append = PluginRegistry::new();
-    test_ok(append.step_all_anchored(timeline, Seq::ZERO));
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    test_ok(append.step_all_anchored(timeline.id(), Seq::ZERO));
     assert!(
         test_ok(append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[],)).is_empty()
     );
