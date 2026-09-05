@@ -1521,11 +1521,7 @@ fn fixtures(
                 options.failure_outcome,
                 family,
             )?;
-            let replay_claim = if family == 1 {
-                options.failure_redaction_state.unwrap_or(0)
-            } else {
-                0
-            };
+            let replay_claim = failure_replay_claim(family, options.failure_redaction_state);
             let mut fixture = vec![
                 text(&case_id),
                 Value::Bool(true),
@@ -1559,6 +1555,14 @@ fn fixtures(
             Ok(array(fixture))
         })
         .collect()
+}
+
+const fn failure_replay_claim(family: u64, state: Option<u8>) -> u8 {
+    if family == 1 {
+        state.unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 fn fixture_expectation(
