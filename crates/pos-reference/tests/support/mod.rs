@@ -660,7 +660,7 @@ pub fn air_gapped_corpus() -> TestResult<Corpus> {
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_watchdog_ms(watchdog_ms: u64) -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
-        watchdog_ms: _,
+        watchdog_ms,
         ..CorpusOptions::default()
     })
 }
@@ -789,7 +789,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let CorpusOptions {
         mode,
         claim_layer,
-        watchdog_ms,
+        watchdog_ms: _,
         subject_adapter,
         extra,
         release_mutation: _,
