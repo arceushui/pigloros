@@ -8,6 +8,17 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
+struct EmptyStateResolver;
+
+impl ErasureStateResolverV1 for EmptyStateResolver {
+    fn resolve_state(
+        &self,
+        _digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        Ok(None)
+    }
+}
+
 #[test]
 fn lifecycle_permits_exactly_the_adr_edges() {
     let lifecycles = [
@@ -587,6 +598,77 @@ fn attempt_and_receipt_codecs_reject_header_and_length_mutations() -> Result<(),
     codec_shape_guards!(
         receipt()?.to_canonical_cbor()?,
         ErasureReceiptV1::from_canonical_cbor
+    );
+    Ok(())
+}
+
+#[test]
+fn predecessor_chain_bounds_fail_closed_for_invalid_roots_and_zero_depth(
+) -> Result<(), ErasureErrorV1> {
+    let invalid_root = ErasureStateV1 {
+        request: reference(1),
+        lifecycle: ErasureLifecycleV1::Authorized,
+        freeze_position: None,
+        coordinator: reference(2),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        previous_state: None,
+        provenance: reference(3),
+        state_digest: reference(4),
+    };
+
+    let failure = verify_predecessor_chain_bounded(invalid_root, &EmptyStateResolver, 1)
+        .err()
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
+    assert_eq!(failure.subject(), reference(4));
+
+    let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+    let failure = verify_predecessor_chain_bounded(submitted, &EmptyStateResolver, 0)
+        .err()
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn freeze_validation_rejects_invalid_rows_and_authorization_bindings() -> Result<(), ErasureErrorV1>
+{
+    let admission = freeze_admission()?;
+    let authorization =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: reference(99),
+            policy: reference(5),
+            trust: reference(6),
+            evidence: vec![1],
+        })?;
+    assert_eq!(
+        authorization.verify_admission_body_binding(&admission),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let mut matrix = ErasureInventoryCategoryV1::CANONICAL
+        .into_iter()
+        .map(|category| {
+            ErasureFreezeApplicabilityRowV1::new(
+                category,
+                0,
+                ErasureApplicabilityDecisionV1::Inapplicable,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    matrix[0] = ErasureFreezeApplicabilityRowV1::new(
+        ErasureInventoryCategoryV1::Artifact,
+        u64::MAX,
+        ErasureApplicabilityDecisionV1::Inapplicable,
+        None,
+    )?;
+    let targets = [target()];
+    assert_eq!(
+        validate_applicability_obligations(&matrix, &targets, &[]),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }

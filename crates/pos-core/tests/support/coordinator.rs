@@ -1,7 +1,7 @@
 //! Shared raw persistence and host-port fixture for ADR-060 public tests.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use ciborium::value::Value;
@@ -23,10 +23,40 @@ use pos_core::{
     ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
-    ErasureStateTransitionV1, ErasureStateV1,
+    ErasureStateTransitionV1, ErasureStateV1, PreparedErasureRecoveryErrorV1,
 };
 
 use crate::erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
+
+/// Field positions in the fixed-width ERCRP1 manifest array.
+pub const MANIFEST_REQUEST_FIELD: usize = 2;
+pub const MANIFEST_STATE_FIELD: usize = 3;
+pub const MANIFEST_TARGET_CLOSURE_FIELD: usize = 4;
+pub const MANIFEST_CORRECTION_FIELD: usize = 5;
+pub const MANIFEST_SCOPE_COMMITMENT_FIELD: usize = 7;
+pub const MANIFEST_FREEZE_PROVENANCE_FIELD: usize = 10;
+pub const MANIFEST_OBLIGATION_SET_FIELD: usize = 12;
+pub const MANIFEST_SCOPE_EXTENSION_HEAD_FIELD: usize = 13;
+pub const MANIFEST_ACTIVE_FIELD: usize = 14;
+pub const MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD: usize = 15;
+pub const MANIFEST_COMPLETED_ATTEMPT_COUNT_FIELD: usize = 16;
+pub const MANIFEST_LATEST_RECEIPT_FIELD: usize = 17;
+pub const MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD: usize = 18;
+pub const MANIFEST_AUTHORIZE_PROVENANCE_FIELD: usize = 19;
+pub const MANIFEST_DISPATCH_PROVENANCE_FIELD: usize = 20;
+
+/// Field positions in the fixed-width inventory and graph node arrays.
+pub const INVENTORY_REFERENCES_FIELD: usize = 5;
+pub const ACTIVE_ADMISSION_FIELD: usize = 1;
+pub const ATTEMPT_ADMITTED_INVENTORY_FIELD: usize = 5;
+pub const ATTEMPT_EFFECTIVE_INVENTORY_FIELD: usize = 6;
+pub const SCOPE_NODE_EXTENSION_FIELD: usize = 4;
+
+/// Field positions in the immutable object arrays used by recovery fixtures.
+pub const SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD: usize = 4;
+pub const FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD: usize = 3;
+pub const OBLIGATION_SET_POLICY_FIELD: usize = 4;
+pub const OBLIGATION_SET_TRUST_FIELD: usize = 5;
 
 /// Configuration for the host side of the public coordinator fixture.
 #[derive(Clone)]
@@ -90,6 +120,7 @@ struct RawStorage {
     resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+    recovery_errors: BTreeMap<ErasureReferenceV1, BTreeSet<ErasureReferenceV1>>,
 }
 
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
@@ -163,7 +194,7 @@ fn replace_attempt_page_field(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let changed_manifest = replace_array_field(
         &manifest,
-        15,
+        MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
         Value::Bytes(changed_reference.digest().to_vec()),
     )?;
     storage.manifests.insert(
@@ -226,6 +257,7 @@ pub struct PublicCoordinatorPort {
     attempt_admissions: Rc<RefCell<u64>>,
     dispatch_calls: Rc<RefCell<u64>>,
     operation_fault_hits: Rc<Cell<u64>>,
+    allow_overbound_recovery_errors: bool,
     config: PublicCoordinatorPortConfig,
 }
 
@@ -238,6 +270,7 @@ impl PublicCoordinatorPort {
             attempt_admissions: Rc::new(RefCell::new(0)),
             dispatch_calls: Rc::new(RefCell::new(0)),
             operation_fault_hits: Rc::new(Cell::new(0)),
+            allow_overbound_recovery_errors: false,
             config,
         }
     }
@@ -247,6 +280,44 @@ impl PublicCoordinatorPort {
         self.config.operation_fault = Some(fault);
         self.operation_fault_hits.set(0);
         self
+    }
+
+    #[must_use]
+    pub const fn with_overbound_recovery_errors(mut self) -> Self {
+        self.allow_overbound_recovery_errors = true;
+        self
+    }
+
+    /// Seed indexed references for exercising the adapter retention boundary.
+    pub fn fill_recovery_error_index(&self, request: ErasureReferenceV1, count: usize) {
+        self.fill_recovery_error_index_excluding(request, count, None);
+    }
+
+    /// Seed indexed references while reserving one reference for the generated record.
+    pub fn fill_recovery_error_index_excluding(
+        &self,
+        request: ErasureReferenceV1,
+        count: usize,
+        excluded: Option<ErasureReferenceV1>,
+    ) {
+        let mut storage = self.storage.borrow_mut();
+        let mut ordinal = 0_usize;
+        let mut inserted = 0_usize;
+        while inserted < count {
+            let mut digest = [0_u8; 32];
+            let ordinal_u64 = u64::try_from(ordinal).unwrap_or(u64::MAX);
+            digest[..8].copy_from_slice(&ordinal_u64.to_be_bytes());
+            let reference = ErasureReferenceV1::from_digest(digest);
+            if excluded != Some(reference) {
+                storage
+                    .recovery_errors
+                    .entry(request)
+                    .or_default()
+                    .insert(reference);
+                inserted = inserted.saturating_add(1);
+            }
+            ordinal = ordinal.saturating_add(1);
+        }
     }
 
     #[must_use]
@@ -288,9 +359,28 @@ impl PublicCoordinatorPort {
             .borrow()
             .manifests
             .get(&request)
-            .and_then(|(digest, bytes)| {
-                pos_core::StoredErasureManifestV1::new(*digest, bytes.clone()).ok()
+            .map(|(digest, bytes)| {
+                pos_core::StoredErasureManifestV1::from_stored(*digest, bytes.clone())
             })
+    }
+
+    /// Return the current content address linked from one manifest field.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or provenance error when the manifest or
+    /// selected field is absent or malformed.
+    pub fn manifest_object_reference(
+        &self,
+        request: ErasureReferenceV1,
+        field: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        let storage = self.storage.borrow();
+        let (_, manifest) = storage
+            .manifests
+            .get(&request)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        array_reference_field(manifest, field)
     }
 
     #[must_use]
@@ -375,6 +465,28 @@ impl PublicCoordinatorPort {
         Ok(())
     }
 
+    /// Replace a stored manifest envelope without repairing its content address.
+    ///
+    /// This models bytes returned by a corrupted adapter so recovery tests can
+    /// assert that core retains the recorded manifest identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProvenanceMissing` when the requested manifest is absent.
+    pub fn replace_manifest_raw(
+        &self,
+        request: ErasureReferenceV1,
+        digest: ErasureReferenceV1,
+        canonical_cbor: Vec<u8>,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        if !storage.manifests.contains_key(&request) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        storage.manifests.insert(request, (digest, canonical_cbor));
+        Ok(())
+    }
+
     /// Replace one field of a manifest-owned object and repair both addresses.
     ///
     /// # Errors
@@ -445,17 +557,17 @@ impl PublicCoordinatorPort {
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         let manifest = replace_array_field(
             &manifest,
-            2,
+            MANIFEST_REQUEST_FIELD,
             Value::Bytes(request.reference().digest().to_vec()),
         )?;
         let manifest = replace_array_field(
             &manifest,
-            3,
+            MANIFEST_STATE_FIELD,
             Value::Bytes(state.state_digest().digest().to_vec()),
         )?;
         let manifest = replace_array_field(
             &manifest,
-            5,
+            MANIFEST_CORRECTION_FIELD,
             Value::Bytes(correction.reference().digest().to_vec()),
         )?;
         storage.objects.insert(request.reference(), request_bytes);
@@ -479,6 +591,27 @@ impl PublicCoordinatorPort {
             .insert(reference, canonical_cbor);
     }
 
+    /// Insert one administrative resolution and its ordinal index entry for a
+    /// recovery-boundary fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error when the resolution cannot be encoded.
+    pub fn insert_resolution(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let bytes = resolution.to_canonical_cbor()?;
+        let mut storage = self.storage.borrow_mut();
+        storage.objects.insert(resolution.reference(), bytes);
+        storage
+            .resolutions
+            .insert((request, ordinal), resolution.reference());
+        Ok(())
+    }
+
     /// Insert one deliberately selected immutable state for recovery tests.
     pub fn insert_state(&self, reference: ErasureReferenceV1, canonical_cbor: Vec<u8>) {
         self.storage
@@ -500,6 +633,24 @@ impl PublicCoordinatorPort {
         request: ErasureReferenceV1,
         lifecycle: pos_core::ErasureLifecycleV1,
     ) -> Result<(), ErasureErrorV1> {
+        self.replace_manifest_with_state_lifecycle_digest(request, lifecycle)
+            .map(|_| ())
+    }
+
+    /// Point the manifest at an earlier valid ERS1 state and return its digest.
+    ///
+    /// This variant lets recovery-integrity tests assert which tampered state
+    /// was retained without changing the public helper's unit-like result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provenance or encoding error when no suitable state
+    /// or manifest exists.
+    pub fn replace_manifest_with_state_lifecycle_digest(
+        &self,
+        request: ErasureReferenceV1,
+        lifecycle: pos_core::ErasureLifecycleV1,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         let mut storage = self.storage.borrow_mut();
         let state = storage
             .states
@@ -513,11 +664,15 @@ impl PublicCoordinatorPort {
             .get(&request)
             .cloned()
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let changed = replace_array_field(&manifest, 3, Value::Bytes(state.digest().to_vec()))?;
+        let changed = replace_array_field(
+            &manifest,
+            MANIFEST_STATE_FIELD,
+            Value::Bytes(state.digest().to_vec()),
+        )?;
         storage
             .manifests
             .insert(request, (addressed("ERCRP1", &changed), changed));
-        Ok(())
+        Ok(state)
     }
 
     /// Replace one field in the single completed attempt page and re-address
@@ -597,7 +752,7 @@ impl PublicCoordinatorPort {
         request: ErasureReferenceV1,
         ordinal: u64,
         page_field: usize,
-    ) -> Result<(), ErasureErrorV1> {
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         let mut storage = self.storage.borrow_mut();
         let page = *storage
             .attempts
@@ -619,7 +774,9 @@ impl PublicCoordinatorPort {
         let Value::Array(fields) = &mut value else {
             return Err(ErasureErrorV1::InvalidEncoding);
         };
-        let Value::Array(references) = fields.get_mut(5).ok_or(ErasureErrorV1::InvalidEncoding)?
+        let Value::Array(references) = fields
+            .get_mut(INVENTORY_REFERENCES_FIELD)
+            .ok_or(ErasureErrorV1::InvalidEncoding)?
         else {
             return Err(ErasureErrorV1::InvalidEncoding);
         };
@@ -635,7 +792,8 @@ impl PublicCoordinatorPort {
             ordinal,
             page_field,
             Value::Bytes(changed_reference.digest().to_vec()),
-        )
+        )?;
+        Ok(changed_reference)
     }
 
     /// Replace and re-address one active retry admission and its manifest link.
@@ -661,13 +819,13 @@ impl PublicCoordinatorPort {
             return Err(ErasureErrorV1::InvalidEncoding);
         };
         let Value::Array(active_fields) = manifest_fields
-            .get_mut(14)
+            .get_mut(MANIFEST_ACTIVE_FIELD)
             .ok_or(ErasureErrorV1::InvalidEncoding)?
         else {
             return Err(ErasureErrorV1::InvalidEncoding);
         };
         let Value::Bytes(previous_bytes) = active_fields
-            .get(1)
+            .get(ACTIVE_ADMISSION_FIELD)
             .ok_or(ErasureErrorV1::InvalidEncoding)?
         else {
             return Err(ErasureErrorV1::InvalidEncoding);
@@ -687,7 +845,7 @@ impl PublicCoordinatorPort {
         let changed_reference = addressed(ERASURE_RETRY_ADMISSION_TAG_V1, &changed);
         storage.objects.remove(&previous);
         storage.objects.insert(changed_reference, changed);
-        active_fields[1] = Value::Bytes(changed_reference.digest().to_vec());
+        active_fields[ACTIVE_ADMISSION_FIELD] = Value::Bytes(changed_reference.digest().to_vec());
         let mut changed_manifest = Vec::new();
         ciborium::into_writer(&manifest, &mut changed_manifest)
             .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
@@ -717,7 +875,7 @@ impl PublicCoordinatorPort {
             index,
             replacement,
             ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-            13,
+            MANIFEST_SCOPE_EXTENSION_HEAD_FIELD,
             |storage| &mut storage.scopes,
         )?;
         Ok(())
@@ -744,7 +902,7 @@ impl PublicCoordinatorPort {
             .objects
             .get(&node)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let previous = array_reference_field(node_bytes, 4)?;
+        let previous = array_reference_field(node_bytes, SCOPE_NODE_EXTENSION_FIELD)?;
         let extension = storage
             .objects
             .get(&previous)
@@ -758,10 +916,10 @@ impl PublicCoordinatorPort {
             &mut storage,
             request,
             ordinal,
-            4,
+            SCOPE_NODE_EXTENSION_FIELD,
             Value::Bytes(changed_reference.digest().to_vec()),
             ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-            13,
+            MANIFEST_SCOPE_EXTENSION_HEAD_FIELD,
             |storage| &mut storage.scopes,
         )?;
         Ok(())
@@ -786,7 +944,7 @@ impl PublicCoordinatorPort {
             index,
             replacement,
             ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
-            18,
+            MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD,
             |storage| &mut storage.resolutions,
         )?;
         Ok(())
@@ -1083,6 +1241,64 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         Ok(index_count(&self.storage.borrow().resolutions, request))
     }
 
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        let references = self
+            .storage
+            .borrow()
+            .recovery_errors
+            .get(&request)
+            .into_iter()
+            .flat_map(|references| references.iter().copied())
+            .take(pos_core::ERASURE_MAX_RECOVERY_ERRORS + 1)
+            .collect::<Vec<_>>();
+        if references.len() > pos_core::ERASURE_MAX_RECOVERY_ERRORS
+            && !self.allow_overbound_recovery_errors
+        {
+            Err(ErasureErrorV1::ScopeInvalid)
+        } else {
+            Ok(references)
+        }
+    }
+
+    fn append_recovery_error(
+        &mut self,
+        object: PreparedErasureRecoveryErrorV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let request = object.request();
+        let reference = object.reference();
+        if storage
+            .recovery_errors
+            .get(&request)
+            .is_some_and(|references| {
+                !references.contains(&reference)
+                    && references.len() >= pos_core::ERASURE_MAX_RECOVERY_ERRORS
+            })
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if storage
+            .objects
+            .get(&reference)
+            .is_some_and(|existing| existing.as_slice() != object.canonical_cbor())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        storage
+            .objects
+            .entry(reference)
+            .or_insert_with(|| object.canonical_cbor().to_vec());
+        storage
+            .recovery_errors
+            .entry(request)
+            .or_default()
+            .insert(reference);
+        Ok(())
+    }
+
     fn compare_and_swap(
         &mut self,
         mutation: pos_core::PreparedErasureCasV1,
@@ -1126,6 +1342,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             resolutions: storage.resolutions.clone(),
             effects: storage.effects.clone(),
             effect_subjects: storage.effect_subjects.clone(),
+            recovery_errors: storage.recovery_errors.clone(),
         };
         for object in mutation.new_objects() {
             insert_exact(

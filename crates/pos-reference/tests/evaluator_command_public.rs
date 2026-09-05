@@ -9,11 +9,16 @@ use std::fs::OpenOptions;
 use std::io::{Cursor, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "linux")]
-use std::os::{fd::AsRawFd, unix::fs::symlink};
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{symlink, OpenOptionsExt},
+};
 
 #[cfg(target_os = "linux")]
 use pos_reference::evaluator_build_identity::{
@@ -31,6 +36,46 @@ use support::{
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+#[cfg(target_os = "linux")]
+const FIFO_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(target_os = "linux")]
+fn open_fifo_writer_after_child_ready(
+    path: &Path,
+    child: &mut std::process::Child,
+) -> TestResult<fs::File> {
+    let deadline = Instant::now() + FIFO_READY_TIMEOUT;
+    loop {
+        match OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(readiness_writer) => {
+                let reader_guard = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(path)?;
+                let writer = OpenOptions::new().write(true).open(path)?;
+                drop(reader_guard);
+                drop(readiness_writer);
+                return Ok(writer);
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("evaluator exited before opening request FIFO: {status}").into());
+        }
+        if Instant::now() >= deadline {
+            drop(child.kill());
+            drop(child.wait());
+            return Err("evaluator did not open request FIFO before the deadline".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 fn evaluator() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pos-reference-evaluator"))
@@ -526,14 +571,15 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
         .args(base.get_args())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
 
+    // Opening the FIFO synchronizes with the evaluator after exec and before
+    // the executable path is replaced.
+    let mut request_writer = open_fifo_writer_after_child_ready(&request_path, &mut child)?;
     fs::rename(&executable, directory.path().join("loaded-evaluator"))?;
     fs::write(&executable, b"replacement path contents")?;
-    OpenOptions::new()
-        .write(true)
-        .open(&request_path)?
-        .write_all(&request)?;
+    request_writer.write_all(&request)?;
+    drop(request_writer);
 
     let output = child.wait_with_output()?;
     assert!(

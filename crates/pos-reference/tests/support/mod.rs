@@ -285,7 +285,7 @@ pub enum ProfileMutation {
     Version,
     ProfileId,
     ProfileSemver,
-    Lifecycle,
+    Lifecycle(u8),
     NormativeDigest,
     MatrixDigest,
     MatrixContent,
@@ -574,6 +574,8 @@ struct CorpusOptions<'a> {
     extra: Option<&'a [u8]>,
     release_mutation: Option<ReleaseMutation>,
     mixed_oracles: bool,
+    failure_outcome: Option<u8>,
+    failure_redaction_state: Option<u8>,
     profile_mutation: Option<ProfileMutation>,
     bundle_mutation: Option<BundleMutation>,
     trust_mutation: Option<TrustMutation>,
@@ -588,6 +590,8 @@ impl Default for CorpusOptions<'_> {
             extra: None,
             release_mutation: None,
             mixed_oracles: false,
+            failure_outcome: None,
+            failure_redaction_state: None,
             profile_mutation: None,
             bundle_mutation: None,
             trust_mutation: None,
@@ -665,6 +669,30 @@ pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
 pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
         mixed_oracles: true,
+        ..CorpusOptions::default()
+    })
+}
+
+/// Build a signed mixed-oracle corpus with one current typed failure outcome.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn mixed_oracle_corpus_with_failure_outcome(outcome: u8) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mixed_oracles: true,
+        failure_outcome: Some(outcome),
+        ..CorpusOptions::default()
+    })
+}
+
+/// Build a signed mixed-oracle corpus with one redacted typed failure.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn mixed_oracle_corpus_with_failure_redaction(state: u8) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mixed_oracles: true,
+        failure_redaction_state: Some(state),
         ..CorpusOptions::default()
     })
 }
@@ -751,6 +779,8 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         extra,
         release_mutation: _,
         mixed_oracles,
+        failure_outcome: _,
+        failure_redaction_state: _,
         profile_mutation,
         bundle_mutation,
         trust_mutation,
@@ -768,22 +798,6 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     if let Some(bytes) = extra {
         members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
     }
-    let mut hard_caps = hard_caps();
-    if let Some(ProfileMutation::SelectedCapBoundary(index)) = profile_mutation {
-        select_hard_cap_boundary(&mut hard_caps, index)?;
-    }
-    if matches!(
-        profile_mutation,
-        Some(ProfileMutation::SelectedCompressionCapBoundary)
-    ) {
-        array_fields_mut(&mut hard_caps)?[6] = uint(1);
-    }
-    if matches!(
-        profile_mutation,
-        Some(ProfileMutation::SelectedProfileByteCapBoundary)
-    ) {
-        array_fields_mut(&mut hard_caps)?[0] = uint(1);
-    }
     let fixtures = fixtures(
         &mut members,
         &signing_key,
@@ -792,12 +806,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         &expected_output,
         options,
     )?;
-    if let Some(ProfileMutation::SelectedClosureCapBoundary(index)) = profile_mutation {
-        select_closure_cap_boundary(&mut hard_caps, &members, index)?;
-    }
-    if let Some(ProfileMutation::SelectedClosureCapExact(index)) = profile_mutation {
-        select_closure_cap_exact(&mut hard_caps, &members, index)?;
-    }
+    let mut hard_caps = selected_hard_caps(profile_mutation, &members)?;
     let mut profile_value = profile_with_selected_closure_caps(
         &members,
         &fixtures,
@@ -844,6 +853,32 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         subject_digest: SUBJECT_DIGEST,
         expected_output,
     })
+}
+
+fn selected_hard_caps(
+    mutation: Option<ProfileMutation>,
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+) -> TestResult<Value> {
+    let mut caps = hard_caps();
+    match mutation {
+        Some(ProfileMutation::SelectedCapBoundary(index)) => {
+            select_hard_cap_boundary(&mut caps, index)?;
+        }
+        Some(ProfileMutation::SelectedCompressionCapBoundary) => {
+            array_fields_mut(&mut caps)?[6] = uint(1);
+        }
+        Some(ProfileMutation::SelectedProfileByteCapBoundary) => {
+            array_fields_mut(&mut caps)?[0] = uint(1);
+        }
+        Some(ProfileMutation::SelectedClosureCapBoundary(index)) => {
+            select_closure_cap_boundary(&mut caps, members, index)?;
+        }
+        Some(ProfileMutation::SelectedClosureCapExact(index)) => {
+            select_closure_cap_exact(&mut caps, members, index)?;
+        }
+        _ => {}
+    }
+    Ok(caps)
 }
 
 fn exact_profile_byte_cap(
@@ -1483,8 +1518,10 @@ fn fixtures(
                 &evidence_path,
                 &output_path,
                 options.mixed_oracles,
+                options.failure_outcome,
                 family,
             )?;
+            let replay_claim = failure_replay_claim(family, options.failure_redaction_state);
             let mut fixture = vec![
                 text(&case_id),
                 Value::Bool(true),
@@ -1500,8 +1537,8 @@ fn fixtures(
                 expectation.oracle,
                 expectation.expected_outcome,
                 expectation.expected_error,
-                uint(0),
-                uint(0),
+                uint(u64::from(replay_claim)),
+                uint(u64::from(replay_claim)),
                 array(vec![uint(100); 8]),
                 array(vec![uint(1_000)]),
                 array(vec![
@@ -1520,11 +1557,20 @@ fn fixtures(
         .collect()
 }
 
+fn failure_replay_claim(family: u64, state: Option<u8>) -> u8 {
+    if family == 1 {
+        state.unwrap_or(0)
+    } else {
+        0
+    }
+}
+
 fn fixture_expectation(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     evidence_path: &str,
     output_path: &str,
     mixed_oracles: bool,
+    failure_outcome: Option<u8>,
     family: u64,
 ) -> TestResult<FixtureExpectation> {
     let output_and_evidence = || -> TestResult<Value> {
@@ -1542,7 +1588,7 @@ fn fixture_expectation(
                 array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
                 Value::Null,
             ]),
-            expected_outcome: uint(2),
+            expected_outcome: uint(u64::from(failure_outcome.unwrap_or(2))),
             expected_error: array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
         },
         (true, 2) => FixtureExpectation {
@@ -2013,7 +2059,7 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::Version => profile_fields[1] = uint(2),
         ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
         ProfileMutation::ProfileSemver => profile_fields[3] = text("01.0.0"),
-        ProfileMutation::Lifecycle => profile_fields[4] = uint(1),
+        ProfileMutation::Lifecycle(value) => profile_fields[4] = uint(u64::from(value)),
         ProfileMutation::NormativeDigest => profile_fields[5] = bytes(&[0; 32]),
         ProfileMutation::MatrixDigest => profile_fields[6] = bytes(&[0; 32]),
         ProfileMutation::MatrixContent

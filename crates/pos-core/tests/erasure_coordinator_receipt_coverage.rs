@@ -51,8 +51,8 @@ use coordinator_support::{
     PublicCoordinatorPortConfig,
 };
 use erasure_support::{
-    reference, request as fixture_request, retry_admission as fixture_retry_admission, target,
-    RetryAdmissionFixture,
+    obligation_for_category, reference, request as fixture_request,
+    retry_admission as fixture_retry_admission, target, RetryAdmissionFixture,
 };
 
 fn encoded_target(target: ErasureRequiredTargetV1) -> Value {
@@ -240,12 +240,7 @@ fn obligation(
     category: ErasureInventoryCategoryV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureObligationV1, ErasureErrorV1> {
-    ErasureObligationV1::new(ErasureObligationInputV1 {
-        category,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })
+    obligation_for_category(request, category, target)
 }
 
 fn atomic_freeze_input(
@@ -472,13 +467,24 @@ fn assert_mutated_correction_is_rejected(
     request: &ErasureRequestV1,
     state: &ErasureStateV1,
     correction: &ErasureCorrectionProvenanceV1,
+    expected_subject: ErasureReferenceV1,
 ) -> Result<(), ErasureErrorV1> {
     adapter.replace_corrected_graph(old_request, request, state, correction)?;
+    let manifest = adapter
+        .current_manifest(request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR);
     assert_eq!(
-        ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR)
-            .submit(request.clone(), request.provenance()),
+        coordinator.submit(request.clone(), request.provenance()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    let failures = coordinator.recovery_errors(request.reference())?;
+    assert!(failures.iter().any(|failure| {
+        failure.manifest() == Some(manifest)
+            && failure.failure_subject() == expected_subject
+            && failure.error() == ErasureErrorV1::ProvenanceMissing
+    }));
     Ok(())
 }
 
@@ -509,6 +515,7 @@ fn assert_correction_recovery_guards(
         &same_request,
         &same_request_state,
         &same_request_correction,
+        same_request_correction.reference(),
     )?;
 
     let wrong_terminal_correction =
@@ -530,7 +537,41 @@ fn assert_correction_recovery_guards(
         &invalid_terminal_request,
         &invalid_terminal_state,
         &wrong_terminal_correction,
+        wrong_terminal_correction.rejected_terminal_state(),
     )
+}
+
+fn assert_correction_recovery_resolve_state_faults(
+    adapter: &PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+) -> Result<(), ErasureErrorV1> {
+    let probe = adapter
+        .clone()
+        .with_operation_fault(PublicCoordinatorFault {
+            operation: PublicCoordinatorOperation::ResolveState,
+            occurrence: u64::MAX,
+        });
+    let observer = probe.clone();
+    ErasureCoordinatorStateMachineV1::new(probe, COORDINATOR)
+        .submit(request.clone(), request.provenance())?;
+    let occurrences = observer.operation_fault_hits();
+    assert!(occurrences > 0, "ResolveState was not exercised");
+
+    for occurrence in 0..occurrences {
+        let faulted = adapter
+            .clone()
+            .with_operation_fault(PublicCoordinatorFault {
+                operation: PublicCoordinatorOperation::ResolveState,
+                occurrence,
+            });
+        assert_eq!(
+            ErasureCoordinatorStateMachineV1::new(faulted, COORDINATOR)
+                .submit(request.clone(), request.provenance()),
+            Err(ErasureErrorV1::TrustSnapshotInvalid),
+            "ResolveState occurrence {occurrence} did not propagate",
+        );
+    }
+    Ok(())
 }
 
 fn correction_for(
@@ -1516,6 +1557,10 @@ fn coordinator_public_missing_state_active_conflict_and_exact_retry_paths(
     let port = coordinator_port(vec![target], None);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     submit_authorize_and_freeze(&mut coordinator, &request)?;
+    assert_eq!(
+        coordinator.finalize(request.reference(), coordinator_receipt_input(target, 30)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     let admission = coordinator_admission(request.reference(), target, 0, None)?;
     coordinator.dispatch_attempt(request.reference(), &admission)?;
     let conflicting_admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
@@ -1680,6 +1725,31 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         rejected.state_digest(),
         original_submitted.state_digest(),
         &correction,
+    )?;
+    let corrected = corrected_request(correction.reference())?;
+    mutation_base.replace_corrected_graph(
+        corrected_reference,
+        &corrected,
+        &corrected_state,
+        &correction,
+    )?;
+    assert_correction_recovery_resolve_state_faults(&mutation_base, &corrected)?;
+
+    let missing_terminal = reference(246);
+    let missing_correction = correction_for(original.reference(), missing_terminal, reference(22))?;
+    let missing_request = corrected_request(missing_correction.reference())?;
+    let missing_state = ErasureStateV1::submitted(
+        missing_request.reference(),
+        COORDINATOR,
+        missing_request.provenance(),
+    )?;
+    assert_mutated_correction_is_rejected(
+        &mutation_base,
+        corrected_reference,
+        &missing_request,
+        &missing_state,
+        &missing_correction,
+        missing_terminal,
     )?;
     Ok(())
 }
@@ -4400,6 +4470,23 @@ fn portable_decoders_reject_wrong_types_in_every_evidence_field() -> Result<(), 
     reject_each_top_level_field(&admission.to_canonical_cbor()?, |bytes| {
         ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(bytes)
     })?;
+    let admission_bytes = admission.to_canonical_cbor()?;
+    assert!(
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace_path(
+            &admission_bytes,
+            &[5, 0, 0],
+            Value::Integer(99.into()),
+        )?)
+        .is_err()
+    );
+    assert!(
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace_path(
+            &admission_bytes,
+            &[5, 0, 2],
+            Value::Integer(99.into()),
+        )?)
+        .is_err()
+    );
     reject_each_top_level_field(&authorization.to_canonical_cbor()?, |bytes| {
         ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor(bytes)
     })?;
@@ -4973,6 +5060,12 @@ fn cas_effect_codec_rejects_wrong_shapes_and_trailing_data() -> Result<(), Erasu
     assert!(ErasureCasEffectV1::from_canonical_cbor(&replace_path(
         &attempt_bytes,
         &[4, 1, 0, 1],
+        Value::Integer(99.into()),
+    )?)
+    .is_err());
+    assert!(ErasureCasEffectV1::from_canonical_cbor(&replace_path(
+        &attempt_bytes,
+        &[4, 1, 0, 2, 1],
         Value::Integer(99.into()),
     )?)
     .is_err());
