@@ -844,6 +844,89 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
 }
 
 #[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
+    let timeline = TimelineId::new();
+
+    let first_event_is_not_one = [projection_event(EntityId::new(), "recovery.event", 2)];
+    assert!(matches!(
+        test_err(PluginRegistry::new().restore_driver_state(
+            &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+            &first_event_is_not_one,
+        )),
+        RuntimeError::InvalidRecoveryEvidence {
+            reason: "source Events must begin at sequence 1"
+        }
+    ));
+
+    let events_are_not_contiguous = [
+        projection_event(EntityId::new(), "recovery.event", 1),
+        projection_event(EntityId::new(), "recovery.event", 3),
+    ];
+    assert!(matches!(
+        test_err(PluginRegistry::new().restore_driver_state(
+            &[TimelineHistorySegment::new(timeline, Seq::from_u64(3))],
+            &events_are_not_contiguous,
+        )),
+        RuntimeError::InvalidRecoveryEvidence {
+            reason: "source Events must be contiguous"
+        }
+    ));
+
+    let events_do_not_reach_the_bound = [projection_event(EntityId::new(), "recovery.event", 1)];
+    assert!(matches!(
+        test_err(PluginRegistry::new().restore_driver_state(
+            &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+            &events_do_not_reach_the_bound,
+        )),
+        RuntimeError::InvalidRecoveryEvidence {
+            reason: "source Events must reach the final Timeline bound"
+        }
+    ));
+
+    let mut driverless = PluginRegistry::new();
+    let plugin = configured_plugin("driverless", &[], false, false);
+    test_ok(driverless.register(&plugin, None, None));
+    assert!(test_ok(driverless.step_all_anchored(timeline, Seq::ZERO)).is_empty());
+    test_ok(driverless.commit_step_at(Seq::ZERO, 0));
+
+    let mut empty = PluginRegistry::new();
+    test_ok(empty.commit_step_at(Seq::ZERO, 0));
+    assert!(test_ok(empty.step_all(timeline)).is_empty());
+
+    drop(test_ok(PluginRegistry::new().into_authorized_projections(
+        timeline,
+        Seq::from_u64(1),
+        0,
+        None,
+        Some(&[projection_event(EntityId::new(), "public.event", 1)]),
+    )));
+    assert!(matches!(
+        PluginRegistry::new().into_authorized_projections(
+            timeline,
+            Seq::from_u64(1),
+            0,
+            None,
+            Some(&[projection_event(EntityId::new(), "persona.profile.v1", 1)]),
+        ),
+        Err(RuntimeError::ConsentOperationUnavailable)
+    ));
+
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut protected = PluginRegistry::new().with_consent_authority(authority);
+    protected.register_driver(Box::new(SensitiveEventDriver {
+        entity: EntityId::new(),
+        event_type: "persona.profile.v1",
+    }));
+    assert!(matches!(
+        test_err(protected.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[])),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+}
+
+#[test]
 fn public_cadence_executes_driver_output_through_the_consent_boundary() {
     let timeline = TimelineId::new();
     let entity = EntityId::new();
