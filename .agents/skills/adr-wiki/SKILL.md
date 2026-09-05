@@ -57,14 +57,41 @@ Rules for managing ADR pages on the Redmine wiki at `redmine.piglor.com/projects
    ...
    ```
 
+7. **Approval is revision-specific.** Record the exact revision reviewed and
+   distinguish section-level feedback from approval of the complete page. An
+   earlier or partial approval does not approve a later amendment.
+
+8. **Pending amendments control page status.** If an accepted ADR gains an
+   unapproved amendment, mark the page `Under Review` and identify which base
+   decisions remain accepted. Restore `Accepted` only after the amended
+   revision is explicitly approved.
+
+9. **Markdown table rows must be contiguous.** Do not place blank lines between
+   the header, separator, or data rows. Parser-sensitive layout is part of the
+   canonical format, not a cosmetic detail.
+
 ## Redmine API reference
 
-7. **Wiki page URLs** use the title with underscores, URL-encoded:
+10. **Wiki page URLs** use the title with underscores, URL-encoded:
    - `GET /projects/pigloros/wiki/<title>.json` — read
    - `PUT /projects/pigloros/wiki/<title>.json` — update
    - Auth: header `X-Redmine-API-Key`
 
-8. **Auth:** Include API key in all requests:
+11. **Auth:** Include API key in all requests:
    ```
    X-Redmine-API-Key: <key>
    ```
+
+12. **Synchronize and verify external writes.** Fetch the current canonical
+    page and any source design before editing. After every write, fetch the page
+    again and verify its parent, status, revision/version marker, links, table
+    structure, and complete text. A successful response alone is not evidence
+    that Redmine stored the intended ADR.
+
+## Pre-flight
+
+- [ ] The page is parented under `ADR` and uses Markdown.
+- [ ] Status reflects the least-approved active decision on the page.
+- [ ] The exact reviewed revision and approval scope are explicit.
+- [ ] Tables have contiguous structural rows.
+- [ ] The canonical page was read back after the final write.

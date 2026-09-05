@@ -19,6 +19,11 @@ See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking g
 
 A **seam** is the public boundary you test at: the interface where you observe behavior without reaching inside. Tests live at seams, never against internals.
 
+Exception: narrowly scoped private fault injection may be necessary to prove
+fail-closed behavior for corrupted or rolled-back states that public
+constructors intentionally cannot create. Keep normal behavior and adapter
+parity at public seams; do not expose a new public seam solely for test setup.
+
 **Test only at pre-agreed seams.** Before writing any test, write down the seams under test and confirm them with the user. No test is written at an unconfirmed seam. You can't test everything — agreeing the seams up front is how testing effort lands on the critical paths and complex logic instead of every edge case.
 
 Ask: "What's the public interface, and which seams should we test?"
@@ -28,9 +33,23 @@ Ask: "What's the public interface, and which seams should we test?"
 - **Implementation-coupled** — mocks internal collaborators, tests private methods, or verifies through a side channel (querying the database instead of using the interface). The tell: the test breaks when you refactor but behavior hasn't changed.
 - **Tautological** — the assertion recomputes the expected value the way the code does (`expect(add(a, b)).toBe(a + b)`, a snapshot derived by hand the same way, a constant asserted equal to itself), so it passes by construction and can never disagree with the code. Expected values must come from an independent source of truth — a known-good literal, a worked example, the spec.
 - **Horizontal slicing** — writing all tests first, then all implementation. Bulk tests verify _imagined_ behavior: you test the _shape_ of things rather than user-facing behavior, the tests go insensitive to real changes, and you commit to test structure before understanding the implementation. Work in **vertical slices** instead — one test → one implementation → repeat, each test a **tracer bullet** that responds to what the last cycle taught you.
+- **Wrong-boundary invalidity** — constructing malformed input through a typed
+  encoder that rejects it before the decoder or authorization gate under test.
+  Start from a valid canonical artifact, mutate the raw representation directly
+  below the intended boundary, and recompute every enclosing digest/signature.
+- **Unreachable downstream assertion** — changing a downstream field while
+  leaving upstream consent, identity, or integrity evidence bound to the old
+  value. Rebuild all earlier evidence needed to reach the intended gate, or
+  assert the earliest mandatory rejection instead.
+- **Trait-heavy error assertion** — comparing an entire `Result` when only the
+  error variant matters, accidentally requiring `Debug` or `PartialEq` on an
+  opaque success type. Match the expected error variant and require no traits
+  unrelated to the behavior under test.
 
 ## Rules of the loop
 
 - **Red before green.** Write the failing test first, then only enough code to pass it. Don't anticipate future tests or add speculative features.
 - **One slice at a time.** One seam, one test, one minimal implementation per cycle.
 - **Refactoring is not part of the loop.** It belongs to the review stage (see the `code-review` skill), not the red → green implementation cycle.
+- **Name the intended gate.** For ordered fail-closed pipelines, each negative
+  case records the earliest normative boundary and expected error it exercises.

@@ -63,6 +63,13 @@ When designing an interface, ask:
 - **The deletion test.** Imagine deleting the module. If complexity vanishes, it was a pass-through. If complexity reappears across N callers, it was earning its keep.
 - **The interface is the test surface.** Callers and tests cross the same seam. If you want to test *past* the interface, the module is probably the wrong shape.
 - **One adapter means a hypothetical seam. Two adapters means a real one.** Don't introduce a seam unless something actually varies across it.
+- **Mandatory verification belongs in the releasing capability.** If a load,
+  recovery, or retrieval operation must perform host-owned authorization or
+  integrity checks before releasing a protected value, require that verifier
+  capability in the interface itself. Documentation and a preferred caller do
+  not make a bypassable security check mandatory. Keep structural persistence
+  validation and host policy verification distinct, but make both unavoidable
+  at release.
 
 ## Designing for testability
 
