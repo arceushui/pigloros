@@ -423,13 +423,15 @@ fn report_round_trips_every_status_and_evidence_shape() -> TestResult {
     exact.case_id = "status-pass".to_owned();
     cases.push(exact);
 
-    let mut typed = base.clone();
-    typed.case_id = "status-typed".to_owned();
-    typed.expected_digest = None;
-    typed.actual_digest = None;
-    typed.expected_error = Some(4);
-    typed.actual_error = Some(4);
-    cases.push(typed);
+    for safe_error in 0..=13 {
+        let mut typed = base.clone();
+        typed.case_id = format!("status-typed-{safe_error:02}");
+        typed.expected_digest = None;
+        typed.actual_digest = None;
+        typed.expected_error = Some(safe_error);
+        typed.actual_error = Some(safe_error);
+        cases.push(typed);
+    }
 
     let mut divergence = base.clone();
     divergence.case_id = "status-divergence".to_owned();
