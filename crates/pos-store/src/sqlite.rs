@@ -11623,7 +11623,7 @@ mod tests {
     }
 
     #[test]
-    fn erasure_sql_helpers_validate_durable_state_and_effect_rows() {
+    fn erasure_sql_helpers_validate_durable_state_rows() {
         let store = new_store();
         let request = ErasureReferenceV1::from_digest([4; 32]);
         let state = ErasureReferenceV1::from_digest([5; 32]);
@@ -11654,6 +11654,27 @@ mod tests {
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_states SET request_digest=zeroblob(31) WHERE state_digest=?1",
+                params![state.digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            validate_sqlite_state_row(&store.conn, request, state, b"state"),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn erasure_sql_helpers_validate_durable_effect_rows() {
+        let store = new_store();
+        let missing = ErasureReferenceV1::from_digest([6; 32]);
         let manifest = ErasureReferenceV1::from_digest([7; 32]);
         let effect = pos_core::ErasureCasEffectV1::None;
         let bytes = effect.to_canonical_cbor().test_ok();
@@ -11717,18 +11738,6 @@ mod tests {
             .test_ok();
         assert_eq!(
             load_sqlite_erasure_effect(&store.conn, manifest),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-
-        store
-            .conn
-            .execute(
-                "UPDATE erasure_states SET request_digest=zeroblob(31) WHERE state_digest=?1",
-                params![state.digest().as_slice()],
-            )
-            .test_ok();
-        assert_eq!(
-            validate_sqlite_state_row(&store.conn, request, state, b"state"),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
     }
