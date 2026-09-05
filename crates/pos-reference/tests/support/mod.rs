@@ -1557,7 +1557,7 @@ fn fixtures(
         .collect()
 }
 
-const fn failure_replay_claim(family: u64, state: Option<u8>) -> u8 {
+fn failure_replay_claim(family: u64, state: Option<u8>) -> u8 {
     if family == 1 {
         state.unwrap_or(0)
     } else {
