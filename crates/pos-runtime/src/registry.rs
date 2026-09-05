@@ -1415,9 +1415,9 @@ impl PluginRegistry {
             .filter(|event| driver_visible_event(event))
             .cloned()
             .collect();
-        let mut staged = Vec::new();
+        let mut staged_driver_count = 0;
         let mut failure = None;
-        for (id, entry) in &mut self.plugins {
+        for entry in self.plugins.values_mut() {
             let Some(driver) = entry.driver.as_mut() else {
                 continue;
             };
@@ -1430,39 +1430,35 @@ impl PluginRegistry {
                 failure = Some(error);
                 break;
             }
-            staged.push(*id);
+            staged_driver_count += 1;
         }
         if let Some(error) = failure {
-            for staged_id in staged {
-                if let Some(staged_driver) = self
-                    .plugins
-                    .get_mut(&staged_id)
-                    .and_then(|staged_entry| staged_entry.driver.as_mut())
-                {
-                    staged_driver.abort_restore_from_history();
+            for entry in self.plugins.values_mut() {
+                if staged_driver_count == 0 {
+                    break;
                 }
+                let Some(driver) = entry.driver.as_mut() else {
+                    continue;
+                };
+                driver.abort_restore_from_history();
+                staged_driver_count -= 1;
             }
             return Err(error);
         }
-        for id in staged {
-            if let Some(driver) = self
-                .plugins
-                .get_mut(&id)
-                .and_then(|entry| entry.driver.as_mut())
+        for entry in self.plugins.values_mut() {
+            let Some(driver) = entry.driver.as_mut() else {
+                continue;
+            };
+            let name = driver.name().to_owned();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                driver.commit_restore_from_history();
+            }))
+            .is_err()
             {
-                let name = driver.name().to_owned();
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    driver.commit_restore_from_history();
-                }))
-                .is_err()
-                {
-                    self.poisoned_driver = Some(name.clone());
-                    return Err(RuntimeError::DriverRestorePanicked { name });
-                }
+                self.poisoned_driver = Some(name.clone());
+                return Err(RuntimeError::DriverRestorePanicked { name });
             }
-            if let Some(entry) = self.plugins.get_mut(&id) {
-                entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
-            }
+            entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
         }
         Ok(())
     }
@@ -1787,14 +1783,15 @@ impl PluginRegistry {
         )?;
         let snapshot = self.snapshot_for_subscriptions(&due_subscriptions);
         for (id, entry) in &mut self.plugins {
+            let Some(driver) = entry.driver.as_mut() else {
+                continue;
+            };
             if due_driver_ids.remove(id) {
-                if let Some(driver) = entry.driver.as_mut() {
-                    let observations = snapshot.view_for(driver.subscriptions());
-                    let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                    reject_host_owned_drafts(&output)?;
-                    entry.last_tick = Some(now_ns);
-                    all_drafts.extend(output.drafts);
-                }
+                let observations = snapshot.view_for(driver.subscriptions());
+                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
+                reject_host_owned_drafts(&output)?;
+                entry.last_tick = Some(now_ns);
+                all_drafts.extend(output.drafts);
             }
         }
         debug_assert!(due_driver_ids.is_empty());
@@ -2362,6 +2359,8 @@ mod tests {
         let timeline = TimelineId::new();
         let state = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = PluginRegistry::new();
+        let driverless = simple_plugin("restore-driverless", &[]);
+        registry.register(&driverless, None, None).test_ok();
         registry.register_driver(Box::new(TransactionalDriver {
             name: "restoring",
             state: Arc::clone(&state),
@@ -2529,6 +2528,8 @@ mod tests {
         let first = Arc::new(Mutex::new(RestoreState::default()));
         let second = Arc::new(Mutex::new(RestoreState::default()));
         let mut registry = PluginRegistry::new();
+        let driverless = simple_plugin("failed-restore-driverless", &[]);
+        registry.register(&driverless, None, None).test_ok();
         registry.register_driver(Box::new(RestoreDriver {
             state: Arc::clone(&first),
             rejects: false,

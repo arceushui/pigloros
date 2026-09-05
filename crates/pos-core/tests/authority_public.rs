@@ -1290,6 +1290,23 @@ fn decision_decoder_rejects_inconsistent_evidence() {
 }
 
 #[test]
+fn decision_decoder_rejects_an_invalid_fail_closed_error() {
+    let decision = decision_for(&request(principal(1), entity(10)), &[]);
+    assert_eq!(
+        decision.outcome(),
+        AuthorizationOutcomeV1::IndeterminateFailClosed
+    );
+    let malformed = changed_array(&ok(decision.encode()), |fields| {
+        fields[21] = Value::Integer(AuthorityErrorV1::InvalidEncoding.code().into());
+    });
+
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&malformed),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+}
+
+#[test]
 fn decision_decoder_rejects_zero_hash_binding() {
     let request = request(principal(1), entity(10));
     let encoded =

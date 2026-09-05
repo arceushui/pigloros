@@ -949,6 +949,7 @@ fn public_registry_steps_a_registered_driverless_plugin() {
     test_ok(driverless.register(&plugin, None, None));
     assert!(test_ok(driverless.step_all_anchored(timeline, Seq::ZERO)).is_empty());
     test_ok(driverless.commit_step_at(Seq::ZERO, 0));
+    assert!(test_ok(driverless.tick_cadenced(timeline, 0)).is_empty());
 }
 
 #[test]
@@ -1486,6 +1487,8 @@ fn public_restore_failure_aborts_prior_driver_and_reports_commit_panic() {
     let tracking_commits = Arc::new(Mutex::new(0));
     let failing_aborts = Arc::new(Mutex::new(0));
     let mut registry = PluginRegistry::new();
+    let driverless = configured_plugin("restore-driverless", &[], false, false);
+    test_ok(registry.register(&driverless, None, None));
     registry.register_driver(Box::new(RestoreTrackingDriver {
         aborts: Arc::clone(&tracking_aborts),
         commits: Arc::clone(&tracking_commits),
@@ -1528,6 +1531,9 @@ fn public_restore_failure_aborts_prior_driver_and_reports_commit_panic() {
 
     let successful_commits = Arc::new(Mutex::new(0));
     let mut successful = PluginRegistry::new();
+    let successful_driverless =
+        configured_plugin("successful-restore-driverless", &[], false, false);
+    test_ok(successful.register(&successful_driverless, None, None));
     successful.register_driver(Box::new(RestoreTrackingDriver {
         aborts: Arc::new(Mutex::new(0)),
         commits: Arc::clone(&successful_commits),
