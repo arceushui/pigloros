@@ -816,7 +816,7 @@ fn decode_profile_header(fields: &[Value]) -> Result<ProfileHeader, ProfileError
         publication_digest: fixed_bytes(&fields[15])?,
     };
     if !semantic_version(text(&fields[3])?, Some(10))
-        || uint(&fields[4])? != 0
+        || uint(&fields[4])? > 3
         || [
             header.normative_spec_digest,
             header.execution_matrix_digest,

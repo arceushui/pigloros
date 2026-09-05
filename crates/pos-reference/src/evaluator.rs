@@ -14,6 +14,12 @@ use crate::signed_bundle::{
 };
 use std::cmp::Ordering;
 
+const SAFE_ERROR_INVALID_ENCODING: u8 = 0;
+const SAFE_ERROR_DIGEST_MISMATCH: u8 = 4;
+const SAFE_ERROR_CLOSURE_INCOMPLETE: u8 = 9;
+const SAFE_ERROR_PROFILE_UNSUPPORTED: u8 = 11;
+const SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED: u8 = 13;
+
 /// Deterministic resource consumption reported by a public subject adapter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ResourceUsage {
@@ -386,10 +392,13 @@ fn case_outcome(
         redaction_state: fixture.redaction_state,
         provenance_digest: fixture.provenance_digest,
     };
+    if outcome.redaction_state >= 2 {
+        return outcome;
+    }
     match &fixture.oracle {
         StrictOracle::Output(expected) => outcome.expected_digest = Some(expected.digest),
-        StrictOracle::Failure(expected) => {
-            outcome.expected_digest = Some(failure_digest(expected));
+        StrictOracle::Failure(_) => {
+            outcome.expected_error = failure_safe_error(fixture.expected_verification_outcome);
         }
         StrictOracle::Divergence {
             classification,
@@ -401,16 +410,12 @@ fn case_outcome(
             ));
         }
     }
-    if outcome.redaction_state >= 2 {
-        outcome.expected_digest = None;
-        return outcome;
-    }
     let Ok(observation) = observation else {
         return outcome;
     };
     if observation.usage.exceeds(fixture.deterministic_budget) {
         outcome.outcome = CaseStatus::Fail;
-        outcome.actual_error = Some(13);
+        outcome.actual_error = Some(SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED);
         return outcome;
     }
     match (&fixture.oracle, observation.result) {
@@ -426,13 +431,13 @@ fn case_outcome(
             };
         }
         (StrictOracle::Failure(expected), SubjectResult::Failure(actual)) => {
-            let actual_digest = failure_digest(&actual);
-            outcome.actual_digest = Some(actual_digest);
-            outcome.outcome = if expected == &actual {
-                CaseStatus::Pass
+            if expected == &actual {
+                outcome.actual_error = outcome.expected_error;
+                outcome.outcome = CaseStatus::Pass;
             } else {
-                CaseStatus::Fail
-            };
+                outcome.actual_error = Some(SAFE_ERROR_DIGEST_MISMATCH);
+                outcome.outcome = CaseStatus::Fail;
+            }
         }
         (
             StrictOracle::Divergence {
@@ -463,14 +468,15 @@ fn case_outcome(
     outcome
 }
 
-fn failure_digest(value: &NamespacedFailure) -> [u8; 32] {
-    let mut bytes = b"PiglorOS.NamespacedFailure.v1\0".to_vec();
-    for field in [&value.owner_id, &value.contract_version, &value.code_id] {
-        let length = field.len() as u64;
-        bytes.extend_from_slice(&length.to_be_bytes());
-        bytes.extend_from_slice(field.as_bytes());
-    }
-    *blake3::hash(&bytes).as_bytes()
+fn failure_safe_error(verification_outcome: u8) -> Option<u8> {
+    [
+        None,
+        None,
+        Some(SAFE_ERROR_INVALID_ENCODING),
+        Some(SAFE_ERROR_CLOSURE_INCOMPLETE),
+        Some(SAFE_ERROR_PROFILE_UNSUPPORTED),
+        Some(SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED),
+    ][usize::from(verification_outcome)]
 }
 
 fn expected_divergence_digest(classification: u8, coordinate: &[u8]) -> [u8; 32] {
