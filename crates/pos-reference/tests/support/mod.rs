@@ -2027,10 +2027,6 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
         ProfileMutation::ProfileSemver => profile_fields[3] = text("01.0.0"),
         ProfileMutation::Lifecycle(value) => profile_fields[4] = uint(u64::from(value)),
-        ProfileMutation::FailureOutcome(value) => {
-            let fixtures = array_fields_mut(&mut profile_fields[9])?;
-            array_fields_mut(&mut fixtures[1])?[12] = uint(u64::from(value));
-        }
         ProfileMutation::NormativeDigest => profile_fields[5] = bytes(&[0; 32]),
         ProfileMutation::MatrixDigest => profile_fields[6] = bytes(&[0; 32]),
         ProfileMutation::MatrixContent
@@ -2215,7 +2211,8 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
     let fixtures = array_fields_mut(&mut profile_fields[9])?;
     let fixture_index = if matches!(
         mutation,
-        ProfileMutation::RawFixtureTransitionField(_)
+        ProfileMutation::FailureOutcome(_)
+            | ProfileMutation::RawFixtureTransitionField(_)
             | ProfileMutation::DeepTypeBoundary(5)
             | ProfileMutation::FixtureSemanticBoundary(8)
     ) {
@@ -2365,6 +2362,9 @@ fn mutate_fixture_relationship(
     mutation: ProfileMutation,
 ) -> TestResult<bool> {
     match mutation {
+        ProfileMutation::FailureOutcome(value) => {
+            fields[12] = uint(u64::from(value));
+        }
         ProfileMutation::FixtureOracleDivergenceCoordinate => {
             fields[11] = divergence_oracle(&[]);
         }
