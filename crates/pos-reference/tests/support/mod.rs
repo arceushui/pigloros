@@ -783,22 +783,6 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     if let Some(bytes) = extra {
         members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
     }
-    let mut hard_caps = hard_caps();
-    if let Some(ProfileMutation::SelectedCapBoundary(index)) = profile_mutation {
-        select_hard_cap_boundary(&mut hard_caps, index)?;
-    }
-    if matches!(
-        profile_mutation,
-        Some(ProfileMutation::SelectedCompressionCapBoundary)
-    ) {
-        array_fields_mut(&mut hard_caps)?[6] = uint(1);
-    }
-    if matches!(
-        profile_mutation,
-        Some(ProfileMutation::SelectedProfileByteCapBoundary)
-    ) {
-        array_fields_mut(&mut hard_caps)?[0] = uint(1);
-    }
     let fixtures = fixtures(
         &mut members,
         &signing_key,
@@ -807,12 +791,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         &expected_output,
         options,
     )?;
-    if let Some(ProfileMutation::SelectedClosureCapBoundary(index)) = profile_mutation {
-        select_closure_cap_boundary(&mut hard_caps, &members, index)?;
-    }
-    if let Some(ProfileMutation::SelectedClosureCapExact(index)) = profile_mutation {
-        select_closure_cap_exact(&mut hard_caps, &members, index)?;
-    }
+    let mut hard_caps = selected_hard_caps(profile_mutation, &members)?;
     let mut profile_value = profile_with_selected_closure_caps(
         &members,
         &fixtures,
@@ -859,6 +838,32 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         subject_digest: SUBJECT_DIGEST,
         expected_output,
     })
+}
+
+fn selected_hard_caps(
+    mutation: Option<ProfileMutation>,
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+) -> TestResult<Value> {
+    let mut caps = hard_caps();
+    match mutation {
+        Some(ProfileMutation::SelectedCapBoundary(index)) => {
+            select_hard_cap_boundary(&mut caps, index)?;
+        }
+        Some(ProfileMutation::SelectedCompressionCapBoundary) => {
+            array_fields_mut(&mut caps)?[6] = uint(1);
+        }
+        Some(ProfileMutation::SelectedProfileByteCapBoundary) => {
+            array_fields_mut(&mut caps)?[0] = uint(1);
+        }
+        Some(ProfileMutation::SelectedClosureCapBoundary(index)) => {
+            select_closure_cap_boundary(&mut caps, members, index)?;
+        }
+        Some(ProfileMutation::SelectedClosureCapExact(index)) => {
+            select_closure_cap_exact(&mut caps, members, index)?;
+        }
+        _ => {}
+    }
+    Ok(caps)
 }
 
 fn exact_profile_byte_cap(
