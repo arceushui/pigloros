@@ -40,6 +40,127 @@ fn extend_unique_subscriptions(
     }
 }
 
+#[cfg(test)]
+mod coverage_focused {
+    use super::*;
+    use pos_core::{CanonicalBytes, ConsentGrantedV1, EntityId, EventId, SchemaVersion};
+
+    fn evidence_event(seq: u64) -> Event {
+        Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("coverage.evidence"),
+            payload: CanonicalBytes::from_static(b"coverage"),
+            wall_time: pos_core::clock::WallTime::from_micros(1),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            payload_hash: pos_core::crypto::Hash::from_bytes([0; 32]),
+        }
+    }
+
+    #[test]
+    fn authorization_edges_are_measured() {
+        let timeline = pos_core::ids::TimelineId::new();
+        let key = ProjectionKey::new(EntityId::new());
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGrantedV1 {
+            subject_id: *key.entity_id(),
+            grantee_id: EntityId::new(),
+            purpose: "coverage".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let registry = PluginRegistry::new().without_consent_gate();
+        let operation = OperationContext::Protected { token, now_secs: 0 };
+        drop(registry.authorize_snapshot_subscriptions(
+            timeline,
+            Seq::ZERO,
+            &operation,
+            std::slice::from_ref(&key),
+        ));
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("coverage.draft"),
+            CanonicalBytes::from_static(b"coverage"),
+        );
+        drop(registry.validate_protected_drafts(
+            timeline,
+            &OperationContext::Public,
+            Seq::ZERO,
+            std::slice::from_ref(&draft),
+        ));
+        drop(PluginRegistry::new().into_authorized_projections(timeline, Seq::ZERO, 0, None, None));
+    }
+
+    #[test]
+    fn recovery_and_host_owned_edges_are_measured() {
+        let timeline = pos_core::ids::TimelineId::new();
+        drop(validate_recovery_evidence(
+            &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+            &[evidence_event(2)],
+        ));
+        drop(validate_recovery_evidence(
+            &[TimelineHistorySegment::new(timeline, Seq::from_u64(3))],
+            &[evidence_event(1), evidence_event(3)],
+        ));
+        drop(validate_recovery_evidence(
+            &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+            &[evidence_event(1)],
+        ));
+
+        let geographic = EventDraft::new(
+            EntityId::new(),
+            Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE),
+            CanonicalBytes::from_static(b"coverage"),
+        );
+        drop(reject_host_owned_draft_slice(&[geographic]));
+        let key = ProjectionKey::new(EntityId::new());
+        let mut subscriptions = Vec::new();
+        let mut seen = HashSet::new();
+        extend_unique_subscriptions(&mut subscriptions, &mut seen, &[key.clone(), key]);
+    }
+
+    #[test]
+    fn action_and_missing_driver_edges_are_measured() {
+        let oversized = ProposedAction::new(
+            Kind::new("coverage.action"),
+            EntityId::new(),
+            CanonicalBytes::from_vec(vec![0; MAX_PROPOSED_ACTION_PAYLOAD_BYTES + 1]),
+            Kind::new("coverage.action.submit"),
+        );
+        drop(PluginRegistry::new().submit_action(&oversized));
+        let unknown = ProposedAction::new(
+            Kind::new("coverage.action"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"coverage"),
+            Kind::new("coverage.action.submit"),
+        );
+        drop(PluginRegistry::new().submit_action(&unknown));
+        drop(PluginRegistry::new_replay().submit_action(&unknown));
+
+        let snapshot = ObservationSnapshot::default();
+        drop(PluginRegistry::new().invoke_selected_driver(
+            PluginId::new(),
+            pos_core::ids::TimelineId::new(),
+            &snapshot,
+            &[],
+        ));
+        let mut poisoned = PluginRegistry::new();
+        poisoned.poisoned_driver = Some("coverage".to_owned());
+        drop(poisoned.ensure_no_pending_step());
+    }
+}
+
 fn driver_visible_event(event: &Event) -> bool {
     !pos_core::is_consent_event_type(&event.event_type)
         && !pos_core::is_geographic_event_type(&event.event_type)
