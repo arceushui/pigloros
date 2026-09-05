@@ -4401,14 +4401,45 @@ mod coverage_private_error_paths {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_store() -> Box<dyn pos_core::store::EventStore> {
+        open_store(StoreConfig::Memory).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "opening the in-memory store failed: {error:?}"
+            )))
+        })
+    }
+
     #[test]
-    fn unbound_and_revoked_private_fences_are_exercised() -> Result<(), String> {
+    fn unbound_and_revoked_private_fences_are_exercised() {
         let timeline = TimelineId::new();
         let subject = EntityId::new();
         let other_subject = EntityId::new();
         let authority = ConsentAuthority::new();
         let consent_grant = grant(subject);
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
+
+        let snapshot_gate = PluginRegistry::new().without_consent_gate();
+        assert!(snapshot_gate
+            .authorize_snapshot_subscriptions(
+                timeline,
+                Seq::ZERO,
+                &OperationContext::Protected {
+                    token: token.clone(),
+                    now_secs: 0,
+                },
+                &[],
+            )
+            .is_err());
+        let draft_gate = PluginRegistry::new().without_consent_gate();
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("public.event"),
+            CanonicalBytes::from_static(b"coverage"),
+        );
+        assert!(draft_gate
+            .validate_protected_drafts(timeline, &OperationContext::Public, Seq::ZERO, &[draft],)
+            .is_err());
 
         let mut mismatch = PluginRegistry::new().with_consent_authority(authority.clone());
         mismatch.register_driver(Box::new(MismatchedSensitiveDriver {
@@ -4457,8 +4488,7 @@ mod coverage_private_error_paths {
             )
             .is_ok());
 
-        let mut store = open_store(StoreConfig::Memory)
-            .map_err(|error| format!("opening the in-memory store failed: {error:?}"))?;
+        let mut store = memory_store();
         assert!(fenced_append
             .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &[])
             .is_err());
@@ -4482,7 +4512,5 @@ mod coverage_private_error_paths {
         assert!(public_append
             .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
             .is_err());
-
-        Ok(())
     }
 }
