@@ -3817,6 +3817,28 @@ mod tests {
         ));
         assert_eq!(overflow_steps.load(Ordering::SeqCst), 1);
         assert_eq!(untouched_steps.load(Ordering::SeqCst), 1);
+
+        let mut anchored = PluginRegistry::new();
+        anchored.register_driver(Box::new(CadenceDriver {
+            name: "anchored-overflow",
+            interval: Duration::from_nanos(2),
+            steps: Arc::new(AtomicUsize::new(0)),
+        }));
+        anchored
+            .tick_cadenced_anchored(timeline, u128::MAX - 1, Seq::ZERO)
+            .test_ok();
+        anchored.commit_step_at(Seq::ZERO, 0).test_ok();
+        let error = anchored
+            .tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO)
+            .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::CadenceOverflow {
+                driver,
+                previous_ns,
+                interval_ns: 2,
+            } if driver == "anchored-overflow" && previous_ns == u128::MAX - 1
+        ));
     }
 
     #[test]
@@ -4105,6 +4127,33 @@ mod tests {
         // Empty events with through=ZERO → early Ok() return
         let zero_segment = TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO);
         drop(validate_recovery_evidence(&[zero_segment], &[]));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn validate_recovery_evidence_rejects_duplicate_and_unordered_segments() {
+        let timeline = TimelineId::new();
+        let duplicate = [
+            TimelineHistorySegment::new(timeline, Seq::from_u64(1)),
+            TimelineHistorySegment::new(timeline, Seq::from_u64(2)),
+        ];
+        assert!(matches!(
+            validate_recovery_evidence(&duplicate, &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "Timeline ancestry is duplicate or unordered"
+            })
+        ));
+
+        let unordered = [
+            TimelineHistorySegment::new(TimelineId::new(), Seq::from_u64(2)),
+            TimelineHistorySegment::new(TimelineId::new(), Seq::from_u64(1)),
+        ];
+        assert!(matches!(
+            validate_recovery_evidence(&unordered, &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "Timeline ancestry is duplicate or unordered"
+            })
+        ));
     }
 
     struct MockActionApprover;

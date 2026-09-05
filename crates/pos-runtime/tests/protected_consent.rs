@@ -124,6 +124,22 @@ impl Driver for EmptyDriver {
     }
 }
 
+struct AnchoredEmptyDriver;
+
+impl Driver for AnchoredEmptyDriver {
+    fn name(&self) -> &'static str {
+        "anchored-empty-public-seam"
+    }
+
+    fn requires_snapshot_anchor(&self) -> bool {
+        true
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+}
+
 struct ProjectionPlugin {
     id: PluginId,
 }
@@ -1174,6 +1190,26 @@ fn public_registry_registration_and_metadata_cover_library_paths() {
         .with_consent_gate(Arc::new(ConsentAuthority::new()))
         .clone_consent_gate()
         .is_some());
+
+    assert!(PluginRegistry::default().is_empty());
+    let mut normal = PluginRegistry::default();
+    normal.register_driver(Box::new(EmptyDriver));
+    assert_eq!(
+        normal.plugin_names().collect::<Vec<_>>(),
+        ["empty-public-seam"]
+    );
+    assert_eq!(
+        normal.plugin_versions().collect::<Vec<_>>(),
+        [("empty-public-seam", "0.1.0")]
+    );
+    assert!(test_ok(normal.tick_cadenced(TimelineId::new(), 0)).is_empty());
+
+    let mut unanchored = PluginRegistry::default();
+    unanchored.register_driver(Box::new(AnchoredEmptyDriver));
+    assert!(matches!(
+        test_err(unanchored.step_all(TimelineId::new())),
+        RuntimeError::MissingSnapshotAnchor { .. }
+    ));
 
     let mut store = test_ok(open_store(StoreConfig::Memory));
     let timeline = test_ok(store.create_timeline("registry-metadata"));
