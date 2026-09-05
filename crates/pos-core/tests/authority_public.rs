@@ -1249,14 +1249,6 @@ fn decision_decoder_rejects_inconsistent_evidence() {
         AuthorizationDecisionV1::decode(&duplicate_chain_binding),
         Err(AuthorityErrorV1::DuplicateIdentity)
     );
-    let zero_chain_binding = changed_array(&encoded, |fields| {
-        let bindings = array_fields_mut(&mut fields[12]);
-        bindings[0] = Value::Bytes(vec![0; 32]);
-    });
-    assert_eq!(
-        AuthorizationDecisionV1::decode(&zero_chain_binding),
-        Err(AuthorityErrorV1::FieldOutOfBounds)
-    );
     let active_with_error = changed_array(&encoded, |fields| {
         fields[21] = Value::Integer(AuthorityErrorV1::CapabilityMissing.code().into());
     });
@@ -1306,6 +1298,21 @@ fn decision_decoder_rejects_inconsistent_evidence() {
             "digest field {digest_field} accepted the zero digest"
         );
     }
+}
+
+#[test]
+fn decision_decoder_rejects_zero_hash_binding() {
+    let request = request(principal(1), entity(10));
+    let encoded =
+        ok(decision_for(&request, &[root_grant(principal(1), vec![entity(10)])]).encode());
+    let zero_chain_binding = changed_array(&encoded, |fields| {
+        let bindings = array_fields_mut(&mut fields[12]);
+        bindings[0] = Value::Bytes(vec![0; 32]);
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&zero_chain_binding),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
 }
 
 #[test]
