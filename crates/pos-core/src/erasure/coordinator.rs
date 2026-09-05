@@ -32,6 +32,64 @@ struct TerminalAttemptV1 {
     receipt_provenance: ErasureReceiptProvenanceV1,
 }
 
+fn commands_for_admission(
+    record: &RecoveredErasureV1,
+    admission: &ErasureRetryAdmissionV1,
+) -> Result<Vec<ErasureDestructionCommandV1>, ErasureErrorV1> {
+    let obligations = record
+        .obligations
+        .iter()
+        .map(|value| (value.reference(), value))
+        .collect::<BTreeMap<_, _>>();
+    admission
+        .unresolved_obligations()
+        .iter()
+        .zip(admission.command_identities())
+        .map(|(reference, command)| {
+            obligations.get(reference).copied().map_or_else(
+                || Err(ErasureErrorV1::ScopeInvalid),
+                |obligation| {
+                    if obligation.command_identity() != *command {
+                        return Err(ErasureErrorV1::ScopeInvalid);
+                    }
+                    Ok(ErasureDestructionCommandV1::from_obligation(
+                        obligation,
+                        admission.reference(),
+                    ))
+                },
+            )
+        })
+        .collect()
+}
+
+fn effective_acknowledgements(
+    record: &RecoveredErasureV1,
+) -> Result<Vec<ErasureAcknowledgementV1>, ErasureErrorV1> {
+    record
+        .effective
+        .values()
+        .map(|value| {
+            record
+                .obligations
+                .iter()
+                .find(|obligation| obligation.reference() == value.obligation())
+                .map(super::ErasureObligationV1::target)
+                .map_or_else(
+                    || Err(ErasureErrorV1::ProvenanceMissing),
+                    |target| {
+                        Ok(ErasureAcknowledgementV1 {
+                            target,
+                            obligation: value.obligation(),
+                            owner: value.owner(),
+                            evidence: value.evidence(),
+                            outcome: value.outcome(),
+                        })
+                    },
+                )
+        })
+        .collect()
+}
+
 impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Construct a coordinator. The cache is a bounded working projection;
     /// durable ERCRP1 remains authoritative.
@@ -600,64 +658,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .collect()
     }
 
-    fn commands_for_admission(
-        record: &RecoveredErasureV1,
-        admission: &ErasureRetryAdmissionV1,
-    ) -> Result<Vec<ErasureDestructionCommandV1>, ErasureErrorV1> {
-        let obligations = record
-            .obligations
-            .iter()
-            .map(|value| (value.reference(), value))
-            .collect::<BTreeMap<_, _>>();
-        admission
-            .unresolved_obligations()
-            .iter()
-            .zip(admission.command_identities())
-            .map(|(reference, command)| {
-                obligations.get(reference).copied().map_or_else(
-                    || Err(ErasureErrorV1::ScopeInvalid),
-                    |obligation| {
-                        if obligation.command_identity() != *command {
-                            return Err(ErasureErrorV1::ScopeInvalid);
-                        }
-                        Ok(ErasureDestructionCommandV1::from_obligation(
-                            obligation,
-                            admission.reference(),
-                        ))
-                    },
-                )
-            })
-            .collect()
-    }
-
-    fn effective_acknowledgements(
-        record: &RecoveredErasureV1,
-    ) -> Result<Vec<ErasureAcknowledgementV1>, ErasureErrorV1> {
-        record
-            .effective
-            .values()
-            .map(|value| {
-                record
-                    .obligations
-                    .iter()
-                    .find(|obligation| obligation.reference() == value.obligation())
-                    .map(super::ErasureObligationV1::target)
-                    .map_or_else(
-                        || Err(ErasureErrorV1::ProvenanceMissing),
-                        |target| {
-                            Ok(ErasureAcknowledgementV1 {
-                                target,
-                                obligation: value.obligation(),
-                                owner: value.owner(),
-                                evidence: value.evidence(),
-                                outcome: value.outcome(),
-                            })
-                        },
-                    )
-            })
-            .collect()
-    }
-
     fn normalize_terminal_input(
         &self,
         record: &RecoveredErasureV1,
@@ -675,7 +675,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             |freeze_position| {
                 input.freeze_position = freeze_position;
                 input.frozen_targets.clone_from(&record.targets);
-                Self::effective_acknowledgements(record).map(|acknowledgements| {
+                effective_acknowledgements(record).map(|acknowledgements| {
                     input.acknowledgements = acknowledgements;
                     input.pending_owners = record.state.pending_owners().to_vec();
                     input.failed_owners = record.state.failed_owners().to_vec();
@@ -710,7 +710,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .as_ref()
             .is_some_and(|active| active.admission == *admission)
         {
-            return Self::commands_for_admission(&record, admission).and_then(|commands| {
+            return commands_for_admission(&record, admission).and_then(|commands| {
                 self.port
                     .dispatch_destruction(request, &commands)
                     .map(|()| record.state)
@@ -731,7 +731,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if admission.unresolved_obligations() != Self::unresolved_obligations(&record) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        Self::commands_for_admission(&record, admission)
+        commands_for_admission(&record, admission)
             .and_then(|commands| {
                 self.port.admit_attempt(admission).and_then(|reservation| {
                     if reservation.admission() != admission.reference() {
@@ -860,10 +860,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         {
             return Err(ErasureErrorV1::Unauthorized);
         }
-        let Some(active) = record.active.clone() else {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        };
-        let Some(scope) = record.scope.clone() else {
+        let Some((active, scope)) = record.active.clone().zip(record.scope.clone()) else {
             return Err(ErasureErrorV1::ProvenanceMissing);
         };
         if !active
@@ -976,7 +973,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 if !inventories_match_frozen_obligations(&input.inventories, &record.obligations) {
                     return Err(ErasureErrorV1::ScopeInvalid);
                 }
-                Self::effective_acknowledgements(record).and_then(|acknowledgements| {
+                effective_acknowledgements(record).and_then(|acknowledgements| {
                     let complete = acknowledgements_close_frozen_obligations(
                         &acknowledgements,
                         &record.obligations,
@@ -1075,7 +1072,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if record.active.is_none() {
             return self.finalize_exact_retry(&record, input);
         }
-        let terminal = Self::terminal_attempt(request, &record, &input)?;
+        let terminal = terminal_attempt(request, &record, &input)?;
         let TerminalAttemptV1 {
             admission,
             acknowledgements,
@@ -1345,5 +1342,142 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinator for ErasureCoordinatorState
         resolution: ErasureAdministrativeResolutionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         Self::resolve_administratively(self, request, &resolution)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::{
+        ErasureReceiptInventoriesV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+        ErasureRetryAdmissionInputV1,
+    };
+
+    const fn reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+        ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: reference(1),
+            subject: reference(2),
+            scope: crate::ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(3)],
+            requester: reference(4),
+            authorization: reference(5),
+            policy: reference(6),
+            request_position: 7,
+            horizon_position: 8,
+            provenance: reference(9),
+        })
+    }
+
+    fn terminal_input() -> ErasureReceiptInputV1 {
+        ErasureReceiptInputV1 {
+            request: reference(1),
+            terminal_state: reference(2),
+            coordinator: reference(3),
+            lifecycle: ErasureLifecycleV1::Complete,
+            freeze_position: 10,
+            acknowledgements: Vec::new(),
+            frozen_targets: Vec::new(),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            inventories: ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: ErasureReplayClaimV1::Exact,
+            policy: reference(4),
+            trust: reference(5),
+            provenance: reference(6),
+            issue_position: 20,
+            signature: reference(7),
+            receipt_digest: reference(8),
+        }
+    }
+
+    #[test]
+    fn recovery_helpers_reject_unbound_references() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let record = RecoveredErasureV1::initial(
+            request.clone(),
+            ErasureStateV1::submitted(request.reference(), reference(10), request.provenance())?,
+        );
+        let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            request: request.reference(),
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![reference(11)],
+            command_identities: vec![reference(12)],
+            policy: reference(6),
+            trust: reference(7),
+            admitted_position: 13,
+            deadline_position: 14,
+            authorization_provenance: reference(15),
+        })?;
+        assert_eq!(
+            commands_for_admission(&record, &admission),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+
+        let mut record = record;
+        let acknowledgement =
+            ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+                request: request.reference(),
+                command: reference(16),
+                attempt: reference(17),
+                obligation: reference(18),
+                owner: reference(19),
+                scope: reference(20),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+                evidence: reference(21),
+                policy: reference(6),
+                trust: reference(7),
+            })?;
+        record
+            .effective
+            .insert((reference(18), reference(19)), acknowledgement);
+        assert_eq!(
+            effective_acknowledgements(&record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_attempt_rejects_invalid_lifecycle_and_missing_active() -> Result<(), ErasureErrorV1>
+    {
+        let request = request()?;
+        let submitted = RecoveredErasureV1::initial(
+            request.clone(),
+            ErasureStateV1::submitted(request.reference(), reference(10), request.provenance())?,
+        );
+        assert_eq!(
+            terminal_attempt(request.reference(), &submitted, &terminal_input()).err(),
+            Some(ErasureErrorV1::PolicyConflict)
+        );
+
+        let awaiting = ErasureStateV1 {
+            request: request.reference(),
+            lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
+            freeze_position: Some(10),
+            coordinator: reference(10),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            previous_state: None,
+            provenance: reference(11),
+            state_digest: reference(12),
+        };
+        let no_active = RecoveredErasureV1::initial(request.clone(), awaiting);
+        assert_eq!(
+            terminal_attempt(request.reference(), &no_active, &terminal_input()).err(),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
     }
 }

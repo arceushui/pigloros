@@ -1557,6 +1557,10 @@ fn coordinator_public_missing_state_active_conflict_and_exact_retry_paths(
     let port = coordinator_port(vec![target], None);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     submit_authorize_and_freeze(&mut coordinator, &request)?;
+    assert_eq!(
+        coordinator.finalize(request.reference(), coordinator_receipt_input(target, 30)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     let admission = coordinator_admission(request.reference(), target, 0, None)?;
     coordinator.dispatch_attempt(request.reference(), &admission)?;
     let conflicting_admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
@@ -4466,6 +4470,23 @@ fn portable_decoders_reject_wrong_types_in_every_evidence_field() -> Result<(), 
     reject_each_top_level_field(&admission.to_canonical_cbor()?, |bytes| {
         ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(bytes)
     })?;
+    let admission_bytes = admission.to_canonical_cbor()?;
+    assert!(
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace_path(
+            &admission_bytes,
+            &[5, 0, 0],
+            Value::Integer(99.into()),
+        )?)
+        .is_err()
+    );
+    assert!(
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace_path(
+            &admission_bytes,
+            &[5, 0, 2],
+            Value::Integer(99.into()),
+        )?)
+        .is_err()
+    );
     reject_each_top_level_field(&authorization.to_canonical_cbor()?, |bytes| {
         ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor(bytes)
     })?;
@@ -5039,6 +5060,12 @@ fn cas_effect_codec_rejects_wrong_shapes_and_trailing_data() -> Result<(), Erasu
     assert!(ErasureCasEffectV1::from_canonical_cbor(&replace_path(
         &attempt_bytes,
         &[4, 1, 0, 1],
+        Value::Integer(99.into()),
+    )?)
+    .is_err());
+    assert!(ErasureCasEffectV1::from_canonical_cbor(&replace_path(
+        &attempt_bytes,
+        &[4, 1, 0, 2, 1],
         Value::Integer(99.into()),
     )?)
     .is_err());

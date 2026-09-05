@@ -490,6 +490,24 @@ struct CompletedAttemptContextV1<'a> {
     predecessor_receipt: Option<ErasureReferenceV1>,
 }
 
+fn retain_positive_acknowledgements(
+    effective: &mut BTreeMap<
+        (ErasureReferenceV1, ErasureReferenceV1),
+        ErasureAcknowledgementProvenanceV1,
+    >,
+) {
+    effective.retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
+}
+
+fn validate_receipt_obligations(
+    receipt: &ErasureReceiptV1,
+    obligations: &[ErasureObligationV1],
+) -> Result<(), RecoveryFailureV1> {
+    receipt
+        .validate_frozen_obligations(obligations)
+        .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))
+}
+
 fn load_recovery_object<T>(
     port: &dyn ErasurePersistencePortV1,
     reference: ErasureReferenceV1,
@@ -1269,8 +1287,7 @@ impl RecoveredErasureV1 {
             ));
         }
         self.validate_attempt_effect(port, &admission)?;
-        self.effective
-            .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
+        retain_positive_acknowledgements(&mut self.effective);
         let admitted = self.load_acknowledgements(
             port,
             &admission,
@@ -1503,11 +1520,7 @@ impl RecoveredErasureV1 {
                         },
                     )
                 })
-                .and_then(|()| {
-                    receipt
-                        .validate_frozen_obligations(&self.obligations)
-                        .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))
-                })
+                .and_then(|()| validate_receipt_obligations(&receipt, &self.obligations))
                 .map(|()| (receipt.receipt_digest(), context.page.terminal_state))
             },
         )
@@ -2472,15 +2485,7 @@ fn resolve_state_provenance_predecessor(
         .resolve_state(previous)
         .map_err(|error| RecoveryFailureV1::new(error, previous))
         .and_then(|state| {
-            state.map_or_else(
-                || {
-                    Err(RecoveryFailureV1::new(
-                        ErasureErrorV1::ProvenanceMissing,
-                        previous,
-                    ))
-                },
-                Ok,
-            )
+            state.ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, previous))
         })
 }
 
@@ -2490,12 +2495,14 @@ mod tests {
     use super::*;
     use crate::{
         ErasureAcknowledgementProvenanceInputV1, ErasureAdministrativeResolutionInputV1,
-        ErasureApplicabilityDecisionV1, ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
+        ErasureApplicabilityDecisionV1, ErasureAttemptOutcomeInputV1,
+        ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
         ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeApplicabilityRowV1,
         ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeProvenanceInputV1,
         ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureObligationInputV1,
-        ErasureObligationSetInputV1, ErasureRequestInputV1, ErasureRetryAdmissionInputV1,
-        ErasureScopeExtensionInputV1, ErasureScopeV1,
+        ErasureObligationSetInputV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+        ErasureReceiptProvenanceInputV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+        ErasureRetryAdmissionInputV1, ErasureScopeExtensionInputV1, ErasureScopeV1,
     };
 
     const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -2567,6 +2574,24 @@ mod tests {
         command: ErasureReferenceV1,
         scope: ErasureReferenceV1,
     ) -> Result<ErasureAcknowledgementProvenanceV1, ErasureErrorV1> {
+        acknowledgement_with_outcome(
+            request,
+            attempt,
+            obligation,
+            command,
+            scope,
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+        )
+    }
+
+    fn acknowledgement_with_outcome(
+        request: ErasureReferenceV1,
+        attempt: ErasureReferenceV1,
+        obligation: ErasureReferenceV1,
+        command: ErasureReferenceV1,
+        scope: ErasureReferenceV1,
+        outcome: ErasureAcknowledgementOutcomeV1,
+    ) -> Result<ErasureAcknowledgementProvenanceV1, ErasureErrorV1> {
         ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
             request,
             command,
@@ -2574,7 +2599,7 @@ mod tests {
             obligation,
             owner: reference(13),
             scope,
-            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            outcome,
             evidence: reference(41),
             policy: reference(6),
             trust: reference(7),
@@ -2599,6 +2624,18 @@ mod tests {
             _authorization: &ErasureFreezeAuthorizationEvidenceV1,
         ) -> Result<(), ErasureErrorV1> {
             Ok(())
+        }
+    }
+
+    struct RejectFreezeVerifier;
+
+    impl ErasureFreezeAuthorizationVerifierV1 for RejectFreezeVerifier {
+        fn validate_freeze_authorization(
+            &self,
+            _admission: &ErasureFreezeAdmissionEvidenceV1,
+            _authorization: &ErasureFreezeAuthorizationEvidenceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
         }
     }
 
@@ -2735,6 +2772,33 @@ mod tests {
             request.clone(),
             ErasureStateV1::submitted(request.reference(), reference(44), request.provenance())?,
         ))
+    }
+
+    fn empty_receipt() -> Result<ErasureReceiptV1, ErasureErrorV1> {
+        ErasureReceiptV1::new(ErasureReceiptInputV1 {
+            request: reference(1),
+            terminal_state: reference(2),
+            coordinator: reference(3),
+            lifecycle: ErasureLifecycleV1::Complete,
+            freeze_position: 10,
+            acknowledgements: Vec::new(),
+            frozen_targets: Vec::new(),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            inventories: ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: ErasureReplayClaimV1::Exact,
+            policy: reference(4),
+            trust: reference(5),
+            provenance: reference(6),
+            issue_position: 10,
+            signature: reference(7),
+            receipt_digest: reference(0),
+        })
     }
 
     fn manifest_value(active: Value) -> Value {
@@ -2884,6 +2948,11 @@ mod tests {
             reference(47),
             reference(40),
         )?;
+        let mut no_active = record_fixture(&request)?;
+        assert_eq!(
+            no_active.retain_acknowledgement(&valid).map(|_| ()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         assert_eq!(
             acknowledgements
                 .retain_acknowledgement(&wrong_request)
@@ -2937,6 +3006,80 @@ mod tests {
                 .append_administrative_resolution(&resolution)
                 .map(|_| ()),
             Err(ErasureErrorV1::PolicyConflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_helpers_cover_empty_and_non_positive_paths() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let positive = acknowledgement_fixture(
+            request.reference(),
+            reference(45),
+            reference(46),
+            reference(47),
+            reference(40),
+        )?;
+        let key = (positive.obligation(), positive.owner());
+        let stale = acknowledgement_with_outcome(
+            request.reference(),
+            reference(45),
+            positive.obligation(),
+            positive.command(),
+            positive.scope(),
+            ErasureAcknowledgementOutcomeV1::Stale,
+        )?;
+
+        let mut effective = BTreeMap::from([
+            (key, positive.clone()),
+            ((reference(48), reference(49)), stale.clone()),
+        ]);
+        retain_positive_acknowledgements(&mut effective);
+        assert_eq!(effective.len(), 1);
+        assert!(effective.contains_key(&key));
+
+        let mut record = record_fixture(&request)?;
+        record.apply_acknowledgements(BTreeMap::from([(key, positive.clone())]));
+        record.apply_acknowledgements(BTreeMap::from([(key, stale)]));
+        assert_eq!(record.effective.get(&key), Some(&positive));
+
+        let receipt = empty_receipt()?;
+        let obligation = obligation(request.reference())?;
+        assert_eq!(
+            validate_receipt_obligations(&receipt, &[obligation])
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(validate_receipt_obligations(&receipt, &[]), Ok(()));
+
+        let outcome = ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
+            request: request.reference(),
+            attempt: reference(50),
+            source_receipt: None,
+            lifecycle: ErasureLifecycleV1::Complete,
+            selected_obligations: reference(51),
+            acknowledgement_inventory: reference(52),
+            terminal_position: 10,
+            policy: reference(6),
+            trust: reference(7),
+        })?;
+        let receipt_provenance =
+            ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
+                request: request.reference(),
+                attempt: reference(50),
+                attempt_ordinal: 0,
+                predecessor_receipt: None,
+                terminal_state: reference(53),
+                evidence_set: reference(54),
+                policy: reference(6),
+                trust: reference(7),
+                issue_position: 10,
+            })?;
+        let mut no_active = record_fixture(&request)?;
+        assert_eq!(
+            no_active.finish_attempt(&outcome, &receipt_provenance, &receipt),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())
     }
@@ -3308,6 +3451,18 @@ mod tests {
         .ok_or(ErasureErrorV1::PolicyConflict)?;
         assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
         assert_eq!(failure.subject(), reference(71));
+
+        let missing = TestPersistencePort {
+            effect_manifest: None,
+            effect: ErasureCasEffectV1::None,
+            resolution_count: 0,
+        };
+        assert_eq!(
+            resolve_state_provenance_predecessor(&missing, reference(72))
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
         Ok(())
     }
 
@@ -3448,6 +3603,17 @@ mod tests {
         graph.authorize_provenance = Some(reference(75));
         graph.target_closure = Some(target_closure_digest(&targets));
         validate_fixed_graph(&graph).map_err(RecoveryFailureV1::error)?;
+
+        let rejecting = RejectFreezeVerifier;
+        assert_eq!(
+            validate_freeze_authorization(&FixedGraphV1 {
+                verifier: &rejecting,
+                ..graph
+            })
+            .err()
+            .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::Unauthorized)
+        );
 
         let wrong_scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request: request.reference(),
