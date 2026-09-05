@@ -305,9 +305,7 @@ mod coverage_entrypoints {
         ConsentAuthority, ConsentGrantedV1,
     };
 
-    struct NoopDriver {
-        subscription: ProjectionKey,
-    }
+    struct NoopDriver;
 
     impl Driver for NoopDriver {
         fn step(
@@ -326,10 +324,6 @@ mod coverage_entrypoints {
 
         fn name(&self) -> &'static str {
             "coverage-registry-driver"
-        }
-
-        fn subscriptions(&self) -> &[ProjectionKey] {
-            std::slice::from_ref(&self.subscription)
         }
     }
 
@@ -361,9 +355,7 @@ mod coverage_entrypoints {
     #[test]
     fn restore_and_cadence_entrypoints_update_driver_state() {
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(NoopDriver {
-            subscription: ProjectionKey::new(EntityId::new()),
-        }));
+        registry.register_driver(Box::new(NoopDriver));
         let timeline = TimelineId::new();
         let restore_event = event("coverage.restore", 1);
         assert!(registry
