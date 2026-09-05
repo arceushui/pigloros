@@ -576,7 +576,13 @@ fn command_process_boundary_classifies_protocol_failures() -> TestResult {
 fn command_process_boundary_classifies_process_crashes() -> TestResult {
     let corpus = support::corpus()?;
     let directory = tempfile::tempdir()?;
-    let output = command_for_corpus(directory.path(), "/bin/false", &corpus)?.output()?;
+    let adapter = write_adapter(directory.path(), "#!/bin/sh\nkill -KILL $$\n")?;
+    let output = command_for_corpus(
+        directory.path(),
+        adapter.to_str().ok_or("adapter path is not UTF-8")?,
+        &corpus,
+    )?
+    .output()?;
     assert!(output.status.success());
     assert_report_counts(&independent_report(&output.stdout)?, [0, 0, 0, 7, 0]);
     Ok(())
