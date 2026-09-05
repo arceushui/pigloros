@@ -4414,16 +4414,16 @@ mod coverage_private_error_paths {
         mismatch.register_driver(Box::new(MismatchedSensitiveDriver {
             entity: other_subject,
         }));
-        mismatch
+        assert!(mismatch
             .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
-            .unwrap_err();
+            .is_err());
 
         let mut commit = PluginRegistry::new().with_consent_authority(authority.clone());
         commit.register_driver(Box::new(EmptyDriver));
-        commit
-            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
-            .unwrap();
-        authority
+        assert!(commit
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .is_ok());
+        assert!(authority
             .record_revocation_on_timeline(
                 timeline,
                 &ConsentRevokedV1 {
@@ -4433,8 +4433,8 @@ mod coverage_private_error_paths {
                     fence_seq: 1,
                 },
             )
-            .unwrap();
-        commit.commit_step_at(Seq::ZERO, 1).unwrap_err();
+            .is_ok());
+        assert!(commit.commit_step_at(Seq::ZERO, 1).is_err());
 
         let fence_authority = ConsentAuthority::new();
         let fence_grant = grant(subject);
@@ -4442,10 +4442,10 @@ mod coverage_private_error_paths {
         let mut fenced_append =
             PluginRegistry::new().with_consent_authority(fence_authority.clone());
         fenced_append.register_driver(Box::new(EmptyDriver));
-        fenced_append
+        assert!(fenced_append
             .step_all_anchored_protected(timeline, Seq::ZERO, fence_token, 0, &[])
-            .unwrap();
-        fence_authority
+            .is_ok());
+        assert!(fence_authority
             .record_revocation_on_timeline(
                 timeline,
                 &ConsentRevokedV1 {
@@ -4455,33 +4455,34 @@ mod coverage_private_error_paths {
                     fence_seq: 1,
                 },
             )
-            .unwrap();
+            .is_ok());
 
-        let mut store = open_store(StoreConfig::Memory).unwrap();
-        fenced_append
+        let mut store = match open_store(StoreConfig::Memory) {
+            Ok(store) => store,
+            Err(error) => panic!("opening the in-memory store failed: {error:?}"),
+        };
+        assert!(fenced_append
             .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &[])
-            .unwrap_err();
+            .is_err());
 
         let append_authority = ConsentAuthority::new();
         let append_token = append_authority.record_grant_on_timeline(timeline, &grant(subject));
         let mut protected_append = PluginRegistry::new().with_consent_authority(append_authority);
         protected_append.register_driver(Box::new(EmptyDriver));
-        protected_append
+        assert!(protected_append
             .step_all_anchored_protected(timeline, Seq::ZERO, append_token, 0, &[])
-            .unwrap();
+            .is_ok());
         protected_append.consent_gate = None;
-        protected_append
+        assert!(protected_append
             .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
-            .unwrap_err();
+            .is_err());
 
         let mut public_append = PluginRegistry::new();
         public_append.register_driver(Box::new(EmptyDriver));
-        public_append
-            .step_all_anchored(timeline, Seq::ZERO)
-            .unwrap();
+        assert!(public_append.step_all_anchored(timeline, Seq::ZERO).is_ok());
         public_append.consent_gate = None;
-        public_append
+        assert!(public_append
             .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
-            .unwrap_err();
+            .is_err());
     }
 }
