@@ -321,6 +321,56 @@ impl Driver for PanickingRestoreDriver {
     }
 }
 
+struct FailingStepDriver;
+
+impl Driver for FailingStepDriver {
+    fn name(&self) -> &'static str {
+        "step-failure"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Err(RuntimeError::InvalidRecoveryEvidence {
+            reason: "public step failure",
+        })
+    }
+}
+
+struct PanickingAbortDriver;
+
+impl Driver for PanickingAbortDriver {
+    fn name(&self) -> &'static str {
+        "abort-panic"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![EventDraft::new(
+            EntityId::new(),
+            Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE),
+            CanonicalBytes::from_static(b"geographic"),
+        )]))
+    }
+
+    fn abort_step(&mut self) {
+        std::panic::resume_unwind(Box::new("public abort panic"));
+    }
+}
+
+struct PanickingCommitDriver;
+
+impl Driver for PanickingCommitDriver {
+    fn name(&self) -> &'static str {
+        "commit-panic"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+
+    fn commit_step(&mut self) {
+        std::panic::resume_unwind(Box::new("public commit panic"));
+    }
+}
+
 struct OverflowCadencedDriver;
 
 impl Driver for OverflowCadencedDriver {
@@ -1009,6 +1059,145 @@ fn assert_public_authorization_edges(timeline: TimelineId) {
                 projection_subject,
             ),
         Err(RuntimeError::ConsentOperationUnavailable)
+    ));
+}
+
+#[test]
+fn public_registry_error_edges_cover_unusual_runtime_guards() {
+    let timeline = TimelineId::new();
+    assert_driver_error_edges(timeline);
+    assert_action_error_edges(timeline);
+    assert_append_error_edges(timeline);
+}
+
+fn assert_driver_error_edges(timeline: TimelineId) {
+    let mut geographic = PluginRegistry::new();
+    geographic.register_driver(Box::new(MismatchedSubjectDriver {
+        entity: EntityId::new(),
+    }));
+    assert!(matches!(
+        test_err(geographic.step_all_anchored(timeline, Seq::ZERO)),
+        RuntimeError::GeographicDraft { .. }
+    ));
+
+    let mut aborting = PluginRegistry::new();
+    aborting.register_driver(Box::new(PanickingAbortDriver));
+    assert!(matches!(
+        test_err(aborting.step_all_anchored(timeline, Seq::ZERO)),
+        RuntimeError::GeographicDraft { .. }
+    ));
+    assert!(matches!(
+        test_err(aborting.step_all_anchored(timeline, Seq::ZERO)),
+        RuntimeError::DriverCommitPanicked { .. }
+    ));
+
+    let mut committing = PluginRegistry::new();
+    committing.register_driver(Box::new(PanickingCommitDriver));
+    test_ok(committing.step_all_anchored(timeline, Seq::ZERO));
+    test_ok(committing.commit_step_at(Seq::ZERO, 0));
+    assert!(matches!(
+        test_err(committing.tick_cadenced(timeline, 0)),
+        RuntimeError::DriverCommitPanicked { .. }
+    ));
+
+    let mut pending = PluginRegistry::new();
+    test_ok(pending.step_all_anchored(timeline, Seq::ZERO));
+    assert!(matches!(
+        test_err(pending.tick_cadenced(timeline, 0)),
+        RuntimeError::PendingDriverStep
+    ));
+    pending.abort_step();
+
+    let mut unanchored = PluginRegistry::new();
+    unanchored.register_driver(Box::new(AnchoredEmptyDriver));
+    assert!(matches!(
+        test_err(unanchored.tick_cadenced(timeline, 0)),
+        RuntimeError::MissingSnapshotAnchor { .. }
+    ));
+
+    let mut step_failure = PluginRegistry::new();
+    step_failure.register_driver(Box::new(FailingStepDriver));
+    assert!(matches!(
+        test_err(step_failure.step_all(timeline)),
+        RuntimeError::InvalidRecoveryEvidence {
+            reason: "public step failure"
+        }
+    ));
+    let mut tick_failure = PluginRegistry::new();
+    tick_failure.register_driver(Box::new(FailingStepDriver));
+    assert!(matches!(
+        test_err(tick_failure.tick_cadenced(timeline, 0)),
+        RuntimeError::InvalidRecoveryEvidence {
+            reason: "public step failure"
+        }
+    ));
+}
+
+fn assert_action_error_edges(timeline: TimelineId) {
+    assert!(matches!(
+        PluginRegistry::new().into_authorized_projections(timeline, Seq::ZERO, 0, None, None,),
+        Err(RuntimeError::ConsentOperationUnavailable)
+    ));
+
+    let mut action_registry = PluginRegistry::new();
+    let action_plugin = configured_plugin("action", &["action.type"], false, false);
+    test_ok(action_registry.register_with_approver(
+        &action_plugin,
+        None,
+        None,
+        Some(Box::new(AcceptingApprover)),
+        [Kind::new("action.type")],
+    ));
+    let actor = EntityId::new();
+    let oversized = ProposedAction::new(
+        Kind::new("action.type"),
+        actor,
+        CanonicalBytes::from_vec(vec![0; 5000]),
+        Kind::new("action.type.submit"),
+    );
+    assert!(matches!(
+        action_registry.submit_action(&oversized),
+        Err(ActionRejected::PayloadTooLarge { .. })
+    ));
+    let unknown = ProposedAction::new(
+        Kind::new("unknown.type"),
+        actor,
+        CanonicalBytes::from_static(b"unknown"),
+        Kind::new("unknown.type.submit"),
+    );
+    assert!(matches!(
+        action_registry.submit_action(&unknown),
+        Err(ActionRejected::UnknownEventType)
+    ));
+    assert!(matches!(
+        PluginRegistry::new_replay().submit_action(&unknown),
+        Err(ActionRejected::UnknownEventType)
+    ));
+}
+
+fn assert_append_error_edges(timeline: TimelineId) {
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let orphan_timeline = TimelineId::new();
+    let mut public_append = PluginRegistry::new();
+    test_ok(public_append.step_all_anchored(orphan_timeline, Seq::ZERO));
+    assert!(matches!(
+        public_append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
+        Err(RuntimeError::Store(_))
+    ));
+
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
+    let mut protected_append = PluginRegistry::new().with_consent_authority(authority);
+    test_ok(protected_append.step_all_anchored_protected(
+        orphan_timeline,
+        Seq::ZERO,
+        token,
+        0,
+        &[],
+    ));
+    assert!(matches!(
+        protected_append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
+        Err(RuntimeError::Store(_))
     ));
 }
 
