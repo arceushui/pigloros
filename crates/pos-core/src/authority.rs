@@ -1484,7 +1484,7 @@ pub struct AuthorityEvaluatorV1;
 
 // Keep the defensive provenance failure transition isolated so its fail-closed
 // result can be verified without weakening the validated grant API.
-fn deny_missing_grant_provenance(evaluation: &mut AuthorizationEvaluationV1) -> Vec<Hash> {
+const fn deny_missing_grant_provenance(evaluation: &mut AuthorizationEvaluationV1) -> Vec<Hash> {
     *evaluation = AuthorizationEvaluationV1::denied(
         AuthorizationOutcomeV1::IndeterminateFailClosed,
         Some(AuthorityErrorV1::ProvenanceMissing),
