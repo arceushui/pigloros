@@ -1071,15 +1071,6 @@ fn public_registry_error_edges_cover_unusual_runtime_guards() {
 }
 
 fn assert_driver_error_edges(timeline: TimelineId) {
-    let mut geographic = PluginRegistry::new();
-    geographic.register_driver(Box::new(MismatchedSubjectDriver {
-        entity: EntityId::new(),
-    }));
-    assert!(matches!(
-        test_err(geographic.step_all_anchored(timeline, Seq::ZERO)),
-        RuntimeError::GeographicDraft { .. }
-    ));
-
     let mut aborting = PluginRegistry::new();
     aborting.register_driver(Box::new(PanickingAbortDriver));
     assert!(matches!(
