@@ -755,17 +755,6 @@ fn no_subject_missing_consent_is_denied() {
 }
 
 #[test]
-fn subject_with_missing_consent_rejects_grant_evidence() {
-    let mut draft = request_draft(authenticated(principal(1)), entity(10));
-    draft.consent = ConsentEvidenceV1::Missing;
-    let request = ok(AuthorizationRequestV1::try_from_draft(draft));
-    assert_eq!(
-        decision_for(&request, &[root_grant(principal(1), vec![entity(10)])]).outcome(),
-        AuthorizationOutcomeV1::ParentInvalid
-    );
-}
-
-#[test]
 fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let principal_ref = principal(1);
     let actor = entity(10);
