@@ -1190,6 +1190,30 @@ fn assert_append_error_edges() {
         protected_append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
         Err(RuntimeError::Store(_))
     ));
+
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
+    let mut protected_missing_gate = PluginRegistry::new().with_consent_authority(authority);
+    test_ok(protected_missing_gate.step_all_anchored_protected(
+        orphan_timeline,
+        Seq::ZERO,
+        token,
+        0,
+        &[],
+    ));
+    protected_missing_gate = protected_missing_gate.without_consent_gate();
+    assert!(matches!(
+        protected_missing_gate.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
+        Err(RuntimeError::ConsentOperationUnavailable)
+    ));
+
+    let mut public_missing_gate = PluginRegistry::new();
+    test_ok(public_missing_gate.step_all_anchored(orphan_timeline, Seq::ZERO));
+    public_missing_gate = public_missing_gate.without_consent_gate();
+    assert!(matches!(
+        public_missing_gate.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
+        Err(RuntimeError::ConsentOperationUnavailable)
+    ));
 }
 
 #[test]
