@@ -1482,6 +1482,18 @@ impl AuthorizationDecisionV1 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuthorityEvaluatorV1;
 
+// Private-seam coverage exception: validated grants cannot make `binding_digest`
+// fail, but this original defensive branch must remain fail-closed. Keep the
+// transition isolated so that invariant can be verified without weakening the
+// public grant constructors or changing authorization behavior.
+const fn deny_missing_grant_provenance(evaluation: &mut AuthorizationEvaluationV1) -> Vec<Hash> {
+    *evaluation = AuthorizationEvaluationV1::denied(
+        AuthorizationOutcomeV1::IndeterminateFailClosed,
+        Some(AuthorityErrorV1::ProvenanceMissing),
+    );
+    Vec::new()
+}
+
 impl AuthorityEvaluatorV1 {
     /// Evaluate adapter evidence, consent, capability, delegation, and revocation
     /// in ADR-059 order and return a closed decision.
@@ -1494,18 +1506,17 @@ impl AuthorityEvaluatorV1 {
         let mut evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
         let request_digest = request_digest(request);
         let grant_chain_bindings = if evaluation.grant_evidence_is_trusted {
-            grant_chain
-                .grants
-                .iter()
-                .map(CapabilityGrantV1::binding_digest)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_else(|_| {
-                    evaluation = AuthorizationEvaluationV1::denied(
-                        AuthorizationOutcomeV1::IndeterminateFailClosed,
-                        Some(AuthorityErrorV1::ProvenanceMissing),
-                    );
-                    Vec::new()
-                })
+            'grant_bindings: {
+                let Ok(bindings) = grant_chain
+                    .grants
+                    .iter()
+                    .map(CapabilityGrantV1::binding_digest)
+                    .collect::<Result<Vec<_>, _>>()
+                else {
+                    break 'grant_bindings deny_missing_grant_provenance(&mut evaluation);
+                };
+                bindings
+            }
         } else {
             Vec::new()
         };
@@ -3052,5 +3063,24 @@ fn decode_principal_set(value: &Value) -> Result<Vec<PrincipalRefV1>, AuthorityE
     match value {
         Value::Array(values) => values.iter().map(decode_principal_value).collect(),
         _ => Err(AuthorityErrorV1::InvalidEncoding),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_paths {
+    use super::*;
+
+    #[test]
+    fn missing_grant_provenance_fails_closed() {
+        let mut evaluation = AuthorizationEvaluationV1::active();
+
+        assert!(deny_missing_grant_provenance(&mut evaluation).is_empty());
+        assert_eq!(
+            evaluation.outcome,
+            AuthorizationOutcomeV1::IndeterminateFailClosed
+        );
+        assert_eq!(evaluation.error, Some(AuthorityErrorV1::ProvenanceMissing));
+        assert!(!evaluation.grant_evidence_is_trusted);
     }
 }

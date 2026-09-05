@@ -1,0 +1,64 @@
+# Reproducible, non-gating measurements for Redmine #224. Wall-clock results
+# remain evidence, not correctness thresholds: hosted runner noise must not
+# turn performance sampling into a flaky merge gate.
+name: memory-store-benchmark
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/memory-store-benchmark.yml
+      - crates/pos-core/src/erasure.rs
+      - crates/pos-core/src/erasure/**
+      - crates/pos-core/tests/support/erasure.rs
+      - crates/pos-store/Cargo.toml
+      - crates/pos-store/benches/**
+      - crates/pos-store/src/memory.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-store-benchmark-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: MemoryStore erasure benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      PIGLOROS_BENCH_OUTPUT: ${{ github.workspace }}/artifacts/memory-erasure-benchmark.csv
+      PIGLOROS_BENCH_SAMPLES: "10"
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: memory-store-benchmark
+      - name: Record runner and toolchain metadata
+        run: |
+          mkdir -p artifacts
+          {
+            printf 'runner_image=%s\n' "$ImageOS-$ImageVersion"
+            printf 'architecture=%s\n' "$(uname -m)"
+            rustc --version --verbose
+            cargo --version --verbose
+          } | tee artifacts/environment.txt
+      - name: Measure MemoryStore erasure persistence paths
+        run: |
+          set -o pipefail
+          cargo bench --locked -p pos-store --bench memory_erasure 2>&1 |
+            tee artifacts/benchmark.log
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: memory-store-erasure-benchmark-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error

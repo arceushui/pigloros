@@ -8,14 +8,22 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
-struct EmptyStateResolver;
+enum TestStateResolver {
+    Missing,
+    Error(ErasureErrorV1),
+    State(Box<ErasureStateV1>),
+}
 
-impl ErasureStateResolverV1 for EmptyStateResolver {
+impl ErasureStateResolverV1 for TestStateResolver {
     fn resolve_state(
         &self,
         _digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
-        Ok(None)
+        match self {
+            Self::Missing => Ok(None),
+            Self::Error(error) => Err(*error),
+            Self::State(state) => Ok(Some(state.as_ref().clone())),
+        }
     }
 }
 
@@ -618,17 +626,47 @@ fn predecessor_chain_bounds_fail_closed_for_invalid_roots_and_zero_depth(
         state_digest: reference(4),
     };
 
-    let failure = verify_predecessor_chain_bounded(invalid_root, &EmptyStateResolver, 1)
+    let failure = verify_predecessor_chain_bounded(invalid_root, &TestStateResolver::Missing, 1)
         .err()
         .ok_or(ErasureErrorV1::PolicyConflict)?;
     assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
     assert_eq!(failure.subject(), reference(4));
 
     let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
-    let failure = verify_predecessor_chain_bounded(submitted, &EmptyStateResolver, 0)
+    let failure = verify_predecessor_chain_bounded(submitted, &TestStateResolver::Missing, 0)
         .err()
         .ok_or(ErasureErrorV1::PolicyConflict)?;
     assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
+
+    let root = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+    let current = ErasureStateV1 {
+        request: root.request(),
+        lifecycle: ErasureLifecycleV1::Authorized,
+        freeze_position: None,
+        coordinator: root.coordinator(),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        previous_state: Some(root.state_digest()),
+        provenance: reference(5),
+        state_digest: reference(6),
+    };
+    let missing = verify_predecessor_chain_bounded(current.clone(), &TestStateResolver::Missing, 2)
+        .err()
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    assert_eq!(missing.subject(), root.state_digest());
+    let resolver_error = verify_predecessor_chain_bounded(
+        current.clone(),
+        &TestStateResolver::Error(ErasureErrorV1::TrustSnapshotInvalid),
+        2,
+    )
+    .err()
+    .ok_or(ErasureErrorV1::PolicyConflict)?;
+    assert_eq!(resolver_error.error(), ErasureErrorV1::TrustSnapshotInvalid);
+    assert_eq!(
+        verify_predecessor_chain_bounded(current, &TestStateResolver::State(Box::new(root)), 2,),
+        Ok(())
+    );
     Ok(())
 }
 

@@ -14,12 +14,16 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::{
     fd::AsRawFd,
     unix::fs::{symlink, OpenOptionsExt},
 };
 
+#[cfg(unix)]
+use ciborium::value::Value;
 #[cfg(target_os = "linux")]
 use pos_reference::evaluator_build_identity::{
     verify_evaluator_build_identity, EvaluatorBuildEvidence, EvaluatorBuildIdentityError,
@@ -251,6 +255,423 @@ fn request_without_diagnostics(request: &[u8]) -> TestResult<Vec<u8>> {
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
     Ok(request.to_canonical_cbor()?)
+}
+
+#[cfg(unix)]
+enum IndependentObservation {
+    Output(Vec<u8>),
+    Failure,
+    Divergence,
+    Unavailable,
+}
+
+#[cfg(unix)]
+fn unsigned(value: u64) -> Value {
+    Value::Integer(value.into())
+}
+
+#[cfg(unix)]
+fn canonical_value(value: &Value) -> TestResult<Vec<u8>> {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(value, &mut encoded)?;
+    Ok(encoded)
+}
+
+#[cfg(unix)]
+fn framed_value(value: &Value) -> TestResult<Vec<u8>> {
+    let encoded = canonical_value(value)?;
+    let length = u32::try_from(encoded.len())?;
+    let mut framed = Vec::with_capacity(4 + encoded.len());
+    framed.extend_from_slice(&length.to_be_bytes());
+    framed.extend_from_slice(&encoded);
+    Ok(framed)
+}
+
+#[cfg(unix)]
+fn push_transcript_frame(
+    stream: &mut Vec<u8>,
+    transcript: &mut blake3::Hasher,
+    value: &Value,
+) -> TestResult {
+    let frame = framed_value(value)?;
+    transcript.update(&frame);
+    stream.extend_from_slice(&frame);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn independent_observation_bytes(
+    result: IndependentObservation,
+    usage: [u64; 8],
+) -> TestResult<Vec<u8>> {
+    let mut stream = Vec::new();
+    let mut transcript = blake3::Hasher::new();
+    transcript.update(b"PiglorOS.EvaluatorObservationStream.v1\0");
+    push_transcript_frame(
+        &mut stream,
+        &mut transcript,
+        &Value::Array(vec![Value::Text("EAO1".to_owned()), unsigned(1)]),
+    )?;
+
+    let (kind, length, digest, failure, divergence) = match result {
+        IndependentObservation::Output(output) => {
+            if !output.is_empty() {
+                push_transcript_frame(
+                    &mut stream,
+                    &mut transcript,
+                    &Value::Array(vec![
+                        Value::Text("EOB1".to_owned()),
+                        unsigned(1),
+                        unsigned(0),
+                        Value::Bytes(output.clone()),
+                    ]),
+                )?;
+            }
+            (
+                0,
+                unsigned(u64::try_from(output.len())?),
+                Value::Bytes(blake3::hash(&output).as_bytes().to_vec()),
+                Value::Null,
+                Value::Null,
+            )
+        }
+        IndependentObservation::Failure => (
+            1,
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![
+                Value::Text("test-provider".to_owned()),
+                Value::Text("1.0.0".to_owned()),
+                Value::Text("denied".to_owned()),
+            ]),
+            Value::Null,
+        ),
+        IndependentObservation::Divergence => (
+            2,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![unsigned(2), Value::Bytes(vec![1, 2])]),
+        ),
+        IndependentObservation::Unavailable => {
+            (3, Value::Null, Value::Null, Value::Null, Value::Null)
+        }
+    };
+    stream.extend_from_slice(&framed_value(&Value::Array(vec![
+        Value::Text("EOE1".to_owned()),
+        unsigned(1),
+        unsigned(kind),
+        length,
+        digest,
+        failure,
+        divergence,
+        Value::Array(usage.into_iter().map(unsigned).collect()),
+        Value::Bytes(transcript.finalize().as_bytes().to_vec()),
+    ]))?);
+    Ok(stream)
+}
+
+#[cfg(unix)]
+fn write_adapter(directory: &Path, body: &str) -> TestResult<std::path::PathBuf> {
+    let adapter = directory.join("fixture-adapter");
+    fs::write(&adapter, body)?;
+    fs::set_permissions(&adapter, fs::Permissions::from_mode(0o500))?;
+    Ok(adapter)
+}
+
+#[cfg(unix)]
+fn command_with_observation(
+    directory: &Path,
+    corpus: &support::Corpus,
+    observation: &[u8],
+) -> TestResult<Command> {
+    let response = directory.join("observation.eao1");
+    fs::write(&response, observation)?;
+    let adapter = write_adapter(
+        directory,
+        "#!/bin/sh\nset -eu\n/bin/cat >/dev/null\nexec /bin/cat -- \"$1\"\n",
+    )?;
+    let mut command = command_for_corpus(
+        directory,
+        adapter.to_str().ok_or("adapter path is not UTF-8")?,
+        corpus,
+    )?;
+    command.args([
+        "--adapter-arg",
+        response.to_str().ok_or("response path is not UTF-8")?,
+    ]);
+    Ok(command)
+}
+
+#[cfg(unix)]
+fn independent_report(bytes: &[u8]) -> TestResult<Vec<Value>> {
+    let value: Value = ciborium::from_reader(bytes)?;
+    assert_eq!(canonical_value(&value)?, bytes);
+    let Value::Array(mut fields) = value else {
+        return Err("CNR1 is not an array".into());
+    };
+    assert_eq!(fields.len(), 24);
+    assert_eq!(fields[0], Value::Text("CNR1".to_owned()));
+    assert_eq!(fields[1], unsigned(1));
+    let Value::Bytes(report_digest) = fields.pop().ok_or("CNR1 digest is absent")? else {
+        return Err("CNR1 digest is not bytes".into());
+    };
+    let unsigned_report = canonical_value(&Value::Array(fields.clone()))?;
+    let mut digest_input = b"PiglorOS.ConformanceReport.v1\0".to_vec();
+    digest_input.extend_from_slice(&unsigned_report);
+    assert_eq!(
+        report_digest.as_slice(),
+        blake3::hash(&digest_input).as_bytes()
+    );
+    fields.push(Value::Bytes(report_digest));
+    Ok(fields)
+}
+
+#[cfg(unix)]
+fn independent_attempt_header(attempt: &[u8]) -> TestResult<Vec<Value>> {
+    let prefix = <[u8; 4]>::try_from(attempt.get(..4).ok_or("EAI1 prefix is absent")?)?;
+    let frame_length = usize::try_from(u32::from_be_bytes(prefix))?;
+    let frame_end = 4_usize
+        .checked_add(frame_length)
+        .ok_or("EAI1 frame overflow")?;
+    let header: Value = ciborium::from_reader(
+        attempt
+            .get(4..frame_end)
+            .ok_or("EAI1 header is truncated")?,
+    )?;
+    let Value::Array(header) = header else {
+        return Err("EAI1 header is not an array".into());
+    };
+    Ok(header)
+}
+
+#[cfg(unix)]
+fn assert_report_counts(report: &[Value], expected: [u64; 5]) {
+    for (field, count) in report[14..19].iter().zip(expected) {
+        assert_eq!(field, &unsigned(count));
+    }
+}
+
+#[cfg(unix)]
+fn report_case<'a>(report: &'a [Value], case_id: &str) -> TestResult<&'a [Value]> {
+    let Value::Array(cases) = &report[13] else {
+        return Err("CNR1 cases are not an array".into());
+    };
+    cases
+        .iter()
+        .find_map(|case| {
+            let Value::Array(fields) = case else {
+                return None;
+            };
+            (fields.first() == Some(&Value::Text(case_id.to_owned()))).then_some(fields.as_slice())
+        })
+        .ok_or_else(|| format!("CNR1 case is absent: {case_id}").into())
+}
+
+#[cfg(unix)]
+fn assert_case_status(report: &[Value], case_id: &str, status: u64) -> TestResult {
+    assert_eq!(report_case(report, case_id)?[5], unsigned(status));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn assert_diagnostic_digest(stderr: &[u8], report: &[Value]) -> TestResult {
+    let diagnostic: serde_json::Value = serde_json::from_slice(stderr)?;
+    let Value::Bytes(report_digest) = &report[23] else {
+        return Err("CNR1 digest is not bytes".into());
+    };
+    let digest = <[u8; 32]>::try_from(report_digest.as_slice())?;
+    assert_eq!(
+        diagnostic["report_digest"],
+        serde_json::Value::String(blake3::Hash::from_bytes(digest).to_hex().to_string())
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_process_boundary_exercises_output_failure_and_divergence_oracles() -> TestResult {
+    let scenarios = [
+        (
+            IndependentObservation::Output(b"accepted".to_vec()),
+            "case-0",
+            [5, 2, 0, 0, 0],
+        ),
+        (IndependentObservation::Failure, "case-1", [1, 6, 0, 0, 0]),
+        (
+            IndependentObservation::Divergence,
+            "case-2",
+            [1, 6, 0, 0, 0],
+        ),
+    ];
+    for (observation, passing_case, counts) in scenarios {
+        let directory = tempfile::tempdir()?;
+        let corpus = support::mixed_oracle_corpus()?;
+        let response = independent_observation_bytes(observation, [0; 8])?;
+        let output = command_with_observation(directory.path(), &corpus, &response)?.output()?;
+        assert!(
+            output.status.success(),
+            "evaluator stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = independent_report(&output.stdout)?;
+        assert_report_counts(&report, counts);
+        assert_case_status(&report, passing_case, 0)?;
+        assert_eq!(report[16], unsigned(0));
+        assert_eq!(report[18], unsigned(0));
+        assert_diagnostic_digest(&output.stderr, &report)?;
+
+        if passing_case == "case-1" {
+            let case = report_case(&report, passing_case)?;
+            assert_eq!(case[9], unsigned(0));
+            assert_eq!(case[10], unsigned(0));
+        } else if passing_case == "case-2" {
+            let case = report_case(&report, passing_case)?;
+            assert_eq!(case[6], Value::Bytes(vec![1, 2]));
+            assert_ne!(case[8], case[7]);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_process_boundary_classifies_resource_exhaustion() -> TestResult {
+    let corpus = support::corpus()?;
+    let directory = tempfile::tempdir()?;
+    let mut usage = [0; 8];
+    usage[0] = 101;
+    let response =
+        independent_observation_bytes(IndependentObservation::Output(b"accepted".to_vec()), usage)?;
+    let output = command_with_observation(directory.path(), &corpus, &response)?.output()?;
+    assert!(output.status.success());
+    let report = independent_report(&output.stdout)?;
+    assert_report_counts(&report, [0, 7, 0, 0, 0]);
+    assert_eq!(report_case(&report, "case-0")?[10], unsigned(13));
+    assert_diagnostic_digest(&output.stderr, &report)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_process_boundary_classifies_protocol_failures() -> TestResult {
+    let corpus = support::corpus()?;
+    for response in [
+        independent_observation_bytes(IndependentObservation::Unavailable, [0; 8])?,
+        independent_observation_bytes(IndependentObservation::Output(vec![0; 101]), [0; 8])?,
+        vec![0xff],
+    ] {
+        let directory = tempfile::tempdir()?;
+        let output = command_with_observation(directory.path(), &corpus, &response)?.output()?;
+        assert!(output.status.success());
+        let report = independent_report(&output.stdout)?;
+        assert_report_counts(&report, [0, 0, 0, 7, 0]);
+        assert_diagnostic_digest(&output.stderr, &report)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_process_boundary_classifies_process_crashes() -> TestResult {
+    let corpus = support::corpus()?;
+    let directory = tempfile::tempdir()?;
+    let adapter = write_adapter(directory.path(), "#!/bin/sh\nkill -KILL $$\n")?;
+    let output = command_for_corpus(
+        directory.path(),
+        adapter.to_str().ok_or("adapter path is not UTF-8")?,
+        &corpus,
+    )?
+    .output()?;
+    assert!(output.status.success());
+    assert_report_counts(&independent_report(&output.stdout)?, [0, 0, 0, 7, 0]);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_process_boundary_enforces_the_fixture_watchdog() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let short_watchdog = support::corpus_with_watchdog_ms(25)?;
+    let capture_directory = directory.path().join("attempts");
+    fs::create_dir(&capture_directory)?;
+    let adapter = write_adapter(
+        directory.path(),
+        "#!/bin/sh\nset -eu\n/bin/cat >\"$1/attempt.$$\"\nexec /bin/sleep 60\n",
+    )?;
+    let mut command = command_for_corpus(
+        directory.path(),
+        adapter.to_str().ok_or("adapter path is not UTF-8")?,
+        &short_watchdog,
+    )?;
+    command.args([
+        "--adapter-arg",
+        capture_directory
+            .to_str()
+            .ok_or("capture directory is not UTF-8")?,
+    ]);
+    let output = command.output()?;
+    assert!(output.status.success());
+    assert_report_counts(&independent_report(&output.stdout)?, [0, 0, 0, 7, 0]);
+    let captures = fs::read_dir(capture_directory)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(captures.len(), 7);
+    for capture in captures {
+        let header = independent_attempt_header(&fs::read(capture.path())?)?;
+        assert_eq!(header[8], unsigned(25));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn air_gapped_process_declaration_and_cnr1_bytes_are_repeatable() -> TestResult {
+    let corpus = support::air_gapped_corpus()?;
+    let response = independent_observation_bytes(
+        IndependentObservation::Output(b"accepted".to_vec()),
+        [0; 8],
+    )?;
+    let mut executions = Vec::new();
+
+    for _ in 0..2 {
+        let directory = tempfile::tempdir()?;
+        let response_path = directory.path().join("observation.eao1");
+        let capture_path = directory.path().join("attempt.eai1");
+        fs::write(&response_path, &response)?;
+        let adapter = write_adapter(
+            directory.path(),
+            "#!/bin/sh\nset -eu\n/bin/cat >\"$1\"\nexec /bin/cat -- \"$2\"\n",
+        )?;
+        let mut command = command_for_corpus(
+            directory.path(),
+            adapter.to_str().ok_or("adapter path is not UTF-8")?,
+            &corpus,
+        )?;
+        command.args([
+            "--adapter-arg",
+            capture_path.to_str().ok_or("capture path is not UTF-8")?,
+            "--adapter-arg",
+            response_path.to_str().ok_or("response path is not UTF-8")?,
+        ]);
+        let output = command.output()?;
+        assert!(
+            output.status.success(),
+            "evaluator stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = independent_report(&output.stdout)?;
+        assert_report_counts(&report, [7, 0, 0, 0, 0]);
+        assert_diagnostic_digest(&output.stderr, &report)?;
+
+        let attempt = fs::read(capture_path)?;
+        let header = independent_attempt_header(&attempt)?;
+        assert_eq!(header[0], Value::Text("EAI1".to_owned()));
+        assert_eq!(header[5], unsigned(1));
+        assert_eq!(header[9], Value::Bool(false));
+        executions.push((output.stdout, output.stderr, attempt));
+    }
+
+    assert_eq!(executions[0], executions[1]);
+    Ok(())
 }
 
 #[test]
