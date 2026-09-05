@@ -238,6 +238,7 @@ pub enum ProfileMutation {
     SelectedCompressionCapBoundary,
     SelectedProfileByteCapBoundary,
     SelectedProfileByteCapExact,
+    InvertedTransportCaps,
     SelectedClosureCapBoundary(u8),
     SelectedClosureCapExact(u8),
     ExecutionContractBoundary(u8),
@@ -869,6 +870,10 @@ fn selected_hard_caps(
         }
         Some(ProfileMutation::SelectedProfileByteCapBoundary) => {
             array_fields_mut(&mut caps)?[0] = uint(1);
+        }
+        Some(ProfileMutation::InvertedTransportCaps) => {
+            array_fields_mut(&mut caps)?[4] = uint(2);
+            array_fields_mut(&mut caps)?[5] = uint(1);
         }
         Some(ProfileMutation::SelectedClosureCapBoundary(index)) => {
             select_closure_cap_boundary(&mut caps, members, index)?;
@@ -2234,7 +2239,8 @@ fn mutate_profile_boundary(
         ProfileMutation::SelectedCapBoundary(_)
         | ProfileMutation::SelectedCompressionCapBoundary
         | ProfileMutation::SelectedProfileByteCapBoundary
-        | ProfileMutation::SelectedProfileByteCapExact => {}
+        | ProfileMutation::SelectedProfileByteCapExact
+        | ProfileMutation::InvertedTransportCaps => {}
         _ => return Ok(false),
     }
     Ok(true)
@@ -3370,7 +3376,11 @@ fn select_closure_cap_boundary(
         2 => (4, measurements.maximum_member_bytes.saturating_sub(1)),
         _ => (5, measurements.member_bytes),
     };
-    array_fields_mut(hard_caps)?[cap_index] = uint(value);
+    let fields = array_fields_mut(hard_caps)?;
+    fields[cap_index] = uint(value);
+    if cap_index == 5 {
+        fields[4] = uint(value);
+    }
     Ok(())
 }
 
@@ -3463,8 +3473,11 @@ fn profile_with_selected_closure_caps(
         const MAX_CONVERGENCE_STEPS: usize = 8;
         for _ in 0..MAX_CONVERGENCE_STEPS {
             let profile_bytes = encoded_profile_length(&profile_value)?;
-            let total_bytes = closure_member_bytes(members)?.saturating_add(profile_bytes);
-            array_fields_mut(hard_caps)?[5] = uint(total_bytes);
+            let measurements = closure_measurements(members)?;
+            let total_bytes = measurements.member_bytes.saturating_add(profile_bytes);
+            let fields = array_fields_mut(hard_caps)?;
+            fields[4] = uint(measurements.maximum_member_bytes.max(profile_bytes));
+            fields[5] = uint(total_bytes);
             profile_value = build_profile(hard_caps)?;
             let encoded_total = closure_member_bytes(members)?
                 .saturating_add(encoded_profile_length(&profile_value)?);
