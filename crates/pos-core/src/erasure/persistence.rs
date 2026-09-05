@@ -508,19 +508,42 @@ fn validate_receipt_obligations(
         .map_err(|error| RecoveryFailureV1::new(error, receipt.receipt_digest()))
 }
 
+fn read_recovery_object(
+    port: &dyn ErasurePersistencePortV1,
+    reference: ErasureReferenceV1,
+) -> Result<Vec<u8>, RecoveryFailureV1> {
+    port.read_object(reference)
+        .map_err(|error| RecoveryFailureV1::new(error, reference))
+}
+
+fn validate_recovery_object_address(
+    expected: ErasureReferenceV1,
+    actual: ErasureReferenceV1,
+) -> Result<(), RecoveryFailureV1> {
+    (actual == expected)
+        .then_some(())
+        .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, expected))
+}
+
 fn load_recovery_object<T>(
     port: &dyn ErasurePersistencePortV1,
     reference: ErasureReferenceV1,
     decode: impl FnOnce(&[u8]) -> Result<T, ErasureErrorV1>,
     address: impl FnOnce(&T) -> ErasureReferenceV1,
 ) -> Result<T, RecoveryFailureV1> {
-    let bytes = port
-        .read_object(reference)
-        .map_err(|error| RecoveryFailureV1::new(error, reference))?;
-    let value = decode(&bytes).map_err(|error| RecoveryFailureV1::new(error, reference))?;
-    (address(&value) == reference)
-        .then_some(value)
-        .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, reference))
+    read_recovery_object(port, reference)
+        .and_then(|bytes| decode(&bytes).map_err(|error| RecoveryFailureV1::new(error, reference)))
+        .and_then(|value| {
+            validate_recovery_object_address(reference, address(&value)).map(|()| value)
+        })
+}
+
+macro_rules! load_optional_recovery_object {
+    ($port:expr_2021, $reference:expr_2021, $decode:expr_2021, $address:expr_2021 $(,)?) => {
+        $reference
+            .map(|reference| load_recovery_object($port, reference, $decode, $address))
+            .transpose()
+    };
 }
 
 fn load_completed_attempt_evidence(
@@ -559,17 +582,6 @@ fn load_completed_attempt_evidence(
     })
 }
 
-fn optional<T>(
-    port: &dyn ErasurePersistencePortV1,
-    reference: Option<ErasureReferenceV1>,
-    decode: impl FnOnce(&[u8]) -> Result<T, ErasureErrorV1> + Copy,
-    address: impl FnOnce(&T) -> ErasureReferenceV1 + Copy,
-) -> Result<Option<T>, RecoveryFailureV1> {
-    reference.map_or(Ok(None), |reference| {
-        load_recovery_object(port, reference, decode, address).map(Some)
-    })
-}
-
 fn recover_foundation(
     port: &dyn ErasurePersistencePortV1,
     requested: ErasureReferenceV1,
@@ -593,7 +605,7 @@ fn recover_foundation(
     }
     verify_predecessor_chain_with_subject(state.clone(), port)
         .map_err(|failure| RecoveryFailureV1::new(failure.error(), failure.subject()))?;
-    let closure = optional(
+    let closure = load_optional_recovery_object!(
         port,
         manifest.target_closure,
         TargetClosureV1::decode,
@@ -621,26 +633,26 @@ fn recover_fixed_evidence(
     port: &dyn ErasurePersistencePortV1,
     manifest: &ManifestV1,
 ) -> Result<RecoveredFixedEvidenceV1, RecoveryFailureV1> {
-    let correction = optional(
+    let correction = load_optional_recovery_object!(
         port,
         manifest.correction,
         ErasureCorrectionProvenanceV1::from_canonical_cbor,
         ErasureCorrectionProvenanceV1::reference,
     )?;
-    let rejection = optional(
+    let rejection = load_optional_recovery_object!(
         port,
         manifest.rejection,
         ErasureAuthorizationRejectionV1::from_canonical_cbor,
         ErasureAuthorizationRejectionV1::reference,
     )?;
-    let scope = optional(
+    let scope = load_optional_recovery_object!(
         port,
         manifest.scope,
         ErasureScopeCommitmentV1::from_canonical_cbor,
         ErasureScopeCommitmentV1::reference,
     )?;
     let freeze = recover_freeze_evidence(port, manifest)?;
-    let obligation_set = optional(
+    let obligation_set = load_optional_recovery_object!(
         port,
         manifest.obligation_set,
         ErasureObligationSetV1::from_canonical_cbor,
@@ -678,25 +690,25 @@ fn recover_freeze_evidence(
     manifest: &ManifestV1,
 ) -> Result<RecoveredFreezeEvidenceV1, RecoveryFailureV1> {
     Ok(RecoveredFreezeEvidenceV1 {
-        admission: optional(
+        admission: load_optional_recovery_object!(
             port,
             manifest.freeze_admission,
             ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor,
             ErasureFreezeAdmissionEvidenceV1::reference,
         )?,
-        authorization: optional(
+        authorization: load_optional_recovery_object!(
             port,
             manifest.freeze_authorization,
             ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor,
             ErasureFreezeAuthorizationEvidenceV1::reference,
         )?,
-        provenance: optional(
+        provenance: load_optional_recovery_object!(
             port,
             manifest.freeze_provenance,
             ErasureFreezeProvenanceV1::from_canonical_cbor,
             ErasureFreezeProvenanceV1::reference,
         )?,
-        failure: optional(
+        failure: load_optional_recovery_object!(
             port,
             manifest.freeze_failure,
             ErasureFreezeFailureV1::from_canonical_cbor,
@@ -1398,8 +1410,7 @@ impl RecoveredErasureV1 {
             predecessor_receipt,
         )?;
         self.validate_attempt_effect(port, &admission)?;
-        self.effective
-            .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
+        retain_positive_acknowledgements(&mut self.effective);
         let admitted_values = self.load_acknowledgements(
             port,
             &admission,
@@ -2973,6 +2984,8 @@ mod tests {
             predecessor_extension: None,
             admission_provenance: reference(51),
         })?;
+        let mut scope_success = record_fixture(&request)?;
+        scope_success.append_scope_extension(extension)?;
         let mut scope_bound = record_fixture(&request)?;
         scope_bound.scope_head = Some(RecoveredScopeHeadV1 {
             node: reference(52),
@@ -2999,6 +3012,8 @@ mod tests {
                 predecessor_resolution: None,
             })?;
         let mut resolution_bound = record_fixture(&request)?;
+        let mut resolution_success = record_fixture(&request)?;
+        resolution_success.append_administrative_resolution(&resolution)?;
         resolution_bound.administrative_resolution_count =
             ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64;
         assert_eq!(
@@ -3074,6 +3089,17 @@ mod tests {
                 trust: reference(7),
                 issue_position: 10,
             })?;
+        let mut active = record_fixture(&request)?;
+        active.begin_attempt(admission_fixture(
+            request.reference(),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            reference(6),
+            reference(7),
+        )?)?;
+        active.finish_attempt(&outcome, &receipt_provenance, &receipt)?;
         let mut no_active = record_fixture(&request)?;
         assert_eq!(
             no_active.finish_attempt(&outcome, &receipt_provenance, &receipt),
@@ -3131,7 +3157,22 @@ mod tests {
 
         assert_eq!(
             record
+                .validate_replay_page_bindings(&page, &admission, &effective, &effective, None)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        assert_eq!(
+            record
                 .validate_replay_page_bindings(&page, &admission, &admitted, &admitted, None)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            record
+                .validate_replay_page_bindings(&page, &admission, &admitted, &effective, None)
                 .err()
                 .map(RecoveryFailureV1::error),
             Some(ErasureErrorV1::ProvenanceMissing)
@@ -3303,7 +3344,16 @@ mod tests {
         }
     }
 
-    struct RecoveryVerifier;
+    struct RecoveryVerifier {
+        error: Option<ErasureErrorV1>,
+    }
+
+    impl RecoveryVerifier {
+        const ACCEPT: Self = Self { error: None };
+        const REJECT: Self = Self {
+            error: Some(ErasureErrorV1::Unauthorized),
+        };
+    }
 
     impl ErasureRecoveryAuthorizationVerifierV1 for RecoveryVerifier {
         fn validate_scope_extension(
@@ -3317,7 +3367,7 @@ mod tests {
             &self,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
-            Ok(())
+            self.error.map_or(Ok(()), Err)
         }
     }
 
@@ -3325,6 +3375,22 @@ mod tests {
         effect_manifest: Option<ErasureReferenceV1>,
         effect: ErasureCasEffectV1,
         resolution_count: u64,
+        resolution_count_error: Option<ErasureErrorV1>,
+        resolution_references: Vec<Result<Option<ErasureReferenceV1>, ErasureErrorV1>>,
+        objects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    }
+
+    impl TestPersistencePort {
+        fn new(effect_manifest: Option<ErasureReferenceV1>, effect: ErasureCasEffectV1) -> Self {
+            Self {
+                effect_manifest,
+                effect,
+                resolution_count: 0,
+                resolution_count_error: None,
+                resolution_references: Vec::new(),
+                objects: BTreeMap::new(),
+            }
+        }
     }
 
     impl ErasureStateResolverV1 for TestPersistencePort {
@@ -3344,8 +3410,11 @@ mod tests {
             Ok(None)
         }
 
-        fn read_object(&self, _reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
-            Err(ErasureErrorV1::ProvenanceMissing)
+        fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+            self.objects
+                .get(&reference)
+                .cloned()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
         }
 
         fn read_effect(
@@ -3389,16 +3458,21 @@ mod tests {
         fn administrative_resolution_ref(
             &self,
             _request: ErasureReferenceV1,
-            _ordinal: u64,
+            ordinal: u64,
         ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-            Ok(None)
+            usize::try_from(ordinal)
+                .ok()
+                .and_then(|ordinal| self.resolution_references.get(ordinal))
+                .copied()
+                .unwrap_or(Ok(None))
         }
 
         fn administrative_resolution_index_count(
             &self,
             _request: ErasureReferenceV1,
         ) -> Result<u64, ErasureErrorV1> {
-            Ok(self.resolution_count)
+            self.resolution_count_error
+                .map_or(Ok(self.resolution_count), Err)
         }
 
         fn recovery_error_refs(
@@ -3421,6 +3495,71 @@ mod tests {
         ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
             Err(ErasureErrorV1::PolicyConflict)
         }
+    }
+
+    fn resolution_fixture(
+        request: ErasureReferenceV1,
+        scope: ErasureReferenceV1,
+        policy: ErasureReferenceV1,
+        trust: ErasureReferenceV1,
+        predecessor: Option<ErasureReferenceV1>,
+        discriminator: u8,
+    ) -> Result<ErasureAdministrativeResolutionV1, ErasureErrorV1> {
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request,
+            affected_digests: vec![reference(discriminator)],
+            action: super::super::ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: scope,
+            policy,
+            trust,
+            principal: reference(discriminator.wrapping_add(1)),
+            authorization_provenance: reference(discriminator.wrapping_add(2)),
+            reason: reference(discriminator.wrapping_add(3)),
+            issue_position: u64::from(discriminator),
+            predecessor_resolution: predecessor,
+        })
+    }
+
+    fn resolution_record(
+        request: &ErasureRequestV1,
+        head: Option<ErasureReferenceV1>,
+    ) -> Result<RecoveredErasureV1, ErasureErrorV1> {
+        let obligation = obligation(request.reference())?;
+        let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request: request.reference(),
+            obligations: vec![obligation.reference()],
+            policy: reference(6),
+            trust: reference(7),
+        })?;
+        let mut record = record_fixture(request)?;
+        record.scope = Some(scope(request.reference())?);
+        record.obligation_set = Some(obligation_set);
+        record.obligations = vec![obligation];
+        record.administrative_resolution_head = head;
+        Ok(record)
+    }
+
+    fn port_with_resolution(
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<TestPersistencePort, ErasureErrorV1> {
+        let reference = resolution.reference();
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        port.resolution_count = 1;
+        port.resolution_references = vec![Ok(Some(reference))];
+        port.objects
+            .insert(reference, resolution.to_canonical_cbor()?);
+        Ok(port)
+    }
+
+    fn administrative_recovery_error(
+        record: &mut RecoveredErasureV1,
+        port: &TestPersistencePort,
+        verifier: &RecoveryVerifier,
+    ) -> Option<ErasureErrorV1> {
+        record
+            .recover_administrative_resolutions(port, verifier)
+            .err()
+            .map(RecoveryFailureV1::error)
     }
 
     #[test]
@@ -3450,11 +3589,7 @@ mod tests {
         assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
         assert_eq!(failure.subject(), reference(71));
 
-        let missing = TestPersistencePort {
-            effect_manifest: None,
-            effect: ErasureCasEffectV1::None,
-            resolution_count: 0,
-        };
+        let missing = TestPersistencePort::new(None, ErasureCasEffectV1::None);
         assert_eq!(
             resolve_state_provenance_predecessor(&missing, reference(72))
                 .err()
@@ -3494,11 +3629,7 @@ mod tests {
             reservation: ErasureAttemptQuotaReservationV1::new(reference(79), reference(80)),
             commands,
         };
-        let port = TestPersistencePort {
-            effect_manifest: Some(reference(81)),
-            effect: wrong_reservation,
-            resolution_count: 0,
-        };
+        let port = TestPersistencePort::new(Some(reference(81)), wrong_reservation);
         assert_eq!(
             record
                 .validate_attempt_effect(&port, &admission)
@@ -3507,11 +3638,7 @@ mod tests {
             Some(ErasureErrorV1::ProvenanceMissing)
         );
 
-        let port = TestPersistencePort {
-            effect_manifest: Some(reference(81)),
-            effect: ErasureCasEffectV1::None,
-            resolution_count: 0,
-        };
+        let port = TestPersistencePort::new(Some(reference(81)), ErasureCasEffectV1::None);
         assert_eq!(
             record
                 .validate_attempt_effect(&port, &admission)
@@ -3520,21 +3647,192 @@ mod tests {
             Some(ErasureErrorV1::ProvenanceMissing)
         );
 
-        let mut missing_resolution_set = record_fixture(&request)?;
-        missing_resolution_set.scope = Some(scope(request.reference())?);
-        missing_resolution_set.administrative_resolution_head = Some(reference(82));
-        let port = TestPersistencePort {
-            effect_manifest: None,
-            effect: ErasureCasEffectV1::None,
-            resolution_count: 1,
-        };
+        Ok(())
+    }
+
+    #[test]
+    fn administrative_recovery_rejects_inconsistent_metadata() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        port.resolution_count_error = Some(ErasureErrorV1::ReceiptCommitFailed);
+        let mut record = record_fixture(&request)?;
         assert_eq!(
-            missing_resolution_set
-                .recover_administrative_resolutions(&port, &RecoveryVerifier)
-                .err()
-                .map(RecoveryFailureV1::error),
+            administrative_recovery_error(&mut record, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        port.resolution_count_error = None;
+        port.resolution_count = ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64 + 1;
+        assert_eq!(
+            administrative_recovery_error(&mut record, &port, &RecoveryVerifier::ACCEPT),
             Some(ErasureErrorV1::ProvenanceMissing)
         );
+
+        for (count, head) in [(1, None), (0, Some(reference(82)))] {
+            port.resolution_count = count;
+            record.administrative_resolution_head = head;
+            assert_eq!(
+                administrative_recovery_error(&mut record, &port, &RecoveryVerifier::ACCEPT),
+                Some(ErasureErrorV1::ProvenanceMissing)
+            );
+        }
+
+        port.resolution_count = 1;
+        record.administrative_resolution_head = Some(reference(82));
+        assert_eq!(
+            administrative_recovery_error(&mut record, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        record.scope = Some(scope(request.reference())?);
+        assert_eq!(
+            administrative_recovery_error(&mut record, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut empty = record_fixture(&request)?;
+        port.resolution_count = 0;
+        assert!(empty
+            .recover_administrative_resolutions(&port, &RecoveryVerifier::ACCEPT)
+            .is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn administrative_recovery_rejects_missing_or_malformed_objects() -> Result<(), ErasureErrorV1>
+    {
+        let request = request()?;
+        let valid = resolution_fixture(
+            request.reference(),
+            scope(request.reference())?.reference(),
+            reference(6),
+            reference(7),
+            None,
+            90,
+        )?;
+        let expected = valid.reference();
+        let record = resolution_record(&request, Some(expected))?;
+
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        port.resolution_count = 1;
+        port.resolution_references = vec![Err(ErasureErrorV1::Unauthorized)];
+        let mut candidate = record.clone();
+        assert_eq!(
+            administrative_recovery_error(&mut candidate, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::Unauthorized)
+        );
+
+        port.resolution_references.clear();
+        let mut candidate = record.clone();
+        assert_eq!(
+            administrative_recovery_error(&mut candidate, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        port.resolution_references = vec![Ok(Some(expected))];
+        let mut candidate = record.clone();
+        assert_eq!(
+            administrative_recovery_error(&mut candidate, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        port.objects.insert(expected, vec![0xff]);
+        let mut candidate = record;
+        assert_eq!(
+            administrative_recovery_error(&mut candidate, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::InvalidEncoding)
+        );
+
+        let wrong_address = reference(99);
+        port.resolution_references = vec![Ok(Some(wrong_address))];
+        port.objects
+            .insert(wrong_address, valid.to_canonical_cbor()?);
+        let mut candidate = resolution_record(&request, Some(wrong_address))?;
+        assert_eq!(
+            administrative_recovery_error(&mut candidate, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn administrative_recovery_validates_resolution_chain() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let scope = scope(request.reference())?;
+        let mismatches = [
+            resolution_fixture(
+                reference(80),
+                scope.reference(),
+                reference(6),
+                reference(7),
+                None,
+                81,
+            )?,
+            resolution_fixture(
+                request.reference(),
+                scope.reference(),
+                reference(6),
+                reference(7),
+                Some(reference(82)),
+                83,
+            )?,
+            resolution_fixture(
+                request.reference(),
+                reference(84),
+                reference(6),
+                reference(7),
+                None,
+                85,
+            )?,
+            resolution_fixture(
+                request.reference(),
+                scope.reference(),
+                reference(86),
+                reference(7),
+                None,
+                87,
+            )?,
+            resolution_fixture(
+                request.reference(),
+                scope.reference(),
+                reference(6),
+                reference(88),
+                None,
+                89,
+            )?,
+        ];
+        for resolution in mismatches {
+            let mut record = resolution_record(&request, Some(resolution.reference()))?;
+            let port = port_with_resolution(&resolution)?;
+            assert_eq!(
+                administrative_recovery_error(&mut record, &port, &RecoveryVerifier::ACCEPT),
+                Some(ErasureErrorV1::ProvenanceMissing)
+            );
+        }
+
+        let valid = resolution_fixture(
+            request.reference(),
+            scope.reference(),
+            reference(6),
+            reference(7),
+            None,
+            90,
+        )?;
+        let port = port_with_resolution(&valid)?;
+        let mut rejected = resolution_record(&request, Some(valid.reference()))?;
+        assert_eq!(
+            administrative_recovery_error(&mut rejected, &port, &RecoveryVerifier::REJECT),
+            Some(ErasureErrorV1::Unauthorized)
+        );
+
+        let mut wrong_head = resolution_record(&request, Some(reference(91)))?;
+        assert_eq!(
+            administrative_recovery_error(&mut wrong_head, &port, &RecoveryVerifier::ACCEPT),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut recovered = resolution_record(&request, Some(valid.reference()))?;
+        recovered
+            .recover_administrative_resolutions(&port, &RecoveryVerifier::ACCEPT)
+            .map_err(RecoveryFailureV1::error)?;
+        assert_eq!(recovered.administrative_resolution_count, 1);
         Ok(())
     }
 
@@ -3630,6 +3928,49 @@ mod tests {
             wrong_scope.reference()
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn frozen_bindings_reject_an_authorized_lifecycle() -> Result<(), ErasureErrorV1> {
+        let request = request()?;
+        let fixture = frozen_fixture(request.reference())?;
+        let targets = vec![fixture.target];
+        let state = ErasureStateV1 {
+            request: request.reference(),
+            lifecycle: ErasureLifecycleV1::Authorized,
+            freeze_position: Some(10),
+            coordinator: reference(44),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: super::super::ErasureReplayClaimV1::Exact,
+            previous_state: None,
+            provenance: fixture.freeze.reference(),
+            state_digest: reference(73),
+        };
+        let verifier = AcceptFreezeVerifier;
+        let mut graph = fixed_graph(FixedGraphInput {
+            request: &request,
+            state: &state,
+            targets: &targets,
+            scope: Some(&fixture.scope),
+            admission: Some(&fixture.admission),
+            authorization: Some(&fixture.authorization),
+            freeze: Some(&fixture.freeze),
+            obligation_set: Some(&fixture.obligation_set),
+            obligations: &[],
+            manifest: reference(74),
+            verifier: &verifier,
+        });
+        graph.authorize_provenance = Some(reference(75));
+        graph.target_closure = Some(target_closure_digest(&targets));
+
+        assert_eq!(
+            validate_frozen_bindings(&graph, &fixture.atomic)
+                .err()
+                .map(RecoveryFailureV1::error),
+            Some(ErasureErrorV1::ProvenanceMissing)
+        );
         Ok(())
     }
 

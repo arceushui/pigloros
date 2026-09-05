@@ -33,8 +33,12 @@ pub const MANIFEST_REQUEST_FIELD: usize = 2;
 pub const MANIFEST_STATE_FIELD: usize = 3;
 pub const MANIFEST_TARGET_CLOSURE_FIELD: usize = 4;
 pub const MANIFEST_CORRECTION_FIELD: usize = 5;
+pub const MANIFEST_REJECTION_FIELD: usize = 6;
 pub const MANIFEST_SCOPE_COMMITMENT_FIELD: usize = 7;
+pub const MANIFEST_FREEZE_ADMISSION_FIELD: usize = 8;
+pub const MANIFEST_FREEZE_AUTHORIZATION_FIELD: usize = 9;
 pub const MANIFEST_FREEZE_PROVENANCE_FIELD: usize = 10;
+pub const MANIFEST_FREEZE_FAILURE_FIELD: usize = 11;
 pub const MANIFEST_OBLIGATION_SET_FIELD: usize = 12;
 pub const MANIFEST_SCOPE_EXTENSION_HEAD_FIELD: usize = 13;
 pub const MANIFEST_ACTIVE_FIELD: usize = 14;
@@ -50,7 +54,11 @@ pub const INVENTORY_REFERENCES_FIELD: usize = 5;
 pub const ACTIVE_ADMISSION_FIELD: usize = 1;
 pub const ATTEMPT_ADMITTED_INVENTORY_FIELD: usize = 5;
 pub const ATTEMPT_EFFECTIVE_INVENTORY_FIELD: usize = 6;
+pub const ATTEMPT_OUTCOME_FIELD: usize = 7;
+pub const ATTEMPT_RECEIPT_PROVENANCE_FIELD: usize = 9;
+pub const ATTEMPT_RETRY_ADMISSION_FIELD: usize = 4;
 pub const SCOPE_NODE_EXTENSION_FIELD: usize = 4;
+pub const OBLIGATION_SET_REFERENCES_FIELD: usize = 3;
 
 /// Field positions in the immutable object arrays used by recovery fixtures.
 pub const SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD: usize = 4;
@@ -154,6 +162,31 @@ fn array_reference_field(bytes: &[u8], index: usize) -> Result<ErasureReferenceV
         return Err(ErasureErrorV1::InvalidEncoding);
     };
     let Value::Bytes(bytes) = fields.get(index).ok_or(ErasureErrorV1::InvalidEncoding)? else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let digest: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    Ok(ErasureReferenceV1::from_digest(digest))
+}
+
+fn array_reference_entry(
+    bytes: &[u8],
+    field: usize,
+    index: usize,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    let value: Value = ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    let Value::Array(fields) = value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(references) = fields.get(field).ok_or(ErasureErrorV1::InvalidEncoding)? else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Bytes(bytes) = references
+        .get(index)
+        .ok_or(ErasureErrorV1::InvalidEncoding)?
+    else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
     let digest: [u8; 32] = bytes
@@ -383,6 +416,45 @@ impl PublicCoordinatorPort {
         array_reference_field(manifest, field)
     }
 
+    /// Return one content address linked directly from an immutable object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or provenance error when the object or field
+    /// is absent or malformed.
+    pub fn object_reference_field(
+        &self,
+        object: ErasureReferenceV1,
+        field: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        let storage = self.storage.borrow();
+        let bytes = storage
+            .objects
+            .get(&object)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        array_reference_field(bytes, field)
+    }
+
+    /// Return one content address from an immutable object's reference array.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or provenance error when the object, array,
+    /// or selected entry is absent or malformed.
+    pub fn object_reference_entry(
+        &self,
+        object: ErasureReferenceV1,
+        field: usize,
+        index: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        let storage = self.storage.borrow();
+        let bytes = storage
+            .objects
+            .get(&object)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        array_reference_entry(bytes, field, index)
+    }
+
     #[must_use]
     pub fn last_mutation(&self) -> Option<pos_core::PreparedErasureCasV1> {
         self.last_mutation.borrow().clone()
@@ -483,6 +555,25 @@ impl PublicCoordinatorPort {
         if !storage.manifests.contains_key(&request) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
+        storage.manifests.insert(request, (digest, canonical_cbor));
+        Ok(())
+    }
+
+    /// Replace a stored manifest envelope and repair its content address.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProvenanceMissing` when the requested manifest is absent.
+    pub fn replace_manifest_canonical_cbor(
+        &self,
+        request: ErasureReferenceV1,
+        canonical_cbor: Vec<u8>,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        if !storage.manifests.contains_key(&request) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let digest = addressed("ERCRP1", &canonical_cbor);
         storage.manifests.insert(request, (digest, canonical_cbor));
         Ok(())
     }
