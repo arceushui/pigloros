@@ -301,7 +301,10 @@ fn request_accepts_bounded_utf8_identifiers() -> TestResult {
             request.expected_output_capability_digest()?;
         request.request_digest = request.digest()?;
         let encoded = request.to_canonical_cbor()?;
-        assert_eq!(EvaluationRequest::from_canonical_cbor(&encoded), Ok(request));
+        assert_eq!(
+            EvaluationRequest::from_canonical_cbor(&encoded),
+            Ok(request)
+        );
     }
     Ok(())
 }
@@ -605,7 +608,10 @@ fn report_orders_utf8_identifiers_by_encoded_bytes() -> TestResult {
     ordered.cases = vec![first.clone(), second.clone()];
     reseal(&mut ordered)?;
     let encoded = ordered.to_canonical_cbor()?;
-    assert_eq!(ConformanceReport::from_canonical_cbor(&encoded), Ok(ordered));
+    assert_eq!(
+        ConformanceReport::from_canonical_cbor(&encoded),
+        Ok(ordered)
+    );
 
     let mut reviewers_reversed = template.clone();
     reviewers_reversed.independence.reviewer_ids = vec!["插件".to_owned(), "é".to_owned()];

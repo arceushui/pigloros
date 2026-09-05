@@ -865,8 +865,7 @@ fn evaluator_matches_output_failure_and_divergence_oracles() -> TestResult {
 #[test]
 fn evaluator_reports_typed_failure_oracles_with_closed_safe_errors() -> TestResult {
     for (verification_outcome, safe_error) in [(2, 0), (3, 9), (4, 11), (5, 13)] {
-        let corpus =
-            support::mixed_oracle_corpus_with_failure_outcome(verification_outcome)?;
+        let corpus = support::mixed_oracle_corpus_with_failure_outcome(verification_outcome)?;
         let mut adapter = MixedOracleAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,
@@ -888,7 +887,10 @@ fn evaluator_reports_typed_failure_oracles_with_closed_safe_errors() -> TestResu
         assert_eq!(failure.outcome, CaseStatus::Pass);
         assert_eq!(failure.expected_error, Some(safe_error));
         assert_eq!(failure.actual_error, Some(safe_error));
-        assert_eq!((failure.expected_digest, failure.actual_digest), (None, None));
+        assert_eq!(
+            (failure.expected_digest, failure.actual_digest),
+            (None, None)
+        );
     }
     Ok(())
 }
@@ -924,7 +926,10 @@ fn evaluator_reports_mismatched_failure_and_divergence_oracles() -> TestResult {
         .ok_or("typed failure case is absent")?;
     assert_eq!(failure.expected_error, Some(0));
     assert_eq!(failure.actual_error, Some(4));
-    assert_eq!((failure.expected_digest, failure.actual_digest), (None, None));
+    assert_eq!(
+        (failure.expected_digest, failure.actual_digest),
+        (None, None)
+    );
     Ok(())
 }
 
