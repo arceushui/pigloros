@@ -1562,7 +1562,7 @@ mod tests {
                 Value::Null,
                 digest.clone(),
                 digest.clone(),
-                digest.clone(),
+                digest,
             ])),
             Err(ErasureErrorV1::InvalidEncoding)
         );
