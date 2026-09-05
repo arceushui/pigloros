@@ -291,6 +291,7 @@ mod coverage_paths {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
     use crate::driver::{Driver, ObservationView, StepOutput, TimelineHistorySegment};
@@ -4279,6 +4280,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_public_error_paths {
     use super::*;
     use crate::driver::{ObservationView, StepOutput};

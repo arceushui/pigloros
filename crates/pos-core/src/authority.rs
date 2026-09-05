@@ -1482,6 +1482,17 @@ impl AuthorizationDecisionV1 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuthorityEvaluatorV1;
 
+// Validated grants encode into an in-memory buffer infallibly. Keep the
+// fail-closed fallback for defence in depth without treating it as reachable.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn deny_missing_grant_provenance(evaluation: &mut AuthorizationEvaluationV1) -> Vec<Hash> {
+    *evaluation = AuthorizationEvaluationV1::denied(
+        AuthorizationOutcomeV1::IndeterminateFailClosed,
+        Some(AuthorityErrorV1::ProvenanceMissing),
+    );
+    Vec::new()
+}
+
 impl AuthorityEvaluatorV1 {
     /// Evaluate adapter evidence, consent, capability, delegation, and revocation
     /// in ADR-059 order and return a closed decision.
@@ -1499,13 +1510,7 @@ impl AuthorityEvaluatorV1 {
                 .iter()
                 .map(CapabilityGrantV1::binding_digest)
                 .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_else(|_| {
-                    evaluation = AuthorizationEvaluationV1::denied(
-                        AuthorizationOutcomeV1::IndeterminateFailClosed,
-                        Some(AuthorityErrorV1::ProvenanceMissing),
-                    );
-                    Vec::new()
-                })
+                .unwrap_or_else(|_| deny_missing_grant_provenance(&mut evaluation))
         } else {
             Vec::new()
         };
