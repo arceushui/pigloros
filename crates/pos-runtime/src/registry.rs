@@ -4405,8 +4405,7 @@ mod coverage_public_error_paths {
         let authority = ConsentAuthority::new();
         let consent_grant = grant(subject);
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
-        let mut fenced_append =
-            PluginRegistry::new().with_consent_authority(authority.clone());
+        let mut fenced_append = PluginRegistry::new().with_consent_authority(authority.clone());
         fenced_append.register_driver(Box::new(EmptyDriver));
         assert!(fenced_append
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
