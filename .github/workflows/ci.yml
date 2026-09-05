@@ -359,7 +359,7 @@ jobs:
     needs:
       - ci_change_scope
       - coverage
-    if: ${{ always() && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -386,47 +386,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
-            echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          for ((attempt = 1; attempt <= 30; attempt++)); do
-            run_ids="$(gh api --method GET --paginate \
-              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-              -f branch=main -f event=push -f status=success -f per_page=100 \
-              --jq ".workflow_runs[] | select(.head_sha == \"${BASE_SHA}\") | .id")"
-            run_id=''
-            while IFS= read -r candidate; do
-              [[ -n "${candidate}" ]] || continue
-              artifact_id="$(gh api --method GET \
-                "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts" \
-                --jq ".artifacts[] | select(.name == \"cargo-crap-baseline-${BASE_SHA}\") | .id")"
-              if [[ -n "${artifact_id}" ]]; then
-                run_id="${candidate}"
-                break
-              fi
-            done <<< "${run_ids}"
-            if [[ -n "${run_id}" ]]; then
-              echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
-              echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
-              exit 0
-            fi
-            if (( attempt < 30 )); then
-              echo "Trusted baseline ${BASE_SHA} is not available yet (attempt ${attempt}/30); retrying in 10s"
-              sleep 10
-            fi
-          done
-
-          # One-time initialization for this PR's pre-gate base. No future
-          # base may silently substitute a PR-controlled baseline.
-          test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"
-          git diff --quiet "${BASE_SHA}...HEAD" -- \
-            '*.rs' '**/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml \
-            .cargo/config.toml .cargo-crap.toml
-          echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
+        run: scripts/resolve_cargo_crap_baseline.sh
       - name: Download trusted base baseline
         if: ${{ steps.baseline.outputs.run-id != '' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

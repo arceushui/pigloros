@@ -120,17 +120,12 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(weaken_bootstrap)
 
-    def test_requires_bounded_baseline_retry(self) -> None:
-        def remove_retry(workflow: dict) -> None:
-            step = self.cargo_crap_step(
+    def test_requires_centralized_baseline_resolver(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.cargo_crap_step(
                 workflow, "Resolve trusted cargo-crap baseline"
-            )
-            step["run"] = step["run"].replace(
-                "for ((attempt = 1; attempt <= 30; attempt++)); do",
-                "while true; do",
-            )
-
-        self.assert_rejected(remove_retry)
+            ).update({"run": "inline-baseline-resolver.sh"})
+        )
 
     def test_requires_scoped_coverage(self) -> None:
         self.assert_rejected(
@@ -143,6 +138,18 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"].update(
                 {"if": "${{ always() }}"}
+            )
+        )
+
+    def test_requires_successful_coverage_for_cargo_crap(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["cargo-crap"].update(
+                {
+                    "if": (
+                        "${{ needs.ci_change_scope.outputs.rust == 'true' || "
+                        "github.event_name != 'pull_request' }}"
+                    )
+                }
             )
         )
 

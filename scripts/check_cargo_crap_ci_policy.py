@@ -14,14 +14,13 @@ INSTALL_ACTION = "taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d78
 UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 BOOTSTRAP_BASE_SHA = "45bdac85b29d273573583f846ba7acd2b3a12573"
-BASELINE_RETRY_ATTEMPTS = 30
-BASELINE_RETRY_DELAY_SECONDS = 10
+BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
 SCOPED_JOB_IF = (
     "${{ needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request' }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
-    "${{ always() && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "${{ needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
 GENERATE_BASELINE_COMMAND = (
@@ -41,47 +40,6 @@ ANALYZE_COMMAND = (
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
-RESOLVE_BASELINE_COMMAND = f'''set -euo pipefail
-if [[ "${{EVENT_NAME}}" != "pull_request" ]]; then
-  echo 'bootstrap=true' >> "${{GITHUB_OUTPUT}}"
-  exit 0
-fi
-
-for ((attempt = 1; attempt <= {BASELINE_RETRY_ATTEMPTS}; attempt++)); do
-  run_ids="$(gh api --method GET --paginate \\
-    "repos/${{GITHUB_REPOSITORY}}/actions/workflows/ci.yml/runs" \\
-    -f branch=main -f event=push -f status=success -f per_page=100 \\
-    --jq ".workflow_runs[] | select(.head_sha == \\"${{BASE_SHA}}\\") | .id")"
-  run_id=''
-  while IFS= read -r candidate; do
-    [[ -n "${{candidate}}" ]] || continue
-    artifact_id="$(gh api --method GET \\
-      "repos/${{GITHUB_REPOSITORY}}/actions/runs/${{candidate}}/artifacts" \\
-      --jq ".artifacts[] | select(.name == \\"cargo-crap-baseline-${{BASE_SHA}}\\") | .id")"
-    if [[ -n "${{artifact_id}}" ]]; then
-      run_id="${{candidate}}"
-      break
-    fi
-  done <<< "${{run_ids}}"
-  if [[ -n "${{run_id}}" ]]; then
-    echo "run-id=${{run_id}}" >> "${{GITHUB_OUTPUT}}"
-    echo 'bootstrap=false' >> "${{GITHUB_OUTPUT}}"
-    exit 0
-  fi
-  if (( attempt < {BASELINE_RETRY_ATTEMPTS} )); then
-    echo "Trusted baseline ${{BASE_SHA}} is not available yet (attempt ${{attempt}}/{BASELINE_RETRY_ATTEMPTS}); retrying in {BASELINE_RETRY_DELAY_SECONDS}s"
-    sleep {BASELINE_RETRY_DELAY_SECONDS}
-  fi
-done
-
-# One-time initialization for this PR's pre-gate base. No future
-# base may silently substitute a PR-controlled baseline.
-test "${{BASE_SHA}}" = "{BOOTSTRAP_BASE_SHA}"
-git diff --quiet "${{BASE_SHA}}...HEAD" -- \\
-  '*.rs' '**/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml \\
-  .cargo/config.toml .cargo-crap.toml
-echo 'bootstrap=true' >> "${{GITHUB_OUTPUT}}"
-'''
 
 
 class PolicyError(RuntimeError):
@@ -101,7 +59,41 @@ def named_step(steps: list[object], name: str) -> dict:
     return matches[0]
 
 
+def check_baseline_resolver() -> None:
+    path = pathlib.Path(__file__).with_name("resolve_cargo_crap_baseline.sh")
+    resolver = path.read_text(encoding="utf-8")
+    required_fragments = (
+        ("#!/usr/bin/env bash\n", "baseline resolver must be an executable Bash script"),
+        ("set -euo pipefail\n", "baseline resolver must fail closed"),
+        ("BASELINE_RETRY_ATTEMPTS=30\n", "baseline retry attempts changed"),
+        ("BASELINE_RETRY_DELAY_SECONDS=10\n", "baseline retry delay changed"),
+        (
+            "for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do",
+            "baseline resolver must use bounded retries",
+        ),
+        (
+            "if (( attempt < BASELINE_RETRY_ATTEMPTS )); then",
+            "baseline resolver must not sleep after the final attempt",
+        ),
+        (
+            'sleep "${BASELINE_RETRY_DELAY_SECONDS}"',
+            "baseline resolver retry delay is not enforced",
+        ),
+        (
+            'test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"',
+            "baseline bootstrap is not restricted to the approved base",
+        ),
+        (
+            'git diff --quiet "${BASE_SHA}...HEAD"',
+            "baseline bootstrap must reject Rust-affecting changes",
+        ),
+    )
+    for fragment, message in required_fragments:
+        require(fragment in resolver, message)
+
+
 def check_workflow(workflow_path: pathlib.Path) -> None:
+    check_baseline_resolver()
     with workflow_path.open(encoding="utf-8") as stream:
         workflow = yaml.safe_load(stream)
 
@@ -215,7 +207,7 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
                 "EVENT_NAME": "${{ github.event_name }}",
                 "GH_TOKEN": "${{ github.token }}",
             },
-            "run": RESOLVE_BASELINE_COMMAND,
+            "run": BASELINE_RESOLVER,
         },
         "trusted baseline resolution changed",
     )
