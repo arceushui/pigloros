@@ -38,21 +38,7 @@ impl ManifestField {
 }
 
 #[derive(Clone, Copy)]
-enum ContractField {
-    Report,
-}
-
-impl ContractField {
-    const fn index(self) -> usize {
-        match self {
-            Self::Report => 6,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
 enum ReportField {
-    Cases,
     FollowOnCounts,
     Digest,
 }
@@ -60,22 +46,8 @@ enum ReportField {
 impl ReportField {
     const fn index(self) -> usize {
         match self {
-            Self::Cases => 13,
             Self::FollowOnCounts => 20,
             Self::Digest => 21,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CaseField {
-    FirstCoordinate,
-}
-
-impl CaseField {
-    const fn index(self) -> usize {
-        match self {
-            Self::FirstCoordinate => 6,
         }
     }
 }
@@ -345,83 +317,6 @@ fn counterfactual_fixture() -> CounterfactualContractV1 {
     }
 }
 
-fn conformance_report_fixture() -> ConformanceReportV1 {
-    let cases = vec![
-        CaseOutcomeV1 {
-            case_id: "scenario-air-gapped".to_owned(),
-            fixture_digest: [14; 32],
-            execution_profile_digest: [4; 32],
-            mode: ExecutionModeV1::AirGapped,
-            claim_layer: ClaimLayerV1::ReplayConformance,
-            outcome: CaseOutcomeStatusV1::Pass,
-            first_coordinate: None,
-            expected_digest: Some([14; 32]),
-            actual_digest: Some([14; 32]),
-            expected_error: None,
-            actual_error: None,
-            replay_claim: ReplayClaimV1::Exact,
-            redaction_state: RedactionStateV1::None,
-            provenance_digest: [15; 32],
-        },
-        CaseOutcomeV1 {
-            case_id: "scenario-local".to_owned(),
-            fixture_digest: [14; 32],
-            execution_profile_digest: [4; 32],
-            mode: ExecutionModeV1::Local,
-            claim_layer: ClaimLayerV1::ReplayConformance,
-            outcome: CaseOutcomeStatusV1::Pass,
-            first_coordinate: None,
-            expected_digest: Some([14; 32]),
-            actual_digest: Some([14; 32]),
-            expected_error: None,
-            actual_error: None,
-            replay_claim: ReplayClaimV1::Exact,
-            redaction_state: RedactionStateV1::None,
-            provenance_digest: [15; 32],
-        },
-    ];
-    let mut report = ConformanceReportV1 {
-        report_id: [1; 16],
-        subject_artifact_digest: [1; 32],
-        profile_digest: [2; 32],
-        normative_spec_digest: [3; 32],
-        execution_profile_digest: [4; 32],
-        fixture_bundle_digest: [5; 32],
-        evaluator_source_digest: [6; 32],
-        evaluator_binary_digest: [7; 32],
-        evaluator_protocol_digest: [8; 32],
-        implementation: ImplementationIdentityV1 {
-            implementation_id: "test".to_owned(),
-            source_digest: [1; 32],
-            build_digest: [2; 32],
-            binary_digest: [3; 32],
-            public_contract_digest: [4; 32],
-            organization_id: None,
-        },
-        independence: IndependenceEvidenceV1 {
-            technical_independent: true,
-            authorship_independent: true,
-            organizational_independent: false,
-            declaration_digest: [9; 32],
-            shared_code_audit_digest: [10; 32],
-            reviewer_ids: vec!["reviewer".to_owned()],
-        },
-        cases,
-        passed: 2,
-        failed: 0,
-        skipped: 0,
-        unavailable: 0,
-        not_applicable: 0,
-        replay_claim: ReplayClaimV1::Exact,
-        redaction_state: RedactionStateV1::None,
-        limitations_digest: [11; 32],
-        provenance_digest: [12; 32],
-        report_digest: [0; 32],
-    };
-    report.report_digest = fixture_ok("compute conformance report digest", report.digest());
-    report
-}
-
 fn proof_contract_fixture() -> Wave8ProofContractV1 {
     let (principal, grant, decision) = authorization_fixtures();
     Wave8ProofContractV1 {
@@ -462,7 +357,6 @@ fn proof_contract_fixture() -> Wave8ProofContractV1 {
             committed: true,
             failure_class: None,
         }],
-        conformance_report: conformance_report_fixture(),
         non_interference: wave8_non_interference_matrix([1; 32]),
     }
 }
@@ -545,28 +439,16 @@ fn replace_nested_field(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn replace_evidence_case_coordinate(
-    evidence: &ciborium::Value,
-    coordinate: ciborium::Value,
-) -> ciborium::Value {
+fn append_retired_contract_field(evidence: &ciborium::Value) -> ciborium::Value {
     let mut evidence_fields = cloned_array_fields(evidence, "decode evidence fixture structure");
     let mut contract_fields = cloned_array_fields(
         &evidence_fields[EvidenceField::Contract.index()],
         "decode proof-contract fixture structure",
     );
-    let mut report_fields = cloned_array_fields(
-        &contract_fields[ContractField::Report.index()],
-        "decode conformance-report fixture structure",
+    contract_fields.insert(
+        6,
+        ciborium::Value::Text(CONFORMANCE_REPORT_MAGIC_V1.to_owned()),
     );
-    let mut cases = cloned_array_fields(
-        &report_fields[ReportField::Cases.index()],
-        "decode conformance cases fixture structure",
-    );
-    let mut case = cloned_array_fields(&cases[0], "decode first conformance case structure");
-    case[CaseField::FirstCoordinate.index()] = coordinate;
-    cases[0] = ciborium::Value::Array(case);
-    report_fields[ReportField::Cases.index()] = ciborium::Value::Array(cases);
-    contract_fields[ContractField::Report.index()] = ciborium::Value::Array(report_fields);
     evidence_fields[EvidenceField::Contract.index()] = ciborium::Value::Array(contract_fields);
     ciborium::Value::Array(evidence_fields)
 }
@@ -674,12 +556,17 @@ fn exercise_scalar_boundaries<T, E>(
     value: &ciborium::Value,
     decode: impl Fn(&[u8]) -> Result<T, E>,
     encode: impl Fn(&T) -> Result<Vec<u8>, E>,
+    should_exercise: impl Fn(usize, &[usize]) -> bool,
 ) -> usize {
     let mut paths = Vec::new();
     structural_paths(value, &mut Vec::new(), &mut paths);
     let mut exercised = 0_usize;
     let mut mutant = value.clone();
-    for path in paths {
+    for (_, path) in paths
+        .into_iter()
+        .enumerate()
+        .filter(|(index, path)| should_exercise(*index, path))
+    {
         let original = value_at_path(value, &path).clone();
         for replacement in scalar_replacements(&original) {
             if replacement == original {
@@ -881,6 +768,7 @@ fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
     let verification = evidence.to_verification_result();
     assert!(verification.is_ok());
     let verification = verification.map(|result| {
+        assert_eq!(result.provenance_digest, ok(evidence.digest()));
         assert!(result.digest().is_ok());
         result.to_canonical_cbor()
     });
@@ -988,6 +876,12 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     let mut invalid_closure = evidence.clone();
     invalid_closure.host_closure.closure_event_type = "other".to_owned();
     expect_err(&verify_evidence(&invalid_closure));
+    let mut overstated_counterfactual = evidence.clone();
+    overstated_counterfactual.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+    assert_eq!(
+        verify_evidence(&overstated_counterfactual),
+        Err(EvidenceError::InvalidDependencyGraph)
+    );
     let value = decode_value(ok(evidence.to_canonical_cbor()));
     let mut paths = Vec::new();
     structural_paths(&value, &mut Vec::new(), &mut paths);
@@ -1038,6 +932,7 @@ fn malformed_verification_results_reach_closed_decoder_boundaries() {
             &result_value,
             VerificationResultV1::from_canonical_cbor,
             VerificationResultV1::to_canonical_cbor,
+            |_, _| true,
         ) > 100
     );
     expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
@@ -1105,6 +1000,7 @@ fn malformed_divergence_reports_reach_closed_decoder_boundaries() {
             &report_value,
             DivergenceReportV1::from_canonical_cbor,
             DivergenceReportV1::to_canonical_cbor,
+            |_, _| true,
         ) > 100
     );
     expect_err(&DivergenceReportV1::from_canonical_cbor(&encode_value(
@@ -1146,27 +1042,45 @@ fn malformed_divergence_reports_reach_closed_decoder_boundaries() {
 }
 
 #[test]
-fn public_evidence_decoder_enforces_case_coordinate_boundary() {
+fn public_moat_proof_contract_excludes_cnr1_and_rejects_the_retired_field() {
     let evidence = public_evidence_fixture();
-    let encoded = decode_value(ok(evidence.to_canonical_cbor()));
-    let exact = replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 128]));
-    assert!(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&exact)).is_ok());
+    let json = ok(serde_json::to_value(&evidence));
+    let contract = json
+        .get("contract")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("proof contract is absent")));
+    assert!(!contract.contains_key("conformance_report"));
 
-    let oversized =
-        replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 129]));
+    let encoded = decode_value(ok(evidence.to_canonical_cbor()));
+    let evidence_fields = cloned_array_fields(&encoded, "decode evidence fixture structure");
+    let contract_fields = cloned_array_fields(
+        &evidence_fields[EvidenceField::Contract.index()],
+        "decode proof-contract fixture structure",
+    );
+    assert_eq!(contract_fields.len(), 7);
+
+    let retired_shape = append_retired_contract_field(&encoded);
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-        &oversized,
+        &retired_shape,
     )));
 
-    let wrong_type =
-        replace_evidence_case_coordinate(&encoded, ciborium::Value::Text("coordinate".to_owned()));
+    let mut trailing_contract_fields = contract_fields;
+    trailing_contract_fields.push(ciborium::Value::Text(
+        CONFORMANCE_REPORT_MAGIC_V1.to_owned(),
+    ));
+    let mut trailing_evidence_fields = cloned_array_fields(
+        &encoded,
+        "decode evidence fixture structure for trailing field",
+    );
+    trailing_evidence_fields[EvidenceField::Contract.index()] =
+        ciborium::Value::Array(trailing_contract_fields);
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-        &wrong_type,
+        &ciborium::Value::Array(trailing_evidence_fields),
     )));
 }
 
 #[test]
-fn public_evidence_decoder_closes_scalar_and_length_boundaries() {
+fn public_evidence_decoder_closes_scalar_and_length_boundaries_even_structural_paths() {
     let evidence = evidence_with_optional_record_variants();
     let value = decode_value(ok(evidence.to_canonical_cbor()));
     assert!(
@@ -1174,6 +1088,21 @@ fn public_evidence_decoder_closes_scalar_and_length_boundaries() {
             &value,
             MoatProofEvidenceV1::from_canonical_cbor,
             MoatProofEvidenceV1::to_canonical_cbor,
+            |index, _| index.is_multiple_of(2),
+        ) > 0
+    );
+}
+
+#[test]
+fn public_evidence_decoder_closes_scalar_and_length_boundaries_odd_structural_paths() {
+    let evidence = evidence_with_optional_record_variants();
+    let value = decode_value(ok(evidence.to_canonical_cbor()));
+    assert!(
+        exercise_scalar_boundaries(
+            &value,
+            MoatProofEvidenceV1::from_canonical_cbor,
+            MoatProofEvidenceV1::to_canonical_cbor,
+            |index, _| !index.is_multiple_of(2),
         ) > 0
     );
 }
@@ -1187,17 +1116,6 @@ fn public_record_variants_round_trip_at_the_wire_seam() {
         ok(MoatProofEvidenceV1::from_canonical_cbor(&encoded)),
         evidence
     );
-
-    for code in safe_error_codes() {
-        let mut with_error = evidence.clone();
-        with_error.contract.conformance_report.cases[0].expected_error = Some(code);
-        with_error.contract.conformance_report.cases[0].actual_error = Some(code);
-        let encoded = ok(with_error.to_canonical_cbor());
-        assert_eq!(
-            ok(MoatProofEvidenceV1::from_canonical_cbor(&encoded)),
-            with_error
-        );
-    }
 
     let base = ok(public_evidence_fixture().to_verification_result());
     let outcomes = [

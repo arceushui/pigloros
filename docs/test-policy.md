@@ -8,6 +8,7 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 2. **Never** put `coverage(off)` on production code — only on `#[test]` / `#[tokio::test]` or inside `#[cfg(test)]`.
 3. Prefer deleting/simplifying unhittable branches over exemptions.
 4. Do not use rustdoc ` ```ignore ` fences — use ` ```text ` or a real doctest.
+5. Pull requests recognized as documentation-only by `.github/rust-scope.yml` skip Rust test, coverage, and cargo-crap jobs; Rust-affecting changes retain those gates.
 
 ## Enforcement
 
@@ -17,8 +18,8 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 | Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
-| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions |
-| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 |
+| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions for Rust-affecting changes |
+| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 for Rust-affecting changes |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
 ## Coverage attribution policy
@@ -31,8 +32,9 @@ production code or avoid writing a reachable behavior test.
 
 ## Change-risk policy
 
-The hosted coverage job publishes its completed LCOV report to a separate,
-required `cargo-crap` check running pinned v0.2.2. The verdict uses zero
+For Rust-affecting changes, the hosted coverage job publishes its completed
+LCOV report to a separate, required `cargo-crap` check running pinned v0.2.2.
+Documentation-only pull requests skip both jobs. The verdict uses zero
 tool tolerance and treats one IEEE-754 representation step (one ULP) as
 numerical equality; every larger score increase fails, including increases on
 moved functions. Every new function must score at most 30. Standard Cargo
@@ -44,8 +46,14 @@ suppress or truncate the report.
 Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so
 newly merged functions become existing baseline entries on the next change.
-If that trusted artifact has expired or the base never completed green CI, the
-pull request must rebase onto a green `main` commit.
+The pull request job polls for the artifact for up to five minutes to cover the
+short interval while the corresponding `main` cargo-crap job is still finishing.
+It trusts only an unexpired artifact attached to the exact base commit on the
+repository's `main` branch; it does not wait for unrelated slower jobs such as
+ASan. The aggregate `main` gate remains responsible for keeping `main` green.
+If that trusted artifact has expired or no successful `main` cargo-crap job has
+published one for the base, the pull request must rebase onto a newer `main`
+commit with a trusted baseline.
 
 PR #58 has one explicit initialization exception for pre-gate base
 `45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,
@@ -73,15 +81,18 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 ## Resource-intensive sanitizer jobs
 
 The complete workspace ASan gate retains all features and test targets, but
-partitions their execution across two hosted shards because Cargo runs separate
-test executables serially. The `bundle-contracts` shard runs the two
-`pos-conformance` bundle integration targets. The `remainder` shard runs
-`--workspace --exclude pos-conformance --tests`, then the `pos-conformance`
-library, binaries, and remaining three integration targets. Each shard
-serializes Cargo build/link jobs and bounds test threads at two. The required
+partitions their execution across four hosted shards because Cargo runs separate
+test executables serially. The `bundle-coverage` and `bundle-public` shards run
+the two `pos-conformance` bundle integration targets independently. The
+`moat-proof` shard runs the slow moat integration target independently, while
+`remainder` runs `--workspace --exclude pos-conformance --tests`, then the
+`pos-conformance` library, binaries, and the profile/provider integration
+targets. Each shard serializes Cargo build/link jobs and bounds test threads at
+two. The required
 `asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
-every shard succeeds. Partitioning changes throughput only: it does not remove
-a package, feature, test target, sanitizer, or coverage requirement. ASan plus
+every shard succeeds. Partitioning reduces wall-clock time by repeating setup
+and build work on independent runners; it does not remove a package, feature,
+test target, sanitizer, or coverage requirement. ASan plus
 `build-std` produces unusually large test-binary links; concurrent lld workers
 can exhaust the runner's available resources and crash with `SIGBUS` before any
 test executes.
@@ -127,7 +138,7 @@ counts are not cross-run invariants because LSan evaluates reachability and
 records matched suppressions separately in each test process.
 
 The complete workspace/all-features/all-test-target ASan scope and
-`detect_leaks=1` remain unchanged across the two shards. A separate 1,234-byte
+`detect_leaks=1` remain unchanged across the four shards. A separate 1,234-byte
 intentional leak runs under the same sanitizer, symbolizer, suppression file,
 and options; it must exit nonzero, report exactly one allocation, and match
 neither approved rule.

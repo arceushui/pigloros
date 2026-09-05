@@ -9,7 +9,7 @@ use crate::evaluator_protocol::{
     array, array_values, bool_value, contract_digest, contract_digest_matches, decode_canonical,
     encode, fixed_bytes, text, uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
-use crate::signed_bundle::{ExpectedResultKey, VerifiedBundle, VerifiedMember};
+use crate::signed_bundle::{ExpectedResultKey, SelectedBundleCaps, VerifiedBundle, VerifiedMember};
 
 const MAX_FIXTURES: usize = 65_536;
 const MAX_AUXILIARY: usize = 64;
@@ -198,6 +198,18 @@ impl EvaluatorHardCaps {
     }
 }
 
+impl From<EvaluatorHardCaps> for SelectedBundleCaps {
+    fn from(caps: EvaluatorHardCaps) -> Self {
+        Self {
+            max_profile_bytes: caps.max_profile_bytes,
+            max_bundle_members: caps.max_bundle_members,
+            max_member_path_bytes: caps.max_member_path_bytes,
+            max_member_bytes: caps.max_member_bytes,
+            max_total_bundle_bytes: caps.max_total_bundle_bytes,
+        }
+    }
+}
+
 /// One selected execution coordinate from CPF1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fixture {
@@ -310,6 +322,23 @@ impl From<ProtocolError> for ProfileError {
 }
 
 impl Profile {
+    /// Authenticate the selected archive caps from a digest-bound CPF1 member.
+    ///
+    /// This narrow decode is used after CFB1 manifest authentication and before
+    /// archive-wide member allocation.
+    ///
+    /// # Errors
+    /// Returns a closed profile failure for malformed bytes or identity mismatch.
+    pub fn authenticated_hard_caps(
+        bytes: &[u8],
+        request: &EvaluationRequest,
+    ) -> Result<EvaluatorHardCaps, ProfileError> {
+        let authenticated = authenticate_profile(bytes, request)?;
+        let caps = authenticated.hard_caps;
+        validate_authenticated_preflight_caps(bytes, &authenticated.value, request, caps)?;
+        Ok(caps)
+    }
+
     /// Decode the sole current eighteen-field CPF1 profile and verify its
     /// self-digest and the request-selected identities.
     ///
@@ -321,23 +350,20 @@ impl Profile {
         request: &EvaluationRequest,
     ) -> Result<Self, ProfileError> {
         let bytes = bundle.profile_bytes();
-        let value = decode_canonical(bytes)?;
-        let fields = array(&value, 18)?;
-        let header = decode_profile_header(fields)?;
-        let profile_digest = fixed_bytes(&fields[17])?;
-        if !contract_digest_matches(
-            b"PiglorOS.ConformanceProfile.v1",
-            &Value::Array(fields[..17].to_vec()),
+        let AuthenticatedProfile {
+            value,
+            header,
             profile_digest,
-        ) || profile_digest != bundle.profile_digest
-            || profile_digest != request.profile_digest
-        {
+            evaluator_artifact_digests,
+            hard_caps,
+        } = authenticate_profile(bytes, request)?;
+        let fields = array(&value, 18)?;
+        if profile_digest != bundle.profile_digest {
             return Err(ProfileError::DigestMismatch);
         }
 
         let execution_profile_digests = digest_list(&fields[7])?;
         let (registry, required_providers) = decode_provider_binding(&fields[8])?;
-        let (evaluator_artifact_digests, hard_caps) = decode_protocol(&fields[11])?;
         let fixtures = decode_fixtures(&fields[9], hard_caps)?;
         let allowed_divergences = decode_allowed_divergences(&fields[10])?;
         let (independence_requirements, trust_policy_snapshot_digest) =
@@ -354,7 +380,7 @@ impl Profile {
         validate_selected_caps(
             bytes.len(),
             &value,
-            &registry,
+            bundle,
             &fixtures,
             &allowed_divergences,
             hard_caps,
@@ -533,9 +559,7 @@ fn decode_fixtures(
     hard_caps: EvaluatorHardCaps,
 ) -> Result<Vec<Fixture>, ProfileError> {
     let values = array_values(value)?;
-    if values.is_empty() || values.len() > MAX_FIXTURES {
-        return Err(ProfileError::FieldOutOfBounds);
-    }
+    validate_fixture_count(values.len(), hard_caps.max_cases)?;
     let fixtures = values
         .iter()
         .map(|fixture| decode_fixture(fixture, hard_caps))
@@ -547,6 +571,13 @@ fn decode_fixtures(
         return Err(ProfileError::NonCanonicalOrder);
     }
     Ok(fixtures)
+}
+
+const fn validate_fixture_count(count: usize, selected_maximum: u64) -> Result<(), ProfileError> {
+    if count == 0 || count > MAX_FIXTURES || count as u64 > selected_maximum {
+        return Err(ProfileError::FieldOutOfBounds);
+    }
+    Ok(())
 }
 
 fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture, ProfileError> {
@@ -701,6 +732,77 @@ struct ProfileHeader {
     publication_digest: [u8; 32],
 }
 
+struct AuthenticatedProfile {
+    value: Value,
+    header: ProfileHeader,
+    profile_digest: [u8; 32],
+    evaluator_artifact_digests: [[u8; 32]; 3],
+    hard_caps: EvaluatorHardCaps,
+}
+
+fn authenticate_profile(
+    bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedProfile, ProfileError> {
+    let value = decode_canonical(bytes)?;
+    let fields = array(&value, 18)?;
+    let header = decode_profile_header(fields)?;
+    let profile_digest = fixed_bytes(&fields[17])?;
+    if !contract_digest_matches(
+        b"PiglorOS.ConformanceProfile.v1",
+        &Value::Array(fields[..17].to_vec()),
+        profile_digest,
+    ) || profile_digest != request.profile_digest
+    {
+        return Err(ProfileError::DigestMismatch);
+    }
+    let (evaluator_artifact_digests, hard_caps) = decode_protocol(&fields[11])?;
+    if evaluator_artifact_digests[0] != request.evaluator_protocol_digest
+        || hard_caps.digest()? != request.evaluator_hard_caps_digest
+    {
+        return Err(ProfileError::DigestMismatch);
+    }
+    Ok(AuthenticatedProfile {
+        value,
+        header,
+        profile_digest,
+        evaluator_artifact_digests,
+        hard_caps,
+    })
+}
+
+fn validate_authenticated_preflight_caps(
+    bytes: &[u8],
+    value: &Value,
+    request: &EvaluationRequest,
+    caps: EvaluatorHardCaps,
+) -> Result<(), ProfileError> {
+    let fields = array(value, 18)?;
+    let fixtures = array_values(&fields[9])?;
+    if bytes.len() as u64 > caps.max_profile_bytes
+        || value_depth(value) as u64 > caps.max_structural_nesting
+        || fixtures.len() as u64 > caps.max_cases
+        || request.output_capability.report_bytes_limit > caps.max_profile_bytes
+        || request.output_capability.diagnostic_bytes_limit > caps.max_diagnostic_bytes
+    {
+        return Err(ProfileError::FieldOutOfBounds);
+    }
+    for fixture in fixtures {
+        let fixture_fields = array(fixture, 24)?;
+        caps.admits(DeterministicBudget::from_value(&fixture_fields[16])?)?;
+    }
+    for divergence in array_values(&fields[10])? {
+        let divergence_fields = array(divergence, 2)?;
+        let Value::Bytes(coordinate) = &divergence_fields[1] else {
+            return Err(ProfileError::InvalidEncoding);
+        };
+        if coordinate.len() as u64 > caps.max_coordinate_bytes {
+            return Err(ProfileError::FieldOutOfBounds);
+        }
+    }
+    Ok(())
+}
+
 fn decode_profile_header(fields: &[Value]) -> Result<ProfileHeader, ProfileError> {
     if text(&fields[0])? != "CPF1" || uint(&fields[1])? != 1 {
         return Err(ProfileError::UnsupportedVersion);
@@ -714,7 +816,7 @@ fn decode_profile_header(fields: &[Value]) -> Result<ProfileHeader, ProfileError
         publication_digest: fixed_bytes(&fields[15])?,
     };
     if !semantic_version(text(&fields[3])?, Some(10))
-        || uint(&fields[4])? != 0
+        || uint(&fields[4])? > 3
         || [
             header.normative_spec_digest,
             header.execution_matrix_digest,
@@ -1056,7 +1158,7 @@ fn validate_artifact_paths(
 fn validate_selected_caps(
     encoded_len: usize,
     value: &Value,
-    registry: &ArtifactDescriptor,
+    bundle: &VerifiedBundle,
     fixtures: &[Fixture],
     allowed: &[AllowedDivergence],
     caps: EvaluatorHardCaps,
@@ -1067,26 +1169,16 @@ fn validate_selected_caps(
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
-    let mut member_count = 1_u64;
-    let mut total_bytes = registry.byte_length;
-    let mut artifacts_within_caps =
-        account_artifact_caps(registry, caps, &mut member_count, &mut total_bytes, false);
-    for fixture in fixtures {
-        for artifact in [&fixture.schema, &fixture.payload]
-            .into_iter()
-            .chain(&fixture.auxiliary)
-        {
-            artifacts_within_caps &=
-                account_artifact_caps(artifact, caps, &mut member_count, &mut total_bytes, true);
-        }
-        if let StrictOracle::Output(output) = &fixture.oracle {
-            artifacts_within_caps &=
-                account_artifact_caps(output, caps, &mut member_count, &mut total_bytes, true);
-        }
-    }
-    if !artifacts_within_caps
-        || member_count > caps.max_bundle_members
+    let member_count = bundle.members.len() as u64;
+    let total_bytes = bundle.members.values().fold(0_u64, |total, member| {
+        total.saturating_add(member.bytes.len() as u64)
+    });
+    if member_count > caps.max_bundle_members
         || total_bytes > caps.max_total_bundle_bytes
+        || bundle.members.iter().any(|(path, member)| {
+            path.len() as u64 > caps.max_member_path_bytes
+                || member.bytes.len() as u64 > caps.max_member_bytes
+        })
         || allowed
             .iter()
             .any(|item| item.first_coordinate.len() as u64 > caps.max_coordinate_bytes)
@@ -1095,25 +1187,6 @@ fn validate_selected_caps(
     } else {
         Ok(())
     }
-}
-
-const fn account_artifact_caps(
-    artifact: &ArtifactDescriptor,
-    caps: EvaluatorHardCaps,
-    member_count: &mut u64,
-    total_bytes: &mut u64,
-    increment: bool,
-) -> bool {
-    if increment {
-        *member_count = member_count.saturating_add(1);
-    }
-    *total_bytes = if increment {
-        total_bytes.saturating_add(artifact.byte_length)
-    } else {
-        *total_bytes
-    };
-    artifact.member_path.len() as u64 <= caps.max_member_path_bytes
-        && artifact.byte_length <= caps.max_member_bytes
 }
 
 fn value_depth(value: &Value) -> usize {

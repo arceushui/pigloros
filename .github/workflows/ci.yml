@@ -22,11 +22,10 @@
 #   --include-ignored: ensures #[ignore] tests run in CI; none may silently skip.
 #
 # Pull requests that change only documentation or other non-Rust content run the
-# lightweight scope job plus Trunk/CodeQL policy workflows. Coverage and its
-# cargo-crap consumer remain unconditional; the other Rust build, test,
-# security, platform, and report jobs are skipped successfully. Any Rust,
-# manifest, dependency, script, workflow, or build-policy change keeps the
-# complete gate set.
+# lightweight scope job plus Trunk/CodeQL policy workflows. Rust build, test,
+# coverage, cargo-crap, security, platform, and report jobs are skipped
+# successfully. Any Rust, manifest, dependency, script, workflow, or
+# build-policy change keeps the complete gate set.
 
 name: ci
 
@@ -62,7 +61,7 @@ jobs:
     outputs:
       rust: ${{ steps.scope.outputs.rust || steps.full.outputs.rust }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -86,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -103,7 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -122,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -148,7 +147,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -160,7 +159,15 @@ jobs:
       - name: Install evaluator packaging tools
         run: sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Build and verify standalone evaluator release evidence
-        run: bash scripts/package-reference-evaluator.sh "${RUNNER_TEMP}/reference-evaluator"
+        run: |
+          shadow_directory="${RUNNER_TEMP}/caller-path-shadow"
+          mkdir -p "${shadow_directory}"
+          for command in b3sum cargo cut dirname env git gzip install jq mkdir mktemp rm rustc rustup sed tar; do
+            printf '#!/bin/sh\nexit 99\n' >"${shadow_directory}/${command}"
+            chmod 0755 "${shadow_directory}/${command}"
+          done
+          PATH="${shadow_directory}:${PATH}" /bin/bash \
+            scripts/package-reference-evaluator.sh "${RUNNER_TEMP}/reference-evaluator"
       - name: Upload standalone evaluator release evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -174,7 +181,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install fixture verification tools
         run: sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Independently regenerate public fixture records
@@ -190,7 +197,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -245,7 +252,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -273,7 +280,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -292,6 +299,8 @@ jobs:
 
   coverage:
     name: coverage
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -302,7 +311,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -347,11 +356,14 @@ jobs:
 
   cargo-crap:
     name: cargo-crap
-    needs: coverage
+    needs:
+      - ci_change_scope
+      - coverage
+    if: ${{ needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -374,41 +386,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
-            echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          run_ids="$(gh api --method GET --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-            -f branch=main -f event=push -f status=success -f per_page=100 \
-            --jq ".workflow_runs[] | select(.head_sha == \"${BASE_SHA}\") | .id")"
-          run_id=''
-          while IFS= read -r candidate; do
-            [[ -n "${candidate}" ]] || continue
-            artifact_id="$(gh api --method GET \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts" \
-              --jq ".artifacts[] | select(.name == \"cargo-crap-baseline-${BASE_SHA}\") | .id")"
-            if [[ -n "${artifact_id}" ]]; then
-              run_id="${candidate}"
-              break
-            fi
-          done <<< "${run_ids}"
-          if [[ -n "${run_id}" ]]; then
-            echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
-            echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          # One-time initialization for this PR's pre-gate base. No future
-          # base may silently substitute a PR-controlled baseline.
-          test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"
-          git diff --quiet "${BASE_SHA}...HEAD" -- \
-            '*.rs' '**/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml \
-            .cargo/config.toml .cargo-crap.toml
-          echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
+        run: scripts/resolve_cargo_crap_baseline.sh
       - name: Download trusted base baseline
         if: ${{ steps.baseline.outputs.run-id != '' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -471,7 +449,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
@@ -487,7 +465,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
@@ -503,7 +481,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -520,7 +498,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-geiger
@@ -539,10 +517,12 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - bundle-contracts
+          - bundle-coverage
+          - bundle-public
+          - moat-proof
           - remainder
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rm -f rust-toolchain.toml
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
@@ -601,15 +581,21 @@ jobs:
               cargo "${cargo_args[@]}" "$@"
           }
           case "${ASAN_SHARD}" in
-            bundle-contracts)
+            bundle-coverage)
               run_asan_tests -p pos-conformance \
-                --test bundle_contract_coverage_public \
+                --test bundle_contract_coverage_public
+              ;;
+            bundle-public)
+              run_asan_tests -p pos-conformance \
                 --test bundle_contract_public
+              ;;
+            moat-proof)
+              run_asan_tests -p pos-conformance \
+                --test moat_proof_public
               ;;
             remainder)
               run_asan_tests --workspace --exclude pos-conformance --tests
               run_asan_tests -p pos-conformance --lib --bins \
-                --test moat_proof_public \
                 --test profile_contract_public \
                 --test provider_contract_public
               ;;
@@ -623,14 +609,25 @@ jobs:
   asan-gate:
     name: asan (address sanitizer)
     if: ${{ always() }}
-    needs: asan
+    needs:
+      - ci_change_scope
+      - asan
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every ASan shard
         env:
+          SCOPE_JOB_RESULT: ${{ needs.ci_change_scope.result }}
+          RUST_SCOPE_RESULT: ${{ needs.ci_change_scope.outputs.rust }}
           ASAN_SHARDS_RESULT: ${{ needs.asan.result }}
-        run: test "${ASAN_SHARDS_RESULT}" = success
+        run: |
+          set -euo pipefail
+          if [[ "${SCOPE_JOB_RESULT}" == "success" \
+            && "${RUST_SCOPE_RESULT}" == "false" \
+            && "${ASAN_SHARDS_RESULT}" == "skipped" ]]; then
+            exit 0
+          fi
+          test "${ASAN_SHARDS_RESULT}" = success
 
   docker-build:
     name: docker-build
@@ -639,7 +636,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -673,7 +670,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -694,7 +691,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -729,7 +726,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: 3.12.11
@@ -763,7 +760,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -800,7 +797,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -830,6 +827,7 @@ jobs:
     name: ci-gate
     if: ${{ always() }}
     needs:
+      - ci_change_scope
       - fmt
       - rustdoc
       - test
@@ -852,6 +850,8 @@ jobs:
     steps:
       - name: Require every blocking CI job to pass
         env:
+          SCOPE_JOB_RESULT: ${{ needs.ci_change_scope.result }}
+          RUST_SCOPE_RESULT: ${{ needs.ci_change_scope.outputs.rust }}
           FMT_RESULT: ${{ needs.fmt.result }}
           RUSTDOC_RESULT: ${{ needs.rustdoc.result }}
           TEST_RESULT: ${{ needs.test.result }}
@@ -872,16 +872,36 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for result_name in \
-            FMT_RESULT RUSTDOC_RESULT TEST_RESULT CONFORMANCE_FIXTURES_RESULT \
-            MATERIALIZE_CONFORMANCE_BUNDLES_RESULT CONFORMANCE_NON_LINUX_RESULT \
-            CLIPPY_RESULT COVERAGE_RESULT CARGO_CRAP_RESULT \
-            AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
-            DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT; do
-            result="${!result_name}"
-            if [[ "${result}" != "success" ]]; then
+          if [[ "${SCOPE_JOB_RESULT}" != "success" ]]; then
+            echo "SCOPE_JOB_RESULT=${SCOPE_JOB_RESULT}" >&2
+            failed=1
+          fi
+
+          check_results() {
+            local allow_scope_skip="$1"
+            shift
+            for result_name in "$@"; do
+              result="${!result_name}"
+              if [[ "${result}" == "success" ]]; then
+                continue
+              fi
+              if [[ "${allow_scope_skip}" == "true" \
+                && "${RUST_SCOPE_RESULT}" == "false" \
+                && "${result}" == "skipped" ]]; then
+                continue
+              fi
               echo "${result_name}=${result}" >&2
               failed=1
-            fi
-          done
+            done
+          }
+
+          check_results true \
+            FMT_RESULT RUSTDOC_RESULT TEST_RESULT CLIPPY_RESULT \
+            AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
+            DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT \
+            COVERAGE_RESULT CARGO_CRAP_RESULT
+          check_results false \
+            CONFORMANCE_FIXTURES_RESULT MATERIALIZE_CONFORMANCE_BUNDLES_RESULT \
+            CONFORMANCE_NON_LINUX_RESULT
+
           exit "${failed}"

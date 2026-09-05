@@ -27,15 +27,21 @@ run_asan_tests() {
     cargo "${cargo_args[@]}" "$@"
 }
 case "${ASAN_SHARD}" in
-  bundle-contracts)
+  bundle-coverage)
     run_asan_tests -p pos-conformance \\
-      --test bundle_contract_coverage_public \\
+      --test bundle_contract_coverage_public
+    ;;
+  bundle-public)
+    run_asan_tests -p pos-conformance \\
       --test bundle_contract_public
+    ;;
+  moat-proof)
+    run_asan_tests -p pos-conformance \\
+      --test moat_proof_public
     ;;
   remainder)
     run_asan_tests --workspace --exclude pos-conformance --tests
     run_asan_tests -p pos-conformance --lib --bins \\
-      --test moat_proof_public \\
       --test profile_contract_public \\
       --test provider_contract_public
     ;;
@@ -79,24 +85,38 @@ EXPECTED_JOB_KEYS = {
 }
 EXPECTED_STRATEGY = {
     "fail-fast": False,
-    "matrix": {"shard": ["bundle-contracts", "remainder"]},
+    "matrix": {
+        "shard": ["bundle-coverage", "bundle-public", "moat-proof", "remainder"]
+    },
 }
 EXPECTED_GATE_JOB = {
     "name": "asan (address sanitizer)",
     "if": "${{ always() }}",
-    "needs": "asan",
+    "needs": ["ci_change_scope", "asan"],
     "runs-on": "ubuntu-24.04",
     "timeout-minutes": 5,
     "steps": [
         {
             "name": "Require every ASan shard",
-            "env": {"ASAN_SHARDS_RESULT": "${{ needs.asan.result }}"},
-            "run": 'test "${ASAN_SHARDS_RESULT}" = success',
+            "env": {
+                "SCOPE_JOB_RESULT": "${{ needs.ci_change_scope.result }}",
+                "RUST_SCOPE_RESULT": "${{ needs.ci_change_scope.outputs.rust }}",
+                "ASAN_SHARDS_RESULT": "${{ needs.asan.result }}",
+            },
+            "run": (
+                "set -euo pipefail\n"
+                'if [[ "${SCOPE_JOB_RESULT}" == "success" \\\n'
+                '  && "${RUST_SCOPE_RESULT}" == "false" \\\n'
+                '  && "${ASAN_SHARDS_RESULT}" == "skipped" ]]; then\n'
+                "  exit 0\n"
+                "fi\n"
+                'test "${ASAN_SHARDS_RESULT}" = success\n'
+            ),
         }
     ],
 }
 EXPECTED_SETUP_STEPS = [
-    {"uses": "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"},
+    {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
     {"run": "rm -f rust-toolchain.toml"},
     {
         "uses": "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772",

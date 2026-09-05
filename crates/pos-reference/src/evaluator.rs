@@ -1,23 +1,24 @@
 //! Resource-bounded black-box evaluation behind one public operation.
 
-use std::cmp::Ordering;
-
+use crate::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use crate::evaluator_protocol::{
-    CaseOutcome, CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence,
-    ProtocolError, SubjectAdapterKind,
+    CaseOutcome, CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError,
+    SubjectAdapterKind,
 };
 use crate::profile::{
-    DeterministicBudget, Fixture, NamespacedFailure, Profile, ProfileError, StrictOracle,
+    DeterministicBudget, EvaluatorHardCaps, Fixture, NamespacedFailure, Profile, ProfileError,
+    StrictOracle,
 };
-use crate::signed_bundle::{verify_signed_bundle, BundleError, VerifiedBundle};
+use crate::signed_bundle::{
+    preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, VerifiedBundle,
+};
+use std::cmp::Ordering;
 
-/// Evaluator build and review identity recorded in every CNR1 report.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EvaluatorIdentity {
-    pub source_digest: [u8; 32],
-    pub binary_digest: [u8; 32],
-    pub independence: IndependenceEvidence,
-}
+const SAFE_ERROR_INVALID_ENCODING: u8 = 0;
+const SAFE_ERROR_DIGEST_MISMATCH: u8 = 4;
+const SAFE_ERROR_CLOSURE_INCOMPLETE: u8 = 9;
+const SAFE_ERROR_PROFILE_UNSUPPORTED: u8 = 11;
+const SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED: u8 = 13;
 
 /// Deterministic resource consumption reported by a public subject adapter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -173,22 +174,23 @@ pub fn evaluate(
     request_bytes: &[u8],
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
-    evaluator: &EvaluatorIdentity,
+    evaluator: &VerifiedEvaluatorBuildIdentity,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<EvaluationArtifacts, EvaluatorError> {
-    let request = EvaluationRequest::from_canonical_cbor(request_bytes)?;
-    if adapter.kind() != request.subject_adapter
-        || adapter.subject_artifact_digest() != request.subject_artifact_digest
-    {
-        return Err(EvaluatorError::AdapterIdentity);
-    }
-    let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
-    let profile = Profile::from_bundle(&bundle, &request)?;
+    let (request, bundle, profile) = verified_inputs(
+        request_bytes,
+        archive_bytes,
+        trust_policy_bytes,
+        evaluator,
+        adapter.kind(),
+        adapter.subject_artifact_digest(),
+    )?;
     let requirements = profile.independence_requirements;
-    if requirements.technical && !evaluator.independence.technical_independent
-        || requirements.authorship && !evaluator.independence.authorship_independent
-        || requirements.organizational && !evaluator.independence.organizational_independent
-        || requirements.declaration_digest != evaluator.independence.declaration_digest
+    let independence = evaluator.independence();
+    if requirements.technical && !independence.technical_independent
+        || requirements.authorship && !independence.authorship_independent
+        || requirements.organizational && !independence.organizational_independent
+        || requirements.declaration_digest != independence.declaration_digest
     {
         return Err(EvaluatorError::Independence);
     }
@@ -212,16 +214,16 @@ pub fn evaluate(
         normative_spec_digest: profile.normative_spec_digest,
         execution_profile_digest: request.execution_profile_digest,
         fixture_bundle_digest: bundle.archive_digest,
-        evaluator_source_digest: evaluator.source_digest,
-        evaluator_binary_digest: evaluator.binary_digest,
+        evaluator_source_digest: evaluator.source_digest(),
+        evaluator_binary_digest: evaluator.binary_digest(),
         evaluator_protocol_digest: profile.evaluator_protocol_digest,
         implementation: request.implementation.clone(),
-        independence: evaluator.independence.clone(),
+        independence: independence.clone(),
         cases,
         replay_claim,
         redaction_state,
         limitations_digest: profile.limitations_digest,
-        provenance_digest: profile.provenance_digest,
+        evaluator_build_provenance_digest: evaluator.build_provenance_digest(),
         report_digest: [0; 32],
     };
     report.report_digest = report
@@ -247,6 +249,42 @@ pub fn evaluate(
     })
 }
 
+fn verified_inputs(
+    request_bytes: &[u8],
+    archive_bytes: &[u8],
+    trust_policy_bytes: &[u8],
+    evaluator: &VerifiedEvaluatorBuildIdentity,
+    adapter_kind: SubjectAdapterKind,
+    subject_artifact_digest: [u8; 32],
+) -> Result<(EvaluationRequest, VerifiedBundle, Profile), EvaluatorError> {
+    let request = EvaluationRequest::from_canonical_cbor(request_bytes)?;
+    if adapter_kind != request.subject_adapter
+        || subject_artifact_digest != request.subject_artifact_digest
+    {
+        return Err(EvaluatorError::AdapterIdentity);
+    }
+    let caps = enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, &request)?;
+    if !evaluator.admits_compression_expansion(caps.max_compression_expansion) {
+        return Err(EvaluatorError::Profile);
+    }
+    let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
+    let profile = Profile::from_bundle(&bundle, &request)?;
+    Ok((request, bundle, profile))
+}
+
+fn enforce_authenticated_selected_caps(
+    archive_bytes: &[u8],
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<EvaluatorHardCaps, EvaluatorError> {
+    let preflight = preflight_signed_bundle_bytes(archive_bytes, trust_policy_bytes, request)?;
+    let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)?;
+    preflight
+        .enforce_selected_caps(caps.into())
+        .map_err(|_| EvaluatorError::Profile)?;
+    Ok(caps)
+}
+
 fn evaluate_cases(
     profile: &Profile,
     bundle: &VerifiedBundle,
@@ -258,15 +296,45 @@ fn evaluate_cases(
         if !fixture.modes.contains(&bundle.mode) {
             continue;
         }
-        let attempt = case_attempt(bundle, fixture, bundle.mode)?;
-        let observation = adapter.execute(&attempt);
-        outcomes.push(case_outcome(fixture, bundle.mode, observation));
+        outcomes.push(evaluate_case(profile, bundle, fixture, adapter)?);
     }
-    if outcomes.is_empty() {
-        Err(EvaluatorError::Profile)
-    } else {
-        Ok(outcomes)
+    (!outcomes.is_empty())
+        .then_some(outcomes)
+        .ok_or(EvaluatorError::Profile)
+}
+
+fn evaluate_case(
+    profile: &Profile,
+    bundle: &VerifiedBundle,
+    fixture: &Fixture,
+    adapter: &mut impl SubjectAdapter,
+) -> Result<CaseOutcome, EvaluatorError> {
+    let attempt = case_attempt(bundle, fixture, bundle.mode)?;
+    let observation = adapter.execute(&attempt);
+    enforce_observed_coordinate_limit(
+        &observation,
+        profile.evaluator_hard_caps.max_coordinate_bytes,
+    )?;
+    Ok(case_outcome(fixture, bundle.mode, observation))
+}
+
+const fn enforce_observed_coordinate_limit(
+    observation: &Result<SubjectObservation, AdapterError>,
+    maximum: u64,
+) -> Result<(), EvaluatorError> {
+    let Ok(SubjectObservation {
+        result: SubjectResult::Divergence {
+            first_coordinate, ..
+        },
+        ..
+    }) = observation
+    else {
+        return Ok(());
+    };
+    if first_coordinate.is_empty() || first_coordinate.len() as u64 > maximum {
+        return Err(EvaluatorError::Profile);
     }
+    Ok(())
 }
 
 fn case_attempt(
@@ -324,10 +392,13 @@ fn case_outcome(
         redaction_state: fixture.redaction_state,
         provenance_digest: fixture.provenance_digest,
     };
+    if outcome.redaction_state >= 2 {
+        return outcome;
+    }
     match &fixture.oracle {
         StrictOracle::Output(expected) => outcome.expected_digest = Some(expected.digest),
-        StrictOracle::Failure(expected) => {
-            outcome.expected_digest = Some(failure_digest(expected));
+        StrictOracle::Failure(_) => {
+            outcome.expected_error = failure_safe_error(fixture.expected_verification_outcome);
         }
         StrictOracle::Divergence {
             classification,
@@ -339,16 +410,12 @@ fn case_outcome(
             ));
         }
     }
-    if outcome.redaction_state >= 2 {
-        outcome.expected_digest = None;
-        return outcome;
-    }
     let Ok(observation) = observation else {
         return outcome;
     };
     if observation.usage.exceeds(fixture.deterministic_budget) {
         outcome.outcome = CaseStatus::Fail;
-        outcome.actual_error = Some(13);
+        outcome.actual_error = Some(SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED);
         return outcome;
     }
     match (&fixture.oracle, observation.result) {
@@ -364,13 +431,13 @@ fn case_outcome(
             };
         }
         (StrictOracle::Failure(expected), SubjectResult::Failure(actual)) => {
-            let actual_digest = failure_digest(&actual);
-            outcome.actual_digest = Some(actual_digest);
-            outcome.outcome = if expected == &actual {
-                CaseStatus::Pass
+            if expected == &actual {
+                outcome.actual_error = outcome.expected_error;
+                outcome.outcome = CaseStatus::Pass;
             } else {
-                CaseStatus::Fail
-            };
+                outcome.actual_error = Some(SAFE_ERROR_DIGEST_MISMATCH);
+                outcome.outcome = CaseStatus::Fail;
+            }
         }
         (
             StrictOracle::Divergence {
@@ -401,14 +468,15 @@ fn case_outcome(
     outcome
 }
 
-fn failure_digest(value: &NamespacedFailure) -> [u8; 32] {
-    let mut bytes = b"PiglorOS.NamespacedFailure.v1\0".to_vec();
-    for field in [&value.owner_id, &value.contract_version, &value.code_id] {
-        let length = field.len() as u64;
-        bytes.extend_from_slice(&length.to_be_bytes());
-        bytes.extend_from_slice(field.as_bytes());
-    }
-    *blake3::hash(&bytes).as_bytes()
+fn failure_safe_error(verification_outcome: u8) -> Option<u8> {
+    [
+        None,
+        None,
+        Some(SAFE_ERROR_INVALID_ENCODING),
+        Some(SAFE_ERROR_CLOSURE_INCOMPLETE),
+        Some(SAFE_ERROR_PROFILE_UNSUPPORTED),
+        Some(SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED),
+    ][usize::from(verification_outcome)]
 }
 
 fn expected_divergence_digest(classification: u8, coordinate: &[u8]) -> [u8; 32] {

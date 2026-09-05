@@ -9,11 +9,20 @@ import sys
 import yaml
 
 
-CHECKOUT_ACTION = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
+CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 INSTALL_ACTION = "taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780"
 UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 BOOTSTRAP_BASE_SHA = "45bdac85b29d273573583f846ba7acd2b3a12573"
+BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
+SCOPED_JOB_IF = (
+    "${{ needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request' }}"
+)
+SCOPED_CARGO_CRAP_JOB_IF = (
+    "${{ needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request') }}"
+)
 GENERATE_BASELINE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
@@ -31,41 +40,6 @@ ANALYZE_COMMAND = (
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
-RESOLVE_BASELINE_COMMAND = f'''set -euo pipefail
-if [[ "${{EVENT_NAME}}" != "pull_request" ]]; then
-  echo 'bootstrap=true' >> "${{GITHUB_OUTPUT}}"
-  exit 0
-fi
-
-run_ids="$(gh api --method GET --paginate \\
-  "repos/${{GITHUB_REPOSITORY}}/actions/workflows/ci.yml/runs" \\
-  -f branch=main -f event=push -f status=success -f per_page=100 \\
-  --jq ".workflow_runs[] | select(.head_sha == \\"${{BASE_SHA}}\\") | .id")"
-run_id=''
-while IFS= read -r candidate; do
-  [[ -n "${{candidate}}" ]] || continue
-  artifact_id="$(gh api --method GET \\
-    "repos/${{GITHUB_REPOSITORY}}/actions/runs/${{candidate}}/artifacts" \\
-    --jq ".artifacts[] | select(.name == \\"cargo-crap-baseline-${{BASE_SHA}}\\") | .id")"
-  if [[ -n "${{artifact_id}}" ]]; then
-    run_id="${{candidate}}"
-    break
-  fi
-done <<< "${{run_ids}}"
-if [[ -n "${{run_id}}" ]]; then
-  echo "run-id=${{run_id}}" >> "${{GITHUB_OUTPUT}}"
-  echo 'bootstrap=false' >> "${{GITHUB_OUTPUT}}"
-  exit 0
-fi
-
-# One-time initialization for this PR's pre-gate base. No future
-# base may silently substitute a PR-controlled baseline.
-test "${{BASE_SHA}}" = "{BOOTSTRAP_BASE_SHA}"
-git diff --quiet "${{BASE_SHA}}...HEAD" -- \\
-  '*.rs' '**/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml \\
-  .cargo/config.toml .cargo-crap.toml
-echo 'bootstrap=true' >> "${{GITHUB_OUTPUT}}"
-'''
 
 
 class PolicyError(RuntimeError):
@@ -85,7 +59,76 @@ def named_step(steps: list[object], name: str) -> dict:
     return matches[0]
 
 
-def check_workflow(workflow_path: pathlib.Path) -> None:
+def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
+    path = path or pathlib.Path(__file__).with_name("resolve_cargo_crap_baseline.sh")
+    resolver = path.read_text(encoding="utf-8")
+    required_fragments = (
+        ("#!/usr/bin/env bash\n", "baseline resolver must be an executable Bash script"),
+        ("set -euo pipefail\n", "baseline resolver must fail closed"),
+        ("BASELINE_RETRY_ATTEMPTS=30\n", "baseline retry attempts changed"),
+        ("BASELINE_RETRY_DELAY_SECONDS=10\n", "baseline retry delay changed"),
+        (
+            "for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do",
+            "baseline resolver must use bounded retries",
+        ),
+        (
+            "if (( attempt < BASELINE_RETRY_ATTEMPTS )); then",
+            "baseline resolver must not sleep after the final attempt",
+        ),
+        (
+            'sleep "${BASELINE_RETRY_DELAY_SECONDS}"',
+            "baseline resolver retry delay is not enforced",
+        ),
+        (
+            '"repos/${GITHUB_REPOSITORY}/actions/artifacts"',
+            "baseline resolver must inspect repository artifacts directly",
+        ),
+        (
+            '-f name="${BASELINE_ARTIFACT_NAME}"',
+            "baseline resolver must request the exact baseline artifact",
+        ),
+        (
+            "select(.expired == false)",
+            "baseline resolver must reject expired artifacts",
+        ),
+        (
+            'select(.workflow_run.head_branch == \\"main\\")',
+            "baseline resolver must require a main-branch artifact",
+        ),
+        (
+            'select(.workflow_run.head_sha == \\"${BASE_SHA}\\")',
+            "baseline resolver must require the exact base commit",
+        ),
+        (
+            "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
+            "baseline resolver must reject fork artifacts",
+        ),
+        (
+            'test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"',
+            "baseline bootstrap is not restricted to the approved base",
+        ),
+        (
+            'git diff --quiet "${BASE_SHA}...HEAD"',
+            "baseline bootstrap must reject Rust-affecting changes",
+        ),
+    )
+    for fragment, message in required_fragments:
+        require(fragment in resolver, message)
+    require(
+        '"repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"' not in resolver,
+        "baseline resolver must not wait for unrelated main workflow jobs",
+    )
+    require(
+        "-f status=success" not in resolver,
+        "baseline resolver must not require whole-workflow completion",
+    )
+
+
+def check_workflow(
+    workflow_path: pathlib.Path,
+    baseline_resolver_path: pathlib.Path | None = None,
+) -> None:
+    check_baseline_resolver(baseline_resolver_path)
     with workflow_path.open(encoding="utf-8") as stream:
         workflow = yaml.safe_load(stream)
 
@@ -99,7 +142,14 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     coverage = jobs.get("coverage")
     require(isinstance(coverage, dict), "missing required coverage job")
     require("continue-on-error" not in coverage, "coverage job must be blocking")
-    require("if" not in coverage, "coverage job must be unconditional")
+    require(
+        coverage.get("needs") == "ci_change_scope",
+        "coverage must depend on the trusted Rust scope result",
+    )
+    require(
+        coverage.get("if") == SCOPED_JOB_IF,
+        "coverage must skip documentation-only pull requests",
+    )
 
     coverage_steps = coverage.get("steps")
     require(isinstance(coverage_steps, list), "coverage steps must be an array")
@@ -128,11 +178,19 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     job = jobs.get("cargo-crap")
     require(isinstance(job, dict), "missing visible cargo-crap job")
     require(
-        set(job) == {"name", "needs", "runs-on", "timeout-minutes", "steps"},
+        set(job)
+        == {"name", "needs", "if", "runs-on", "timeout-minutes", "steps"},
         "cargo-crap job metadata or execution controls changed",
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
-    require(job.get("needs") == "coverage", "cargo-crap must depend on coverage")
+    require(
+        job.get("needs") == ["ci_change_scope", "coverage"],
+        "cargo-crap must depend on the trusted scope result and coverage",
+    )
+    require(
+        job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
+        "cargo-crap must skip documentation-only pull requests",
+    )
     require(job.get("runs-on") == "ubuntu-latest", "cargo-crap runner changed")
     require(job.get("timeout-minutes") == 10, "cargo-crap timeout changed")
     steps = job.get("steps")
@@ -184,7 +242,7 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
                 "EVENT_NAME": "${{ github.event_name }}",
                 "GH_TOKEN": "${{ github.token }}",
             },
-            "run": RESOLVE_BASELINE_COMMAND,
+            "run": BASELINE_RESOLVER,
         },
         "trusted baseline resolution changed",
     )
