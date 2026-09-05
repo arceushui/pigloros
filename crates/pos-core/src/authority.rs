@@ -2800,9 +2800,7 @@ fn validate_decision(
         .and_then(|()| validate_plugin_context(decoded.plugin_id, decoded.installation_id))
         .and_then(|()| validate_decision_evidence(&decoded))
         .and_then(|()| {
-            if decoded.acting_delegates.len() > usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1 {
-                Err(AuthorityErrorV1::FieldOutOfBounds)
-            } else if decision_digest(&decoded) == decoded.decision_digest {
+            if decision_digest(&decoded) == decoded.decision_digest {
                 Ok(decoded)
             } else {
                 Err(AuthorityErrorV1::DigestMismatch)
