@@ -4335,3 +4335,153 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_private_error_paths {
+    use super::*;
+    use crate::driver::{ObservationView, StepOutput};
+    use pos_core::{
+        clock::Seq,
+        event::{CanonicalBytes, EventDraft, Kind},
+        ids::{EntityId, TimelineId},
+        ConsentGrantedV1, ConsentRevokedV1,
+    };
+    use pos_store::{open_store, StoreConfig};
+
+    struct EmptyDriver;
+
+    impl Driver for EmptyDriver {
+        fn name(&self) -> &'static str {
+            "coverage-private-empty"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+    }
+
+    struct MismatchedSensitiveDriver {
+        entity: EntityId,
+    }
+
+    impl Driver for MismatchedSensitiveDriver {
+        fn name(&self) -> &'static str {
+            "coverage-private-mismatch"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                Kind::new("retention.extend.v1"),
+                CanonicalBytes::from_static(b"coverage"),
+            )]))
+        }
+    }
+
+    fn grant(subject_id: EntityId) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "coverage".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        }
+    }
+
+    #[test]
+    fn unbound_and_revoked_private_fences_are_exercised() {
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let other_subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let consent_grant = grant(subject);
+        let token = authority.record_grant_on_timeline(timeline, &consent_grant);
+
+        let mut mismatch = PluginRegistry::new().with_consent_authority(authority.clone());
+        mismatch.register_driver(Box::new(MismatchedSensitiveDriver {
+            entity: other_subject,
+        }));
+        mismatch
+            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
+            .unwrap_err();
+
+        let mut commit = PluginRegistry::new().with_consent_authority(authority.clone());
+        commit.register_driver(Box::new(EmptyDriver));
+        commit
+            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
+            .unwrap();
+        authority
+            .record_revocation_on_timeline(
+                timeline,
+                &ConsentRevokedV1 {
+                    subject_id: subject,
+                    grantee_id: consent_grant.grantee_id,
+                    grant_seq: consent_grant.grant_seq,
+                    fence_seq: 1,
+                },
+            )
+            .unwrap();
+        commit.commit_step_at(Seq::ZERO, 1).unwrap_err();
+
+        let fence_authority = ConsentAuthority::new();
+        let fence_grant = grant(subject);
+        let fence_token = fence_authority.record_grant_on_timeline(timeline, &fence_grant);
+        let mut fenced_append =
+            PluginRegistry::new().with_consent_authority(fence_authority.clone());
+        fenced_append.register_driver(Box::new(EmptyDriver));
+        fenced_append
+            .step_all_anchored_protected(timeline, Seq::ZERO, fence_token, 0, &[])
+            .unwrap();
+        fence_authority
+            .record_revocation_on_timeline(
+                timeline,
+                &ConsentRevokedV1 {
+                    subject_id: subject,
+                    grantee_id: fence_grant.grantee_id,
+                    grant_seq: fence_grant.grant_seq,
+                    fence_seq: 1,
+                },
+            )
+            .unwrap();
+
+        let mut store = open_store(StoreConfig::Memory).unwrap();
+        fenced_append
+            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &[])
+            .unwrap_err();
+
+        let append_authority = ConsentAuthority::new();
+        let append_token = append_authority.record_grant_on_timeline(timeline, &grant(subject));
+        let mut protected_append = PluginRegistry::new().with_consent_authority(append_authority);
+        protected_append.register_driver(Box::new(EmptyDriver));
+        protected_append
+            .step_all_anchored_protected(timeline, Seq::ZERO, append_token, 0, &[])
+            .unwrap();
+        protected_append.consent_gate = None;
+        protected_append
+            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
+            .unwrap_err();
+
+        let mut public_append = PluginRegistry::new();
+        public_append.register_driver(Box::new(EmptyDriver));
+        public_append
+            .step_all_anchored(timeline, Seq::ZERO)
+            .unwrap();
+        public_append.consent_gate = None;
+        public_append
+            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
+            .unwrap_err();
+    }
+}
