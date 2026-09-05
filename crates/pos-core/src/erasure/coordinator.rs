@@ -525,7 +525,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .and_then(|(scope, freeze, state)| {
                 record.replace_state(state);
                 record
-                    .retain_atomic_freeze(admission, scope, freeze)
+                    .retain_atomic_freeze(admission, &scope, freeze)
                     .map(|objects| (objects, record.clone()))
             })
             .and_then(|(objects, record)| {

@@ -931,7 +931,7 @@ impl RecoveredErasureV1 {
     pub(super) fn retain_atomic_freeze(
         &mut self,
         admission: &ErasureAtomicFreezeAdmissionV1,
-        scope: ErasureScopeCommitmentV1,
+        scope: &ErasureScopeCommitmentV1,
         freeze: ErasureFreezeProvenanceV1,
     ) -> Result<Vec<ErasurePersistenceObjectV1>, ErasureErrorV1> {
         TargetClosureV1::new(self.request.reference(), admission.targets().to_vec()).and_then(
@@ -982,12 +982,12 @@ impl RecoveredErasureV1 {
                         Some(admission.freeze_authorization_evidence().reference());
                     self.manifest.freeze_provenance = Some(freeze.reference());
                     self.manifest.obligation_set = Some(admission.obligation_set().reference());
-                    self.targets = closure.targets.clone();
+                    self.targets.clone_from(&closure.targets);
                     self.scope = Some(scope.clone());
                     self.freeze_admission = Some(admission.freeze_admission_evidence().clone());
                     self.freeze_authorization =
                         Some(admission.freeze_authorization_evidence().clone());
-                    self.freeze_provenance = Some(freeze.clone());
+                    self.freeze_provenance = Some(freeze);
                     self.obligation_set = Some(admission.obligation_set().clone());
                     self.obligations = admission.obligations().to_vec();
                 })
