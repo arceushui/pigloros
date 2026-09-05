@@ -1016,11 +1016,17 @@ fn recovery_rejects_wrong_width_persistence_envelopes() -> Result<(), ErasureErr
     graph
         .adapter
         .replace_manifest_canonical_cbor(graph.request.reference(), malformed_array.clone())?;
-    assert_recovery_fails_and_retains_with_error(
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let failures = assert_recovery_fails_and_retains_with_error(
         graph.adapter,
         &graph.request,
         ErasureErrorV1::InvalidEncoding,
     )?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
 
     for (manifest_field, nested_field) in [
         (MANIFEST_TARGET_CLOSURE_FIELD, None),
@@ -1078,11 +1084,17 @@ fn recovery_rejects_malformed_active_attempt_fields() -> Result<(), ErasureError
             MANIFEST_ACTIVE_FIELD,
             active,
         )?;
-        assert_recovery_fails_and_retains_with_error(
+        let manifest = graph
+            .adapter
+            .current_manifest(graph.request.reference())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let failures = assert_recovery_fails_and_retains_with_error(
             graph.adapter,
             &graph.request,
             ErasureErrorV1::InvalidEncoding,
         )?;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].failure_subject(), manifest.digest());
     }
     Ok(())
 }

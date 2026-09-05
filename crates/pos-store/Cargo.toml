@@ -23,5 +23,9 @@ rusqlite = { workspace = true, optional = true }
 blake3 = { workspace = true }
 tempfile = "3"
 
+[[bench]]
+name = "memory_erasure"
+harness = false
+
 [lints]
 workspace = true
