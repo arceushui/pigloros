@@ -1482,9 +1482,8 @@ impl AuthorizationDecisionV1 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuthorityEvaluatorV1;
 
-// Validated grants encode into an in-memory buffer infallibly. Keep the
-// fail-closed fallback for defence in depth without treating it as reachable.
-#[cfg_attr(coverage_nightly, coverage(off))]
+// Keep the defensive provenance failure transition isolated so its fail-closed
+// result can be verified without weakening the validated grant API.
 fn deny_missing_grant_provenance(evaluation: &mut AuthorizationEvaluationV1) -> Vec<Hash> {
     *evaluation = AuthorizationEvaluationV1::denied(
         AuthorizationOutcomeV1::IndeterminateFailClosed,
@@ -3057,5 +3056,24 @@ fn decode_principal_set(value: &Value) -> Result<Vec<PrincipalRefV1>, AuthorityE
     match value {
         Value::Array(values) => values.iter().map(decode_principal_value).collect(),
         _ => Err(AuthorityErrorV1::InvalidEncoding),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_paths {
+    use super::*;
+
+    #[test]
+    fn missing_grant_provenance_fails_closed() {
+        let mut evaluation = AuthorizationEvaluationV1::active();
+
+        assert!(deny_missing_grant_provenance(&mut evaluation).is_empty());
+        assert_eq!(
+            evaluation.outcome,
+            AuthorizationOutcomeV1::IndeterminateFailClosed
+        );
+        assert_eq!(evaluation.error, Some(AuthorityErrorV1::ProvenanceMissing));
+        assert!(!evaluation.grant_evidence_is_trusted);
     }
 }
