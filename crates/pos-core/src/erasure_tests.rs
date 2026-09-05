@@ -631,3 +631,44 @@ fn predecessor_chain_bounds_fail_closed_for_invalid_roots_and_zero_depth(
     assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
+
+#[test]
+fn freeze_validation_rejects_invalid_rows_and_authorization_bindings() -> Result<(), ErasureErrorV1>
+{
+    let admission = freeze_admission()?;
+    let authorization =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: reference(99),
+            policy: reference(5),
+            trust: reference(6),
+            evidence: vec![1],
+        })?;
+    assert_eq!(
+        authorization.verify_admission_body_binding(&admission),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let mut matrix = ErasureInventoryCategoryV1::CANONICAL
+        .into_iter()
+        .map(|category| {
+            ErasureFreezeApplicabilityRowV1::new(
+                category,
+                0,
+                ErasureApplicabilityDecisionV1::Inapplicable,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    matrix[0] = ErasureFreezeApplicabilityRowV1::new(
+        ErasureInventoryCategoryV1::Artifact,
+        u64::MAX,
+        ErasureApplicabilityDecisionV1::Inapplicable,
+        None,
+    )?;
+    let targets = [target()];
+    assert_eq!(
+        validate_applicability_obligations(&matrix, &targets, &[]),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}

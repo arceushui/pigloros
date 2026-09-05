@@ -4357,10 +4357,9 @@ fn validate_applicability_obligations(
         .map(|obligation| ((obligation.category(), obligation.target()), obligation))
         .collect::<BTreeMap<_, _>>();
     for row in matrix {
-        let target_index =
-            usize::try_from(row.target_index()).map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        let target = targets
-            .get(target_index)
+        let target = usize::try_from(row.target_index())
+            .ok()
+            .and_then(|target_index| targets.get(target_index))
             .ok_or(ErasureErrorV1::ScopeInvalid)?;
         let obligation = by_category_target.get(&(row.category(), *target));
         match (row.decision(), row.owner(), obligation) {

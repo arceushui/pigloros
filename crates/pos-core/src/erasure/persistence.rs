@@ -217,10 +217,7 @@ impl TargetClosureV1 {
                 .iter()
                 .map(target_from_value)
                 .collect::<Result<Vec<_>, _>>()?;
-            let closure = Self::new(bytes32(&fields[2])?, targets)?;
-            (closure.canonical_cbor()?.as_slice() == bytes)
-                .then_some(closure)
-                .ok_or(ErasureErrorV1::InvalidEncoding)
+            Self::new(bytes32(&fields[2])?, targets)
         })
     }
 }
@@ -290,9 +287,7 @@ impl InventoryV1 {
                     ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
                 )?,
             )?;
-            (inventory.canonical_cbor()?.as_slice() == bytes)
-                .then_some(inventory)
-                .ok_or(ErasureErrorV1::InvalidEncoding)
+            Ok(inventory)
         })
     }
 }
@@ -2690,6 +2685,73 @@ mod tests {
             request.clone(),
             ErasureStateV1::submitted(request.reference(), reference(44), request.provenance())?,
         ))
+    }
+
+    fn manifest_value(active: Value) -> Value {
+        let mut fields = vec![
+            text(ERCRP1),
+            uint(VERSION),
+            digest(reference(1)),
+            digest(reference(2)),
+        ];
+        fields.extend((0..10).map(|_| Value::Null));
+        fields.push(active);
+        fields.push(Value::Null);
+        fields.push(uint(0));
+        fields.extend((0..4).map(|_| Value::Null));
+        Value::Array(fields)
+    }
+
+    #[test]
+    fn persistence_decoders_reject_wrong_shapes_and_active_fields() -> Result<(), ErasureErrorV1> {
+        let wrong_shape = encode_limited(&Value::Null, ERASURE_PORTABLE_RECORD_MAX_BYTES)?;
+        assert_eq!(
+            TargetClosureV1::decode(&wrong_shape),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            InventoryV1::decode(&wrong_shape),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            AttemptPageV1::decode(&wrong_shape),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            ScopeNodeV1::decode(&wrong_shape),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+
+        let wrong_manifest = encode_limited(&Value::Null, ERASURE_COORDINATOR_RECORD_MAX_BYTES)?;
+        assert_eq!(
+            ManifestV1::decode(&wrong_manifest),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        let invalid_ordinal = encode_limited(
+            &manifest_value(Value::Array(vec![
+                Value::Null,
+                digest(reference(3)),
+                Value::Array(Vec::new()),
+            ])),
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+        )?;
+        assert_eq!(
+            ManifestV1::decode(&invalid_ordinal),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        let invalid_admission = encode_limited(
+            &manifest_value(Value::Array(vec![
+                uint(0),
+                Value::Null,
+                Value::Array(Vec::new()),
+            ])),
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+        )?;
+        assert_eq!(
+            ManifestV1::decode(&invalid_admission),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        Ok(())
     }
 
     #[test]

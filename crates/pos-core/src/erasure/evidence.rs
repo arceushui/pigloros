@@ -1385,13 +1385,11 @@ fn decode_limited_value(
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     cbor_shape_is_bounded(bytes, maximum_array)?;
-    let value = ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-    let canonical = encode_canonical(&value)?;
-    if canonical == bytes {
-        Ok(value)
-    } else {
-        Err(ErasureErrorV1::InvalidEncoding)
-    }
+    // `cbor_shape_is_bounded` admits only the canonical, bounded subset that
+    // this protocol uses: definite arrays, primitive values, and minimally
+    // encoded arguments. Maps, tags, floats, and indefinite items are
+    // rejected before the CBOR decoder is invoked.
+    ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)
 }
 pub(super) fn cbor_shape_is_bounded(
     bytes: &[u8],
@@ -1553,6 +1551,44 @@ pub(super) fn domain_digest(domain: &str, bytes: &[u8]) -> [u8; 32] {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evidence_decoders_reject_unknown_codes_and_invalid_text() {
+        let digest = Value::Bytes(vec![0; 32]);
+        assert_eq!(
+            command_from_value(&Value::Array(vec![
+                digest.clone(),
+                uint(99),
+                Value::Null,
+                digest.clone(),
+                digest.clone(),
+                digest.clone(),
+            ])),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            applicability_row_from_value(&Value::Array(vec![
+                uint(99),
+                uint(0),
+                uint(0),
+                Value::Null,
+            ])),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            applicability_row_from_value(&Value::Array(vec![
+                uint(0),
+                uint(0),
+                uint(99),
+                Value::Null,
+            ])),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            decode_limited(&[0x61, 0xff], 2, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
 
     #[test]
     fn bounded_cbor_helpers_fail_closed_at_each_shape_boundary() {
