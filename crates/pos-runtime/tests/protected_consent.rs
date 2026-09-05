@@ -844,7 +844,6 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
     let timeline = TimelineId::new();
 
@@ -894,6 +893,40 @@ fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
     test_ok(empty.commit_step_at(Seq::ZERO, 0));
     assert!(test_ok(empty.step_all(timeline)).is_empty());
 
+    let mut empty_driver = PluginRegistry::new();
+    empty_driver.register_driver(Box::new(EmptyDriver));
+    assert!(test_ok(empty_driver.step_all(timeline)).is_empty());
+    assert!(test_ok(empty_driver.tick_cadenced(timeline, 0)).is_empty());
+
+    let no_gate = PluginRegistry::new().without_consent_gate();
+    assert!(matches!(
+        test_err(no_gate.step_all(timeline)),
+        RuntimeError::ConsentOperationUnavailable
+    ));
+    let mut no_gate_tick = PluginRegistry::new().without_consent_gate();
+    no_gate_tick.register_driver(Box::new(EmptyDriver));
+    assert!(matches!(
+        test_err(no_gate_tick.tick_cadenced(timeline, 0)),
+        RuntimeError::ConsentOperationUnavailable
+    ));
+
+    let mut subscribed_tick = PluginRegistry::new();
+    subscribed_tick.register_driver(Box::new(SubscribedDriver {
+        key: pos_runtime::ProjectionKey::new(EntityId::new()),
+    }));
+    assert!(matches!(
+        test_err(subscribed_tick.tick_cadenced(timeline, 0)),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+    let mut subscribed_anchored = PluginRegistry::new();
+    subscribed_anchored.register_driver(Box::new(SubscribedDriver {
+        key: pos_runtime::ProjectionKey::new(EntityId::new()),
+    }));
+    assert!(matches!(
+        test_err(subscribed_anchored.step_all_anchored(timeline, Seq::ZERO)),
+        RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+
     drop(test_ok(PluginRegistry::new().into_authorized_projections(
         timeline,
         Seq::from_u64(1),
@@ -923,6 +956,50 @@ fn public_registry_edge_inputs_cover_recovery_and_empty_paths() {
     assert!(matches!(
         test_err(protected.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[])),
         RuntimeError::Consent(ConsentError::NoConsent)
+    ));
+
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let grant = grant(subject);
+    let token = authority.record_grant_on_timeline(timeline, &grant);
+    let mut revoked = PluginRegistry::new().with_consent_authority(authority.clone());
+    revoked.register_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    test_ok(revoked.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
+    test_ok(authority.record_revocation_on_timeline(
+        timeline,
+        &pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        },
+    ));
+    assert!(matches!(
+        test_err(revoked.commit_step_at(Seq::from_u64(1), 2)),
+        RuntimeError::Consent(ConsentError::Revoked)
+    ));
+
+    let projection_authority = ConsentAuthority::new();
+    let projection_subject = EntityId::new();
+    let projection_token =
+        projection_authority.record_grant_on_timeline(timeline, &grant(projection_subject));
+    drop(test_ok(
+        PluginRegistry::new()
+            .with_consent_authority(projection_authority)
+            .into_authorized_projections(timeline, Seq::ZERO, 0, Some(&projection_token), None),
+    ));
+    assert!(matches!(
+        PluginRegistry::new()
+            .without_consent_gate()
+            .projection_state_for_reducer(
+                timeline,
+                Seq::ZERO,
+                0,
+                &projection_token,
+                "missing",
+                projection_subject,
+            ),
+        Err(RuntimeError::ConsentOperationUnavailable)
     ));
 }
 
