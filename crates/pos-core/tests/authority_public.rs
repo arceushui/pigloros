@@ -755,6 +755,17 @@ fn no_subject_missing_consent_is_denied() {
 }
 
 #[test]
+fn subject_with_missing_consent_rejects_grant_evidence() {
+    let mut draft = request_draft(authenticated(principal(1)), entity(10));
+    draft.consent = ConsentEvidenceV1::Missing;
+    let request = ok(AuthorizationRequestV1::try_from_draft(draft));
+    assert_eq!(
+        decision_for(&request, &[root_grant(principal(1), vec![entity(10)])]).outcome(),
+        AuthorizationOutcomeV1::ParentInvalid
+    );
+}
+
+#[test]
 fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let principal_ref = principal(1);
     let actor = entity(10);
@@ -1079,6 +1090,13 @@ fn authority_records_reject_noncanonical_and_malformed_encodings() {
 fn capability_decoder_rejects_every_malformed_public_field() {
     let principal_ref = principal(1);
     let encoded = ok(root_grant(principal_ref, vec![entity(10)]).encode());
+    let wrong_magic = changed_array(&encoded, |fields| {
+        fields[0] = Value::Bytes(b"wrong".to_vec());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&wrong_magic),
+        Err(AuthorityErrorV1::InvalidEncoding)
+    );
     for field in 2..20 {
         let malformed = changed_array(&encoded, |fields| {
             fields[field] = Value::Bool(false);
@@ -1153,6 +1171,14 @@ fn capability_decoder_rejects_every_malformed_public_field() {
         CapabilityGrantV1::decode(&unknown_delegate_class),
         Err(AuthorityErrorV1::UnknownEnum)
     );
+    let malformed_delegate_class = changed_array(&encoded, |fields| {
+        let classes = array_fields_mut(&mut fields[12]);
+        classes[0] = Value::Text("wrong-type".to_owned());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&malformed_delegate_class),
+        Err(AuthorityErrorV1::InvalidEncoding)
+    );
 }
 
 #[test]
@@ -1222,6 +1248,14 @@ fn decision_decoder_rejects_inconsistent_evidence() {
     assert_eq!(
         AuthorizationDecisionV1::decode(&duplicate_chain_binding),
         Err(AuthorityErrorV1::DuplicateIdentity)
+    );
+    let zero_chain_binding = changed_array(&encoded, |fields| {
+        let bindings = array_fields_mut(&mut fields[12]);
+        bindings[0] = Value::Bytes(vec![0; 32]);
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&zero_chain_binding),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     let active_with_error = changed_array(&encoded, |fields| {
         fields[21] = Value::Integer(AuthorityErrorV1::CapabilityMissing.code().into());
@@ -2005,6 +2039,10 @@ fn malformed_requests_are_rejected_before_evaluation() {
     );
     assert_eq!(
         AuthorityRegistrySnapshotV1::try_new(hash(1), vec![], vec![], vec![]),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![hash(2)], vec![], vec![Hash::zero()]),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 

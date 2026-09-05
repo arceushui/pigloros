@@ -415,6 +415,23 @@ mod coverage_entrypoints {
         )));
     }
 
+    #[test]
+    fn public_entrypoints_fail_closed_when_the_consent_gate_is_unbound() {
+        let timeline = TimelineId::new();
+        assert!(matches!(
+            PluginRegistry::new()
+                .without_consent_gate()
+                .tick_cadenced(timeline, 0),
+            Err(RuntimeError::ConsentOperationUnavailable)
+        ));
+        assert!(matches!(
+            PluginRegistry::new()
+                .without_consent_gate()
+                .step_all(timeline),
+            Err(RuntimeError::ConsentOperationUnavailable)
+        ));
+    }
+
     fn event(event_type: &str, seq: u64) -> Event {
         Event {
             id: EventId::new(),
