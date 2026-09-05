@@ -22,7 +22,6 @@ EXPECTED_EXCLUDES = {
     "!**/*.adoc",
     "!**/*.rst",
     "!.agents/**",
-    "!.cursor/**",
     "!docs/**",
 }
 EXPECTED_SCOPE_SCOPED_CI_RESULTS = (
@@ -112,7 +111,6 @@ class RustScopePolicyTests(unittest.TestCase):
             "adr/decision.adoc",
             "notes/history.rst",
             ".agents/skills/example.md",
-            ".cursor/rules/example.txt",
             "docs/reference.txt",
         ]
         self.assertFalse(rust_gate_required(paths, self.patterns))
