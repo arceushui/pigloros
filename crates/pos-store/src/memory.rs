@@ -1313,70 +1313,171 @@ impl ErasurePersistencePortV1 for MemoryStore {
         if current_digest != mutation.expected_manifest_digest() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let mut evidence = self.erasure_evidence.clone();
-        let mut states = self.erasure_states.clone();
-        let mut attempts = self.erasure_attempt_pages.clone();
-        let mut scopes = self.erasure_scope_nodes.clone();
-        let mut resolutions = self.erasure_administrative_resolutions.clone();
-        let mut effects = self.erasure_effects.clone();
-        let mut effect_subjects = self.erasure_effect_subjects.clone();
+        let mut delta = MemoryErasureCasDelta::default();
         for object in mutation.new_objects() {
-            insert_exact(&mut evidence, object.reference(), object.canonical_cbor())?;
+            stage_exact(
+                &self.erasure_evidence,
+                &mut delta.evidence,
+                object.reference(),
+                object.canonical_cbor(),
+            )?;
         }
         for state in mutation.new_states() {
             if let Some(previous) = state.state().previous_state() {
-                let bytes = states
+                let bytes = delta
+                    .states
                     .get(&previous)
+                    .or_else(|| self.erasure_states.get(&previous))
                     .ok_or(ErasureErrorV1::ProvenanceMissing)?;
                 state
                     .state()
                     .validate_predecessor(&pos_core::ErasureStateV1::from_canonical_cbor(bytes)?)?;
             }
-            insert_exact(&mut states, state.reference(), state.canonical_cbor())?;
+            stage_exact(
+                &self.erasure_states,
+                &mut delta.states,
+                state.reference(),
+                state.canonical_cbor(),
+            )?;
         }
         for index in mutation.index_inserts() {
-            let (map, ordinal, reference) = match *index {
-                ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
-                    (&mut attempts, ordinal, reference)
-                }
-                ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
-                    (&mut scopes, ordinal, reference)
-                }
-                ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
-                    (&mut resolutions, ordinal, reference)
-                }
+            let (existing, staged, ordinal, reference) = match *index {
+                ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (
+                    &self.erasure_attempt_pages,
+                    &mut delta.attempts,
+                    ordinal,
+                    reference,
+                ),
+                ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (
+                    &self.erasure_scope_nodes,
+                    &mut delta.scopes,
+                    ordinal,
+                    reference,
+                ),
+                ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+                    &self.erasure_administrative_resolutions,
+                    &mut delta.resolutions,
+                    ordinal,
+                    reference,
+                ),
             };
-            insert_index(map, request, ordinal, reference)?;
+            stage_index(existing, staged, request, ordinal, reference)?;
         }
         let effect_bytes = mutation.effect().to_canonical_cbor()?;
-        insert_effect_exact(
-            &mut effects,
+        stage_effect(
+            &self.erasure_effects,
+            &mut delta.effects,
             next.digest(),
             mutation.effect(),
             &effect_bytes,
         )?;
         if let Some(subject) = mutation.effect().subject() {
-            match effect_subjects.get(&subject) {
+            match self.erasure_effect_subjects.get(&subject) {
                 Some(existing) if *existing != next.digest() => {
                     return Err(ErasureErrorV1::PolicyConflict);
                 }
                 Some(_) => {}
                 None => {
-                    effect_subjects.insert(subject, next.digest());
+                    delta.effect_subjects.insert(subject, next.digest());
                 }
             }
         }
+        apply_memory_erasure_delta(self, delta);
         self.erasure_records
             .insert(request, (next.digest(), next.canonical_cbor().to_vec()));
-        self.erasure_evidence = evidence;
-        self.erasure_states = states;
-        self.erasure_attempt_pages = attempts;
-        self.erasure_scope_nodes = scopes;
-        self.erasure_administrative_resolutions = resolutions;
-        self.erasure_effects = effects;
-        self.erasure_effect_subjects = effect_subjects;
         Ok(ErasureCasOutcomeV1::Applied)
     }
+}
+
+// Own only the bounded mutation delta. All fallible validation completes
+// before these entries are applied to the store, preserving CAS atomicity
+// without cloning unrelated requests' retained state.
+#[derive(Default)]
+struct MemoryErasureCasDelta {
+    evidence: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    states: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    attempts: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    scopes: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
+    effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+}
+
+fn apply_memory_erasure_delta(store: &mut MemoryStore, delta: MemoryErasureCasDelta) {
+    for (reference, bytes) in delta.evidence {
+        store.erasure_evidence.entry(reference).or_insert(bytes);
+    }
+    for (reference, bytes) in delta.states {
+        store.erasure_states.entry(reference).or_insert(bytes);
+    }
+    for (key, reference) in delta.attempts {
+        store.erasure_attempt_pages.entry(key).or_insert(reference);
+    }
+    for (key, reference) in delta.scopes {
+        store.erasure_scope_nodes.entry(key).or_insert(reference);
+    }
+    for (key, reference) in delta.resolutions {
+        store
+            .erasure_administrative_resolutions
+            .entry(key)
+            .or_insert(reference);
+    }
+    for (manifest, effect) in delta.effects {
+        store.erasure_effects.entry(manifest).or_insert(effect);
+    }
+    for (subject, manifest) in delta.effect_subjects {
+        store
+            .erasure_effect_subjects
+            .entry(subject)
+            .or_insert(manifest);
+    }
+}
+
+fn stage_exact(
+    existing: &BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    staged: &mut BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    reference: ErasureReferenceV1,
+    bytes: &[u8],
+) -> Result<(), ErasureErrorV1> {
+    if existing
+        .get(&reference)
+        .is_some_and(|value| value.as_slice() != bytes)
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    insert_exact(staged, reference, bytes)
+}
+
+fn stage_effect(
+    existing: &BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
+    staged: &mut BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
+    manifest: ErasureReferenceV1,
+    effect: &pos_core::ErasureCasEffectV1,
+    bytes: &[u8],
+) -> Result<(), ErasureErrorV1> {
+    if let Some(value) = existing.get(&manifest) {
+        let stored = decode_memory_effect(value)?;
+        if stored != *effect || value.1.as_slice() != bytes {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    }
+    insert_effect_exact(staged, manifest, effect, bytes)
+}
+
+fn stage_index(
+    existing: &BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    staged: &mut BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    request: ErasureReferenceV1,
+    ordinal: u64,
+    reference: ErasureReferenceV1,
+) -> Result<(), ErasureErrorV1> {
+    if existing
+        .get(&(request, ordinal))
+        .is_some_and(|value| *value != reference)
+    {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    insert_index(staged, request, ordinal, reference)
 }
 
 fn memory_mutation_is_exact(store: &MemoryStore, mutation: &PreparedErasureCasV1) -> bool {
