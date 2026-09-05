@@ -53,7 +53,12 @@ fn open_fifo_writer_after_child_ready(
             .open(path)
         {
             Ok(readiness_writer) => {
+                let reader_guard = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(path)?;
                 let writer = OpenOptions::new().write(true).open(path)?;
+                drop(reader_guard);
                 drop(readiness_writer);
                 return Ok(writer);
             }

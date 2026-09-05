@@ -70,7 +70,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             }
             self.write_executable(
                 tools / "gh",
-                "printf '%s\\n' \"$@\" >> \"${GH_ARGS}\"\n"
+                "printf '%s\\0' \"$@\" >> \"${GH_ARGS}\"\n"
                 "printf 'call\\n' >> \"${GH_CALLS}\"\n"
                 "printf '%s' \"${GH_RESPONSE}\"\n",
             )
@@ -140,16 +140,31 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertEqual(logs["gh_calls"], "call\n")
         self.assertEqual(logs["sleep_calls"], "")
         self.assertEqual(logs["git_calls"], "")
-        for argument in (
-            "repos/owner/repository/actions/artifacts",
-            f"name=cargo-crap-baseline-{EXAMPLE_BASE_SHA}",
-            "select(.expired == false)",
-            'select(.workflow_run.head_branch == "main")',
-            f'select(.workflow_run.head_sha == "{EXAMPLE_BASE_SHA}")',
-            "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
-        ):
-            with self.subTest(argument=argument):
-                self.assertIn(argument, logs["gh_args"])
+        expected_query = (
+            ".artifacts[] |\n"
+            "      select(.expired == false) |\n"
+            '      select(.workflow_run.head_branch == "main") |\n'
+            f'      select(.workflow_run.head_sha == "{EXAMPLE_BASE_SHA}") |\n'
+            "      select(.workflow_run.head_repository_id == "
+            ".workflow_run.repository_id) |\n"
+            "      .workflow_run.id"
+        )
+        self.assertEqual(
+            logs["gh_args"].split("\0")[:-1],
+            [
+                "api",
+                "--method",
+                "GET",
+                "--paginate",
+                "repos/owner/repository/actions/artifacts",
+                "-f",
+                f"name=cargo-crap-baseline-{EXAMPLE_BASE_SHA}",
+                "-f",
+                "per_page=100",
+                "--jq",
+                expected_query,
+            ],
+        )
 
     def test_resolver_fails_closed_after_the_bounded_retry_window(self) -> None:
         result, logs = self.run_resolver("")
@@ -167,6 +182,15 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(logs["output"], "bootstrap=true\n")
+        self.assertIn(f"{BOOTSTRAP_BASE_SHA}...HEAD", logs["git_calls"])
+
+    def test_resolver_rejects_bootstrap_when_policy_inputs_changed(self) -> None:
+        result, logs = self.run_resolver(
+            "", base_sha=BOOTSTRAP_BASE_SHA, git_status=1
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
         self.assertIn(f"{BOOTSTRAP_BASE_SHA}...HEAD", logs["git_calls"])
 
     def test_rejects_unpinned_cargo_crap(self) -> None:
