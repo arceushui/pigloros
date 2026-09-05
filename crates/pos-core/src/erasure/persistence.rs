@@ -3030,16 +3030,14 @@ mod tests {
             ErasureAcknowledgementOutcomeV1::Stale,
         )?;
 
-        let mut effective = BTreeMap::from([
-            (key, positive.clone()),
-            ((reference(48), reference(49)), stale.clone()),
-        ]);
+        let mut effective =
+            BTreeMap::from([(key, positive), ((reference(48), reference(49)), stale)]);
         retain_positive_acknowledgements(&mut effective);
         assert_eq!(effective.len(), 1);
         assert!(effective.contains_key(&key));
 
         let mut record = record_fixture(&request)?;
-        record.apply_acknowledgements(BTreeMap::from([(key, positive.clone())]));
+        record.apply_acknowledgements(BTreeMap::from([(key, positive)]));
         record.apply_acknowledgements(BTreeMap::from([(key, stale)]));
         assert_eq!(record.effective.get(&key), Some(&positive));
 
