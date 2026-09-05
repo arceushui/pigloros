@@ -11,6 +11,7 @@ Use this skill whenever an implementation ticket belongs to an epic or a larger 
 
 Before proposing or implementing a ticket:
 
+0. For a Redmine ticket, invoke `start-work` first. Identify the ticket, set it to In Progress, and record the work in journal notes.
 1. Read the repository context, project overview, applicable ADRs/specifications, and the relevant existing tests.
 2. Inspect the actual code paths, public seams, callers, persistence/schema boundaries, and nearby history. Do not split work from the ticket prose alone.
 3. Map the change surface: files, modules, interfaces, tests, migrations, and dependency edges. Identify whether the work is a vertical behavior slice or a mechanical wide refactor.
@@ -23,6 +24,7 @@ Do not create artificial micro-PRs that cannot stand on their own. A slice is ap
 
 The inspection record should map the concrete files, modules, interfaces, tests, migrations, and dependency edges. Each published implementation ticket should state:
 
+- the existing project hierarchy and the correct Redmine relation type for each decomposition or execution dependency; keep Wave, milestone design, ADR, implementation ticket, and subtask distinct, use parent/child relations for decomposition, and use blocker relations only for execution order between independent tickets;
 - the end-to-end behavior or seam it delivers;
 - explicit in-scope and out-of-scope work;
 - the stable architectural areas, public seams, and blast radius found during inspection; keep exact file paths in the transient inspection record rather than the published ticket;
@@ -46,7 +48,7 @@ Before coding, re-read this checklist and confirm:
 
 During implementation, keep the diff aligned with the ticket. Never use `git add -A`; stage only files changed for this slice. Do not add placeholder code, speculative fields, dead branches, or lint suppressions merely to complete the shape of a future ticket.
 
-After each code change, run the project’s required quality gates, including formatting, workspace tests with ignored tests included, pedantic Clippy, and the 99% LLVM line/region coverage gate. If a new branch cannot be covered, simplify or remove it rather than exempting production code. If local resource constraints prevent a gate, record the limitation and use the repository’s equivalent hosted gate; do not weaken the threshold.
+After each code change, run the quality gates applicable to the affected language, artifact, and scope. Pull requests recognized by `.github/rust-scope.yml` as documentation-only (for example, Markdown-only changes) skip Rust build, test, coverage, and cargo-crap jobs; retain applicable documentation and policy checks. For Rust-affecting changes, run formatting, workspace tests with ignored tests included, pedantic Clippy, and the 99% LLVM line/region coverage gate. If a new branch cannot be covered, simplify or remove it rather than exempting production code. If local resource constraints prevent a gate, record the limitation and use the repository’s equivalent hosted gate; do not weaken the threshold.
 
 Before opening the PR, inspect `git diff --stat` and the full diff against the fixed point. Confirm that every changed file belongs to the ticket, the PR description names the delivered seam and follow-up tickets, and the acceptance evidence is reproducible. Commit from the isolated worktree before removing it. Request a separate code review only when that review workflow has been explicitly authorized.
 

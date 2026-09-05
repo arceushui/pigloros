@@ -8,6 +8,7 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 2. **Never** put `coverage(off)` on production code — only on `#[test]` / `#[tokio::test]` or inside `#[cfg(test)]`.
 3. Prefer deleting/simplifying unhittable branches over exemptions.
 4. Do not use rustdoc ` ```ignore ` fences — use ` ```text ` or a real doctest.
+5. Pull requests recognized as documentation-only by `.github/rust-scope.yml` skip Rust test, coverage, and cargo-crap jobs; Rust-affecting changes retain those gates.
 
 ## Enforcement
 
@@ -17,8 +18,8 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 | Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
-| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions |
-| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 |
+| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions for Rust-affecting changes |
+| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 for Rust-affecting changes |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
 ## Coverage attribution policy
@@ -31,8 +32,9 @@ production code or avoid writing a reachable behavior test.
 
 ## Change-risk policy
 
-The hosted coverage job publishes its completed LCOV report to a separate,
-required `cargo-crap` check running pinned v0.2.2. The verdict uses zero
+For Rust-affecting changes, the hosted coverage job publishes its completed
+LCOV report to a separate, required `cargo-crap` check running pinned v0.2.2.
+Documentation-only pull requests skip both jobs. The verdict uses zero
 tool tolerance and treats one IEEE-754 representation step (one ULP) as
 numerical equality; every larger score increase fails, including increases on
 moved functions. Every new function must score at most 30. Standard Cargo

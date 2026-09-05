@@ -456,22 +456,13 @@ fn descriptor_directory_identity(
 }
 
 #[cfg(target_os = "linux")]
-fn directory_entry_identity(
+const fn directory_entry_identity(
     metadata: rustix::fs::Stat,
 ) -> Result<DirectoryIdentity, MaterializationError> {
-    let file_type = FileType::from_raw_mode(metadata.st_mode);
-    if file_type == FileType::Directory {
-        return Ok(directory_identity(metadata));
-    }
-    Err(non_directory_error(file_type))
-}
-
-#[cfg(target_os = "linux")]
-fn non_directory_error(file_type: FileType) -> MaterializationError {
-    if file_type == FileType::Symlink {
-        MaterializationError::SymlinkDetected
-    } else {
-        MaterializationError::UntrustedOutputDirectory
+    match FileType::from_raw_mode(metadata.st_mode) {
+        FileType::Directory => Ok(directory_identity(metadata)),
+        FileType::Symlink => Err(MaterializationError::SymlinkDetected),
+        _ => Err(MaterializationError::UntrustedOutputDirectory),
     }
 }
 

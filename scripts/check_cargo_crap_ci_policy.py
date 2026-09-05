@@ -16,6 +16,14 @@ DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a54
 BOOTSTRAP_BASE_SHA = "45bdac85b29d273573583f846ba7acd2b3a12573"
 BASELINE_RETRY_ATTEMPTS = 30
 BASELINE_RETRY_DELAY_SECONDS = 10
+SCOPED_JOB_IF = (
+    "${{ needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request' }}"
+)
+SCOPED_CARGO_CRAP_JOB_IF = (
+    "${{ always() && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request') }}"
+)
 GENERATE_BASELINE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
@@ -107,7 +115,14 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     coverage = jobs.get("coverage")
     require(isinstance(coverage, dict), "missing required coverage job")
     require("continue-on-error" not in coverage, "coverage job must be blocking")
-    require("if" not in coverage, "coverage job must be unconditional")
+    require(
+        coverage.get("needs") == "ci_change_scope",
+        "coverage must depend on the trusted Rust scope result",
+    )
+    require(
+        coverage.get("if") == SCOPED_JOB_IF,
+        "coverage must skip documentation-only pull requests",
+    )
 
     coverage_steps = coverage.get("steps")
     require(isinstance(coverage_steps, list), "coverage steps must be an array")
@@ -136,11 +151,19 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     job = jobs.get("cargo-crap")
     require(isinstance(job, dict), "missing visible cargo-crap job")
     require(
-        set(job) == {"name", "needs", "runs-on", "timeout-minutes", "steps"},
+        set(job)
+        == {"name", "needs", "if", "runs-on", "timeout-minutes", "steps"},
         "cargo-crap job metadata or execution controls changed",
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
-    require(job.get("needs") == "coverage", "cargo-crap must depend on coverage")
+    require(
+        job.get("needs") == ["ci_change_scope", "coverage"],
+        "cargo-crap must depend on the trusted scope result and coverage",
+    )
+    require(
+        job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
+        "cargo-crap must skip documentation-only pull requests",
+    )
     require(job.get("runs-on") == "ubuntu-latest", "cargo-crap runner changed")
     require(job.get("timeout-minutes") == 10, "cargo-crap timeout changed")
     steps = job.get("steps")

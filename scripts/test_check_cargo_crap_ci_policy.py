@@ -132,6 +132,20 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(remove_retry)
 
+    def test_requires_scoped_coverage(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["coverage"].update(
+                {"if": "${{ always() }}"}
+            )
+        )
+
+    def test_requires_scoped_cargo_crap(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["cargo-crap"].update(
+                {"if": "${{ always() }}"}
+            )
+        )
+
     def test_requires_baseline_retry_delay(self) -> None:
         def remove_delay(workflow: dict) -> None:
             step = self.cargo_crap_step(
