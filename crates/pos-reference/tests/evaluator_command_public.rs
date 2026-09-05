@@ -428,6 +428,24 @@ fn independent_report(bytes: &[u8]) -> TestResult<Vec<Value>> {
 }
 
 #[cfg(unix)]
+fn independent_attempt_header(attempt: &[u8]) -> TestResult<Vec<Value>> {
+    let prefix = <[u8; 4]>::try_from(attempt.get(..4).ok_or("EAI1 prefix is absent")?)?;
+    let frame_length = usize::try_from(u32::from_be_bytes(prefix))?;
+    let frame_end = 4_usize
+        .checked_add(frame_length)
+        .ok_or("EAI1 frame overflow")?;
+    let header: Value = ciborium::from_reader(
+        attempt
+            .get(4..frame_end)
+            .ok_or("EAI1 header is truncated")?,
+    )?;
+    let Value::Array(header) = header else {
+        return Err("EAI1 header is not an array".into());
+    };
+    Ok(header)
+}
+
+#[cfg(unix)]
 fn assert_report_counts(report: &[Value], expected: [u64; 5]) {
     for (field, count) in report[14..19].iter().zip(expected) {
         assert_eq!(field, &unsigned(count));
@@ -553,18 +571,32 @@ fn command_process_boundary_classifies_resource_protocol_and_lifecycle_failures(
 
     let directory = tempfile::tempdir()?;
     let short_watchdog = support::corpus_with_watchdog_ms(25)?;
+    let capture_directory = directory.path().join("attempts");
+    fs::create_dir(&capture_directory)?;
     let adapter = write_adapter(
         directory.path(),
-        "#!/bin/sh\nset -eu\n/bin/cat >/dev/null\nexec /bin/sleep 60\n",
+        "#!/bin/sh\nset -eu\n/bin/cat >\"$1/attempt.$$\"\nexec /bin/sleep 60\n",
     )?;
-    let output = command_for_corpus(
+    let mut command = command_for_corpus(
         directory.path(),
         adapter.to_str().ok_or("adapter path is not UTF-8")?,
         &short_watchdog,
-    )?
-    .output()?;
+    )?;
+    command.args([
+        "--adapter-arg",
+        capture_directory
+            .to_str()
+            .ok_or("capture directory is not UTF-8")?,
+    ]);
+    let output = command.output()?;
     assert!(output.status.success());
     assert_report_counts(&independent_report(&output.stdout)?, [0, 0, 0, 7, 0]);
+    let captures = fs::read_dir(capture_directory)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(captures.len(), 7);
+    for capture in captures {
+        let header = independent_attempt_header(&fs::read(capture.path())?)?;
+        assert_eq!(header[8], unsigned(25));
+    }
     Ok(())
 }
 
@@ -609,19 +641,7 @@ fn air_gapped_process_declaration_and_cnr1_bytes_are_repeatable() -> TestResult 
         assert_diagnostic_digest(&output.stderr, &report)?;
 
         let attempt = fs::read(capture_path)?;
-        let prefix = <[u8; 4]>::try_from(attempt.get(..4).ok_or("EAI1 prefix is absent")?)?;
-        let frame_length = usize::try_from(u32::from_be_bytes(prefix))?;
-        let frame_end = 4_usize
-            .checked_add(frame_length)
-            .ok_or("EAI1 frame overflow")?;
-        let header: Value = ciborium::from_reader(
-            attempt
-                .get(4..frame_end)
-                .ok_or("EAI1 header is truncated")?,
-        )?;
-        let Value::Array(header) = header else {
-            return Err("EAI1 header is not an array".into());
-        };
+        let header = independent_attempt_header(&attempt)?;
         assert_eq!(header[0], Value::Text("EAI1".to_owned()));
         assert_eq!(header[5], unsigned(1));
         assert_eq!(header[9], Value::Bool(false));
