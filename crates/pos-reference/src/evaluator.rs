@@ -392,6 +392,9 @@ fn case_outcome(
         redaction_state: fixture.redaction_state,
         provenance_digest: fixture.provenance_digest,
     };
+    if outcome.redaction_state >= 2 {
+        return outcome;
+    }
     match &fixture.oracle {
         StrictOracle::Output(expected) => outcome.expected_digest = Some(expected.digest),
         StrictOracle::Failure(_) => {
@@ -406,10 +409,6 @@ fn case_outcome(
                 first_coordinate,
             ));
         }
-    }
-    if outcome.redaction_state >= 2 {
-        outcome.expected_digest = None;
-        return outcome;
     }
     let Ok(observation) = observation else {
         return outcome;

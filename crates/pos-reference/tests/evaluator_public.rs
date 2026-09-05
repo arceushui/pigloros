@@ -896,6 +896,39 @@ fn evaluator_reports_typed_failure_oracles_with_closed_safe_errors() -> TestResu
 }
 
 #[test]
+fn evaluator_omits_typed_failure_evidence_when_redacted() -> TestResult {
+    for redaction_state in [2, 3] {
+        let corpus = support::mixed_oracle_corpus_with_failure_redaction(redaction_state)?;
+        let mut adapter = MixedOracleAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+            coordinate_bytes: None,
+        };
+        let result = evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut adapter,
+        )?;
+        let failure = result
+            .report
+            .cases
+            .iter()
+            .find(|case| case.case_id == "case-1")
+            .ok_or("redacted typed failure case is absent")?;
+        assert_eq!(failure.redaction_state, redaction_state);
+        assert_eq!(failure.replay_claim, redaction_state);
+        assert_eq!(failure.outcome, CaseStatus::Unavailable);
+        assert_eq!(failure.expected_error, None);
+        assert_eq!(failure.actual_error, None);
+        assert_eq!(failure.expected_digest, None);
+        assert_eq!(failure.actual_digest, None);
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_reports_mismatched_failure_and_divergence_oracles() -> TestResult {
     let corpus = support::mixed_oracle_corpus()?;
     let mut adapter = MismatchedOracleAdapter {

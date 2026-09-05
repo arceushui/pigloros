@@ -575,6 +575,7 @@ struct CorpusOptions<'a> {
     release_mutation: Option<ReleaseMutation>,
     mixed_oracles: bool,
     failure_outcome: Option<u8>,
+    failure_redaction_state: Option<u8>,
     profile_mutation: Option<ProfileMutation>,
     bundle_mutation: Option<BundleMutation>,
     trust_mutation: Option<TrustMutation>,
@@ -590,6 +591,7 @@ impl Default for CorpusOptions<'_> {
             release_mutation: None,
             mixed_oracles: false,
             failure_outcome: None,
+            failure_redaction_state: None,
             profile_mutation: None,
             bundle_mutation: None,
             trust_mutation: None,
@@ -683,6 +685,18 @@ pub fn mixed_oracle_corpus_with_failure_outcome(outcome: u8) -> TestResult<Corpu
     })
 }
 
+/// Build a signed mixed-oracle corpus with one redacted typed failure.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn mixed_oracle_corpus_with_failure_redaction(state: u8) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mixed_oracles: true,
+        failure_redaction_state: Some(state),
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a cryptographically bound corpus with one invalid CPF1 contract field.
 ///
 /// # Errors
@@ -766,6 +780,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         release_mutation: _,
         mixed_oracles,
         failure_outcome: _,
+        failure_redaction_state: _,
         profile_mutation,
         bundle_mutation,
         trust_mutation,
@@ -1506,6 +1521,11 @@ fn fixtures(
                 options.failure_outcome,
                 family,
             )?;
+            let replay_claim = if family == 1 {
+                options.failure_redaction_state.unwrap_or(0)
+            } else {
+                0
+            };
             let mut fixture = vec![
                 text(&case_id),
                 Value::Bool(true),
@@ -1521,8 +1541,8 @@ fn fixtures(
                 expectation.oracle,
                 expectation.expected_outcome,
                 expectation.expected_error,
-                uint(0),
-                uint(0),
+                uint(u64::from(replay_claim)),
+                uint(u64::from(replay_claim)),
                 array(vec![uint(100); 8]),
                 array(vec![uint(1_000)]),
                 array(vec![
