@@ -3965,12 +3965,11 @@ mod tests {
         graph.authorize_provenance = Some(reference(75));
         graph.target_closure = Some(target_closure_digest(&targets));
 
-        assert_eq!(
-            validate_frozen_bindings(&graph, &fixture.atomic)
-                .err()
-                .map(RecoveryFailureV1::error),
-            Some(ErasureErrorV1::ProvenanceMissing)
-        );
+        let failure = validate_frozen_bindings(&graph, &fixture.atomic)
+            .err()
+            .ok_or(ErasureErrorV1::PolicyConflict)?;
+        assert_eq!(failure.error(), ErasureErrorV1::ProvenanceMissing);
+        assert_eq!(failure.subject(), state.state_digest());
         Ok(())
     }
 
