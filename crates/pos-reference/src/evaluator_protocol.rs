@@ -929,7 +929,7 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
     validate_identifier(value).map(|()| value.to_owned())
 }
 
-fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
+const fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
     if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
         Err(ProtocolError::FieldOutOfBounds)
     } else {
