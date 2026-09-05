@@ -5476,7 +5476,7 @@ mod tests {
         );
         assert_eq!(
             decode_memory_effect(&(effect.identity(), vec![0xff])),
-            Err(ErasureErrorV1::ProvenanceMissing)
+            Err(ErasureErrorV1::InvalidEncoding)
         );
         assert_eq!(
             decode_memory_effect(&(ErasureReferenceV1::from_digest([9; 32]), bytes.clone())),

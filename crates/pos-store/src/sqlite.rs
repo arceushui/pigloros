@@ -11738,7 +11738,7 @@ mod tests {
             .test_ok();
         assert_eq!(
             load_sqlite_erasure_effect(&store.conn, manifest),
-            Err(ErasureErrorV1::ProvenanceMissing)
+            Err(ErasureErrorV1::InvalidEncoding)
         );
     }
 
