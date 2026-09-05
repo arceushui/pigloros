@@ -286,7 +286,6 @@ pub enum ProfileMutation {
     ProfileId,
     ProfileSemver,
     Lifecycle(u8),
-    FailureOutcome(u8),
     NormativeDigest,
     MatrixDigest,
     MatrixContent,
@@ -575,6 +574,7 @@ struct CorpusOptions<'a> {
     extra: Option<&'a [u8]>,
     release_mutation: Option<ReleaseMutation>,
     mixed_oracles: bool,
+    failure_outcome: Option<u8>,
     profile_mutation: Option<ProfileMutation>,
     bundle_mutation: Option<BundleMutation>,
     trust_mutation: Option<TrustMutation>,
@@ -589,6 +589,7 @@ impl Default for CorpusOptions<'_> {
             extra: None,
             release_mutation: None,
             mixed_oracles: false,
+            failure_outcome: None,
             profile_mutation: None,
             bundle_mutation: None,
             trust_mutation: None,
@@ -677,7 +678,7 @@ pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
 pub fn mixed_oracle_corpus_with_failure_outcome(outcome: u8) -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
         mixed_oracles: true,
-        profile_mutation: Some(ProfileMutation::FailureOutcome(outcome)),
+        failure_outcome: Some(outcome),
         ..CorpusOptions::default()
     })
 }
@@ -764,6 +765,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         extra,
         release_mutation: _,
         mixed_oracles,
+        failure_outcome: _,
         profile_mutation,
         bundle_mutation,
         trust_mutation,
@@ -1496,6 +1498,7 @@ fn fixtures(
                 &evidence_path,
                 &output_path,
                 options.mixed_oracles,
+                options.failure_outcome,
                 family,
             )?;
             let mut fixture = vec![
@@ -1538,6 +1541,7 @@ fn fixture_expectation(
     evidence_path: &str,
     output_path: &str,
     mixed_oracles: bool,
+    failure_outcome: Option<u8>,
     family: u64,
 ) -> TestResult<FixtureExpectation> {
     let output_and_evidence = || -> TestResult<Value> {
@@ -1555,7 +1559,7 @@ fn fixture_expectation(
                 array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
                 Value::Null,
             ]),
-            expected_outcome: uint(2),
+            expected_outcome: uint(u64::from(failure_outcome.unwrap_or(2))),
             expected_error: array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
         },
         (true, 2) => FixtureExpectation {
@@ -2211,8 +2215,7 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
     let fixtures = array_fields_mut(&mut profile_fields[9])?;
     let fixture_index = if matches!(
         mutation,
-        ProfileMutation::FailureOutcome(_)
-            | ProfileMutation::RawFixtureTransitionField(_)
+        ProfileMutation::RawFixtureTransitionField(_)
             | ProfileMutation::DeepTypeBoundary(5)
             | ProfileMutation::FixtureSemanticBoundary(8)
     ) {
@@ -2362,9 +2365,6 @@ fn mutate_fixture_relationship(
     mutation: ProfileMutation,
 ) -> TestResult<bool> {
     match mutation {
-        ProfileMutation::FailureOutcome(value) => {
-            fields[12] = uint(u64::from(value));
-        }
         ProfileMutation::FixtureOracleDivergenceCoordinate => {
             fields[11] = divergence_oracle(&[]);
         }
