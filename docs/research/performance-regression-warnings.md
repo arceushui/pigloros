@@ -1,5 +1,7 @@
 # Performance-regression warnings — research for Redmine #297
 
+Canonical decision record: [ADR-070 — Advisory Performance Regression Evidence](https://redmine.piglor.com/projects/pigloros/wiki/ADR-070_Advisory_Performance_Regression_Evidence). This document remains the supporting research evidence; the Redmine ADR owns the decision and lifecycle.
+
 ## Recommendation
 
 **Preserve the current dependency-free `memory_erasure` harness and add a small deterministic CSV comparator. Do not introduce Criterion or iai-callgrind for #297.**
