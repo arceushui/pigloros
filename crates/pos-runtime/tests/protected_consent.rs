@@ -1133,6 +1133,15 @@ fn assert_driver_error_edges(timeline: TimelineId) {
         test_err(duplicate_subscriptions.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
+
+    let mut limited = PluginRegistry::new().with_resource_limit(0);
+    limited.register_driver(Box::new(CadencedDraftDriver {
+        entity: EntityId::new(),
+    }));
+    assert!(matches!(
+        test_err(limited.step_all_anchored(timeline, Seq::ZERO)),
+        RuntimeError::ResourceExhausted { .. }
+    ));
 }
 
 fn assert_action_error_edges(timeline: TimelineId) {
