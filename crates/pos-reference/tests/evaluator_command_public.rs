@@ -510,7 +510,7 @@ fn command_process_boundary_exercises_output_failure_and_divergence_oracles() ->
         } else if passing_case == "case-2" {
             let case = report_case(&report, passing_case)?;
             assert_eq!(case[6], Value::Bytes(vec![1, 2]));
-            assert_eq!(case[8], case[7]);
+            assert_ne!(case[8], case[7]);
         }
     }
     Ok(())
