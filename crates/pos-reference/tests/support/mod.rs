@@ -285,7 +285,8 @@ pub enum ProfileMutation {
     Version,
     ProfileId,
     ProfileSemver,
-    Lifecycle,
+    Lifecycle(u8),
+    FailureOutcome(u8),
     NormativeDigest,
     MatrixDigest,
     MatrixContent,
@@ -665,6 +666,18 @@ pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
 pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
         mixed_oracles: true,
+        ..CorpusOptions::default()
+    })
+}
+
+/// Build a signed mixed-oracle corpus with one current typed failure outcome.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn mixed_oracle_corpus_with_failure_outcome(outcome: u8) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mixed_oracles: true,
+        profile_mutation: Some(ProfileMutation::FailureOutcome(outcome)),
         ..CorpusOptions::default()
     })
 }
@@ -2013,7 +2026,11 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::Version => profile_fields[1] = uint(2),
         ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
         ProfileMutation::ProfileSemver => profile_fields[3] = text("01.0.0"),
-        ProfileMutation::Lifecycle => profile_fields[4] = uint(1),
+        ProfileMutation::Lifecycle(value) => profile_fields[4] = uint(u64::from(value)),
+        ProfileMutation::FailureOutcome(value) => {
+            let fixtures = array_fields_mut(&mut profile_fields[9])?;
+            array_fields_mut(&mut fixtures[1])?[12] = uint(u64::from(value));
+        }
         ProfileMutation::NormativeDigest => profile_fields[5] = bytes(&[0; 32]),
         ProfileMutation::MatrixDigest => profile_fields[6] = bytes(&[0; 32]),
         ProfileMutation::MatrixContent

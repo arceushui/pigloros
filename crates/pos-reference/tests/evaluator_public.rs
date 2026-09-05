@@ -815,6 +815,26 @@ fn evaluator_rejects_semantically_invalid_signed_release_admission() -> TestResu
 }
 
 #[test]
+fn evaluator_accepts_every_current_profile_lifecycle() -> TestResult {
+    for lifecycle in 0..=3 {
+        let corpus = support::corpus_with_profile_mutation(ProfileMutation::Lifecycle(lifecycle))?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert!(evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut adapter,
+        )
+        .is_ok());
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_matches_output_failure_and_divergence_oracles() -> TestResult {
     let corpus = support::mixed_oracle_corpus()?;
     let mut adapter = MixedOracleAdapter {
@@ -843,6 +863,37 @@ fn evaluator_matches_output_failure_and_divergence_oracles() -> TestResult {
 }
 
 #[test]
+fn evaluator_reports_typed_failure_oracles_with_closed_safe_errors() -> TestResult {
+    for (verification_outcome, safe_error) in [(2, 0), (3, 9), (4, 11), (5, 13)] {
+        let corpus =
+            support::mixed_oracle_corpus_with_failure_outcome(verification_outcome)?;
+        let mut adapter = MixedOracleAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+            coordinate_bytes: None,
+        };
+        let result = evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut adapter,
+        )?;
+        let failure = result
+            .report
+            .cases
+            .iter()
+            .find(|case| case.case_id == "case-1")
+            .ok_or("typed failure case is absent")?;
+        assert_eq!(failure.outcome, CaseStatus::Pass);
+        assert_eq!(failure.expected_error, Some(safe_error));
+        assert_eq!(failure.actual_error, Some(safe_error));
+        assert_eq!((failure.expected_digest, failure.actual_digest), (None, None));
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_reports_mismatched_failure_and_divergence_oracles() -> TestResult {
     let corpus = support::mixed_oracle_corpus()?;
     let mut adapter = MismatchedOracleAdapter {
@@ -865,6 +916,15 @@ fn evaluator_reports_mismatched_failure_and_divergence_oracles() -> TestResult {
             .count(),
         2
     );
+    let failure = result
+        .report
+        .cases
+        .iter()
+        .find(|case| case.case_id == "case-1")
+        .ok_or("typed failure case is absent")?;
+    assert_eq!(failure.expected_error, Some(0));
+    assert_eq!(failure.actual_error, Some(4));
+    assert_eq!((failure.expected_digest, failure.actual_digest), (None, None));
     Ok(())
 }
 
@@ -973,7 +1033,7 @@ const PROFILE_MUTATIONS: &[ProfileMutation] = &[
     ProfileMutation::Version,
     ProfileMutation::ProfileId,
     ProfileMutation::ProfileSemver,
-    ProfileMutation::Lifecycle,
+    ProfileMutation::Lifecycle(4),
     ProfileMutation::NormativeDigest,
     ProfileMutation::MatrixDigest,
     ProfileMutation::MatrixContent,

@@ -213,7 +213,7 @@ fn request_rejects_every_public_identity_and_capability_boundary() -> TestResult
     }
 
     let mut request = valid.clone();
-    request.implementation.implementation_id = "Invalid".to_owned();
+    request.implementation.implementation_id = "a".repeat(129);
     assert_eq!(
         request.to_canonical_cbor(),
         Err(ProtocolError::FieldOutOfBounds)
@@ -273,13 +273,7 @@ fn request_round_trips_every_adapter_and_optional_identity_shape() -> TestResult
 
 #[test]
 fn request_rejects_each_identifier_boundary() -> TestResult {
-    for identifier in [
-        String::new(),
-        "a".repeat(129),
-        "café".to_owned(),
-        "Invalid".to_owned(),
-        "invalid@identifier".to_owned(),
-    ] {
+    for identifier in [String::new(), "a".repeat(129)] {
         let mut request = valid_request()?;
         request.implementation.implementation_id = identifier.clone();
         assert_eq!(
@@ -292,6 +286,22 @@ fn request_rejects_each_identifier_boundary() -> TestResult {
             request.to_canonical_cbor(),
             Err(ProtocolError::FieldOutOfBounds)
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn request_accepts_bounded_utf8_identifiers() -> TestResult {
+    for identifier in ["Café/@插件".to_owned(), format!("{}é", "a".repeat(126))] {
+        assert!(!identifier.is_empty() && identifier.len() <= 128);
+        let mut request = valid_request()?;
+        request.implementation.implementation_id = identifier.clone();
+        request.implementation.organization_id = Some(identifier);
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        let encoded = request.to_canonical_cbor()?;
+        assert_eq!(EvaluationRequest::from_canonical_cbor(&encoded), Ok(request));
     }
     Ok(())
 }
@@ -549,20 +559,66 @@ fn report_rejects_invalid_identity_order_aggregate_and_case_contracts() -> TestR
 fn report_rejects_public_identity_reviewer_and_case_identifier_boundaries() -> TestResult {
     let valid = valid_report()?;
 
-    assert_report_rejected(
-        &valid,
-        |report| report.implementation.implementation_id = "Invalid".to_owned(),
-        ProtocolError::FieldOutOfBounds,
+    for identifier in [String::new(), "a".repeat(129)] {
+        assert_report_rejected(
+            &valid,
+            |report| report.implementation.implementation_id = identifier.clone(),
+            ProtocolError::FieldOutOfBounds,
+        );
+        assert_report_rejected(
+            &valid,
+            |report| report.independence.reviewer_ids[0] = identifier.clone(),
+            ProtocolError::FieldOutOfBounds,
+        );
+        assert_report_rejected(
+            &valid,
+            |report| report.cases[0].case_id = identifier,
+            ProtocolError::FieldOutOfBounds,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn report_accepts_bounded_utf8_identifiers() -> TestResult {
+    let mut report = valid_report()?;
+    report.implementation.implementation_id = "实现/@Café".to_owned();
+    report.implementation.organization_id = Some(format!("{}é", "a".repeat(126)));
+    report.independence.reviewer_ids = vec!["审阅者/@1".to_owned()];
+    report.cases[0].case_id.push_str("-é");
+    reseal(&mut report)?;
+    let encoded = report.to_canonical_cbor()?;
+    assert_eq!(ConformanceReport::from_canonical_cbor(&encoded), Ok(report));
+    Ok(())
+}
+
+#[test]
+fn report_orders_utf8_identifiers_by_encoded_bytes() -> TestResult {
+    let template = valid_report()?;
+    let mut first = template.cases[0].clone();
+    first.case_id = "é".to_owned();
+    let mut second = first.clone();
+    second.case_id = "插件".to_owned();
+
+    let mut ordered = template.clone();
+    ordered.independence.reviewer_ids = vec!["é".to_owned(), "插件".to_owned()];
+    ordered.cases = vec![first.clone(), second.clone()];
+    reseal(&mut ordered)?;
+    let encoded = ordered.to_canonical_cbor()?;
+    assert_eq!(ConformanceReport::from_canonical_cbor(&encoded), Ok(ordered));
+
+    let mut reviewers_reversed = template.clone();
+    reviewers_reversed.independence.reviewer_ids = vec!["插件".to_owned(), "é".to_owned()];
+    assert_eq!(
+        reviewers_reversed.to_canonical_cbor(),
+        Err(ProtocolError::NonCanonicalOrder)
     );
-    assert_report_rejected(
-        &valid,
-        |report| report.independence.reviewer_ids[0] = "Invalid".to_owned(),
-        ProtocolError::FieldOutOfBounds,
-    );
-    assert_report_rejected(
-        &valid,
-        |report| report.cases[0].case_id = "Invalid".to_owned(),
-        ProtocolError::FieldOutOfBounds,
+
+    let mut cases_reversed = template;
+    cases_reversed.cases = vec![second, first];
+    assert_eq!(
+        cases_reversed.to_canonical_cbor(),
+        Err(ProtocolError::NonCanonicalOrder)
     );
     Ok(())
 }
