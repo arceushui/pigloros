@@ -167,13 +167,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 self.port
                     .compare_and_swap(prepared)
                     .map(|_| next_digest)
-                    .map_err(|error| {
+                    .inspect_err(|error| {
                         if error == ErasureErrorV1::PolicyConflict {
                             self.records.retain(|record| {
                                 record.request.reference() != next.request.reference()
                             });
                         }
-                        error
                     })
             })
             .map(|next_digest| {
@@ -861,13 +860,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         {
             return Err(ErasureErrorV1::Unauthorized);
         }
-        let active = match record.active.clone() {
-            Some(active) => active,
-            None => return Err(ErasureErrorV1::ProvenanceMissing),
+        let Some(active) = record.active.clone() else {
+            return Err(ErasureErrorV1::ProvenanceMissing);
         };
-        let scope = match record.scope.clone() {
-            Some(scope) => scope,
-            None => return Err(ErasureErrorV1::ProvenanceMissing),
+        let Some(scope) = record.scope.clone() else {
+            return Err(ErasureErrorV1::ProvenanceMissing);
         };
         if !active
             .admission
@@ -1223,9 +1220,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .as_ref()
             .map(super::ErasureScopeCommitmentV1::reference)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let obligations = match record.obligation_set.clone() {
-            Some(obligations) => obligations,
-            None => return Err(ErasureErrorV1::ProvenanceMissing),
+        let Some(obligations) = record.obligation_set.clone() else {
+            return Err(ErasureErrorV1::ProvenanceMissing);
         };
         let policy = record.request.policy();
         let predecessor = record.administrative_resolution_head;

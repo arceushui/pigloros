@@ -973,7 +973,7 @@ impl RecoveredErasureV1 {
                             objects
                         })
                 })
-                .map(|objects| {
+                .inspect(|_| {
                     self.manifest.target_closure = Some(closure.reference);
                     self.manifest.scope = Some(scope.reference());
                     self.manifest.freeze_admission =
@@ -982,15 +982,14 @@ impl RecoveredErasureV1 {
                         Some(admission.freeze_authorization_evidence().reference());
                     self.manifest.freeze_provenance = Some(freeze.reference());
                     self.manifest.obligation_set = Some(admission.obligation_set().reference());
-                    self.targets = closure.targets;
-                    self.scope = Some(scope);
+                    self.targets = closure.targets.clone();
+                    self.scope = Some(scope.clone());
                     self.freeze_admission = Some(admission.freeze_admission_evidence().clone());
                     self.freeze_authorization =
                         Some(admission.freeze_authorization_evidence().clone());
-                    self.freeze_provenance = Some(freeze);
+                    self.freeze_provenance = Some(freeze.clone());
                     self.obligation_set = Some(admission.obligation_set().clone());
                     self.obligations = admission.obligations().to_vec();
-                    objects
                 })
             },
         )
@@ -2173,8 +2172,7 @@ fn validate_freeze_authorization(graph: &FixedGraphV1<'_>) -> Result<(), Recover
         (Some(admission), Some(authorization)) => graph
             .verifier
             .validate_freeze_authorization(admission, authorization)
-            .map_err(|error| RecoveryFailureV1::new(error, authorization.reference()))
-            .map(|()| ()),
+            .map_err(|error| RecoveryFailureV1::new(error, authorization.reference())),
         (None, None) => Ok(()),
         _ => {
             let subject = graph
