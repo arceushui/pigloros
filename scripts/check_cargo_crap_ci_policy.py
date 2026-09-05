@@ -92,11 +92,11 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline resolver must reject expired artifacts",
         ),
         (
-            'select(.workflow_run.head_branch == "main")',
+            'select(.workflow_run.head_branch == \\"main\\")',
             "baseline resolver must require a main-branch artifact",
         ),
         (
-            'select(.workflow_run.head_sha == "${BASE_SHA}")',
+            'select(.workflow_run.head_sha == \\"${BASE_SHA}\\")',
             "baseline resolver must require the exact base commit",
         ),
         (
