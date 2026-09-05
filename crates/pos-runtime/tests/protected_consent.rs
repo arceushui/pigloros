@@ -1067,7 +1067,7 @@ fn public_registry_error_edges_cover_unusual_runtime_guards() {
     let timeline = TimelineId::new();
     assert_driver_error_edges(timeline);
     assert_action_error_edges(timeline);
-    assert_append_error_edges(timeline);
+    assert_append_error_edges();
 }
 
 fn assert_driver_error_edges(timeline: TimelineId) {
@@ -1175,7 +1175,7 @@ fn assert_action_error_edges(timeline: TimelineId) {
     ));
 }
 
-fn assert_append_error_edges(timeline: TimelineId) {
+fn assert_append_error_edges() {
     let mut store = test_ok(open_store(StoreConfig::Memory));
     let orphan_timeline = TimelineId::new();
     let mut public_append = PluginRegistry::new();
