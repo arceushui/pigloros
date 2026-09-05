@@ -1476,8 +1476,7 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        let context = self.registration_context(plugin)?;
-        self.register_with_approver_slice(plugin, reducer, driver, None, &[], context)
+        self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
     }
 
     /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
