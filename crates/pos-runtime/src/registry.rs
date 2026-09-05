@@ -1456,35 +1456,39 @@ impl PluginRegistry {
         }
         if let Some(error) = failure {
             for staged_id in staged {
-                if let Some(staged_driver) = self
+                let _ = self
                     .plugins
                     .get_mut(&staged_id)
                     .and_then(|staged_entry| staged_entry.driver.as_mut())
-                {
-                    staged_driver.abort_restore_from_history();
-                }
+                    .map(|staged_driver| staged_driver.abort_restore_from_history());
             }
             return Err(error);
         }
         for id in staged {
-            if let Some(driver) = self
+            let commit_error = self
                 .plugins
                 .get_mut(&id)
                 .and_then(|entry| entry.driver.as_mut())
-            {
-                let name = driver.name().to_owned();
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    driver.commit_restore_from_history();
-                }))
-                .is_err()
-                {
-                    self.poisoned_driver = Some(name.clone());
-                    return Err(RuntimeError::DriverRestorePanicked { name });
-                }
+                .map_or(Ok(()), |driver| {
+                    let name = driver.name().to_owned();
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        driver.commit_restore_from_history();
+                    }))
+                    .is_err()
+                    {
+                        Err(name)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .err();
+            if let Some(name) = commit_error {
+                self.poisoned_driver = Some(name.clone());
+                return Err(RuntimeError::DriverRestorePanicked { name });
             }
-            if let Some(entry) = self.plugins.get_mut(&id) {
+            let _ = self.plugins.get_mut(&id).map(|entry| {
                 entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
-            }
+            });
         }
         Ok(())
     }
@@ -1785,13 +1789,18 @@ impl PluginRegistry {
         let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
         for (id, entry) in &mut self.plugins {
             if due_driver_ids.remove(id) {
-                if let Some(driver) = entry.driver.as_mut() {
-                    let observations = snapshot.view_for(driver.subscriptions());
-                    let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                    reject_host_owned_drafts(&output)?;
-                    entry.last_tick = Some(now_ns);
-                    all_drafts.extend(output.drafts);
-                }
+                let driver_result = entry
+                    .driver
+                    .as_mut()
+                    .map(|driver| {
+                        let observations = snapshot.view_for(driver.subscriptions());
+                        let output = invoke_driver(driver.as_mut(), timeline, observations)?;
+                        reject_host_owned_drafts(&output)?;
+                        all_drafts.extend(output.drafts);
+                        Ok::<(), RuntimeError>(())
+                    })
+                    .transpose()?;
+                let _ = driver_result.map(|()| entry.last_tick = Some(now_ns));
             }
         }
         debug_assert!(due_driver_ids.is_empty());
