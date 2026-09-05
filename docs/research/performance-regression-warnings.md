@@ -4,7 +4,7 @@ Canonical decision record: [ADR-070 — Advisory Performance Regression Evidence
 
 ## Recommendation
 
-**Preserve the current dependency-free `memory_erasure` harness and add a small deterministic CSV comparator. Do not introduce Criterion or iai-callgrind for #297.**
+**Preserve the current dependency-free `memory_erasure` harness and add a small deterministic CSV comparator. Do not introduce Criterion or Gungraun for #297.**
 
 The actual harness at [`memory_erasure.rs`](../../crates/pos-store/benches/memory_erasure.rs) intentionally uses only `std`: it runs ten raw `Instant` samples by default for each scenario/cardinality, writes `scenario,cardinality,sample,elapsed_nanos` CSV, and prints the median and p95. Its manifest has `harness = false` and no benchmark-framework dependency ([`pos-store/Cargo.toml`](../../crates/pos-store/Cargo.toml)). #297 should preserve this observable contract and compare the raw CSV with a reviewed, dependency-free comparator (for example, a Python-standard-library script with fixture tests).
 
@@ -18,7 +18,7 @@ Use the **latest successful `main` benchmark artifact** as the advisory baseline
 |---|---|---|
 | Existing raw-CSV harness + deterministic comparator | Retains the measured end-to-end MemoryStore path, benchmark cardinalities, CSV evidence, and zero new Rust dependencies | **Adopt.** |
 | Criterion.rs | Offers bootstrap estimates and comparison reports, but requires a new dev dependency and a different benchmark/output contract. Its own documentation says hosted CI virtualization is noisy enough that results should not be relied on. | **Do not add.** It does not solve GitHub-hosted noise and would add migration work without making an advisory 10-sample signal more trustworthy. |
-| iai-callgrind | Measures deterministic instruction/cache behaviour under Callgrind rather than the harness's wall-clock `Instant` durations; it needs Valgrind and its runner binary, so answers a different question with a distinct toolchain | **Do not add.** Consider separately only if the project deliberately wants instruction-count regression policy. ([iai-callgrind official README](https://github.com/clockworklabs/iai-callgrind)) |
+| Gungraun (formerly iai-callgrind) | Measures deterministic instruction/cache behaviour under Valgrind tools such as Callgrind rather than the harness's wall-clock `Instant` durations; it needs Valgrind and its runner binary, so answers a different question with a distinct toolchain | **Do not add.** Consider separately only if the project deliberately wants instruction-count regression policy. ([Gungraun changelog](https://github.com/gungraun/gungraun/blob/main/CHANGELOG.md)) |
 | Dedicated historical service / fixed self-hosted runner | Can improve long-term hardware consistency | Defer: it adds operational ownership, and GitHub warns that public forks can run dangerous code on self-hosted runners. ([GitHub runner-group security](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access)) |
 
 Criterion remains useful background for a later, deliberate redesign: it uses bootstrap confidence intervals and comparison testing, but cautions that VM load can create apparent changes even when source did not change. That cautions against treating a framework addition as a noise cure. ([Criterion analysis](https://bheisler.github.io/criterion.rs/book/analysis.html), [Criterion CI FAQ](https://bheisler.github.io/criterion.rs/book/faq.html))
@@ -53,7 +53,7 @@ Test the parser, selector, and arithmetic with fixture CSV—not timing tests. C
 
 1. **Observe now:** preserve the current command and ten-sample CSV; publish a 90-day trusted `main` artifact; use a 14-day freshness limit and the 10% median-only advisory warning.
 2. **Calibrate for 4–8 weeks:** triage every warning; record baseline age, runner drift, and confirmation by a repeat run. Do not lower the threshold merely because a framework can calculate a CI.
-3. **Reconsider only with evidence:** a 5% threshold, Criterion, or iai-callgrind needs a separately documented measurement goal, stable comparable environment, sufficient repetitions, and evidence that the current 10% warnings miss material regressions. A dedicated private runner remains the stronger route for a future hard wall-clock gate.
+3. **Reconsider only with evidence:** a 5% threshold, Criterion, or Gungraun needs a separately documented measurement goal, stable comparable environment, sufficient repetitions, and evidence that the current 10% warnings miss material regressions. A dedicated private runner remains the stronger route for a future hard wall-clock gate.
 4. **Promote selectively:** add a separate required check only after stable hardware identity, an owner and triage/SLO, enough observations, low unexplained-warning rate, a reviewed threshold, and deterministic missing-baseline behaviour. Prefer an exact-PR-base or merge-queue baseline for that hard gate; keep hosted latest-`main` results advisory.
 
 This preserves the harness intentionally built for the MemoryStore persistence path, gives #297 an auditable and maintainable signal, and avoids a new dependency whose statistical machinery cannot remove hosted-runner noise.
