@@ -565,7 +565,9 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
         .success());
 
     let executable = directory.path().join("running-evaluator");
+    let replacement = directory.path().join("replacement-evaluator");
     fs::copy(env!("CARGO_BIN_EXE_pos-reference-evaluator"), &executable)?;
+    fs::write(&replacement, b"replacement path contents")?;
     let mut command = Command::new(&executable);
     command
         .args(base.get_args())
@@ -576,8 +578,7 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
     // Opening the FIFO synchronizes with the evaluator after exec and before
     // the executable path is replaced.
     let mut request_writer = open_fifo_writer_after_child_ready(&request_path, &mut child)?;
-    fs::rename(&executable, directory.path().join("loaded-evaluator"))?;
-    fs::write(&executable, b"replacement path contents")?;
+    fs::rename(&replacement, &executable)?;
     request_writer.write_all(&request)?;
     drop(request_writer);
 
