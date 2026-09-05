@@ -168,7 +168,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .compare_and_swap(prepared)
                     .map(|_| next_digest)
                     .inspect_err(|error| {
-                        if error == ErasureErrorV1::PolicyConflict {
+                        if *error == ErasureErrorV1::PolicyConflict {
                             self.records.retain(|record| {
                                 record.request.reference() != next.request.reference()
                             });
