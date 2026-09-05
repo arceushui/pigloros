@@ -670,6 +670,16 @@ struct PluginEntry {
     event_cursor: Seq,
 }
 
+#[inline(never)]
+fn plugin_name(entry: &PluginEntry) -> &str {
+    entry.name.as_str()
+}
+
+#[inline(never)]
+fn plugin_name_and_version(entry: &PluginEntry) -> (&str, &str) {
+    (entry.name.as_str(), entry.version.as_str())
+}
+
 struct PendingStep {
     timeline: pos_core::ids::TimelineId,
     driver_ids: Vec<PluginId>,
@@ -751,9 +761,7 @@ impl PluginRegistry {
     }
 
     fn snapshot_for_subscriptions(&self, subscriptions: &[ProjectionKey]) -> ObservationSnapshot {
-        ObservationSnapshot::from_subscriptions(subscriptions.iter(), |key| {
-            self.projections.state_for(key.entity_id()).cloned()
-        })
+        ObservationSnapshot::from_projection_registry(subscriptions.iter(), &self.projections)
     }
 
     fn snapshot_for_tick(
@@ -1661,14 +1669,12 @@ impl PluginRegistry {
 
     /// Iterate over plugin names in registration order.
     pub fn plugin_names(&self) -> impl Iterator<Item = &str> {
-        self.plugins.values().map(|e| e.name.as_str())
+        self.plugins.values().map(plugin_name)
     }
 
     /// Iterate over registered plugin (name, version) pairs in registration order.
     pub fn plugin_versions(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.plugins
-            .values()
-            .map(|e| (e.name.as_str(), e.version.as_str()))
+        self.plugins.values().map(plugin_name_and_version)
     }
 
     /// Register a driver directly (for tests and late-bound agent registration).
