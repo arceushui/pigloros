@@ -1504,12 +1504,15 @@ impl AuthorityEvaluatorV1 {
         let mut evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
         let request_digest = request_digest(request);
         let grant_chain_bindings = if evaluation.grant_evidence_is_trusted {
-            grant_chain
+            match grant_chain
                 .grants
                 .iter()
                 .map(CapabilityGrantV1::binding_digest)
                 .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_else(|_| deny_missing_grant_provenance(&mut evaluation))
+            {
+                Ok(bindings) => bindings,
+                Err(_) => deny_missing_grant_provenance(&mut evaluation),
+            }
         } else {
             Vec::new()
         };

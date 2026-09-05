@@ -643,6 +643,14 @@ struct PluginEntry {
     event_cursor: Seq,
 }
 
+const fn plugin_name(entry: &PluginEntry) -> &str {
+    entry.name.as_str()
+}
+
+const fn plugin_name_and_version(entry: &PluginEntry) -> (&str, &str) {
+    (entry.name.as_str(), entry.version.as_str())
+}
+
 struct PendingStep {
     timeline: pos_core::ids::TimelineId,
     driver_ids: Vec<PluginId>,
@@ -723,11 +731,8 @@ impl PluginRegistry {
         PluginComposition { plugins, schemas }
     }
 
-    fn snapshot_for_subscriptions<'a>(
-        &self,
-        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
-    ) -> ObservationSnapshot {
-        ObservationSnapshot::from_subscriptions(subscriptions, |key| {
+    fn snapshot_for_subscriptions(&self, subscriptions: &[ProjectionKey]) -> ObservationSnapshot {
+        ObservationSnapshot::from_subscriptions(subscriptions.iter(), |key| {
             self.projections.state_for(key.entity_id()).cloned()
         })
     }
@@ -755,7 +760,7 @@ impl PluginRegistry {
             operation,
             subscriptions.iter(),
         )?;
-        Ok(self.snapshot_for_subscriptions(subscriptions.iter()))
+        Ok(self.snapshot_for_subscriptions(&subscriptions))
     }
 
     fn authorize_snapshot_subscriptions<'a>(
@@ -1475,7 +1480,7 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
+        self.register_with_approver_slice(plugin, reducer, driver, None, &[])
     }
 
     /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
@@ -1494,6 +1499,18 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(plugin, reducer, driver, approver, &approver_event_types)
+    }
+
+    fn register_with_approver_slice(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: &[Kind],
+    ) -> Result<(), RuntimeError> {
         let id = plugin.id();
         let name = plugin.name().to_owned();
 
@@ -1502,8 +1519,6 @@ impl PluginRegistry {
         }
 
         let cap = plugin.capability();
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-
         if let Some(kind) = cap
             .owned_event_types
             .iter()
@@ -1589,7 +1604,7 @@ impl PluginRegistry {
 
         // Index action approver if present
         if approver.is_some() {
-            for kind in &approver_event_types {
+            for kind in approver_event_types {
                 self.approver_map.insert(kind.clone(), id);
             }
         }
@@ -1628,14 +1643,12 @@ impl PluginRegistry {
 
     /// Iterate over plugin names in registration order.
     pub fn plugin_names(&self) -> impl Iterator<Item = &str> {
-        self.plugins.values().map(|e| e.name.as_str())
+        self.plugins.values().map(plugin_name)
     }
 
     /// Iterate over registered plugin (name, version) pairs in registration order.
     pub fn plugin_versions(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.plugins
-            .values()
-            .map(|e| (e.name.as_str(), e.version.as_str()))
+        self.plugins.values().map(plugin_name_and_version)
     }
 
     /// Register a driver directly (for tests and late-bound agent registration).
@@ -1755,7 +1768,7 @@ impl PluginRegistry {
             &OperationContext::Public,
             due_subscriptions.iter(),
         )?;
-        let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
+        let snapshot = self.snapshot_for_subscriptions(&due_subscriptions);
         for (id, entry) in &mut self.plugins {
             if due_driver_ids.remove(id) {
                 if let Some(driver) = entry.driver.as_mut() {
@@ -3404,7 +3417,7 @@ mod tests {
         let observed = ProjectionKey::new(observed_entity);
         let missing = ProjectionKey::new(missing_entity);
         let subscriptions = vec![observed.clone(), observed.clone(), missing.clone()];
-        let snapshot = reg.snapshot_for_subscriptions(subscriptions.iter());
+        let snapshot = reg.snapshot_for_subscriptions(&subscriptions);
         let view = snapshot.view_for(&subscriptions);
 
         assert_eq!(view.len(), 2);
