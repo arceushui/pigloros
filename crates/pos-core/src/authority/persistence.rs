@@ -499,11 +499,13 @@ impl AuthorityPersistenceStateV1 {
                 Err(AuthorityPersistenceErrorV1::Conflict)
             };
         }
-        let current = self
+        let Some(current) = self
             .timelines
             .get(&revocation.authority_timeline())
             .copied()
-            .ok_or(AuthorityPersistenceErrorV1::InvalidRecord)?;
+        else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        };
         if revocation.revocation_epoch() != current.revocation_epoch.saturating_add(1) {
             return Err(AuthorityPersistenceErrorV1::StaleEpoch);
         }
@@ -529,11 +531,13 @@ impl AuthorityPersistenceStateV1 {
         &self,
         leaf_grant_id: Hash,
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
-        let timeline = self
+        let Some(timeline) = self
             .grants
             .get(&leaf_grant_id)
             .map(CapabilityGrantV1::issuance_timeline)
-            .ok_or(AuthorityPersistenceErrorV1::Conflict)?;
+        else {
+            return Err(AuthorityPersistenceErrorV1::Conflict);
+        };
         let mut chain = Vec::new();
         let mut next = Some(leaf_grant_id);
         while let Some(grant_id) = next {
@@ -553,11 +557,9 @@ impl AuthorityPersistenceStateV1 {
             next = grant.parent_grant_id();
         }
         chain.reverse();
-        let current = self
-            .timelines
-            .get(&timeline)
-            .copied()
-            .ok_or(AuthorityPersistenceErrorV1::InvalidRecord)?;
+        let Some(current) = self.timelines.get(&timeline).copied() else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        };
         let resolved = chain
             .iter()
             .map(|grant| {
@@ -596,17 +598,22 @@ impl AuthorityPersistenceStateV1 {
         {
             return Err(AuthorityPersistenceErrorV1::InvalidRecord);
         }
-        let grants = self
+        let grants_result = self
             .grants
             .values()
             .map(|grant| grant.encode().map(|encoded| bytes(encoded.as_slice())))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(AuthorityPersistenceErrorV1::from)?;
-        let revocations = self
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(grants) = grants_result else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        };
+        let revocations_result = self
             .revocations
             .values()
             .map(|revocation| revocation.encode().map(|encoded| bytes(encoded.as_slice())))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(revocations) = revocations_result else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        };
         let timelines = self
             .timelines
             .iter()

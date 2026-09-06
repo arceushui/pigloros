@@ -478,28 +478,9 @@ fn conflicts_stale_epochs_and_timeline_reordering_fail_closed() {
     );
     ok(state.issue_grant(grant_permit(&root), root.clone()));
 
-    let mut conflict = child.clone();
-    let mut draft = CapabilityGrantDraftV1 {
-        grant_id: conflict.grant_id(),
-        grantor: conflict.grantor().clone(),
-        grantee: conflict.grantee().clone(),
-        trust_domain: conflict.trust_domain().to_owned(),
-        scope: conflict.scope().clone(),
-        valid_from_position: conflict.valid_from_position(),
-        valid_until_position: conflict.valid_until_position(),
-        parent_grant_id: conflict.parent_grant_id(),
-        delegation_depth: conflict.delegation_depth(),
-        max_delegation_depth: conflict.max_delegation_depth(),
-        permitted_delegate_classes: conflict.permitted_delegate_classes().to_vec(),
-        consent_references: conflict.consent_references().to_vec(),
-        policy_revision: conflict.policy_revision(),
-        issuance_timeline: conflict.issuance_timeline(),
-        issuance_seq: Seq::from_u64(1),
-        revocation_epoch: conflict.revocation_epoch(),
-        revocation_fence: conflict.revocation_fence(),
-        authority_registry_digest: conflict.authority_registry_digest(),
-    };
-    conflict = ok(CapabilityGrantV1::try_from_draft(draft.clone()));
+    let mut draft = grant_draft(&child);
+    draft.issuance_seq = Seq::from_u64(1);
+    let conflict = ok(CapabilityGrantV1::try_from_draft(draft.clone()));
     let conflict_permit = grant_permit(&conflict);
     assert_eq!(
         state.issue_grant(conflict_permit, conflict),
@@ -816,6 +797,36 @@ fn authority_state_validation_rejects_incoherent_public_fixtures() {
     value_array(&mut value_array(&mut broken_parent)[2])[1] =
         Value::Bytes(ok(broken_child.encode()).as_slice().to_vec());
     assert_invalid_persistence_value(&broken_parent);
+
+    let mut delegation_cycle = fixture.clone();
+    let mut cyclic_root_draft = grant_draft(&root_grant());
+    cyclic_root_draft.parent_grant_id = Some(hash(2));
+    cyclic_root_draft.delegation_depth = 1;
+    let cyclic_root = ok(CapabilityGrantV1::try_from_draft(cyclic_root_draft));
+    value_array(&mut value_array(&mut delegation_cycle)[2])[0] =
+        Value::Bytes(ok(cyclic_root.encode()).as_slice().to_vec());
+    assert_invalid_persistence_value(&delegation_cycle);
+
+    let mut over_depth_chain = fixture.clone();
+    let mut encoded_grants = Vec::new();
+    for value in 1_u8..=18 {
+        let mut draft = grant_draft(&root_grant());
+        draft.grant_id = hash(value);
+        draft.valid_from_position = Seq::from_u64(u64::from(value));
+        draft.issuance_seq = Seq::from_u64(u64::from(value));
+        draft.parent_grant_id = (value < 18).then_some(hash(value.saturating_add(1)));
+        draft.delegation_depth = u8::from(value < 18);
+        draft.max_delegation_depth = 16;
+        let grant = ok(CapabilityGrantV1::try_from_draft(draft));
+        encoded_grants.push(Value::Bytes(ok(grant.encode()).as_slice().to_vec()));
+    }
+    value_array(&mut over_depth_chain)[2] = Value::Array(encoded_grants);
+    value_array(&mut over_depth_chain)[3] = Value::Array(vec![]);
+    let timeline_state =
+        value_array(&mut value_array(&mut value_array(&mut over_depth_chain)[4])[0]);
+    timeline_state[1] = Value::Integer(0_u64.into());
+    timeline_state[2] = Value::Integer(18_u64.into());
+    assert_invalid_persistence_value(&over_depth_chain);
 
     let mut revocation_without_grant = fixture.clone();
     value_array(&mut value_array(&mut revocation_without_grant)[2]).clear();
