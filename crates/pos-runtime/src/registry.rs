@@ -1179,13 +1179,6 @@ impl PluginRegistry {
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
             self.collect_anchored_selection(selection)?;
-        let protected = match &operation {
-            OperationContext::Public => false,
-            OperationContext::Protected { .. } => true,
-        };
-        if protected && (!subscriptions.is_empty() || !committed_events.is_empty()) {
-            return Err(RuntimeError::AuthorityFenceRequired);
-        }
         let mut event_cursors = Vec::new();
 
         let anchor = SnapshotAnchor::new(timeline, observed_through);
