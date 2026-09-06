@@ -140,11 +140,15 @@ fn observation_snapshot(
 }
 
 fn fixture() -> Fixture {
+    fixture_with_timeline(TimelineId::new())
+}
+
+fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
     let ids = FixtureIds {
         principal: PrincipalRefV1::try_new([1; 16], "host.test").test_ok(),
         participant_id: EntityId::new(),
         plugin_id: PluginId::new(),
-        timeline_id: TimelineId::new(),
+        timeline_id,
         authority_timeline: TimelineId::new(),
     };
     let registry_digest = hash_from_repeated_byte(6);
@@ -469,7 +473,9 @@ fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
 
 #[test]
 fn current_authority_fence_appends_then_commits_the_driver() {
-    let fixture = fixture();
+    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let timeline = store.create_timeline("authorized-participant").test_ok();
+    let fixture = fixture_with_timeline(timeline.id());
     let (mut registry, state) = registry(&fixture, false);
     let drafts = registry
         .stage_authorized_driver(
@@ -479,7 +485,6 @@ fn current_authority_fence_appends_then_commits_the_driver() {
         )
         .test_ok();
     let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
-    let mut store = open_store(StoreConfig::Memory).test_ok();
     let events = registry
         .append_and_commit_authorized_step_at(
             store.as_mut(),
