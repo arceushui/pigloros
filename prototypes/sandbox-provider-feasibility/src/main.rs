@@ -17,11 +17,30 @@ use netlink_packet_netfilter::{
 use netlink_sys::{protocols::NETLINK_NETFILTER, Socket, SocketAddr};
 use nix::sched::{setns, unshare, CloneFlags};
 use rtnetlink::{new_connection, LinkDummy};
-use std::{fs::File, os::unix::fs::MetadataExt as _, thread, time::Instant};
+use std::{
+    fs::File,
+    io::{BufRead as _, BufReader, Read as _, Write as _},
+    os::unix::fs::MetadataExt as _,
+    process::{Command, Stdio},
+    thread,
+    time::Instant,
+};
+use zbus::zvariant::{OwnedValue, Type, Value};
 
 #[tokio::main]
 async fn main() {
     let arguments: Vec<String> = std::env::args().collect();
+    if arguments.iter().any(|argument| argument == "--leaf") {
+        std::future::pending::<()>().await;
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--attempt-worker")
+    {
+        run_attempt_worker();
+        return;
+    }
     let privileged = arguments.iter().any(|argument| argument == "--privileged");
     let network_isolation =
         if privileged && arguments.iter().any(|argument| argument == "--offline") {
@@ -29,12 +48,26 @@ async fn main() {
         } else {
             "not-requested"
         };
+    let attempt_id = attempt_id(&arguments);
+    if arguments
+        .iter()
+        .any(|argument| argument == "--broker-death")
+    {
+        probe_broker_death(&attempt_id, network_isolation).await;
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--check-broker-clean")
+    {
+        check_broker_units_absent(&attempt_id).await;
+        return;
+    }
     let dbus = probe_systemd().await;
     let route = probe_route_netlink().await;
     let nftables_packet_bytes = encode_nftables_probe();
     println!("systemd={dbus};route_netlink={route};nftables_packet_bytes={nftables_packet_bytes}");
     if privileged {
-        let attempt_id = attempt_id(&arguments);
         let started = Instant::now();
         let systemd_started = Instant::now();
         let systemd_lifecycle = probe_transient_slice(&attempt_id).await;
@@ -55,6 +88,175 @@ async fn main() {
         println!(
             "attempt={attempt_id};network_isolation={network_isolation};transient_slice={systemd_lifecycle};transient_slice_us={systemd_elapsed_us};dummy_link={route_lifecycle};dummy_link_us={route_elapsed_us};nftables_read={nftables_read};nftables_read_us={nftables_read_elapsed_us};nftables_atomic={nftables_atomic};nftables_atomic_us={nftables_atomic_elapsed_us};namespace_descriptor={namespace};namespace_us={namespace_elapsed_us};dm_verity={dm_verity};total_us={}",
             started.elapsed().as_micros()
+        );
+    }
+}
+
+fn run_attempt_worker() {
+    let mut signal = [0_u8; 1];
+    if std::io::stdin().read_exact(&mut signal).is_err() {
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(leaf) = Command::new(executable)
+        .arg("--leaf")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    println!(
+        "worker-ready;worker_pid={};leaf_pid={}",
+        std::process::id(),
+        leaf.id()
+    );
+    let _ = std::io::stdout().flush();
+    loop {
+        thread::park();
+    }
+}
+
+async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
+    let Ok(connection) = zbus::Connection::system().await else {
+        println!("broker-setup-rejected;reason=dbus-unavailable");
+        return;
+    };
+    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
+        println!("broker-setup-rejected;reason=manager-unavailable");
+        return;
+    };
+    let broker_unit = format!("pigloros-broker-{attempt_id}.scope");
+    let attempt_unit = format!("pigloros-attempt-{attempt_id}.scope");
+    if start_transient_scope(&proxy, &broker_unit, &[std::process::id()], &[])
+        .await
+        .is_err()
+    {
+        println!("broker-setup-rejected;reason=broker-scope");
+        return;
+    }
+
+    let Ok(executable) = std::env::current_exe() else {
+        println!("broker-setup-rejected;reason=current-exe");
+        return;
+    };
+    let Ok(mut worker) = Command::new(executable)
+        .arg("--attempt-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        println!("broker-setup-rejected;reason=worker-spawn");
+        return;
+    };
+    if start_transient_scope(
+        &proxy,
+        &attempt_unit,
+        &[worker.id()],
+        std::slice::from_ref(&broker_unit),
+    )
+    .await
+    .is_err()
+    {
+        let _ = worker.kill();
+        println!("broker-setup-rejected;reason=attempt-scope");
+        return;
+    }
+    let Some(mut worker_stdin) = worker.stdin.take() else {
+        let _ = worker.kill();
+        println!("broker-setup-rejected;reason=worker-stdin");
+        return;
+    };
+    if worker_stdin.write_all(&[1]).is_err() {
+        let _ = worker.kill();
+        println!("broker-setup-rejected;reason=worker-signal");
+        return;
+    }
+    drop(worker_stdin);
+    let Some(worker_stdout) = worker.stdout.take() else {
+        let _ = worker.kill();
+        println!("broker-setup-rejected;reason=worker-stdout");
+        return;
+    };
+    let mut worker_line = String::new();
+    if BufReader::new(worker_stdout)
+        .read_line(&mut worker_line)
+        .is_err()
+        || !worker_line.starts_with("worker-ready;")
+    {
+        let _ = worker.kill();
+        println!("broker-setup-rejected;reason=worker-readiness");
+        return;
+    }
+    println!(
+        "broker-ready;network_isolation={network_isolation};broker_pid={};broker_unit={broker_unit};attempt_unit={attempt_unit};{}",
+        std::process::id(),
+        worker_line.trim_end()
+    );
+    let _ = std::io::stdout().flush();
+    std::future::pending::<()>().await;
+}
+
+async fn start_transient_scope(
+    proxy: &zbus_systemd::systemd1::ManagerProxy<'_>,
+    name: &str,
+    pids: &[u32],
+    binds_to: &[String],
+) -> Result<(), ()> {
+    let mut properties = vec![
+        (
+            "Description".to_owned(),
+            owned_value("PiglorOS #211 probe")?,
+        ),
+        ("PIDs".to_owned(), owned_value(pids.to_vec())?),
+        ("KillMode".to_owned(), owned_value("control-group")?),
+        ("SendSIGKILL".to_owned(), OwnedValue::from(true)),
+        (
+            "TimeoutStopUSec".to_owned(),
+            OwnedValue::from(5_000_000_u64),
+        ),
+    ];
+    if !binds_to.is_empty() {
+        properties.push(("BindsTo".to_owned(), owned_value(binds_to.to_vec())?));
+    }
+    proxy
+        .start_transient_unit(name.to_owned(), "fail".to_owned(), properties, vec![])
+        .await
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
+fn owned_value<T>(value: T) -> Result<OwnedValue, ()>
+where
+    T: Type + Into<Value<'static>>,
+{
+    Value::new(value).try_into_owned().map_err(|_| ())
+}
+
+async fn check_broker_units_absent(attempt_id: &str) {
+    let Ok(connection) = zbus::Connection::system().await else {
+        println!("broker-cleanliness-unproven;reason=dbus-unavailable");
+        return;
+    };
+    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
+        println!("broker-cleanliness-unproven;reason=manager-unavailable");
+        return;
+    };
+    let broker_unit = format!("pigloros-broker-{attempt_id}.scope");
+    let attempt_unit = format!("pigloros-attempt-{attempt_id}.scope");
+    let broker_absent = proxy.get_unit(broker_unit).await.is_err();
+    let attempt_absent = proxy.get_unit(attempt_unit).await.is_err();
+    if broker_absent && attempt_absent {
+        println!("broker-clean;broker_unit=absent;attempt_unit=absent");
+    } else {
+        println!(
+            "broker-residual;broker_unit={};attempt_unit={}",
+            if broker_absent { "absent" } else { "loaded" },
+            if attempt_absent { "absent" } else { "loaded" }
         );
     }
 }

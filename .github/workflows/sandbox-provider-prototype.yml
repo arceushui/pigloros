@@ -116,6 +116,50 @@ jobs:
           test "$(grep -c 'typed-install-read-back-delete-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'retained-fd-create-restore-drop-ok' concurrent-summary.txt)" -eq 8
 
+      - name: Prove broker-death descendant cleanup
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          set -euo pipefail
+          : >broker-death.txt
+          sudo ./target/debug/sandbox-provider-feasibility \
+            --privileged --offline --broker-death --attempt-id death \
+            >broker-death.txt &
+          launcher_pid=$!
+          for _ in $(seq 1 100); do
+            grep -q '^broker-ready;' broker-death.txt && break
+            sleep 0.1
+          done
+          grep -q '^broker-ready;network_isolation=isolated-no-host-net;' broker-death.txt
+          broker_pid=$(sed -n 's/.*;broker_pid=\([0-9]*\);.*/\1/p' broker-death.txt)
+          worker_pid=$(sed -n 's/.*;worker_pid=\([0-9]*\);.*/\1/p' broker-death.txt)
+          leaf_pid=$(sed -n 's/.*;leaf_pid=\([0-9]*\)$/\1/p' broker-death.txt)
+          test -n "$broker_pid" && test -n "$worker_pid" && test -n "$leaf_pid"
+          recovery_started=$(date +%s%N)
+          sudo kill -KILL "$broker_pid"
+          wait "$launcher_pid" || true
+          for _ in $(seq 1 100); do
+            if ! sudo kill -0 "$worker_pid" 2>/dev/null && \
+               ! sudo kill -0 "$leaf_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          ! sudo kill -0 "$worker_pid" 2>/dev/null
+          ! sudo kill -0 "$leaf_pid" 2>/dev/null
+          for _ in $(seq 1 100); do
+            cleanup=$(sudo ./target/debug/sandbox-provider-feasibility \
+              --privileged --offline --check-broker-clean --attempt-id death)
+            if grep -q '^broker-clean;' <<<"$cleanup"; then
+              printf '%s\n' "$cleanup" | tee -a broker-death.txt
+              break
+            fi
+            sleep 0.1
+          done
+          grep -q '^broker-clean;' broker-death.txt
+          recovery_us=$(( ($(date +%s%N) - recovery_started) / 1000 ))
+          printf 'broker_death_recovery_us=%s\n' "$recovery_us" | tee -a broker-death.txt
+          test "$recovery_us" -le 10000000
+
       - name: Record thirty sequential lifecycle samples
         working-directory: prototypes/sandbox-provider-feasibility
         run: |
@@ -162,6 +206,7 @@ jobs:
           path: |
             prototypes/sandbox-provider-feasibility/Cargo.lock
             prototypes/sandbox-provider-feasibility/cargo-deny.txt
+            prototypes/sandbox-provider-feasibility/broker-death.txt
             prototypes/sandbox-provider-feasibility/concurrent-*.txt
             prototypes/sandbox-provider-feasibility/dependency-metadata.json
             prototypes/sandbox-provider-feasibility/dependency-packages.json
