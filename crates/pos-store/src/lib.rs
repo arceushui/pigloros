@@ -51,11 +51,12 @@ pub use pos_core::store::{
     APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use pos_core::{
-    CanonicalBytes, CoreError, CorrelationId, EntityId, ErasureFreezeAuthorizationVerifierV1,
-    ErasurePersistencePortV1, Event, EventDraft, EventId, GeographicAdmissionAdmin,
-    GeographicAdmissionOutcome, GeographicAdmissionStore, GeographicReplayEvidenceV1,
-    GeographicReplayVerifier, Kind, OwnTracksEnrollmentStore, TimelineId,
-    ValidatedGeographicAdmissionV1, WallTime,
+    AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,
+    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event, EventDraft, EventId,
+    GeographicAdmissionAdmin, GeographicAdmissionOutcome, GeographicAdmissionStore,
+    GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind, OwnTracksEnrollmentStore,
+    PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1, WallTime,
 };
 
 /// Resolve a generic-adapter visibility check without exposing protected Timeline state.

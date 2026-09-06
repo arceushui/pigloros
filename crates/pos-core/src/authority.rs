@@ -11,6 +11,14 @@ use ciborium::Value;
 
 use crate::{CanonicalBytes, EntityId, Hash, PluginId, Seq, TimelineId, WallTime};
 
+mod persistence;
+
+pub use persistence::{
+    AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    AuthorityPersistenceStateV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    PersistedAuthorityV1, MAX_PERSISTED_AUTHORITY_GRANTS, MAX_PERSISTED_AUTHORITY_STATE_BYTES,
+};
+
 const PRINCIPAL_MAGIC: [u8; 4] = *b"PRN1";
 const GRANT_MAGIC: [u8; 4] = *b"CPG1";
 const DECISION_MAGIC: [u8; 4] = *b"AUD1";
@@ -973,6 +981,17 @@ impl CapabilityGrantV1 {
         self.authority_registry_digest
     }
 
+    pub(super) fn with_persisted_revocation(
+        &self,
+        revocation_epoch: u64,
+        revocation_fence: Option<Seq>,
+    ) -> Self {
+        let mut resolved = self.clone();
+        resolved.revocation_epoch = revocation_epoch;
+        resolved.revocation_fence = revocation_fence;
+        resolved
+    }
+
     /// Return the digest that a trusted registry attests for this exact record.
     ///
     /// # Errors
@@ -1119,6 +1138,12 @@ pub struct AuthorizationRequestV1 {
 }
 
 impl AuthorizationRequestV1 {
+    /// Canonical digest binding every resolved request input.
+    #[must_use]
+    pub fn binding_digest(&self) -> Hash {
+        request_digest(self)
+    }
+
     /// Validate a fully resolved host request.
     ///
     /// # Errors

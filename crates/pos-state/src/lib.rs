@@ -12,12 +12,204 @@
 //! No I/O, no async.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use pos_core::{
-    ConsentRevocationFoldListener, ConsentRevokedV1, EntityId, Event, Reducer, Relationship, State,
-    StateRegistry, EVENT_TYPE_CONSENT_REVOKED_V1,
+    AuthorizationDecisionV1, AuthorizationRequestV1, ConsentEvidenceV1,
+    ConsentRevocationFoldListener, ConsentRevokedV1, EntityId, Event, Hash, PersistedAuthorityV1,
+    Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
+    EVENT_TYPE_CONSENT_REVOKED_V1,
 };
+
+// ---------------------------------------------------------------------------
+// AuthorizationCacheV1
+// ---------------------------------------------------------------------------
+
+/// Exact invalidation identity for one cached active authorization decision.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct AuthorizationCacheKeyV1 {
+    request_digest: Hash,
+    authority_timeline: TimelineId,
+    grant_chain_bindings: Vec<Hash>,
+    consent_policy_revision: Hash,
+    capability_policy_revision: Hash,
+    revocation_epoch: u64,
+}
+
+impl AuthorizationCacheKeyV1 {
+    #[must_use]
+    pub fn from_decision(decision: &AuthorizationDecisionV1, revocation_epoch: u64) -> Self {
+        Self {
+            request_digest: decision.request_digest(),
+            authority_timeline: decision.authority_timeline(),
+            grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
+            consent_policy_revision: decision.consent_policy_revision(),
+            capability_policy_revision: decision.capability_policy_revision(),
+            revocation_epoch,
+        }
+    }
+
+    #[must_use]
+    pub const fn authority_timeline(&self) -> TimelineId {
+        self.authority_timeline
+    }
+
+    #[must_use]
+    pub const fn revocation_epoch(&self) -> u64 {
+        self.revocation_epoch
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AuthorizationCacheEntryV1 {
+    decision: AuthorizationDecisionV1,
+    expires_at: WallTime,
+    valid_until_position: Seq,
+    grant_ids: BTreeSet<Hash>,
+    consent_references: BTreeSet<Hash>,
+}
+
+/// Current authorized-decision projection with explicit expiry and revocation indexes.
+///
+/// Only active decisions are admitted. Every lookup supplies the current wall-time and
+/// Timeline position, so an entry cannot outlive the shorter of its consent/grant wall
+/// expiry and logical-position expiry. Parent and consent indexes make revocation
+/// invalidation independent of which chain member was the leaf.
+#[derive(Clone, Debug, Default)]
+pub struct AuthorizationCacheV1 {
+    entries: HashMap<AuthorizationCacheKeyV1, AuthorizationCacheEntryV1>,
+}
+
+impl AuthorizationCacheV1 {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cache an active decision until its derived shortest expiry.
+    ///
+    /// Returns the exact cache key, or `None` when the decision is denied, the
+    /// request does not match the persisted authority state, an expiry is not in
+    /// the request's future, or no capability chain is identified.
+    pub fn insert_active(
+        &mut self,
+        decision: AuthorizationDecisionV1,
+        request: &AuthorizationRequestV1,
+        authority: &PersistedAuthorityV1,
+    ) -> Option<AuthorizationCacheKeyV1> {
+        let grants = authority.chain().grants();
+        let grant_ids = grants
+            .iter()
+            .map(|grant| grant.grant_id())
+            .collect::<BTreeSet<_>>();
+        let consent_references = grants
+            .iter()
+            .flat_map(|grant| grant.consent_references().iter().copied())
+            .collect::<BTreeSet<_>>();
+        let valid_until_position = grants
+            .iter()
+            .map(|grant| grant.valid_until_position())
+            .min()?;
+        let expires_at = match request.consent() {
+            ConsentEvidenceV1::Resolved { grants } => grants
+                .iter()
+                .map(|grant| grant.valid_until())
+                .min()
+                .map_or(request.authenticated().expires_at(), |consent_expiry| {
+                    consent_expiry.min(request.authenticated().expires_at())
+                }),
+            _ => request.authenticated().expires_at(),
+        };
+        let request_matches = decision.request_digest() == request.binding_digest()
+            && decision.authority_timeline() == request.authority_timeline()
+            && decision.at_position() == request.at_position()
+            && decision.capability_policy_revision() == request.capability_policy_revision()
+            && decision.consent_policy_revision() == request.consent_policy_revision()
+            && authority.revocation_epoch() == request.revocation_epoch();
+        if !decision.is_allowed()
+            || !request_matches
+            || request.at_time() >= expires_at
+            || valid_until_position <= decision.at_position()
+            || grant_ids.is_empty()
+        {
+            return None;
+        }
+        let key =
+            AuthorizationCacheKeyV1::from_decision(&decision, authority.revocation_epoch());
+        self.entries.insert(
+            key.clone(),
+            AuthorizationCacheEntryV1 {
+                decision,
+                expires_at,
+                valid_until_position,
+                grant_ids,
+                consent_references,
+            },
+        );
+        Some(key)
+    }
+
+    /// Read an unexpired decision through its complete invalidation identity.
+    pub fn get(
+        &mut self,
+        key: &AuthorizationCacheKeyV1,
+        at_time: WallTime,
+        at_position: Seq,
+    ) -> Option<&AuthorizationDecisionV1> {
+        let expired = self.entries.get(key).is_some_and(|entry| {
+            at_time >= entry.expires_at || at_position >= entry.valid_until_position
+        });
+        if expired {
+            self.entries.remove(key);
+            None
+        } else {
+            self.entries.get(key).map(|entry| &entry.decision)
+        }
+    }
+
+    /// Invalidate every leaf decision derived from this grant or any parent grant.
+    pub fn invalidate_grant(&mut self, grant_id: Hash) -> usize {
+        self.retain_counted(|entry| !entry.grant_ids.contains(&grant_id))
+    }
+
+    /// Invalidate every decision derived from one revoked consent reference.
+    pub fn invalidate_consent(&mut self, consent_reference: Hash) -> usize {
+        self.retain_counted(|entry| !entry.consent_references.contains(&consent_reference))
+    }
+
+    /// Drop stale epochs for one authority Timeline while leaving unrelated Timelines intact.
+    pub fn retain_revocation_epoch(
+        &mut self,
+        authority_timeline: TimelineId,
+        current_epoch: u64,
+    ) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|key, _| {
+            key.authority_timeline() != authority_timeline
+                || key.revocation_epoch() == current_epoch
+        });
+        before.saturating_sub(self.entries.len())
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn retain_counted(
+        &mut self,
+        mut keep: impl FnMut(&AuthorizationCacheEntryV1) -> bool,
+    ) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| keep(entry));
+        before.saturating_sub(self.entries.len())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EntityStateProjection
@@ -331,6 +523,11 @@ mod tests {
         entity::RelationshipKind,
         event::{CanonicalBytes, Kind, SchemaVersion},
         ids::EventId,
+        AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+        AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+        AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1,
+        CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+        DelegationChainV1, PrincipalRefV1,
     };
     use proptest::prelude::*;
 
@@ -356,6 +553,138 @@ mod tests {
             signature: None,
             signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
+        }
+    }
+
+    fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+        })
+    }
+
+    const fn test_hash(value: u8) -> Hash {
+        Hash::from_bytes([value; 32])
+    }
+
+    struct CacheFixture {
+        decision: AuthorizationDecisionV1,
+        request: AuthorizationRequestV1,
+        authority: PersistedAuthorityV1,
+        grant_id: Hash,
+        consent_reference: Hash,
+    }
+
+    fn active_decision(authority_timeline: TimelineId) -> CacheFixture {
+        decision_with_capability_trust(authority_timeline, true)
+    }
+
+    fn decision_with_capability_trust(
+        authority_timeline: TimelineId,
+        trust_capability: bool,
+    ) -> CacheFixture {
+        let principal = test_ok(PrincipalRefV1::try_new([1; 16], "local.test"));
+        let actor = EntityId::new();
+        let authenticated = test_ok(AuthenticatedPrincipalResultV1::try_from_draft(
+            AuthenticatedPrincipalDraftV1 {
+                principal: principal.clone(),
+                adapter_id: "test-adapter".to_owned(),
+                assurance: test_ok(AssuranceLevelV1::try_new(1)),
+                issued_at: WallTime::from_micros(1),
+                expires_at: WallTime::from_micros(100),
+                binding_digest: test_hash(3),
+            },
+        ));
+        let policy = test_hash(4);
+        let grant_id = test_hash(5);
+        let consent_reference = test_hash(6);
+        let registry_digest = test_hash(7);
+        let scope = test_ok(CapabilityScopeV1::try_from_draft(
+            CapabilityScopeDraftV1 {
+                resources: vec!["profile".to_owned()],
+                actions: vec!["read".to_owned()],
+                purposes: vec!["planning".to_owned()],
+                audiences: vec!["local-host".to_owned()],
+                actor_entity_ids: vec![actor],
+                subject_ids: vec![],
+                participant_ids: vec![],
+                plugin_id: None,
+                principal_roles: vec![AuthorityRoleV1::Actor],
+                max_uses: 2,
+                budget: 10,
+                environment_constraints: vec!["local-only".to_owned()],
+            },
+        ));
+        let grant = test_ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+            grant_id,
+            grantor: principal.clone(),
+            grantee: AuthorityGranteeV1::Principal(principal),
+            trust_domain: "local.test".to_owned(),
+            scope,
+            valid_from_position: Seq::from_u64(1),
+            valid_until_position: Seq::from_u64(80),
+            parent_grant_id: None,
+            delegation_depth: 0,
+            max_delegation_depth: 0,
+            permitted_delegate_classes: vec![],
+            consent_references: vec![consent_reference],
+            policy_revision: policy,
+            issuance_timeline: authority_timeline,
+            issuance_seq: Seq::from_u64(1),
+            revocation_epoch: 0,
+            revocation_fence: None,
+            authority_registry_digest: registry_digest,
+        }));
+        let request = test_ok(AuthorizationRequestV1::try_from_draft(
+            AuthorizationRequestDraftV1 {
+                authenticated,
+                actor_entity_id: actor,
+                subject_id: None,
+                participant_id: None,
+                plugin_id: None,
+                installation_id: None,
+                principal_role: AuthorityRoleV1::Actor,
+                resource: "profile".to_owned(),
+                data_category: "public".to_owned(),
+                action: "read".to_owned(),
+                purpose: "planning".to_owned(),
+                audience: "local-host".to_owned(),
+                at_time: WallTime::from_micros(10),
+                authority_timeline,
+                at_position: Seq::from_u64(10),
+                consent_timeline: None,
+                consent_at_position: None,
+                use_count: 1,
+                budget: 5,
+                consent_policy_revision: policy,
+                capability_policy_revision: policy,
+                revocation_epoch: 0,
+                revocation_state_current: true,
+                authority_registry_digest: registry_digest,
+                consent: ConsentEvidenceV1::NotRequired,
+                environment_constraints: vec!["local-only".to_owned()],
+            },
+        ));
+        let capability_bindings = if trust_capability {
+            vec![test_ok(grant.binding_digest())]
+        } else {
+            vec![]
+        };
+        let registry = test_ok(AuthorityRegistrySnapshotV1::try_new(
+            registry_digest,
+            vec![request.authenticated().registry_binding_digest()],
+            capability_bindings,
+            vec![],
+        ));
+        let chain = test_ok(DelegationChainV1::try_from_grants(vec![grant.clone()]));
+        let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &registry);
+        let mut state = AuthorityPersistenceStateV1::new();
+        test_ok(state.issue_grant(grant));
+        CacheFixture {
+            decision,
+            request,
+            authority: test_ok(state.resolve(grant_id)),
+            grant_id,
+            consent_reference,
         }
     }
 
@@ -517,6 +846,113 @@ mod tests {
         let registry = ProjectionRegistry::new();
         let entity = EntityId::new();
         assert!(registry.state_for(&entity).is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authorization_cache_expires_at_the_shortest_time_or_position() {
+        let fixture = active_decision(TimelineId::new());
+        let mut by_time = AuthorizationCacheV1::new();
+        let key = by_time
+            .insert_active(
+                fixture.decision.clone(),
+                &fixture.request,
+                &fixture.authority,
+            )
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+        assert!(by_time
+            .get(&key, WallTime::from_micros(99), Seq::from_u64(79))
+            .is_some());
+        assert!(by_time
+            .get(&key, WallTime::from_micros(100), Seq::from_u64(79))
+            .is_none());
+        assert!(by_time.is_empty());
+
+        let mut by_position = AuthorizationCacheV1::new();
+        let key = by_position
+            .insert_active(fixture.decision, &fixture.request, &fixture.authority)
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+        assert!(by_position
+            .get(&key, WallTime::from_micros(99), Seq::from_u64(80))
+            .is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authorization_cache_invalidates_parent_consent_and_stale_epoch() {
+        let timeline = TimelineId::new();
+        let other_timeline = TimelineId::new();
+        let fixture = active_decision(timeline);
+        let other = active_decision(other_timeline);
+
+        let mut grant_cache = AuthorizationCacheV1::new();
+        assert!(grant_cache
+            .insert_active(
+                fixture.decision.clone(),
+                &fixture.request,
+                &fixture.authority,
+            )
+            .is_some());
+        assert_eq!(grant_cache.invalidate_grant(fixture.grant_id), 1);
+        assert!(grant_cache.is_empty());
+
+        let mut consent_cache = AuthorizationCacheV1::new();
+        assert!(consent_cache
+            .insert_active(
+                fixture.decision.clone(),
+                &fixture.request,
+                &fixture.authority,
+            )
+            .is_some());
+        assert_eq!(
+            consent_cache.invalidate_consent(fixture.consent_reference),
+            1
+        );
+
+        let mut epoch_cache = AuthorizationCacheV1::new();
+        assert!(epoch_cache
+            .insert_active(
+                fixture.decision,
+                &fixture.request,
+                &fixture.authority,
+            )
+            .is_some());
+        assert!(epoch_cache
+            .insert_active(
+                other.decision,
+                &other.request,
+                &other.authority,
+            )
+            .is_some());
+        assert_eq!(epoch_cache.len(), 2);
+        assert_eq!(epoch_cache.retain_revocation_epoch(timeline, 1), 1);
+        assert_eq!(epoch_cache.len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authorization_cache_rejects_mismatched_or_denied_entries() {
+        let timeline = TimelineId::new();
+        let fixture = active_decision(timeline);
+        let mismatched = active_decision(TimelineId::new());
+        let mut cache = AuthorizationCacheV1::new();
+        assert!(cache
+            .insert_active(
+                fixture.decision.clone(),
+                &mismatched.request,
+                &fixture.authority,
+            )
+            .is_none());
+
+        let denied = decision_with_capability_trust(timeline, false);
+        assert!(!denied.decision.is_allowed());
+        assert!(cache
+            .insert_active(
+                denied.decision,
+                &denied.request,
+                &denied.authority,
+            )
+            .is_none());
     }
 
     #[test]
