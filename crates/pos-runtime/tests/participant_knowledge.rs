@@ -1,6 +1,6 @@
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
     AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
@@ -37,6 +37,16 @@ fn error_text<T>(result: Result<T, RuntimeError>) -> String {
     match result {
         Ok(_) => std::panic::resume_unwind(Box::new("expected runtime error")),
         Err(error) => error.to_string(),
+    }
+}
+
+fn authority_error<T>(result: Result<T, RuntimeError>) -> AuthorityErrorV1 {
+    match result {
+        Err(RuntimeError::Authority(error)) => error,
+        Ok(_) => std::panic::resume_unwind(Box::new("expected authority error")),
+        Err(error) => {
+            std::panic::resume_unwind(Box::new(format!("expected authority error, got: {error}")))
+        }
     }
 }
 
@@ -643,14 +653,16 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
     let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
     let mut store = open_store(StoreConfig::Memory).test_ok();
 
-    assert!(error_text(registry.append_and_commit_authorized_step_at(
-        store.as_mut(),
-        &drafts,
-        &authority,
-        &fixture.authority_registry,
-        Seq::from_u64(11),
-    ))
-    .contains("authority was revoked at the evaluation fence"));
+    assert_eq!(
+        authority_error(registry.append_and_commit_authorized_step_at(
+            store.as_mut(),
+            &drafts,
+            &authority,
+            &fixture.authority_registry,
+            Seq::from_u64(11),
+        )),
+        AuthorityErrorV1::CapabilityMissing
+    );
     let (aborts, commits) = {
         let state = state
             .lock()
@@ -667,16 +679,18 @@ fn current_consent_is_required_before_driver_invocation() {
     let authority = current_authority(&fixture);
     let (mut registry, state) = registry(&fixture, false);
 
-    assert!(error_text(registry.stage_authorized_driver(
-        fixture.plugin_id,
-        fixture.timeline_id,
-        fixture.observation.clone(),
-        &fixture.knowledge,
-        &authority,
-        &registry_without_consent(&fixture),
-        Seq::from_u64(10),
-    ))
-    .contains("consent evidence is missing"));
+    assert_eq!(
+        authority_error(registry.stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.observation.clone(),
+            &fixture.knowledge,
+            &authority,
+            &registry_without_consent(&fixture),
+            Seq::from_u64(10),
+        )),
+        AuthorityErrorV1::ConsentMissing
+    );
     assert_eq!(
         state
             .lock()
@@ -693,14 +707,16 @@ fn consent_revocation_after_staging_aborts_before_append() {
     let drafts = stage_current(&mut registry, &fixture).test_ok();
     let mut store = open_store(StoreConfig::Memory).test_ok();
 
-    assert!(error_text(registry.append_and_commit_authorized_step_at(
-        store.as_mut(),
-        &drafts,
-        &current_authority(&fixture),
-        &registry_without_consent(&fixture),
-        Seq::from_u64(11),
-    ))
-    .contains("consent evidence is missing"));
+    assert_eq!(
+        authority_error(registry.append_and_commit_authorized_step_at(
+            store.as_mut(),
+            &drafts,
+            &current_authority(&fixture),
+            &registry_without_consent(&fixture),
+            Seq::from_u64(11),
+        )),
+        AuthorityErrorV1::ConsentMissing
+    );
     let (aborts, commits) = {
         let state = state
             .lock()
@@ -736,16 +752,18 @@ fn revoked_authority_is_rejected_before_driver_invocation() {
     let authority = current_authority(&fixture);
     let (mut registry, state) = registry(&fixture, false);
 
-    assert!(error_text(registry.stage_authorized_driver(
-        fixture.plugin_id,
-        fixture.timeline_id,
-        fixture.observation.clone(),
-        &fixture.knowledge,
-        &authority,
-        &fixture.authority_registry,
-        Seq::from_u64(11),
-    ))
-    .contains("authority was revoked at the evaluation fence"));
+    assert_eq!(
+        authority_error(registry.stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.observation.clone(),
+            &fixture.knowledge,
+            &authority,
+            &fixture.authority_registry,
+            Seq::from_u64(11),
+        )),
+        AuthorityErrorV1::CapabilityMissing
+    );
     assert_eq!(
         state
             .lock()
