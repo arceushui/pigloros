@@ -41,6 +41,7 @@ enum StagingMutation {
     CorruptFileAtSameLength,
     RemoveFile,
     PreventFutureDirectories,
+    RelaxExpectedDirectoryPermissions,
     ReplaceDirectoryWithSymlink,
     ReplaceDirectoryWithRegularFile,
     InjectRegularFile,
@@ -184,6 +185,7 @@ const fn mutation_requires_staged_files(mutation: StagingMutation) -> bool {
             | StagingMutation::CorruptFiles
             | StagingMutation::CorruptFileAtSameLength
             | StagingMutation::RemoveFile
+            | StagingMutation::RelaxExpectedDirectoryPermissions
             | StagingMutation::ReplaceDirectoryWithSymlink
             | StagingMutation::ReplaceDirectoryWithRegularFile
             | StagingMutation::ReplaceFileWithFifo
@@ -257,6 +259,10 @@ fn apply_staging_mutation(
                 Err(error) => return Err(error.into()),
             }
             fs::set_permissions(providers, fs::Permissions::from_mode(0o500))?;
+        }
+        StagingMutation::RelaxExpectedDirectoryPermissions => {
+            let directory = staged_nested_directory(staging, staged_files)?;
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?;
         }
         StagingMutation::ReplaceDirectoryWithSymlink => {
             let directory = staged_nested_directory(staging, staged_files)?;
@@ -360,6 +366,7 @@ fn mutate_live_staging(
             | StagingMutation::CorruptFileAtSameLength
             | StagingMutation::RemoveFile
             | StagingMutation::PreventFutureDirectories
+            | StagingMutation::RelaxExpectedDirectoryPermissions
             | StagingMutation::ReplaceDirectoryWithSymlink
             | StagingMutation::ReplaceDirectoryWithRegularFile
             | StagingMutation::ReplaceFileWithFifo
@@ -3113,6 +3120,15 @@ fn public_materializer_rejects_expected_staging_entry_mutations() -> TestResult 
         ),
         (StagingMutation::BlockFutureDirectory, "SymlinkDetected"),
     ])
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_materializer_rejects_relaxed_expected_directory_permissions() -> TestResult {
+    assert_live_staging_rejections(&[(
+        StagingMutation::RelaxExpectedDirectoryPermissions,
+        "UntrustedOutputDirectory",
+    )])
 }
 
 #[cfg(unix)]
