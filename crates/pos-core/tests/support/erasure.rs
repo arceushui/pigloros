@@ -1,4 +1,7 @@
 //! Shared builders for public ADR-060 integration-test fixtures.
+//!
+//! Store integration tests include this file by path so these public fixture
+//! builders have one test-only owner.
 
 use std::collections::BTreeMap;
 
@@ -12,6 +15,93 @@ use pos_core::{
     ErasureRetryAdmissionV1, ErasureScopeV1,
 };
 
+/// Expand the persistence-port methods that are identical for test hosts.
+///
+/// Hosts retain their scenario-specific manifest/object/CAS behavior locally;
+/// this shared forwarding block keeps the public read/index surface in one
+/// place for backend-parity tests.
+#[macro_export]
+macro_rules! impl_erasure_persistence_forwarding {
+    () => {
+        fn read_effect(
+            &self,
+            manifest: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_core::ErasureCasEffectV1, pos_core::ErasureErrorV1> {
+            self.store.borrow().read_effect(manifest)
+        }
+
+        fn effect_manifest(
+            &self,
+            subject: pos_core::ErasureReferenceV1,
+        ) -> Result<Option<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store.borrow().effect_manifest(subject)
+        }
+
+        fn attempt_page_ref(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store.borrow().attempt_page_ref(request, ordinal)
+        }
+
+        fn attempt_index_count(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+        ) -> Result<u64, pos_core::ErasureErrorV1> {
+            self.store.borrow().attempt_index_count(request)
+        }
+
+        fn scope_node_ref(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store.borrow().scope_node_ref(request, ordinal)
+        }
+
+        fn scope_index_count(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+        ) -> Result<u64, pos_core::ErasureErrorV1> {
+            self.store.borrow().scope_index_count(request)
+        }
+
+        fn administrative_resolution_ref(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store
+                .borrow()
+                .administrative_resolution_ref(request, ordinal)
+        }
+
+        fn administrative_resolution_index_count(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+        ) -> Result<u64, pos_core::ErasureErrorV1> {
+            self.store
+                .borrow()
+                .administrative_resolution_index_count(request)
+        }
+
+        fn recovery_error_refs(
+            &self,
+            request: pos_core::ErasureReferenceV1,
+        ) -> Result<Vec<pos_core::ErasureReferenceV1>, pos_core::ErasureErrorV1> {
+            self.store.borrow().recovery_error_refs(request)
+        }
+
+        fn append_recovery_error(
+            &mut self,
+            object: pos_core::PreparedErasureRecoveryErrorV1,
+        ) -> Result<(), pos_core::ErasureErrorV1> {
+            self.store.borrow_mut().append_recovery_error(object)
+        }
+    };
+}
+
 /// Build a deterministic test-only digest reference.
 #[must_use]
 pub const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -22,13 +112,11 @@ pub const fn reference(value: u8) -> ErasureReferenceV1 {
 /// lifecycle scenarios.
 #[must_use]
 pub const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
+    let varied = target(seed);
     ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(seed),
         key_role: ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(seed.wrapping_add(1)),
-        replica_set: reference(seed.wrapping_add(2)),
-        replica_id: reference(seed.wrapping_add(3)),
+        ..varied
     }
 }
 
@@ -92,7 +180,55 @@ pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureEr
     })
 }
 
+/// Build the deterministic ERQ1 shared by the persistence integration suites.
+///
+/// Keeping this fixture here prevents the backend tests from silently drifting
+/// apart while they exercise the same public persistence contract.
+///
+/// # Errors
+///
+/// Returns [`ErasureErrorV1`] if the shared fixture violates an ERQ1 invariant.
+pub fn persistence_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+    request(RequestFixtureInput {
+        request: reference(1),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(3)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 9,
+        horizon_position: 20,
+        provenance: reference(7),
+    })
+}
+
+/// Build the deterministic `TimelineReplay` target shared by persistence tests.
+#[must_use]
+pub const fn persistence_target() -> ErasureRequiredTargetV1 {
+    replay_target(10)
+}
+
 /// Build one category-scoped obligation for an ERQ1 target.
+///
+/// # Errors
+///
+/// Returns [`ErasureErrorV1`] when the target or derived command identity is
+/// not valid for an ERRA1 obligation.
+pub fn obligation_for_category(
+    request: ErasureReferenceV1,
+    category: ErasureInventoryCategoryV1,
+    target: ErasureRequiredTargetV1,
+) -> Result<ErasureObligationV1, ErasureErrorV1> {
+    ErasureObligationV1::new(ErasureObligationInputV1 {
+        category,
+        target,
+        owner: target.replica_id,
+        command_identity: destruction_command_reference(request, target),
+    })
+}
+
+/// Build the common artifact obligation for an ERQ1 target.
 ///
 /// # Errors
 ///
@@ -102,12 +238,7 @@ pub fn obligation(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureObligationV1, ErasureErrorV1> {
-    ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })
+    obligation_for_category(request, ErasureInventoryCategoryV1::Artifact, target)
 }
 
 /// Named fields for a retry-admission fixture built from validated obligations.

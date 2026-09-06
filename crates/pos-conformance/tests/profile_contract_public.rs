@@ -304,7 +304,7 @@ fn report_with_cases(count: usize) -> Result<ConformanceReportV1, pos_conformanc
         replay_claim: ReplayClaimV1::Exact,
         redaction_state: RedactionStateV1::None,
         limitations_digest: [16; 32],
-        provenance_digest: [17; 32],
+        evaluator_build_provenance_digest: [17; 32],
         report_digest: [0; 32],
     };
     report.report_digest = report.digest()?;

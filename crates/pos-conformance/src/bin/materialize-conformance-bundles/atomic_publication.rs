@@ -456,13 +456,23 @@ fn descriptor_directory_identity(
 }
 
 #[cfg(target_os = "linux")]
-const fn directory_entry_identity(
+fn directory_entry_identity(
     metadata: rustix::fs::Stat,
 ) -> Result<DirectoryIdentity, MaterializationError> {
-    match FileType::from_raw_mode(metadata.st_mode) {
-        FileType::Directory => Ok(directory_identity(metadata)),
-        FileType::Symlink => Err(MaterializationError::SymlinkDetected),
-        _ => Err(MaterializationError::UntrustedOutputDirectory),
+    let file_type = FileType::from_raw_mode(metadata.st_mode);
+    if file_type == FileType::Directory {
+        return Ok(directory_identity(metadata));
+    }
+    Err(non_directory_error(file_type))
+}
+
+#[cfg(target_os = "linux")]
+#[inline(never)]
+fn non_directory_error(file_type: FileType) -> MaterializationError {
+    if file_type == FileType::Symlink {
+        MaterializationError::SymlinkDetected
+    } else {
+        MaterializationError::UntrustedOutputDirectory
     }
 }
 
@@ -832,5 +842,34 @@ const fn map_atomic_error(operation: AtomicOperation, error: Errno) -> Materiali
         (AtomicOperation::Open | AtomicOperation::Publish, _) => {
             MaterializationError::UntrustedOutputDirectory
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_identity_rejects_non_directories() -> Result<(), MaterializationError> {
+        let directory =
+            fs::statat(CWD, Path::new("."), AtFlags::empty()).map_err(map_open_error)?;
+        assert!(directory_entry_identity(directory).is_ok());
+
+        let regular_file =
+            fs::statat(CWD, Path::new("/dev/null"), AtFlags::empty()).map_err(map_open_error)?;
+        assert!(matches!(
+            directory_entry_identity(regular_file),
+            Err(MaterializationError::UntrustedOutputDirectory)
+        ));
+        assert!(matches!(
+            non_directory_error(FileType::Symlink),
+            MaterializationError::SymlinkDetected
+        ));
+        assert!(matches!(
+            non_directory_error(FileType::RegularFile),
+            MaterializationError::UntrustedOutputDirectory
+        ));
+        Ok(())
     }
 }

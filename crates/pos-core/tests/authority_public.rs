@@ -742,6 +742,19 @@ fn consent_binds_grantee_policy_and_exact_subject_timeline_position() {
 }
 
 #[test]
+fn no_subject_missing_consent_is_denied() {
+    let mut draft = request_draft(authenticated(principal(1)), entity(10));
+    draft.subject_id = None;
+    draft.consent_timeline = None;
+    draft.consent_at_position = None;
+    draft.consent = ConsentEvidenceV1::Missing;
+    assert_eq!(
+        decision_for(&ok(AuthorizationRequestV1::try_from_draft(draft)), &[]).outcome(),
+        AuthorizationOutcomeV1::ConsentMissing
+    );
+}
+
+#[test]
 fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let principal_ref = principal(1);
     let actor = entity(10);
@@ -827,6 +840,23 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     );
     assert_eq!(decision.outcome(), AuthorizationOutcomeV1::ConsentMissing);
     assert_eq!(decision.error(), Some(AuthorityErrorV1::ConsentMissing));
+
+    let current_request = request(principal(1), actor);
+    let current_grant = root_grant(principal(1), vec![actor]);
+    let current_chain = ok(DelegationChainV1::try_from_grants(vec![current_grant]));
+    let missing_capability = ok(AuthorityRegistrySnapshotV1::try_new(
+        hash(7),
+        vec![current_request.authenticated().registry_binding_digest()],
+        vec![hash(99)],
+        vec![consent_grant().binding_digest()],
+    ));
+    let decision =
+        AuthorityEvaluatorV1::authorize(&current_request, &current_chain, &missing_capability);
+    assert_eq!(
+        decision.outcome(),
+        AuthorizationOutcomeV1::IndeterminateFailClosed
+    );
+    assert_eq!(decision.error(), Some(AuthorityErrorV1::CapabilityMissing));
 }
 
 #[test]
@@ -1049,6 +1079,13 @@ fn authority_records_reject_noncanonical_and_malformed_encodings() {
 fn capability_decoder_rejects_every_malformed_public_field() {
     let principal_ref = principal(1);
     let encoded = ok(root_grant(principal_ref, vec![entity(10)]).encode());
+    let wrong_magic = changed_array(&encoded, |fields| {
+        fields[0] = Value::Bytes(b"wrong".to_vec());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&wrong_magic),
+        Err(AuthorityErrorV1::InvalidEncoding)
+    );
     for field in 2..20 {
         let malformed = changed_array(&encoded, |fields| {
             fields[field] = Value::Bool(false);
@@ -1114,6 +1151,22 @@ fn capability_decoder_rejects_every_malformed_public_field() {
     assert_eq!(
         CapabilityGrantV1::decode(&wrong_plugin_grantee_tag),
         Err(AuthorityErrorV1::UnknownEnum)
+    );
+    let unknown_delegate_class = changed_array(&encoded, |fields| {
+        let classes = array_fields_mut(&mut fields[12]);
+        classes[0] = Value::Integer(99.into());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&unknown_delegate_class),
+        Err(AuthorityErrorV1::UnknownEnum)
+    );
+    let malformed_delegate_class = changed_array(&encoded, |fields| {
+        let classes = array_fields_mut(&mut fields[12]);
+        classes[0] = Value::Text("wrong-type".to_owned());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&malformed_delegate_class),
+        Err(AuthorityErrorV1::InvalidEncoding)
     );
 }
 
@@ -1237,6 +1290,73 @@ fn decision_decoder_rejects_inconsistent_evidence() {
 }
 
 #[test]
+fn decision_decoder_rejects_an_invalid_fail_closed_error() {
+    let decision = decision_for(&request(principal(1), entity(10)), &[]);
+    assert_eq!(
+        decision.outcome(),
+        AuthorizationOutcomeV1::IndeterminateFailClosed
+    );
+    let malformed = changed_array(&ok(decision.encode()), |fields| {
+        fields[21] = Value::Integer(AuthorityErrorV1::InvalidEncoding.code().into());
+    });
+
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&malformed),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+}
+
+#[test]
+fn decision_decoder_rejects_zero_hash_binding() {
+    let request = request(principal(1), entity(10));
+    let encoded =
+        ok(decision_for(&request, &[root_grant(principal(1), vec![entity(10)])]).encode());
+    let zero_chain_binding = changed_array(&encoded, |fields| {
+        let bindings = array_fields_mut(&mut fields[12]);
+        bindings[0] = Value::Bytes(vec![0; 32]);
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&zero_chain_binding),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn decision_decoder_rejects_unknown_role() {
+    let request_value = request(principal(1), entity(10));
+    let encoded = ok(decision_for(
+        &request_value,
+        &[root_grant(principal(1), vec![entity(10)])],
+    )
+    .encode());
+    let invalid_role = changed_array(&encoded, |fields| {
+        fields[3] = Value::Integer(99.into());
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&invalid_role),
+        Err(AuthorityErrorV1::UnknownEnum)
+    );
+}
+
+#[test]
+fn decision_decoder_rejects_oversized_hash_sequence() {
+    let request_value = request(principal(1), entity(10));
+    let encoded = ok(decision_for(
+        &request_value,
+        &[root_grant(principal(1), vec![entity(10)])],
+    )
+    .encode());
+    let oversized_bindings = changed_array(&encoded, |fields| {
+        let bindings = array_fields_mut(&mut fields[12]);
+        bindings.extend((2_u8..=18).map(|value| Value::Bytes(hash(value).as_bytes().to_vec())));
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&oversized_bindings),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
 fn decision_decoder_rejects_cyclic_and_missing_chain_evidence() {
     let parent = delegation_parent();
     let child = ok(CapabilityGrantV1::try_from_draft(delegation_child()));
@@ -1329,6 +1449,22 @@ fn delegated_principal_mismatches_emit_round_trip_safe_decisions() {
         assert_eq!(decision.grant_id(), None);
         assert!(decision.grant_chain_bindings().is_empty());
     }
+
+    let missing_capability = decision_for(&request(principal(1), entity(10)), &[]);
+    assert_eq!(
+        missing_capability.outcome(),
+        AuthorizationOutcomeV1::IndeterminateFailClosed
+    );
+    assert_eq!(
+        missing_capability.error(),
+        Some(AuthorityErrorV1::CapabilityMissing)
+    );
+    assert_eq!(
+        ok(AuthorizationDecisionV1::decode(&ok(
+            missing_capability.encode()
+        ))),
+        missing_capability
+    );
 }
 
 #[test]
@@ -1561,6 +1697,9 @@ fn grant_contract_exposes_all_bound_authority_and_plugin_context() {
     assert_eq!(grant.grantee().principal(), &principal);
     assert_eq!(grant.grantee().plugin_id(), Some(plugin_id));
     assert_eq!(grant.grantee().installation_id(), Some([3; 16]));
+    let principal_grantee = AuthorityGranteeV1::Principal(principal.clone());
+    assert_eq!(principal_grantee.plugin_id(), None);
+    assert_eq!(principal_grantee.installation_id(), None);
     assert_eq!(grant.trust_domain(), "local.test");
     assert_eq!(grant.scope().resources(), &["journal", "profile"]);
     assert_eq!(grant.scope().actions(), &["read"]);
@@ -1627,6 +1766,12 @@ fn grant_contract_exposes_all_bound_authority_and_plugin_context() {
         std::slice::from_ref(&grant)
     )
     .is_allowed());
+    let plugin_decision = decision_for(
+        &ok(AuthorizationRequestV1::try_from_draft(request.clone())),
+        std::slice::from_ref(&grant),
+    );
+    assert_eq!(plugin_decision.plugin_id(), Some(plugin_id));
+    assert_eq!(plugin_decision.installation_id(), Some([3; 16]));
 
     request.installation_id = Some([4; 16]);
     assert_eq!(
@@ -1806,6 +1951,50 @@ fn malformed_grants_are_rejected_before_evaluation() {
 }
 
 #[test]
+fn malformed_grant_drafts_reject_invalid_temporal_and_scope_fields() {
+    let principal_ref = principal(1);
+    let actor = entity(10);
+    let mut invalid = grant_draft(
+        6,
+        principal_ref.clone(),
+        AuthorityGranteeV1::Principal(principal_ref.clone()),
+        scope(vec![actor], vec!["read"], None),
+    );
+    invalid.issuance_seq = Seq::from_u64(11);
+    assert_eq!(
+        CapabilityGrantV1::try_from_draft(invalid),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+    let mut invalid = grant_draft(
+        7,
+        principal_ref.clone(),
+        AuthorityGranteeV1::Principal(principal_ref.clone()),
+        scope(vec![actor], vec!["read"], None),
+    );
+    invalid.revocation_fence = Some(Seq::from_u64(5));
+    assert_eq!(
+        CapabilityGrantV1::try_from_draft(invalid),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+    let invalid = grant_draft(
+        8,
+        principal_ref.clone(),
+        AuthorityGranteeV1::Principal(principal_ref),
+        scope_for_role(
+            vec![actor],
+            vec![entity(50)],
+            vec!["read"],
+            Some(plugin(1)),
+            AuthorityRoleV1::Actor,
+        ),
+    );
+    assert_eq!(
+        CapabilityGrantV1::try_from_draft(invalid),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
 fn malformed_requests_are_rejected_before_evaluation() {
     let principal = principal(1);
     let actor = entity(10);
@@ -1859,7 +2048,7 @@ fn malformed_requests_are_rejected_before_evaluation() {
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 
-    let mut invalid = request_draft(authenticated(principal), actor);
+    let mut invalid = request_draft(authenticated(principal.clone()), actor);
     invalid.consent = ConsentEvidenceV1::Resolved {
         grants: vec![consent_grant_with_id(9), consent_grant_with_id(8)],
     };
@@ -1867,8 +2056,32 @@ fn malformed_requests_are_rejected_before_evaluation() {
         AuthorizationRequestV1::try_from_draft(invalid),
         Err(AuthorityErrorV1::NonCanonicalOrder)
     );
+    let mut invalid = request_draft(authenticated(principal.clone()), actor);
+    invalid.plugin_id = Some(plugin(1));
+    assert_eq!(
+        AuthorizationRequestV1::try_from_draft(invalid),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+    let mut invalid = request_draft(authenticated(principal), actor);
+    invalid.installation_id = Some([1; 16]);
+    assert_eq!(
+        AuthorizationRequestV1::try_from_draft(invalid),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn registry_snapshot_rejects_missing_or_zero_bindings() {
     assert_eq!(
         AuthorityRegistrySnapshotV1::try_new(Hash::zero(), vec![hash(1)], vec![hash(2)], vec![]),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![], vec![], vec![]),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        AuthorityRegistrySnapshotV1::try_new(hash(1), vec![hash(2)], vec![], vec![Hash::zero()]),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 }
@@ -2004,6 +2217,14 @@ fn delegation_chain_rejects_duplicate_or_unbounded_identity_sequences() {
         ]),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
+    let root = delegation_parent();
+    assert_eq!(
+        DelegationChainV1::try_from_grants(vec![
+            root;
+            usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 2
+        ]),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
 }
 
 #[test]
@@ -2072,7 +2293,7 @@ fn ancestor_changes_invalidate_every_descendant() {
     child_draft.valid_until_position = Seq::from_u64(90);
     child_draft.issuance_seq = Seq::from_u64(15);
     let child = ok(CapabilityGrantV1::try_from_draft(child_draft));
-    let request = request(recipient, actor);
+    let delegated_request = request(recipient, actor);
 
     for change in 0..2 {
         let mut parent = parent_draft.clone();
@@ -2082,13 +2303,30 @@ fn ancestor_changes_invalidate_every_descendant() {
         }
         assert_eq!(
             decision_for(
-                &request,
+                &delegated_request,
                 &[ok(CapabilityGrantV1::try_from_draft(parent)), child.clone()]
             )
             .outcome(),
             AuthorizationOutcomeV1::ParentInvalid
         );
     }
+
+    let mut mismatched_consent_parent = parent_draft.clone();
+    mismatched_consent_parent.consent_references = vec![hash(9)];
+    let mut mismatched_consent_child = delegation_child();
+    mismatched_consent_child.parent_grant_id = Some(hash(1));
+    mismatched_consent_child.consent_references = vec![hash(9)];
+    assert_eq!(
+        decision_for(
+            &delegated_request,
+            &[
+                ok(CapabilityGrantV1::try_from_draft(mismatched_consent_parent)),
+                ok(CapabilityGrantV1::try_from_draft(mismatched_consent_child)),
+            ],
+        )
+        .outcome(),
+        AuthorizationOutcomeV1::ParentInvalid
+    );
 
     let mut wrong_timeline = parent_draft.clone();
     wrong_timeline.issuance_timeline = timeline(31);
@@ -2104,8 +2342,33 @@ fn ancestor_changes_invalidate_every_descendant() {
     parent.revocation_fence = Some(Seq::from_u64(50));
     assert_eq!(
         decision_for(
-            &request,
+            &delegated_request,
             &[ok(CapabilityGrantV1::try_from_draft(parent)), child]
+        )
+        .outcome(),
+        AuthorizationOutcomeV1::ParentInvalid
+    );
+
+    let mut expired_parent = grant_draft(
+        1,
+        principal(1),
+        AuthorityGranteeV1::Principal(principal(2)),
+        scope(
+            vec![entity(10), entity(11)],
+            vec![DELEGATE_ACTION_V1, "read"],
+            None,
+        ),
+    );
+    expired_parent.valid_until_position = Seq::from_u64(40);
+    let mut expired_child = delegation_child();
+    expired_child.valid_until_position = Seq::from_u64(30);
+    assert_eq!(
+        decision_for(
+            &request(principal(3), actor),
+            &[
+                ok(CapabilityGrantV1::try_from_draft(expired_parent)),
+                ok(CapabilityGrantV1::try_from_draft(expired_child)),
+            ],
         )
         .outcome(),
         AuthorizationOutcomeV1::ParentInvalid

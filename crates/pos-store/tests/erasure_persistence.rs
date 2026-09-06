@@ -1,166 +1,54 @@
 //! Backend parity for the raw ERCRP1 manifest/CAS persistence port.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
-use pos_core::erasure::{
-    destruction_command_reference, target_closure_digest, ErasureAuthorizationDecisionV1,
-};
+use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
     ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1,
-    ErasureErrorV1, ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
-    ErasureStateTransitionV1, ErasureStateV1,
+    ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
 
+#[path = "../../pos-core/tests/support/erasure.rs"]
+pub mod erasure_support;
+
+use erasure_support::{
+    freeze_evidence_fixture, obligation, persistence_request as request,
+    persistence_target as target, reference, retry_admission as fixture_retry_admission,
+    FreezeEvidenceFixtureInput, RetryAdmissionFixture,
+};
+
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
-
-const fn reference(value: u8) -> ErasureReferenceV1 {
-    ErasureReferenceV1::from_digest([value; 32])
-}
-
-fn freeze_evidence(
-    request: ErasureReferenceV1,
-    scope_commitment: ErasureReferenceV1,
-    obligation_set: &ErasureObligationSetV1,
-    targets: &[ErasureRequiredTargetV1],
-    obligations: &[ErasureObligationV1],
-    freeze_position: u64,
-    evidence: &[u8],
-) -> Result<
-    (
-        ErasureFreezeAdmissionEvidenceV1,
-        ErasureFreezeAuthorizationEvidenceV1,
-    ),
-    ErasureErrorV1,
-> {
-    let owners = obligations
-        .iter()
-        .map(|obligation| {
-            (
-                (obligation.category(), obligation.target()),
-                obligation.owner(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut matrix = Vec::with_capacity(
-        targets
-            .len()
-            .saturating_mul(ErasureInventoryCategoryV1::CANONICAL.len()),
-    );
-    for category in ErasureInventoryCategoryV1::CANONICAL {
-        for (target_index, target) in targets.iter().enumerate() {
-            let owner = owners.get(&(category, *target)).copied();
-            matrix.push(ErasureFreezeApplicabilityRowV1::new(
-                category,
-                target_index as u64,
-                if owner.is_some() {
-                    pos_core::ErasureApplicabilityDecisionV1::Applicable
-                } else {
-                    pos_core::ErasureApplicabilityDecisionV1::Inapplicable
-                },
-                owner,
-            )?);
-        }
-    }
-    let input = ErasureFreezeAdmissionEvidenceInputV1 {
-        request,
-        scope_commitment,
-        obligation_set: obligation_set.reference(),
-        applicability_matrix: matrix,
-        freeze_position,
-        policy: obligation_set.policy(),
-        trust: obligation_set.trust(),
-        authorization_provenance: reference(0),
-    };
-    let provisional = ErasureFreezeAdmissionEvidenceV1::new(input.clone())?;
-    let authorization =
-        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: provisional.authorization_body_digest()?,
-            policy: obligation_set.policy(),
-            trust: obligation_set.trust(),
-            evidence: evidence.to_vec(),
-        })?;
-    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
-        authorization_provenance: authorization.reference(),
-        ..input
-    })?;
-    Ok((admission, authorization))
-}
-
-const fn target() -> ErasureRequiredTargetV1 {
-    ErasureRequiredTargetV1 {
-        artifact_class: ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(10),
-        key_role: ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(11),
-        replica_set: reference(12),
-        replica_id: reference(13),
-    }
-}
-
-fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: reference(1),
-        subject: reference(2),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(3)],
-        requester: reference(4),
-        authorization: reference(5),
-        policy: reference(6),
-        request_position: 9,
-        horizon_position: 20,
-        provenance: reference(7),
-    })
-}
 
 fn admission(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
-    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })?;
-    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+    let obligation = obligation(request, target)?;
+    fixture_retry_admission(RetryAdmissionFixture {
         request,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: vec![obligation.reference()],
-        command_identities: vec![obligation.command_identity()],
+        obligations: std::slice::from_ref(&obligation),
         policy: reference(6),
         trust: reference(8),
         admitted_position: 11,
         deadline_position: 20,
         authorization_provenance: reference(12),
-    })
-}
-
-fn obligation(
-    request: ErasureReferenceV1,
-    target: ErasureRequiredTargetV1,
-) -> Result<ErasureObligationV1, ErasureErrorV1> {
-    ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
     })
 }
 
@@ -196,6 +84,8 @@ struct Host<S> {
     store: Rc<RefCell<S>>,
     targets: Vec<ErasureRequiredTargetV1>,
     verify_exact_retry: bool,
+    fail_read_object: bool,
+    manifest_sequence: Option<Rc<RefCell<VecDeque<pos_core::StoredErasureManifestV1>>>>,
 }
 
 type RetainedEffect = (ErasureReferenceV1, pos_core::ErasureCasEffectV1);
@@ -215,69 +105,22 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for Host<S> {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<pos_core::StoredErasureManifestV1>, ErasureErrorV1> {
+        if let Some(sequence) = &self.manifest_sequence {
+            if let Some(manifest) = sequence.borrow_mut().pop_front() {
+                return Ok(Some(manifest));
+            }
+        }
         self.store.borrow().read_manifest(request)
     }
 
     fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+        if self.fail_read_object {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         self.store.borrow().read_object(reference)
     }
 
-    fn read_effect(
-        &self,
-        manifest: ErasureReferenceV1,
-    ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
-        self.store.borrow().read_effect(manifest)
-    }
-
-    fn effect_manifest(
-        &self,
-        subject: ErasureReferenceV1,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().effect_manifest(subject)
-    }
-
-    fn attempt_page_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().attempt_page_ref(request, ordinal)
-    }
-
-    fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        self.store.borrow().attempt_index_count(request)
-    }
-
-    fn scope_node_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store.borrow().scope_node_ref(request, ordinal)
-    }
-
-    fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        self.store.borrow().scope_index_count(request)
-    }
-
-    fn administrative_resolution_ref(
-        &self,
-        request: ErasureReferenceV1,
-        ordinal: u64,
-    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        self.store
-            .borrow()
-            .administrative_resolution_ref(request, ordinal)
-    }
-
-    fn administrative_resolution_index_count(
-        &self,
-        request: ErasureReferenceV1,
-    ) -> Result<u64, ErasureErrorV1> {
-        self.store
-            .borrow()
-            .administrative_resolution_index_count(request)
-    }
+    crate::impl_erasure_persistence_forwarding!();
 
     fn compare_and_swap(
         &mut self,
@@ -353,14 +196,7 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
         let mut obligations = targets
             .iter()
             .copied()
-            .map(|target| {
-                ErasureObligationV1::new(ErasureObligationInputV1 {
-                    category: ErasureInventoryCategoryV1::Artifact,
-                    target,
-                    owner: target.replica_id,
-                    command_identity: destruction_command_reference(request, target),
-                })
-            })
+            .map(|target| obligation(request, target))
             .collect::<Result<Vec<_>, _>>()?;
         obligations.sort_unstable_by_key(ErasureObligationV1::reference);
         let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
@@ -381,15 +217,16 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
         let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
         let evidence = requested.provenance.digest();
         let freeze_position = requested.freeze_position.unwrap_or(10);
-        let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
-            request,
-            scope_reference,
-            &obligation_set,
-            &targets,
-            &obligations,
-            freeze_position,
-            &evidence,
-        )?;
+        let (freeze_admission_evidence, freeze_authorization_evidence) =
+            freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+                request,
+                scope_commitment: scope_reference,
+                obligation_set: &obligation_set,
+                targets: &targets,
+                obligations: &obligations,
+                freeze_position,
+                evidence: &evidence,
+            })?;
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets,
             scope,
@@ -463,6 +300,8 @@ fn complete_with_retry_validation<S: ErasurePersistencePortV1>(
             store: Rc::clone(&shared),
             targets: vec![target],
             verify_exact_retry,
+            fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -575,6 +414,8 @@ fn assert_raw_backend<S: ErasurePersistencePortV1>(
             store: shared,
             targets: vec![target()],
             verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -594,6 +435,8 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
             store: Rc::clone(&shared),
             targets: Vec::new(),
             verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -602,6 +445,8 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
             store: shared,
             targets: Vec::new(),
             verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -635,6 +480,7 @@ fn assert_empty_backend<S: ErasurePersistencePortV1>(
     assert_eq!(store.scope_index_count(missing)?, 0);
     assert_eq!(store.administrative_resolution_ref(missing, 0)?, None);
     assert_eq!(store.administrative_resolution_index_count(missing)?, 0);
+    assert!(store.recovery_error_refs(missing)?.is_empty());
     Ok(())
 }
 
@@ -659,6 +505,161 @@ fn memory_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn
 fn memory_manifest_cas_accepts_exact_retry_for_every_effect(
 ) -> Result<(), Box<dyn std::error::Error>> {
     complete_with_retry_validation(MemoryStore::new(), true)?;
+    Ok(())
+}
+
+#[test]
+fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (shared, request, _) = complete(MemoryStore::new())?;
+    let manifest = shared
+        .borrow()
+        .read_manifest(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let mut failing = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            failing.verified_state(request.reference()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    drop(failing);
+
+    let observer = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: shared,
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let failures = observer.recovery_errors(request.reference())?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].manifest(), Some(manifest));
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn memory_recovery_error_bound_rejects_without_partial_writes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let request = reference(30);
+    let manifests = (0..=ERASURE_MAX_RECOVERY_ERRORS)
+        .map(|ordinal| {
+            let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+            let mut digest = [0_u8; 32];
+            digest[..8].copy_from_slice(&ordinal.to_be_bytes());
+            Ok::<_, ErasureErrorV1>(pos_core::StoredErasureManifestV1::from_stored(
+                ErasureReferenceV1::from_digest(digest),
+                vec![0xff_u8],
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let attempted_manifest = manifests
+        .last()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let expected_failure = ErasureRecoveryErrorV1::new(
+        request,
+        Some(attempted_manifest),
+        attempted_manifest,
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    let shared = Rc::new(RefCell::new(MemoryStore::new()));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: Vec::new(),
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: Some(Rc::new(RefCell::new(VecDeque::from(manifests)))),
+        },
+        reference(30),
+    );
+    for _ in 0..ERASURE_MAX_RECOVERY_ERRORS {
+        assert_eq!(
+            coordinator.verified_state(request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    let index_before = shared.borrow().recovery_error_refs(request)?;
+    assert_eq!(index_before.len(), ERASURE_MAX_RECOVERY_ERRORS);
+    assert_eq!(
+        shared.borrow().read_object(expected_failure.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(shared.borrow().recovery_error_refs(request)?, index_before);
+    assert_eq!(
+        shared.borrow().read_object(expected_failure.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn retained_recovery_failure<S: ErasurePersistencePortV1>(
+    store: S,
+) -> Result<(ErasureRecoveryErrorV1, Vec<u8>), ErasureErrorV1> {
+    let (shared, request, _) = complete(store)?;
+    let mut failing = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        failing.verified_state(request.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let observer = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: shared,
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let failure = observer
+        .recovery_errors(request.reference())?
+        .into_iter()
+        .next()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let bytes = failure.to_canonical_cbor()?;
+    Ok((failure, bytes))
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn recovery_error_identity_and_canonical_bytes_match_across_backends(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let memory = retained_recovery_failure(MemoryStore::new())?;
+    let sqlite = retained_recovery_failure(SqliteStore::open_in_memory()?)?;
+    assert_eq!(memory.0, sqlite.0);
+    assert_eq!(memory.1, sqlite.1);
+    assert_eq!(memory.0.reference(), sqlite.0.reference());
     Ok(())
 }
 
@@ -713,6 +714,8 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
             store: Rc::new(RefCell::new(reopened)),
             targets: vec![target()],
             verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -720,6 +723,287 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
     assert_eq!(
         coordinator.submit(request, provenance)?.lifecycle(),
         ErasureLifecycleV1::Complete
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+    let manifest = shared
+        .borrow()
+        .read_manifest(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    drop(shared);
+
+    let raw = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        raw.execute(
+            "DELETE FROM erasure_evidence WHERE reference_digest=?1",
+            rusqlite::params![request.reference().digest().as_slice()],
+        )?,
+        1
+    );
+    drop(raw);
+
+    let mut failing = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            failing.verified_state(request.reference()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    drop(failing);
+
+    let mut observer = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let failures = observer.recovery_errors(request.reference())?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].manifest(), Some(manifest));
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+
+    let failure_reference = failures[0].reference();
+    let raw = rusqlite::Connection::open(path)?;
+    raw.execute(
+        "UPDATE erasure_evidence SET object_cbor=?1 WHERE reference_digest=?2",
+        rusqlite::params![vec![0xff_u8], failure_reference.digest().as_slice()],
+    )?;
+    drop(raw);
+    assert_eq!(
+        observer.verified_state(request.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_recovery_error_retention_failure(
+    open: impl FnOnce(&str) -> Result<SqliteStore, pos_core::CoreError>,
+    corrupt: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<()>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+    let store = open(path)?;
+    drop(shared);
+    let raw = rusqlite::Connection::open(path)?;
+    corrupt(&raw)?;
+    drop(raw);
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(store)),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        coordinator.verified_state(request.reference()),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_error_retention_fails_closed_at_backend_boundaries(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_recovery_error_retention_failure(SqliteStore::open_read_only, |_connection| {
+        Ok(())
+    })?;
+    assert_sqlite_recovery_error_retention_failure(SqliteStore::open, |connection| {
+        connection.execute_batch(
+            "DROP TABLE erasure_recovery_errors;
+             CREATE TABLE erasure_recovery_errors (request_digest BLOB NOT NULL)",
+        )
+    })?;
+    assert_sqlite_recovery_error_retention_failure(SqliteStore::open, |connection| {
+        connection.execute_batch(
+            "CREATE TRIGGER deny_recovery_error_index_insert
+             BEFORE INSERT ON erasure_recovery_errors
+             BEGIN SELECT RAISE(ABORT, 'recovery error index denied'); END;",
+        )
+    })?;
+    assert_sqlite_recovery_error_retention_failure(SqliteStore::open, |connection| {
+        connection.execute_batch(
+            "CREATE TRIGGER deny_recovery_evidence_insert
+             BEFORE INSERT ON erasure_evidence
+             BEGIN SELECT RAISE(ABORT, 'recovery evidence denied'); END;",
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_error_trigger_rollbacks_leave_no_partial_rows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for trigger in [
+        "CREATE TRIGGER deny_recovery_error_index_insert
+         BEFORE INSERT ON erasure_recovery_errors
+         BEGIN SELECT RAISE(ABORT, 'recovery error index denied'); END;",
+        "CREATE TRIGGER deny_recovery_evidence_insert
+         BEFORE INSERT ON erasure_evidence
+         BEGIN SELECT RAISE(ABORT, 'recovery evidence denied'); END;",
+    ] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or(ErasureErrorV1::InvalidEncoding)?;
+        let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+        let manifest = shared
+            .borrow()
+            .read_manifest(request.reference())?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .digest();
+        drop(shared);
+
+        let raw = rusqlite::Connection::open(path)?;
+        raw.execute_batch(trigger)?;
+        drop(raw);
+
+        let expected_failure = ErasureRecoveryErrorV1::new(
+            request.reference(),
+            Some(manifest),
+            request.reference(),
+            ErasureErrorV1::ProvenanceMissing,
+        )?;
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+            Host {
+                store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
+                targets: vec![target()],
+                verify_exact_retry: false,
+                fail_read_object: true,
+                manifest_sequence: None,
+            },
+            reference(30),
+        );
+        assert_eq!(
+            coordinator.verified_state(request.reference()),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        drop(coordinator);
+
+        let observer = SqliteStore::open_read_only(path)?;
+        assert!(observer
+            .recovery_error_refs(request.reference())?
+            .is_empty());
+        assert_eq!(
+            observer.read_object(expected_failure.reference()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    drop(SqliteStore::open(path)?);
+
+    let request = reference(30);
+    let reserved_reference =
+        ErasureRecoveryErrorV1::new(request, None, request, ErasureErrorV1::ReceiptCommitFailed)?
+            .reference();
+    let raw = rusqlite::Connection::open(path)?;
+    let mut inserted = 0_usize;
+    let mut candidate_ordinal = 0_usize;
+    while inserted <= ERASURE_MAX_RECOVERY_ERRORS {
+        let ordinal = u64::try_from(candidate_ordinal)?;
+        let mut digest = [0_u8; 32];
+        digest[..8].copy_from_slice(&ordinal.to_be_bytes());
+        if ErasureReferenceV1::from_digest(digest) != reserved_reference {
+            raw.execute(
+                "INSERT INTO erasure_recovery_errors(request_digest,error_digest)
+                 VALUES(?1,?2)",
+                rusqlite::params![request.digest().as_slice(), digest.as_slice()],
+            )?;
+            inserted = inserted.saturating_add(1);
+        }
+        candidate_ordinal = candidate_ordinal.saturating_add(1);
+    }
+    drop(raw);
+
+    let store = SqliteStore::open(path)?;
+    assert_eq!(
+        store.recovery_error_refs(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let malformed_database = tempfile::NamedTempFile::new()?;
+    let malformed_path = malformed_database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    drop(SqliteStore::open(malformed_path)?);
+    let malformed_connection = rusqlite::Connection::open(malformed_path)?;
+    malformed_connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+    malformed_connection.execute(
+        "INSERT INTO erasure_recovery_errors(request_digest,error_digest)
+         VALUES(?1,?2)",
+        rusqlite::params![request.digest().as_slice(), vec![1_u8]],
+    )?;
+    drop(malformed_connection);
+    let malformed_store = SqliteStore::open(malformed_path)?;
+    assert_eq!(
+        malformed_store.recovery_error_refs(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let schema_connection = rusqlite::Connection::open(path)?;
+    schema_connection.execute_batch("DROP TABLE erasure_records")?;
+    drop(schema_connection);
+    let shared = Rc::new(RefCell::new(store));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: shared,
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }
@@ -754,6 +1038,8 @@ fn sqlite_recovery_rejects_a_missing_durable_attempt_effect(
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
             verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );
@@ -794,6 +1080,8 @@ fn sqlite_recovery_rejects_a_corrupted_durable_attempt_effect(
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
             verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
         },
         reference(30),
     );

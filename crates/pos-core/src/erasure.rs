@@ -112,6 +112,10 @@ pub const ERASURE_ATTEMPT_HISTORY_TAG_V1: &str = "ERAH1";
 pub const ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1: &str = "ERSEH1";
 /// Domain tag for one durable adapter effect committed with an ERCRP1 advance.
 pub const ERASURE_CAS_EFFECT_TAG_V1: &str = "ERCE1";
+/// Domain tag for one immutable recovery-error record.
+pub const ERASURE_RECOVERY_ERROR_TAG_V1: &str = "ERRE1";
+/// Maximum number of recovery errors retained for one ERQ1 request.
+pub const ERASURE_MAX_RECOVERY_ERRORS: usize = 4_096;
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +212,114 @@ impl std::fmt::Display for ErasureErrorV1 {
 }
 
 impl std::error::Error for ErasureErrorV1 {}
+
+/// Immutable, payload-free, non-authoritative evidence that one durable ERCRP1
+/// graph failed recovery.
+///
+/// This diagnostic never authorizes containment and never proves that the
+/// recovered graph is invalid. Consumers that need authority must use a
+/// successfully verified state instead of treating the presence of this record
+/// as an authority grant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureRecoveryErrorV1 {
+    request: ErasureReferenceV1,
+    manifest: Option<ErasureReferenceV1>,
+    failure_subject: ErasureReferenceV1,
+    error: ErasureErrorV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureRecoveryErrorV1 {
+    /// Construct and content-address one recovery failure.
+    ///
+    /// The record retains only minimized references and the closed error code;
+    /// it never copies erased or application payload bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or size-bound error.
+    pub fn new(
+        request: ErasureReferenceV1,
+        manifest: Option<ErasureReferenceV1>,
+        failure_subject: ErasureReferenceV1,
+        error: ErasureErrorV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        Self {
+            request,
+            manifest,
+            failure_subject,
+            error,
+            content_digest: ErasureReferenceV1::from_digest([0; 32]),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 request whose recovery failed.
+    #[must_use]
+    pub const fn request(self) -> ErasureReferenceV1 {
+        self.request
+    }
+
+    /// Return the ERCRP1 manifest that was being recovered.
+    #[must_use]
+    pub const fn manifest(self) -> Option<ErasureReferenceV1> {
+        self.manifest
+    }
+
+    /// Return the minimized reference that identifies the failed recovery subject.
+    #[must_use]
+    pub const fn failure_subject(self) -> ErasureReferenceV1 {
+        self.failure_subject
+    }
+
+    /// Return the closed recovery error.
+    #[must_use]
+    pub const fn error(self) -> ErasureErrorV1 {
+        self.error
+    }
+
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+
+    /// Encode the exact deterministic ERRE1 record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or size-bound error.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &recovery_error_value(self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical ERRE1 record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or oversized bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(bytes, ERASURE_PORTABLE_RECORD_MAX_BYTES, 6)
+            .and_then(|value| exact_array(&value, 6).and_then(recovery_error_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &recovery_error_value(&self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_RECOVERY_ERROR_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
 
 /// A minimized digest reference; it never carries erased payload bytes.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -760,9 +872,13 @@ impl ErasureFreezeAuthorizationEvidenceV1 {
         &self,
         admission: &ErasureFreezeAdmissionEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        (self.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        admission
+            .authorization_body_digest()
+            .and_then(|body_digest| {
+                (self.admission_body_digest() == body_digest)
+                    .then_some(())
+                    .ok_or(ErasureErrorV1::Unauthorized)
+            })
     }
 
     /// Encode the exact retained authorization-evidence object.
@@ -2980,6 +3096,12 @@ impl ErasureVerifiedStateV1 {
 /// Implementations must return a snapshot only after durable recovery has
 /// validated every referenced record. In particular, a warm cache or a raw
 /// ERCRP1 manifest is not sufficient evidence for #186's runtime fence.
+/// This remains a separate port from [`ErasurePersistencePortV1`]: the
+/// containment consumer owns the verified-state contract, while persistence
+/// adapters own storage, indexing, and compare-and-swap capabilities.
+/// It is read-only with respect to authoritative ERS1/ERCRP1 lifecycle state;
+/// recovery may refresh a non-authoritative cache or append a bounded
+/// immutable ERRE1 diagnostic when verification fails.
 pub trait ErasureVerifiedStateQueryV1 {
     /// Recover and return one request's authoritative verified state.
     ///
@@ -2991,6 +3113,25 @@ pub trait ErasureVerifiedStateQueryV1 {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1>;
+}
+
+/// Public read-only seam for payload-free recovery diagnostics.
+///
+/// Implementations return only ERRE1 evidence that has been retrieved and
+/// validated through the persistence boundary. These diagnostics never
+/// authorize containment and must not be used as a substitute for a
+/// successfully verified [`ErasureVerifiedStateV1`].
+pub trait ErasureRecoveryErrorQueryV1 {
+    /// Return the bounded, immutable recovery failures retained for a request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed persistence, decoding, or provenance error when an
+    /// indexed recovery-error object cannot be verified.
+    fn recovery_errors(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1>;
 }
 
 mod receipt;
@@ -3122,8 +3263,8 @@ pub trait ErasureStateResolverV1 {
 
 /// Host-owned verifier for retained freeze-authorization evidence.
 ///
-/// Persistence adapters require this capability before returning any
-/// frozen-or-later coordinator record. This keeps ADR-060's authorization
+/// Durable recovery requires this independent host capability before returning
+/// any frozen-or-later coordinator record. This keeps ADR-060's authorization
 /// rule inside the recovery interface instead of relying on caller discipline.
 pub trait ErasureFreezeAuthorizationVerifierV1 {
     /// Verify one retained ERFA1 body and its ERFAA1 authorization evidence.
@@ -3145,6 +3286,8 @@ pub trait ErasureFreezeAuthorizationVerifierV1 {
 /// The persistence layer validates immutable structural bindings. The host
 /// remains responsible for interpreting retained #186/#187 evidence and
 /// checking capabilities, principals, policy, and trust semantics.
+/// This verifier revalidates already admitted evidence during recovery; it
+/// does not itself make the admission decision.
 pub trait ErasureRecoveryAuthorizationVerifierV1 {
     /// Verify the host admission which authorized one future-Fork extension.
     ///
@@ -3170,8 +3313,9 @@ pub trait ErasureRecoveryAuthorizationVerifierV1 {
     ) -> Result<(), ErasureErrorV1>;
 }
 
-/// Exact stored ERCRP1 bytes and their content address. Adapters return this
-/// envelope unchanged; decoding and recovery remain core-owned.
+/// Exact stored ERCRP1 bytes and their recorded content address. Adapters
+/// return this envelope unchanged; content-address verification, decoding, and
+/// recovery remain core-owned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredErasureManifestV1 {
     digest: ErasureReferenceV1,
@@ -3179,7 +3323,7 @@ pub struct StoredErasureManifestV1 {
 }
 
 impl StoredErasureManifestV1 {
-    /// Construct an adapter-returned manifest after checking its content address.
+    /// Construct a manifest after checking its content address.
     ///
     /// # Errors
     ///
@@ -3195,6 +3339,23 @@ impl StoredErasureManifestV1 {
                 canonical_cbor,
             })
             .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    /// Construct an exact envelope from adapter storage.
+    ///
+    /// The adapter must preserve the recorded digest and bytes exactly. Core
+    /// recovery verifies that the digest authenticates the bytes before it
+    /// decodes or uses the manifest.
+    #[must_use]
+    pub const fn from_stored(digest: ErasureReferenceV1, canonical_cbor: Vec<u8>) -> Self {
+        Self {
+            digest,
+            canonical_cbor,
+        }
+    }
+
+    pub(super) fn content_address_matches(&self) -> bool {
+        ErasureReferenceV1::from_digest(domain_digest(ERCRP1, &self.canonical_cbor)) == self.digest
     }
 
     /// Return the content address used for CAS.
@@ -3231,6 +3392,44 @@ impl ErasurePersistenceObjectV1 {
     #[must_use]
     pub fn canonical_cbor(&self) -> &[u8] {
         &self.canonical_cbor
+    }
+}
+
+/// Opaque core-prepared ERRE1 evidence for an adapter append.
+///
+/// Adapters can persist and inspect this token, but cannot construct one from
+/// an arbitrary public diagnostic. Core creates it only after content-addressing
+/// the complete [`ErasureRecoveryErrorV1`] record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedErasureRecoveryErrorV1 {
+    request: ErasureReferenceV1,
+    object: ErasurePersistenceObjectV1,
+}
+
+impl PreparedErasureRecoveryErrorV1 {
+    pub(crate) fn new(record: ErasureRecoveryErrorV1) -> Result<Self, ErasureErrorV1> {
+        record.to_canonical_cbor().map(|bytes| Self {
+            request: record.request(),
+            object: ErasurePersistenceObjectV1::new(record.reference(), bytes),
+        })
+    }
+
+    /// Return the ERQ1 request bound to this core-prepared diagnostic.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.request
+    }
+
+    /// Return the content address of the ERRE1 diagnostic.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.object.reference()
+    }
+
+    /// Return the canonical ERRE1 bytes prepared by core.
+    #[must_use]
+    pub fn canonical_cbor(&self) -> &[u8] {
+        self.object.canonical_cbor()
     }
 }
 
@@ -3480,12 +3679,23 @@ pub enum ErasureCasOutcomeV1 {
 /// The core owns ERCRP1 decoding, recovery, validation, and construction of
 /// every mutation. Adapters own only canonical byte/object storage and one
 /// atomic compare-and-swap transaction.
+///
+/// This is deliberately separate from the host-owned authorization verifier
+/// traits: persistence proves structural and content-address bindings, while
+/// the verifiers interpret independently authenticated Principal, capability,
+/// policy, and trust evidence. [`ErasureVerifiedStateQueryV1`] is a separate
+/// read-only consumer seam over successfully recovered state. The composite
+/// [`ErasureCoordinatorPortV1`] groups these capabilities for a coordinator
+/// host; it does not grant persistence adapters authorization authority.
 pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     /// Return the current ERCRP1 envelope for one request, if any.
     ///
     /// # Errors
     ///
-    /// Returns a closed adapter read or decoding error.
+    /// Returns a closed adapter read or storage-shape error. The returned
+    /// envelope is not decoded or content-address validated by the adapter;
+    /// core recovery performs those checks while retaining its recorded
+    /// manifest identity on failure.
     fn read_manifest(
         &self,
         request: ErasureReferenceV1,
@@ -3566,6 +3776,32 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<u64, ErasureErrorV1>;
+    /// Return immutable ERRE1 recovery-error references for one request in
+    /// deterministic content-address order. The adapter must inspect no more
+    /// than `ERASURE_MAX_RECOVERY_ERRORS + 1` rows and must fail closed when
+    /// the extra sentinel row exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1>;
+    /// Atomically retain one core-prepared, immutable ERRE1 recovery-error
+    /// object and its request index entry.
+    ///
+    /// Repeating the exact `(object.request(), object.reference())` insertion
+    /// is idempotent. A different object at the same content address fails
+    /// closed, and the per-request retention bound is enforced by the adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed transaction, bound, or provenance error.
+    fn append_recovery_error(
+        &mut self,
+        object: PreparedErasureRecoveryErrorV1,
+    ) -> Result<(), ErasureErrorV1>;
     /// Atomically apply a core-prepared delta. If the current manifest already
     /// equals the supplied next manifest and every referenced delta is equal,
     /// return [`ErasureCasOutcomeV1::ExactRetry`]; otherwise stale heads fail
@@ -3581,10 +3817,37 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RecoveryFailureV1 {
+    error: ErasureErrorV1,
+    subject: ErasureReferenceV1,
+}
+
+impl RecoveryFailureV1 {
+    pub(super) const fn new(error: ErasureErrorV1, subject: ErasureReferenceV1) -> Self {
+        Self { error, subject }
+    }
+
+    pub(super) const fn error(self) -> ErasureErrorV1 {
+        self.error
+    }
+
+    pub(super) const fn subject(self) -> ErasureReferenceV1 {
+        self.subject
+    }
+}
+
 fn verify_predecessor_chain<R: ErasureStateResolverV1 + ?Sized>(
     current: ErasureStateV1,
     resolver: &R,
 ) -> Result<(), ErasureErrorV1> {
+    verify_predecessor_chain_with_subject(current, resolver).map_err(|failure| failure.error)
+}
+
+fn verify_predecessor_chain_with_subject<R: ErasureStateResolverV1 + ?Sized>(
+    current: ErasureStateV1,
+    resolver: &R,
+) -> Result<(), RecoveryFailureV1> {
     verify_predecessor_chain_bounded(
         current,
         resolver,
@@ -3596,24 +3859,44 @@ fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1 + ?Sized>(
     mut current: ErasureStateV1,
     resolver: &R,
     maximum_depth: usize,
-) -> Result<(), ErasureErrorV1> {
+) -> Result<(), RecoveryFailureV1> {
     for _ in 0..maximum_depth {
         if let Some(previous_digest) = current.previous_state() {
-            match resolver.resolve_state(previous_digest) {
-                Ok(Some(previous)) => {
-                    current.validate_predecessor(&previous)?;
-                    current = previous;
-                }
-                Ok(None) => return Err(ErasureErrorV1::ProvenanceMissing),
-                Err(error) => return Err(error),
-            }
+            current = resolve_predecessor_state(&current, resolver, previous_digest)?;
         } else if current.lifecycle() == ErasureLifecycleV1::Submitted {
             return Ok(());
         } else {
-            return Err(ErasureErrorV1::ProvenanceMissing);
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                current.state_digest(),
+            ));
         }
     }
-    Err(ErasureErrorV1::ProvenanceMissing)
+    Err(RecoveryFailureV1::new(
+        ErasureErrorV1::ProvenanceMissing,
+        current.state_digest(),
+    ))
+}
+
+fn resolve_predecessor_state<R: ErasureStateResolverV1 + ?Sized>(
+    current: &ErasureStateV1,
+    resolver: &R,
+    previous_digest: ErasureReferenceV1,
+) -> Result<ErasureStateV1, RecoveryFailureV1> {
+    let previous = match resolver.resolve_state(previous_digest) {
+        Ok(Some(previous)) => previous,
+        Ok(None) => {
+            return Err(RecoveryFailureV1::new(
+                ErasureErrorV1::ProvenanceMissing,
+                previous_digest,
+            ));
+        }
+        Err(error) => return Err(RecoveryFailureV1::new(error, previous_digest)),
+    };
+    current
+        .validate_predecessor(&previous)
+        .map_err(|error| RecoveryFailureV1::new(error, previous_digest))?;
+    Ok(previous)
 }
 
 /// Application-facing erasure lifecycle interface.
@@ -3732,6 +4015,11 @@ pub trait ErasureCoordinator {
 
 /// Host capability boundary for authentication, atomic freeze admission, and
 /// irreversible-work admission.
+///
+/// This composite is an application-facing dependency bundle, not a decision
+/// to merge storage and authorization into one port. Implementations keep the
+/// persistence, freeze-verification, and recovery-verification contracts
+/// independently auditable and replaceable.
 pub trait ErasureCoordinatorPortV1:
     ErasurePersistencePortV1
     + ErasureFreezeAuthorizationVerifierV1
@@ -4071,10 +4359,9 @@ fn validate_applicability_obligations(
         .map(|obligation| ((obligation.category(), obligation.target()), obligation))
         .collect::<BTreeMap<_, _>>();
     for row in matrix {
-        let target_index =
-            usize::try_from(row.target_index()).map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        let target = targets
-            .get(target_index)
+        let target = usize::try_from(row.target_index())
+            .ok()
+            .and_then(|target_index| targets.get(target_index))
             .ok_or(ErasureErrorV1::ScopeInvalid)?;
         let obligation = by_category_target.get(&(row.category(), *target));
         match (row.decision(), row.owner(), obligation) {
@@ -4123,8 +4410,9 @@ use evidence::{
     inventories_exceed_bound, inventories_have_duplicate_targets, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, obligation_from_fields, obligation_set_from_fields,
     obligation_set_value, obligation_value, receipt_core_value, receipt_from_fields,
-    receipt_provenance_from_fields, receipt_provenance_value, receipt_value, reference_zero,
-    request_from_fields, request_value, retry_admission_from_fields, retry_admission_value,
+    receipt_provenance_from_fields, receipt_provenance_value, receipt_value,
+    recovery_error_from_fields, recovery_error_value, reference_zero, request_from_fields,
+    request_value, retry_admission_from_fields, retry_admission_value,
     scope_commitment_from_fields, scope_commitment_value, scope_extension_from_fields,
     scope_extension_value, sort_inventories, state_core_value, state_from_fields, state_value,
     strictly_increasing,

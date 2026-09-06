@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+use ciborium::value::Value;
+
 #[path = "support/coordinator.rs"]
 pub mod coordinator_support;
 #[path = "support/erasure.rs"]
@@ -13,25 +15,41 @@ pub mod erasure_support;
 
 use coordinator_support::{
     PublicCoordinatorFault, PublicCoordinatorOperation, PublicCoordinatorPort,
-    PublicCoordinatorPortConfig,
+    PublicCoordinatorPortConfig, ATTEMPT_ADMITTED_INVENTORY_FIELD,
+    ATTEMPT_EFFECTIVE_INVENTORY_FIELD, ATTEMPT_OUTCOME_FIELD, ATTEMPT_RECEIPT_PROVENANCE_FIELD,
+    ATTEMPT_RETRY_ADMISSION_FIELD, FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD,
+    INVENTORY_REFERENCES_FIELD, MANIFEST_ACTIVE_FIELD,
+    MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD, MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
+    MANIFEST_CORRECTION_FIELD, MANIFEST_FREEZE_ADMISSION_FIELD,
+    MANIFEST_FREEZE_AUTHORIZATION_FIELD, MANIFEST_FREEZE_FAILURE_FIELD,
+    MANIFEST_FREEZE_PROVENANCE_FIELD, MANIFEST_LATEST_RECEIPT_FIELD, MANIFEST_OBLIGATION_SET_FIELD,
+    MANIFEST_REJECTION_FIELD, MANIFEST_REQUEST_FIELD, MANIFEST_SCOPE_COMMITMENT_FIELD,
+    MANIFEST_SCOPE_EXTENSION_HEAD_FIELD, MANIFEST_STATE_FIELD, MANIFEST_TARGET_CLOSURE_FIELD,
+    OBLIGATION_SET_POLICY_FIELD, OBLIGATION_SET_REFERENCES_FIELD, OBLIGATION_SET_TRUST_FIELD,
+    SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD, SCOPE_NODE_EXTENSION_FIELD,
 };
 use erasure_support::{
     obligation as fixture_obligation, reference, replay_target as target,
     request as fixture_request, retry_admission as fixture_retry_admission, RequestFixtureInput,
     RetryAdmissionFixture,
 };
-use pos_core::erasure::target_closure_digest;
+use pos_core::erasure::{
+    target_closure_digest, ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1,
+};
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureCoordinator,
-    ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureInventoryCategoryV1,
-    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureVerifiedStateQueryV1,
+    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
+    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryErrorQueryV1,
+    ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1, ErasureVerifiedStateQueryV1,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -49,6 +67,12 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
         horizon_position: 20,
         provenance: reference(6),
     })
+}
+
+fn encode_value(value: &Value) -> Result<Vec<u8>, ErasureErrorV1> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    Ok(bytes)
 }
 
 fn port(
@@ -293,11 +317,51 @@ impl ErasureStateResolverV1 for StateMapResolver {
 }
 
 fn assert_recovery_fails(adapter: PublicCoordinatorPort, request: &ErasureRequestV1) {
+    assert_recovery_fails_with_error(adapter, request, ErasureErrorV1::ProvenanceMissing);
+}
+
+fn assert_recovery_fails_with_error(
+    adapter: PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+    expected_error: ErasureErrorV1,
+) {
     assert_eq!(
         ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR)
             .submit(request.clone(), request.provenance()),
-        Err(ErasureErrorV1::ProvenanceMissing)
+        Err(expected_error)
     );
+}
+
+fn assert_recovery_fails_and_retains(
+    adapter: PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1> {
+    assert_recovery_fails_and_retains_with_error(
+        adapter,
+        request,
+        ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+fn assert_recovery_fails_and_retains_with_error(
+    adapter: PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+    expected_error: ErasureErrorV1,
+) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1> {
+    let observer = adapter.clone();
+    assert_recovery_fails_with_error(adapter, request, expected_error);
+    ErasureCoordinatorStateMachineV1::new(observer, COORDINATOR)
+        .recovery_errors(request.reference())
+}
+
+fn assert_recovery_query_trait(
+    coordinator: &ErasureCoordinatorStateMachineV1<PublicCoordinatorPort>,
+    request: ErasureReferenceV1,
+    expected: &[ErasureRecoveryErrorV1],
+) -> Result<(), ErasureErrorV1> {
+    let query: &dyn ErasureRecoveryErrorQueryV1 = coordinator;
+    assert_eq!(query.recovery_errors(request)?.as_slice(), expected);
+    Ok(())
 }
 
 #[test]
@@ -349,6 +413,253 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
 }
 
 #[test]
+fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(), ErasureErrorV1> {
+    let graph = active_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let adapter = graph.adapter;
+    adapter.remove_object(request);
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR);
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let foreign_request = fixture_request(RequestFixtureInput {
+        request: reference(251),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
+        request_position: 10,
+        horizon_position: 20,
+        provenance: reference(6),
+    })?;
+    adapter.insert_object(request, foreign_request.to_canonical_cbor()?);
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    adapter.remove_object(request);
+    adapter.insert_object(request, graph.request.to_canonical_cbor()?);
+    let missing_closure = reference(250);
+    adapter.replace_manifest_field(
+        request,
+        MANIFEST_TARGET_CLOSURE_FIELD,
+        Value::Bytes(missing_closure.digest().to_vec()),
+    )?;
+    let changed_manifest = adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let failures = coordinator.recovery_errors(request)?;
+    assert_recovery_query_trait(&coordinator, request, &failures)?;
+    assert_eq!(failures.len(), 2);
+    assert!(failures.iter().any(|failure| {
+        failure.request() == request
+            && failure.manifest() == Some(manifest)
+            && failure.failure_subject() == request
+            && failure.error() == ErasureErrorV1::ProvenanceMissing
+    }));
+    assert!(failures.iter().any(|failure| {
+        failure.request() == request
+            && failure.manifest() == Some(changed_manifest)
+            && failure.failure_subject() == missing_closure
+            && failure.error() == ErasureErrorV1::ProvenanceMissing
+    }));
+    let bytes = failures[0].to_canonical_cbor()?;
+    assert_eq!(
+        ErasureRecoveryErrorV1::from_canonical_cbor(&bytes)?,
+        failures[0]
+    );
+    assert_eq!(
+        ErasureRecoveryErrorV1::from_canonical_cbor(&[]),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let value: Value =
+        ciborium::from_reader(bytes.as_slice()).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    let Value::Array(fields) = value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    for (index, replacement) in [
+        (0, Value::Text("wrong-contract".to_owned())),
+        (2, Value::Bytes(vec![0_u8])),
+        (3, Value::Text("wrong-optional-reference".to_owned())),
+        (4, Value::Bytes(vec![0_u8])),
+        (5, Value::Text("wrong-error-code".to_owned())),
+        (5, Value::Integer(16_u64.into())),
+    ] {
+        let mut malformed = fields.clone();
+        malformed[index] = replacement;
+        assert_eq!(
+            ErasureRecoveryErrorV1::from_canonical_cbor(&encode_value(&Value::Array(malformed))?),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_error_queries_fail_closed_at_each_public_boundary() -> Result<(), ErasureErrorV1> {
+    let request = request()?.reference();
+
+    let missing_object = port(Vec::new(), None);
+    missing_object.fill_recovery_error_index(request, 1);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(missing_object, COORDINATOR).recovery_errors(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let malformed_object = port(Vec::new(), None);
+    malformed_object.fill_recovery_error_index(request, 1);
+    malformed_object.insert_object(reference(0), vec![0]);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(malformed_object, COORDINATOR)
+            .recovery_errors(request),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let bounded = port(Vec::new(), None);
+    bounded.fill_recovery_error_index(request, pos_core::ERASURE_MAX_RECOVERY_ERRORS + 1);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(bounded, COORDINATOR).recovery_errors(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let overbound = port(Vec::new(), None).with_overbound_recovery_errors();
+    overbound.fill_recovery_error_index(request, pos_core::ERASURE_MAX_RECOVERY_ERRORS + 1);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(overbound, COORDINATOR).recovery_errors(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovery_error_retention_fails_closed_when_the_bound_is_full() -> Result<(), ErasureErrorV1> {
+    let request = request()?.reference();
+    let manifest_fault = port(Vec::new(), None).with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::LoadManifest,
+        occurrence: 0,
+    });
+    let manifest_failure =
+        ErasureRecoveryErrorV1::new(request, None, request, ErasureErrorV1::TrustSnapshotInvalid)?;
+    manifest_fault.fill_recovery_error_index_excluding(
+        request,
+        pos_core::ERASURE_MAX_RECOVERY_ERRORS,
+        Some(manifest_failure.reference()),
+    );
+    let manifest_observer = manifest_fault.clone();
+    let manifest_index_before = manifest_observer.recovery_error_refs(request)?;
+    assert_eq!(
+        manifest_index_before.len(),
+        pos_core::ERASURE_MAX_RECOVERY_ERRORS
+    );
+    assert_eq!(
+        manifest_observer.read_object(manifest_failure.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(manifest_fault, COORDINATOR).verified_state(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        manifest_observer.recovery_error_refs(request)?,
+        manifest_index_before
+    );
+    assert_eq!(
+        manifest_observer.read_object(manifest_failure.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let graph = active_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let recovery_failure = ErasureRecoveryErrorV1::new(
+        request,
+        Some(manifest),
+        request,
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    graph.adapter.remove_object(request);
+    graph.adapter.fill_recovery_error_index_excluding(
+        request,
+        pos_core::ERASURE_MAX_RECOVERY_ERRORS,
+        Some(recovery_failure.reference()),
+    );
+    let graph_observer = graph.adapter.clone();
+    let graph_index_before = graph_observer.recovery_error_refs(request)?;
+    assert_eq!(
+        graph_index_before.len(),
+        pos_core::ERASURE_MAX_RECOVERY_ERRORS
+    );
+    assert_eq!(
+        graph_observer.read_object(recovery_failure.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR).verified_state(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        graph_observer.recovery_error_refs(request)?,
+        graph_index_before
+    );
+    assert_eq!(
+        graph_observer.read_object(recovery_failure.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn manifest_read_failures_are_retained_without_a_manifest_reference() -> Result<(), ErasureErrorV1>
+{
+    let request = request()?;
+    let adapter = port(vec![], None).with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::LoadManifest,
+        occurrence: 0,
+    });
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
+
+    assert_eq!(
+        coordinator.verified_state(request.reference()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    let failures = coordinator.recovery_errors(request.reference())?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].request(), request.reference());
+    assert_eq!(failures[0].manifest(), None);
+    assert_eq!(failures[0].failure_subject(), request.reference());
+    assert_eq!(failures[0].error(), ErasureErrorV1::TrustSnapshotInvalid);
+    Ok(())
+}
+
+#[test]
 fn public_state_chain_query_requires_the_complete_predecessor_chain() -> Result<(), ErasureErrorV1>
 {
     let request = request()?;
@@ -369,24 +680,601 @@ fn public_state_chain_query_requires_the_complete_predecessor_chain() -> Result<
 }
 
 #[test]
+fn recovery_failure_retains_a_malformed_manifest_identity() -> Result<(), ErasureErrorV1> {
+    let graph = active_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    graph
+        .adapter
+        .replace_manifest_raw(request, manifest.digest(), vec![0xff])?;
+
+    let stored = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(stored.digest(), manifest.digest());
+    assert_eq!(stored.canonical_cbor(), &[0xff]);
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].manifest(), Some(manifest.digest()));
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_failure_identifies_a_missing_predecessor_state() -> Result<(), ErasureErrorV1> {
+    let graph = completed_graph(vec![target(10)], None)?;
+    let terminal = graph
+        .adapter
+        .resolve_state(graph.receipt.terminal_state())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let missing_predecessor = terminal
+        .previous_state()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    graph.adapter.remove_state(missing_predecessor);
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), missing_predecessor);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
 fn recovery_rejects_manifest_state_rollback_after_a_completed_attempt() -> Result<(), ErasureErrorV1>
 {
     let graph = completed_graph(vec![target(10)], None)?;
-    graph.adapter.replace_manifest_with_state_lifecycle(
+    graph.adapter.replace_manifest_with_state_lifecycle_digest(
         graph.request.reference(),
         ErasureLifecycleV1::AwaitingAcknowledgements,
     )?;
-    assert_recovery_fails(graph.adapter, &graph.request);
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_a_replayed_attempt_with_a_stale_manifest_head() -> Result<(), ErasureErrorV1> {
+    let graph = completed_graph(vec![target(10)], None)?;
+    let changed_head = reference(242);
+    graph.adapter.replace_manifest_field(
+        graph.request.reference(),
+        MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
+        Value::Bytes(changed_head.digest().to_vec()),
+    )?;
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_a_replayed_attempt_with_a_stale_manifest_receipt() -> Result<(), ErasureErrorV1>
+{
+    let graph = completed_graph(vec![target(10)], None)?;
+    let changed_receipt = reference(243);
+    graph.adapter.replace_manifest_field(
+        graph.request.reference(),
+        MANIFEST_LATEST_RECEIPT_FIELD,
+        Value::Bytes(changed_receipt.digest().to_vec()),
+    )?;
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_a_replayed_attempt_with_a_different_dispatch_admission(
+) -> Result<(), ErasureErrorV1> {
+    let graph = completed_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let obligation = fixture_obligation(request, target(10))?;
+    let alternate = fixture_retry_admission(RetryAdmissionFixture {
+        request,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        obligations: std::slice::from_ref(&obligation),
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 11,
+        deadline_position: 20,
+        authorization_provenance: reference(244),
+    })?;
+    graph
+        .adapter
+        .insert_object(alternate.reference(), alternate.to_canonical_cbor()?);
+    graph.adapter.replace_attempt_page_field(
+        request,
+        0,
+        4,
+        Value::Bytes(alternate.reference().digest().to_vec()),
+    )?;
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), alternate.reference());
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_a_replayed_attempt_with_a_missing_terminal_state() -> Result<(), ErasureErrorV1>
+{
+    let graph = completed_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let missing_state = reference(245);
+    graph.adapter.replace_attempt_page_field(
+        request,
+        0,
+        10,
+        Value::Bytes(missing_state.digest().to_vec()),
+    )?;
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), missing_state);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_an_indexed_resolution_without_a_frozen_scope() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let port = port(Vec::new(), None);
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+
+    let resolution = resolution(request.reference(), reference(246), reference(247))?;
+    adapter.insert_resolution(request.reference(), 0, &resolution)?;
+    adapter.replace_manifest_field(
+        request.reference(),
+        MANIFEST_ADMINISTRATIVE_RESOLUTION_HEAD_FIELD,
+        Value::Bytes(resolution.reference().digest().to_vec()),
+    )?;
+    let manifest = adapter
+        .current_manifest(request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+
+    let failures = assert_recovery_fails_and_retains(adapter, &request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_a_missing_resolution_index_entry() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let scope_commitment = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let resolution = resolution(
+        graph.request.reference(),
+        graph.receipt.terminal_state(),
+        scope_commitment.reference(),
+    )?;
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .resolve_administratively(graph.request.reference(), &resolution)?;
+    graph
+        .adapter
+        .insert_resolution(graph.request.reference(), 1, &resolution)?;
+    graph
+        .adapter
+        .remove_resolution(graph.request.reference(), 0);
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), manifest);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[test]
+fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), ErasureErrorV1> {
+    for (manifest_field, object_tag, object_field, replacement, expected_error) in [
+        (
+            MANIFEST_SCOPE_COMMITMENT_FIELD,
+            ERASURE_SCOPE_COMMITMENT_TAG_V1,
+            SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD,
+            Value::Bytes(reference(250).digest().to_vec()),
+            ErasureErrorV1::ScopeInvalid,
+        ),
+        (
+            MANIFEST_FREEZE_PROVENANCE_FIELD,
+            ERASURE_FREEZE_PROVENANCE_TAG_V1,
+            FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD,
+            Value::Bytes(reference(251).digest().to_vec()),
+            ErasureErrorV1::ProvenanceMissing,
+        ),
+        (
+            MANIFEST_OBLIGATION_SET_FIELD,
+            ERASURE_OBLIGATION_SET_TAG_V1,
+            OBLIGATION_SET_POLICY_FIELD,
+            Value::Bytes(reference(252).digest().to_vec()),
+            ErasureErrorV1::ProvenanceMissing,
+        ),
+        (
+            MANIFEST_OBLIGATION_SET_FIELD,
+            ERASURE_OBLIGATION_SET_TAG_V1,
+            OBLIGATION_SET_TRUST_FIELD,
+            Value::Bytes(reference(253).digest().to_vec()),
+            ErasureErrorV1::ProvenanceMissing,
+        ),
+    ] {
+        let graph = completed_graph(vec![target(10)], None)?;
+        graph.adapter.replace_manifest_object_field(
+            graph.request.reference(),
+            manifest_field,
+            object_tag,
+            object_field,
+            replacement,
+        )?;
+        let subject = graph
+            .adapter
+            .manifest_object_reference(graph.request.reference(), manifest_field)?;
+        let failures = assert_recovery_fails_and_retains_with_error(
+            graph.adapter,
+            &graph.request,
+            expected_error,
+        )?;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].failure_subject(), subject);
+        assert_eq!(failures[0].error(), expected_error);
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_malformed_manifest_owned_objects() -> Result<(), ErasureErrorV1> {
+    for manifest_field in [
+        MANIFEST_REQUEST_FIELD,
+        MANIFEST_TARGET_CLOSURE_FIELD,
+        MANIFEST_SCOPE_COMMITMENT_FIELD,
+        MANIFEST_FREEZE_ADMISSION_FIELD,
+        MANIFEST_FREEZE_AUTHORIZATION_FIELD,
+        MANIFEST_FREEZE_PROVENANCE_FIELD,
+        MANIFEST_OBLIGATION_SET_FIELD,
+        MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
+        MANIFEST_LATEST_RECEIPT_FIELD,
+    ] {
+        let graph = completed_graph(vec![target(10)], None)?;
+        let subject = graph
+            .adapter
+            .manifest_object_reference(graph.request.reference(), manifest_field)?;
+        graph.adapter.insert_object(subject, vec![0xff]);
+
+        let failures = assert_recovery_fails_and_retains_with_error(
+            graph.adapter,
+            &graph.request,
+            ErasureErrorV1::InvalidEncoding,
+        )?;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].failure_subject(), subject);
+    }
+    Ok(())
+}
+
+fn assert_malformed_recovery_object(
+    adapter: PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+    subject: ErasureReferenceV1,
+) -> Result<(), ErasureErrorV1> {
+    assert_recovery_rejects_object_bytes(adapter, request, subject, vec![0xff])
+}
+
+fn assert_recovery_rejects_object_bytes(
+    adapter: PublicCoordinatorPort,
+    request: &ErasureRequestV1,
+    subject: ErasureReferenceV1,
+    bytes: Vec<u8>,
+) -> Result<(), ErasureErrorV1> {
+    adapter.insert_object(subject, bytes);
+    let failures = assert_recovery_fails_and_retains_with_error(
+        adapter,
+        request,
+        ErasureErrorV1::InvalidEncoding,
+    )?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), subject);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_wrong_width_persistence_envelopes() -> Result<(), ErasureErrorV1> {
+    let malformed_array = encode_value(&Value::Array(Vec::new()))?;
+
+    let graph = active_graph(vec![target(10)], None)?;
+    graph
+        .adapter
+        .replace_manifest_canonical_cbor(graph.request.reference(), malformed_array.clone())?;
+    let manifest = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let failures = assert_recovery_fails_and_retains_with_error(
+        graph.adapter,
+        &graph.request,
+        ErasureErrorV1::InvalidEncoding,
+    )?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), manifest.digest());
+
+    for (manifest_field, nested_field) in [
+        (MANIFEST_TARGET_CLOSURE_FIELD, None),
+        (
+            MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
+            Some(ATTEMPT_ADMITTED_INVENTORY_FIELD),
+        ),
+        (MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD, None),
+    ] {
+        let graph = completed_graph(vec![target(10)], None)?;
+        let owner = graph
+            .adapter
+            .manifest_object_reference(graph.request.reference(), manifest_field)?;
+        let subject = nested_field.map_or(Ok(owner), |field| {
+            graph.adapter.object_reference_field(owner, field)
+        })?;
+        assert_recovery_rejects_object_bytes(
+            graph.adapter,
+            &graph.request,
+            subject,
+            malformed_array.clone(),
+        )?;
+    }
+
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let extension = extension(graph.request.reference(), &scope, lineage_rule)?;
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .append_scope_extension(graph.request.reference(), extension)?;
+    let subject = graph.adapter.manifest_object_reference(
+        graph.request.reference(),
+        MANIFEST_SCOPE_EXTENSION_HEAD_FIELD,
+    )?;
+    assert_recovery_rejects_object_bytes(graph.adapter, &graph.request, subject, malformed_array)
+}
+
+#[test]
+fn recovery_rejects_malformed_active_attempt_fields() -> Result<(), ErasureErrorV1> {
+    for active in [
+        Value::Array(vec![
+            Value::Text("not-an-ordinal".to_owned()),
+            Value::Bytes(reference(10).digest().to_vec()),
+            Value::Array(Vec::new()),
+        ]),
+        Value::Array(vec![
+            Value::Integer(0_u64.into()),
+            Value::Text("not-an-admission".to_owned()),
+            Value::Array(Vec::new()),
+        ]),
+    ] {
+        let graph = active_graph(vec![target(10)], None)?;
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            MANIFEST_ACTIVE_FIELD,
+            active,
+        )?;
+        let manifest = graph
+            .adapter
+            .current_manifest(graph.request.reference())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let failures = assert_recovery_fails_and_retains_with_error(
+            graph.adapter,
+            &graph.request,
+            ErasureErrorV1::InvalidEncoding,
+        )?;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].failure_subject(), manifest.digest());
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_malformed_attempt_descendants() -> Result<(), ErasureErrorV1> {
+    for page_field in [
+        ATTEMPT_RETRY_ADMISSION_FIELD,
+        ATTEMPT_OUTCOME_FIELD,
+        ATTEMPT_RECEIPT_PROVENANCE_FIELD,
+    ] {
+        let graph = completed_graph(vec![target(10)], None)?;
+        let page = graph.adapter.manifest_object_reference(
+            graph.request.reference(),
+            MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
+        )?;
+        let subject = graph.adapter.object_reference_field(page, page_field)?;
+        assert_malformed_recovery_object(graph.adapter, &graph.request, subject)?;
+    }
+
+    let graph = completed_graph(vec![target(10)], None)?;
+    let obligation_set = graph
+        .adapter
+        .manifest_object_reference(graph.request.reference(), MANIFEST_OBLIGATION_SET_FIELD)?;
+    let obligation =
+        graph
+            .adapter
+            .object_reference_entry(obligation_set, OBLIGATION_SET_REFERENCES_FIELD, 0)?;
+    assert_malformed_recovery_object(graph.adapter, &graph.request, obligation)?;
+
+    let graph = completed_graph(vec![target(10)], None)?;
+    let page = graph.adapter.manifest_object_reference(
+        graph.request.reference(),
+        MANIFEST_ATTEMPT_HISTORY_HEAD_FIELD,
+    )?;
+    let inventory = graph
+        .adapter
+        .object_reference_field(page, ATTEMPT_EFFECTIVE_INVENTORY_FIELD)?;
+    let acknowledgement =
+        graph
+            .adapter
+            .object_reference_entry(inventory, INVENTORY_REFERENCES_FIELD, 0)?;
+    assert_malformed_recovery_object(graph.adapter, &graph.request, acknowledgement)
+}
+
+#[test]
+fn recovery_rejects_a_malformed_scope_extension() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let extension = extension(graph.request.reference(), &scope, lineage_rule)?;
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .append_scope_extension(graph.request.reference(), extension)?;
+    let scope_node = graph.adapter.manifest_object_reference(
+        graph.request.reference(),
+        MANIFEST_SCOPE_EXTENSION_HEAD_FIELD,
+    )?;
+    let subject = graph
+        .adapter
+        .object_reference_field(scope_node, SCOPE_NODE_EXTENSION_FIELD)?;
+    assert_malformed_recovery_object(graph.adapter, &graph.request, subject)
+}
+
+#[test]
+fn recovery_rejects_a_malformed_correction() -> Result<(), ErasureErrorV1> {
+    let original = request()?;
+    let adapter = port(Vec::new(), None);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR);
+    coordinator.submit(original.clone(), original.provenance())?;
+    let rejected = coordinator.reject(original.reference(), reference(21))?;
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: original.reference(),
+        rejected_terminal_state: rejected.state_digest(),
+        correction_reason: reference(22),
+        authorization_provenance: reference(23),
+    })?;
+    let corrected = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(50),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
+        request_position: 11,
+        horizon_position: 20,
+        provenance: correction.reference(),
+    })?;
+    coordinator.submit_corrected(corrected.clone(), correction)?;
+    let subject =
+        adapter.manifest_object_reference(corrected.reference(), MANIFEST_CORRECTION_FIELD)?;
+    assert_malformed_recovery_object(adapter, &corrected, subject)
+}
+
+#[test]
+fn recovery_rejects_a_malformed_authorization_rejection() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let adapter = port(Vec::new(), None);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    let rejected = coordinator.reject(request.reference(), reference(21))?;
+    assert_eq!(rejected.lifecycle(), ErasureLifecycleV1::Rejected);
+    let subject =
+        adapter.manifest_object_reference(request.reference(), MANIFEST_REJECTION_FIELD)?;
+    assert_malformed_recovery_object(adapter, &request, subject)
+}
+
+#[test]
+fn recovery_rejects_a_malformed_freeze_failure() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let adapter = PublicCoordinatorPort::new(PublicCoordinatorPortConfig {
+        targets: Vec::new(),
+        fail_commits: false,
+        policy: reference(5),
+        trust: reference(6),
+        scope_member: reference(7),
+        freeze_evidence: reference(8),
+        lineage_rule: None,
+        freeze_rejection: Some((ErasureErrorV1::ScopeInvalid, reference(21))),
+        operation_fault: None,
+        attempt_reservation_admission: None,
+    });
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    coordinator.authorize(request.reference(), reference(21))?;
+    let rejected = coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    assert_eq!(rejected.lifecycle(), ErasureLifecycleV1::Rejected);
+    let subject =
+        adapter.manifest_object_reference(request.reference(), MANIFEST_FREEZE_FAILURE_FIELD)?;
+    assert_malformed_recovery_object(adapter, &request, subject)
+}
+
+#[test]
+fn recovery_failures_keep_distinct_subjects_for_one_manifest() -> Result<(), ErasureErrorV1> {
+    let graph = active_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let state = graph
+        .adapter
+        .manifest_object_reference(request, MANIFEST_STATE_FIELD)?;
+    let adapter = graph.adapter;
+
+    adapter.remove_object(request);
+    let first = assert_recovery_fails_and_retains(adapter.clone(), &graph.request)?;
+    adapter.insert_object(request, graph.request.to_canonical_cbor()?);
+    adapter.remove_state(state);
+    let mut failures = assert_recovery_fails_and_retains(adapter, &graph.request)?;
+
+    assert_eq!(first.len(), 1);
+    assert_eq!(failures.len(), 2);
+    failures.sort_unstable_by_key(|failure| failure.failure_subject());
+    assert_eq!(
+        failures
+            .iter()
+            .map(|failure| failure.failure_subject())
+            .collect::<Vec<_>>(),
+        vec![request, state]
+    );
+    assert!(failures.iter().all(|failure| {
+        failure.manifest() == Some(manifest) && failure.error() == ErasureErrorV1::ProvenanceMissing
+    }));
     Ok(())
 }
 
 #[test]
 fn recovery_rejects_reordered_persisted_acknowledgement_inventory() -> Result<(), ErasureErrorV1> {
     let graph = completed_graph(vec![target(10), target(20)], None)?;
-    graph
-        .adapter
-        .reverse_attempt_inventory(graph.request.reference(), 0, 5)?;
-    assert_recovery_fails(graph.adapter, &graph.request);
+    let changed_inventory = graph.adapter.reverse_attempt_inventory(
+        graph.request.reference(),
+        0,
+        ATTEMPT_ADMITTED_INVENTORY_FIELD,
+    )?;
+    let failures = assert_recovery_fails_and_retains(graph.adapter, &graph.request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].failure_subject(), changed_inventory);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
 

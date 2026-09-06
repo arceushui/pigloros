@@ -14,20 +14,21 @@ use super::{
     ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
-    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
-    ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
-    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
-    ERASURE_CAS_EFFECT_TAG_V1, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
-    ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1, ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
-    ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1, ERASURE_FREEZE_FAILURE_TAG_V1,
-    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS,
-    ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
-    ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1,
-    ERASURE_RECEIPT_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateV1, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+    ERASURE_AUTHORIZATION_REJECTION_TAG_V1, ERASURE_CAS_EFFECT_TAG_V1,
+    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
+    ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
+    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
+    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_INVENTORY_RESULTS,
+    ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_REFERENCES,
+    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1,
+    ERASURE_RECOVERY_ERROR_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
     ERASURE_SCOPE_EXTENSION_TAG_V1, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
@@ -189,6 +190,29 @@ pub(super) fn correction_provenance_from_fields(
         correction_reason: bytes32(&fields[4])?,
         authorization_provenance: bytes32(&fields[5])?,
     })
+}
+
+pub(super) fn recovery_error_value(record: &ErasureRecoveryErrorV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_RECOVERY_ERROR_TAG_V1),
+        uint(VERSION),
+        digest(record.request()),
+        optional_digest(record.manifest()),
+        digest(record.failure_subject()),
+        uint(record.error().code()),
+    ])
+}
+
+pub(super) fn recovery_error_from_fields(
+    fields: &[Value],
+) -> Result<ErasureRecoveryErrorV1, ErasureErrorV1> {
+    header(fields, ERASURE_RECOVERY_ERROR_TAG_V1)?;
+    ErasureRecoveryErrorV1::new(
+        bytes32(&fields[2])?,
+        optional_bytes32(&fields[3])?,
+        bytes32(&fields[4])?,
+        ErasureErrorV1::from_code(unsigned(&fields[5])?)?,
+    )
 }
 
 pub(super) fn authorization_rejection_value(record: &ErasureAuthorizationRejectionV1) -> Value {
@@ -1361,13 +1385,11 @@ fn decode_limited_value(
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     cbor_shape_is_bounded(bytes, maximum_array)?;
-    let value = ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-    let canonical = encode_canonical(&value)?;
-    if canonical == bytes {
-        Ok(value)
-    } else {
-        Err(ErasureErrorV1::InvalidEncoding)
-    }
+    // `cbor_shape_is_bounded` admits only the canonical, bounded subset that
+    // this protocol uses: definite arrays, primitive values, and minimally
+    // encoded arguments. Maps, tags, floats, and indefinite items are
+    // rejected before the CBOR decoder is invoked.
+    ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)
 }
 pub(super) fn cbor_shape_is_bounded(
     bytes: &[u8],
@@ -1478,6 +1500,7 @@ pub(super) fn exact_array(value: &Value, expected: usize) -> Result<&[Value], Er
         _ => Err(ErasureErrorV1::InvalidEncoding),
     }
 }
+
 pub(super) fn string(value: &Value) -> Result<&str, ErasureErrorV1> {
     match value {
         Value::Text(value) => Ok(value),
@@ -1522,4 +1545,102 @@ pub(super) fn domain_digest(domain: &str, bytes: &[u8]) -> [u8; 32] {
     input.push(0);
     input.extend_from_slice(bytes);
     *blake3::hash(&input).as_bytes()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evidence_decoders_reject_unknown_codes_and_invalid_text() {
+        let digest = Value::Bytes(vec![0; 32]);
+        assert_eq!(
+            command_from_value(&Value::Array(vec![
+                digest.clone(),
+                uint(99),
+                Value::Null,
+                digest.clone(),
+                digest.clone(),
+                digest,
+            ])),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            applicability_row_from_value(&Value::Array(vec![
+                uint(99),
+                uint(0),
+                uint(0),
+                Value::Null,
+            ])),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            applicability_row_from_value(&Value::Array(vec![
+                uint(0),
+                uint(0),
+                uint(99),
+                Value::Null,
+            ])),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            decode_limited(&[0x61, 0xff], 2, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn bounded_cbor_helpers_fail_closed_at_each_shape_boundary() {
+        assert_eq!(
+            bounded_array(&[Value::Null], 0),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(array(&Value::Null, 1), Err(ErasureErrorV1::InvalidEncoding));
+        assert_eq!(
+            exact_array(&Value::Null, 0),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            exact_array(&Value::Array(Vec::new()), 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+
+        assert_eq!(
+            cbor_shape_is_bounded(&[0, 0], 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[0x9f], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[0x1f], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_item_end(&[0x81, 0x1f], 0, 0, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_argument(&[], 0, 31),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_argument_bytes(&[0], 0, 2, 256),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            cbor_argument_bytes(&[0], 0, 1, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            decode_limited(&[0x18, 0x00], 2, 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
 }

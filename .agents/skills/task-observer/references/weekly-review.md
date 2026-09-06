@@ -122,6 +122,12 @@ often generalise. Build skill → [relevant observations]. Interactive:
 present all of it and await approval. Autonomous: apply the approval policy
 above and continue.
 
+Checkpoint entries whose own Issue and Suggested improvement explicitly say
+that no reusable observation or skill change exists are audit evidence, not a
+methodology backlog. Mark them `DECLINED (YYYY-MM-DD) — checkpoint only; no
+skill change proposed` during the review. Do not copy their wording into a
+skill merely to make the OPEN count reach zero.
+
 **Step 4 — cross-check principles.** Flag every skill that doesn't yet
 comply with each active cross-cutting principle.
 

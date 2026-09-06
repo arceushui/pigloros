@@ -11,8 +11,8 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::PluginId,
-    ActionApprover, ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentError,
-    ConsentGate, Plugin, ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
+    ConsentError, ConsentGate, Plugin, ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::ProjectionRegistry;
 
@@ -291,6 +291,7 @@ mod coverage_paths {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
     use crate::driver::{Driver, ObservationView, StepOutput, TimelineHistorySegment};
@@ -385,6 +386,23 @@ mod coverage_entrypoints {
         assert!(*committed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner));
+    }
+
+    #[test]
+    fn public_entrypoints_fail_closed_when_the_consent_gate_is_unbound() {
+        let timeline = TimelineId::new();
+        assert!(matches!(
+            PluginRegistry::new()
+                .without_consent_gate()
+                .tick_cadenced(timeline, 0),
+            Err(RuntimeError::ConsentOperationUnavailable)
+        ));
+        assert!(matches!(
+            PluginRegistry::new()
+                .without_consent_gate()
+                .step_all(timeline),
+            Err(RuntimeError::ConsentOperationUnavailable)
+        ));
     }
 
     fn event(event_type: &str, seq: u64) -> Event {
@@ -625,6 +643,14 @@ struct PluginEntry {
     event_cursor: Seq,
 }
 
+const fn plugin_name(entry: &PluginEntry) -> &str {
+    entry.name.as_str()
+}
+
+const fn plugin_name_and_version(entry: &PluginEntry) -> (&str, &str) {
+    (entry.name.as_str(), entry.version.as_str())
+}
+
 struct PendingStep {
     timeline: pos_core::ids::TimelineId,
     driver_ids: Vec<PluginId>,
@@ -705,11 +731,8 @@ impl PluginRegistry {
         PluginComposition { plugins, schemas }
     }
 
-    fn snapshot_for_subscriptions<'a>(
-        &self,
-        subscriptions: impl IntoIterator<Item = &'a ProjectionKey>,
-    ) -> ObservationSnapshot {
-        ObservationSnapshot::from_subscriptions(subscriptions, |key| {
+    fn snapshot_for_subscriptions(&self, subscriptions: &[ProjectionKey]) -> ObservationSnapshot {
+        ObservationSnapshot::from_subscriptions(subscriptions.iter(), |key| {
             self.projections.state_for(key.entity_id()).cloned()
         })
     }
@@ -737,7 +760,7 @@ impl PluginRegistry {
             operation,
             subscriptions.iter(),
         )?;
-        Ok(self.snapshot_for_subscriptions(subscriptions.iter()))
+        Ok(self.snapshot_for_subscriptions(&subscriptions))
     }
 
     fn authorize_snapshot_subscriptions<'a>(
@@ -1392,9 +1415,9 @@ impl PluginRegistry {
             .filter(|event| driver_visible_event(event))
             .cloned()
             .collect();
-        let mut staged = Vec::new();
+        let mut staged_driver_count = 0;
         let mut failure = None;
-        for (id, entry) in &mut self.plugins {
+        for entry in self.plugins.values_mut() {
             let Some(driver) = entry.driver.as_mut() else {
                 continue;
             };
@@ -1407,39 +1430,35 @@ impl PluginRegistry {
                 failure = Some(error);
                 break;
             }
-            staged.push(*id);
+            staged_driver_count += 1;
         }
         if let Some(error) = failure {
-            for staged_id in staged {
-                if let Some(staged_driver) = self
-                    .plugins
-                    .get_mut(&staged_id)
-                    .and_then(|staged_entry| staged_entry.driver.as_mut())
-                {
-                    staged_driver.abort_restore_from_history();
+            for entry in self.plugins.values_mut() {
+                if staged_driver_count == 0 {
+                    break;
                 }
+                let Some(driver) = entry.driver.as_mut() else {
+                    continue;
+                };
+                driver.abort_restore_from_history();
+                staged_driver_count -= 1;
             }
             return Err(error);
         }
-        for id in staged {
-            if let Some(driver) = self
-                .plugins
-                .get_mut(&id)
-                .and_then(|entry| entry.driver.as_mut())
+        for entry in self.plugins.values_mut() {
+            let Some(driver) = entry.driver.as_mut() else {
+                continue;
+            };
+            let name = driver.name().to_owned();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                driver.commit_restore_from_history();
+            }))
+            .is_err()
             {
-                let name = driver.name().to_owned();
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    driver.commit_restore_from_history();
-                }))
-                .is_err()
-                {
-                    self.poisoned_driver = Some(name.clone());
-                    return Err(RuntimeError::DriverRestorePanicked { name });
-                }
+                self.poisoned_driver = Some(name.clone());
+                return Err(RuntimeError::DriverRestorePanicked { name });
             }
-            if let Some(entry) = self.plugins.get_mut(&id) {
-                entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
-            }
+            entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
         }
         Ok(())
     }
@@ -1476,6 +1495,22 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            &approver_event_types,
+            context,
+        )
+    }
+
+    fn registration_context(
+        &self,
+        plugin: &dyn Plugin,
+    ) -> Result<(PluginId, String, Capability), RuntimeError> {
         let id = plugin.id();
         let name = plugin.name().to_owned();
 
@@ -1483,9 +1518,19 @@ impl PluginRegistry {
             return Err(RuntimeError::DuplicatePlugin { id, name });
         }
 
-        let cap = plugin.capability();
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        Ok((id, name, plugin.capability()))
+    }
 
+    fn register_with_approver_slice(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: &[Kind],
+        context: (PluginId, String, Capability),
+    ) -> Result<(), RuntimeError> {
+        let (id, name, cap) = context;
         if let Some(kind) = cap
             .owned_event_types
             .iter()
@@ -1571,7 +1616,7 @@ impl PluginRegistry {
 
         // Index action approver if present
         if approver.is_some() {
-            for kind in &approver_event_types {
+            for kind in approver_event_types {
                 self.approver_map.insert(kind.clone(), id);
             }
         }
@@ -1610,14 +1655,12 @@ impl PluginRegistry {
 
     /// Iterate over plugin names in registration order.
     pub fn plugin_names(&self) -> impl Iterator<Item = &str> {
-        self.plugins.values().map(|e| e.name.as_str())
+        self.plugins.values().map(plugin_name)
     }
 
     /// Iterate over registered plugin (name, version) pairs in registration order.
     pub fn plugin_versions(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.plugins
-            .values()
-            .map(|e| (e.name.as_str(), e.version.as_str()))
+        self.plugins.values().map(plugin_name_and_version)
     }
 
     /// Register a driver directly (for tests and late-bound agent registration).
@@ -1737,16 +1780,17 @@ impl PluginRegistry {
             &OperationContext::Public,
             due_subscriptions.iter(),
         )?;
-        let snapshot = self.snapshot_for_subscriptions(due_subscriptions.iter());
+        let snapshot = self.snapshot_for_subscriptions(&due_subscriptions);
         for (id, entry) in &mut self.plugins {
+            let Some(driver) = entry.driver.as_mut() else {
+                continue;
+            };
             if due_driver_ids.remove(id) {
-                if let Some(driver) = entry.driver.as_mut() {
-                    let observations = snapshot.view_for(driver.subscriptions());
-                    let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                    reject_host_owned_drafts(&output)?;
-                    entry.last_tick = Some(now_ns);
-                    all_drafts.extend(output.drafts);
-                }
+                let observations = snapshot.view_for(driver.subscriptions());
+                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
+                reject_host_owned_drafts(&output)?;
+                entry.last_tick = Some(now_ns);
+                all_drafts.extend(output.drafts);
             }
         }
         debug_assert!(due_driver_ids.is_empty());
@@ -2314,6 +2358,8 @@ mod tests {
         let timeline = TimelineId::new();
         let state = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = PluginRegistry::new();
+        let driverless = simple_plugin("restore-driverless", &[]);
+        registry.register(&driverless, None, None).test_ok();
         registry.register_driver(Box::new(TransactionalDriver {
             name: "restoring",
             state: Arc::clone(&state),
@@ -2481,6 +2527,8 @@ mod tests {
         let first = Arc::new(Mutex::new(RestoreState::default()));
         let second = Arc::new(Mutex::new(RestoreState::default()));
         let mut registry = PluginRegistry::new();
+        let driverless = simple_plugin("failed-restore-driverless", &[]);
+        registry.register(&driverless, None, None).test_ok();
         registry.register_driver(Box::new(RestoreDriver {
             state: Arc::clone(&first),
             rejects: false,
@@ -2683,6 +2731,10 @@ mod tests {
         );
         let unbound = PluginRegistry::new();
         assert!(unbound.clone_consent_gate().is_some());
+        assert!(PluginRegistry::new()
+            .with_consent_gate(Arc::new(ConsentAuthority::new()))
+            .clone_consent_gate()
+            .is_some());
         assert!(matches!(
             unbound.projection_state_for_reducer(
                 timeline,
@@ -2758,6 +2810,31 @@ mod tests {
         reg.register(&p1, None, None).test_ok();
         let err = reg.register(&p2, None, None).test_err();
         assert!(matches!(err, RuntimeError::DuplicatePlugin { .. }));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn duplicate_plugin_does_not_consume_approver_event_types() {
+        let mut reg = PluginRegistry::new();
+        let id = PluginId::new();
+        let plugin = TestPlugin {
+            id,
+            name: "dup",
+            cap: Capability::default(),
+        };
+        reg.register(&plugin, None, None).test_ok();
+
+        let consumed = std::cell::Cell::new(false);
+        let event_types = std::iter::once_with(|| {
+            consumed.set(true);
+            Kind::new("must.not.be.consumed")
+        });
+        let error = reg
+            .register_with_approver(&plugin, None, None, None, event_types)
+            .test_err();
+
+        assert!(matches!(error, RuntimeError::DuplicatePlugin { .. }));
+        assert!(!consumed.get());
     }
 
     #[test]
@@ -3382,7 +3459,7 @@ mod tests {
         let observed = ProjectionKey::new(observed_entity);
         let missing = ProjectionKey::new(missing_entity);
         let subscriptions = vec![observed.clone(), observed.clone(), missing.clone()];
-        let snapshot = reg.snapshot_for_subscriptions(subscriptions.iter());
+        let snapshot = reg.snapshot_for_subscriptions(&subscriptions);
         let view = snapshot.view_for(&subscriptions);
 
         assert_eq!(view.len(), 2);
@@ -3547,6 +3624,116 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_rejects_when_no_step_is_pending() {
+        let mut no_pending = PluginRegistry::new();
+        let mut no_pending_store = open_store(StoreConfig::Memory).test_ok();
+        assert!(matches!(
+            no_pending.append_and_commit_step_at(no_pending_store.as_mut(), Seq::ZERO, 0, &[]),
+            Err(RuntimeError::PendingDriverStep)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_accepts_an_empty_public_step() {
+        let mut public_store = open_store(StoreConfig::Memory).test_ok();
+        let public_timeline = public_store.create_timeline("append-public").test_ok();
+        let mut public_success = PluginRegistry::new();
+        public_success
+            .step_all_anchored(public_timeline.id(), Seq::ZERO)
+            .test_ok();
+        assert!(public_success
+            .append_and_commit_step_at(public_store.as_mut(), Seq::ZERO, 0, &[])
+            .test_ok()
+            .is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_propagates_store_failures() {
+        let timeline = TimelineId::new();
+        let mut public_store_error = PluginRegistry::new();
+        public_store_error
+            .step_all_anchored(timeline, Seq::ZERO)
+            .test_ok();
+        let mut failing_store = AppendFailStore;
+        assert!(matches!(
+            public_store_error
+                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &[])
+                .test_err(),
+            RuntimeError::Store(CoreError::Storage(_))
+        ));
+    }
+
+    fn append_grant(subject_id: EntityId) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "append-coverage".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_accepts_an_empty_protected_step() {
+        let subject = EntityId::new();
+        let mut protected_store = open_store(StoreConfig::Memory).test_ok();
+        let protected_timeline = protected_store
+            .create_timeline("append-protected")
+            .test_ok();
+        let authority = ConsentAuthority::new();
+        let token =
+            authority.record_grant_on_timeline(protected_timeline.id(), &append_grant(subject));
+        let mut protected_success = PluginRegistry::new().with_consent_authority(authority);
+        protected_success
+            .step_all_anchored_protected(protected_timeline.id(), Seq::ZERO, token, 0, &[])
+            .test_ok();
+        assert!(protected_success
+            .append_and_commit_step_at(protected_store.as_mut(), Seq::ZERO, 0, &[])
+            .test_ok()
+            .is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_rejects_a_forged_protected_draft() {
+        let subject = EntityId::new();
+        let mut protected_store = open_store(StoreConfig::Memory).test_ok();
+        let protected_timeline = protected_store
+            .create_timeline("append-protected-reject")
+            .test_ok();
+        let reject_authority = ConsentAuthority::new();
+        let reject_token = reject_authority
+            .record_grant_on_timeline(protected_timeline.id(), &append_grant(subject));
+        let mut protected_reject = PluginRegistry::new().with_consent_authority(reject_authority);
+        protected_reject
+            .step_all_anchored_protected(protected_timeline.id(), Seq::ZERO, reject_token, 0, &[])
+            .test_ok();
+        let forged = [EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            CanonicalBytes::from_static(b"forged"),
+        )];
+        assert!(matches!(
+            protected_reject.append_and_commit_step_at(
+                protected_store.as_mut(),
+                Seq::ZERO,
+                0,
+                &forged,
+            ),
+            Err(RuntimeError::ConsentDraft { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_cadenced_tick_reaches_draft_fence_after_driver_output() {
         struct SensitiveDriver {
             subject: EntityId,
@@ -3658,6 +3845,28 @@ mod tests {
         ));
         assert_eq!(overflow_steps.load(Ordering::SeqCst), 1);
         assert_eq!(untouched_steps.load(Ordering::SeqCst), 1);
+
+        let mut anchored = PluginRegistry::new();
+        anchored.register_driver(Box::new(CadenceDriver {
+            name: "anchored-overflow",
+            interval: Duration::from_nanos(2),
+            steps: Arc::new(AtomicUsize::new(0)),
+        }));
+        anchored
+            .tick_cadenced_anchored(timeline, u128::MAX - 1, Seq::ZERO)
+            .test_ok();
+        anchored.commit_step_at(Seq::ZERO, 0).test_ok();
+        let error = anchored
+            .tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO)
+            .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::CadenceOverflow {
+                driver,
+                previous_ns,
+                interval_ns: 2,
+            } if driver == "anchored-overflow" && previous_ns == u128::MAX - 1
+        ));
     }
 
     #[test]
@@ -3948,6 +4157,34 @@ mod tests {
         drop(validate_recovery_evidence(&[zero_segment], &[]));
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn validate_recovery_evidence_rejects_duplicate_and_unordered_segments() {
+        let timeline = TimelineId::new();
+        let mut registry = PluginRegistry::new();
+        let duplicate = [
+            TimelineHistorySegment::new(timeline, Seq::from_u64(1)),
+            TimelineHistorySegment::new(timeline, Seq::from_u64(2)),
+        ];
+        assert!(matches!(
+            registry.restore_driver_state(&duplicate, &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "Timeline ancestry is duplicate or unordered"
+            })
+        ));
+
+        let unordered = [
+            TimelineHistorySegment::new(TimelineId::new(), Seq::from_u64(2)),
+            TimelineHistorySegment::new(TimelineId::new(), Seq::from_u64(1)),
+        ];
+        assert!(matches!(
+            registry.restore_driver_state(&unordered, &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "Timeline ancestry is duplicate or unordered"
+            })
+        ));
+    }
+
     struct MockActionApprover;
 
     impl ActionApprover for MockActionApprover {
@@ -4082,5 +4319,199 @@ mod tests {
             replay.submit_action(&valid),
             Err(ActionRejected::UnknownEventType)
         );
+    }
+
+    #[test]
+    fn driverless_registry_ticks_without_drafts() {
+        let mut driverless = PluginRegistry::new();
+        let plugin = simple_plugin("coverage-driverless", &[]);
+        driverless.register(&plugin, None, None).test_ok();
+        driverless.tick_cadenced(TimelineId::new(), 0).test_ok();
+        driverless.commit_step_at(Seq::ZERO, 0).test_ok();
+    }
+
+    #[test]
+    fn replay_rejects_action_submission() {
+        let proposal = ProposedAction::new(
+            Kind::new("replay.event"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"coverage"),
+            Kind::new("replay.event.submit"),
+        );
+        assert_eq!(
+            PluginRegistry::new_replay().submit_action(&proposal),
+            Err(ActionRejected::UnknownEventType)
+        );
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_public_error_paths {
+    use super::*;
+    use crate::driver::{ObservationView, StepOutput};
+    use pos_core::{
+        clock::Seq,
+        event::{CanonicalBytes, EventDraft, Kind},
+        ids::{EntityId, TimelineId},
+        ConsentGrantedV1, ConsentRevokedV1,
+    };
+    use pos_store::{open_store, StoreConfig};
+
+    struct EmptyDriver;
+
+    impl Driver for EmptyDriver {
+        fn name(&self) -> &'static str {
+            "coverage-public-empty"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+    }
+
+    struct MismatchedSensitiveDriver {
+        entity: EntityId,
+    }
+
+    impl Driver for MismatchedSensitiveDriver {
+        fn name(&self) -> &'static str {
+            "coverage-public-mismatch"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                Kind::new("retention.extend.v1"),
+                CanonicalBytes::from_static(b"coverage"),
+            )]))
+        }
+    }
+
+    fn grant(subject_id: EntityId) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "coverage".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        }
+    }
+
+    fn revoke(authority: &ConsentAuthority, timeline: TimelineId, grant: &ConsentGrantedV1) {
+        assert!(authority
+            .record_revocation_on_timeline(
+                timeline,
+                &ConsentRevokedV1 {
+                    subject_id: grant.subject_id,
+                    grantee_id: grant.grantee_id,
+                    grant_seq: grant.grant_seq,
+                    fence_seq: 1,
+                },
+            )
+            .is_ok());
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_store() -> Box<dyn pos_core::store::EventStore> {
+        open_store(StoreConfig::Memory).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "opening the in-memory store failed: {error:?}"
+            )))
+        })
+    }
+
+    #[test]
+    fn protected_step_rejects_sensitive_draft_for_another_subject() {
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let consent_grant = grant(subject);
+        let token = authority.record_grant_on_timeline(timeline, &consent_grant);
+        let mut mismatch = PluginRegistry::new().with_consent_authority(authority);
+        mismatch.register_driver(Box::new(MismatchedSensitiveDriver {
+            entity: EntityId::new(),
+        }));
+        assert!(mismatch
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .is_err());
+    }
+
+    #[test]
+    fn revocation_rejects_staged_commit() {
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let consent_grant = grant(subject);
+        let token = authority.record_grant_on_timeline(timeline, &consent_grant);
+        let mut commit = PluginRegistry::new().with_consent_authority(authority.clone());
+        commit.register_driver(Box::new(EmptyDriver));
+        assert!(commit
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .is_ok());
+        revoke(&authority, timeline, &consent_grant);
+        assert!(commit.commit_step_at(Seq::ZERO, 1).is_err());
+    }
+
+    #[test]
+    fn revocation_rejects_staged_append() {
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let consent_grant = grant(subject);
+        let token = authority.record_grant_on_timeline(timeline, &consent_grant);
+        let mut fenced_append = PluginRegistry::new().with_consent_authority(authority.clone());
+        fenced_append.register_driver(Box::new(EmptyDriver));
+        assert!(fenced_append
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .is_ok());
+        revoke(&authority, timeline, &consent_grant);
+        let mut store = memory_store();
+        assert!(fenced_append
+            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &[])
+            .is_err());
+    }
+
+    #[test]
+    fn missing_gate_rejects_staged_protected_append() {
+        let timeline = TimelineId::new();
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(timeline, &grant(EntityId::new()));
+        let mut protected_append = PluginRegistry::new().with_consent_authority(authority);
+        protected_append.register_driver(Box::new(EmptyDriver));
+        assert!(protected_append
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .is_ok());
+        protected_append = protected_append.without_consent_gate();
+        let mut store = memory_store();
+        assert!(protected_append
+            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
+            .is_err());
+    }
+
+    #[test]
+    fn missing_gate_rejects_staged_public_append() {
+        let timeline = TimelineId::new();
+        let mut public_append = PluginRegistry::new();
+        public_append.register_driver(Box::new(EmptyDriver));
+        assert!(public_append.step_all_anchored(timeline, Seq::ZERO).is_ok());
+        public_append = public_append.without_consent_gate();
+        let mut store = memory_store();
+        assert!(public_append
+            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
+            .is_err());
     }
 }

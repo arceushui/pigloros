@@ -1,5 +1,50 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
+
+system_path=$(command -p getconf PATH)
+if [[ -z ${system_path} ]]; then
+  printf '%s\n' 'cannot determine the trusted system executable path' >&2
+  exit 2
+fi
+user_home=$(PATH="${system_path}" getent passwd "${EUID}" | PATH="${system_path}" cut -d: -f6)
+if [[ -z ${user_home} || ! -d ${user_home} ]]; then
+  printf '%s\n' 'cannot determine the packaging user home' >&2
+  exit 2
+fi
+rustup_path=$(PATH="${system_path}" command -v rustup || true)
+if [[ -z ${rustup_path} ]]; then
+  rustup_path=${user_home}/.cargo/bin/rustup
+fi
+if [[ ! -x ${rustup_path} ]]; then
+  printf '%s\n' 'trusted Rustup executable is unavailable' >&2
+  exit 2
+fi
+trusted_tool_path=${rustup_path%/*}:${system_path}
+readonly system_path user_home rustup_path trusted_tool_path
+PATH=${trusted_tool_path}
+CDPATH=
+GIT_CONFIG_GLOBAL=/dev/null
+GIT_CONFIG_NOSYSTEM=1
+RUSTUP_HOME=${user_home}/.rustup
+export PATH
+export CDPATH GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM RUSTUP_HOME
+
+trusted_git() {
+  env -i \
+    PATH="${trusted_tool_path}" \
+    HOME="${user_home}" \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 \
+    git "$@"
+}
+
+trusted_rustup() {
+  env -i \
+    PATH="${trusted_tool_path}" \
+    HOME="${user_home}" \
+    RUSTUP_HOME="${RUSTUP_HOME}" \
+    "${rustup_path}" "$@"
+}
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
@@ -19,14 +64,15 @@ if [[ ! -d ${output_parent} || -L ${output_parent} ]]; then
   exit 2
 fi
 
-for command in b3sum cargo git gzip jq rustc; do
+for command in b3sum cargo git gzip jq rustc rustup tar; do
   command -v "${command}" >/dev/null || {
     printf 'required packaging command is unavailable: %s\n' "${command}" >&2
     exit 2
   }
 done
 
-if [[ -n $(git status --porcelain=v1 --untracked-files=all) ]]; then
+commit=$(trusted_git rev-parse --verify 'HEAD^{commit}')
+if ! trusted_git diff --quiet "${commit}" -- || [[ -n $(trusted_git ls-files --others --exclude-standard) ]]; then
   printf '%s\n' 'evaluator packages must be built from a clean source tree' >&2
   exit 2
 fi
@@ -40,25 +86,79 @@ trap cleanup EXIT
 package_directory=${work_directory}/reference-evaluator
 mkdir -p -- "${package_directory}/bin" "${package_directory}/source"
 
+source_tar=${work_directory}/pigloros-source.tar
+trusted_git archive --format=tar "${commit}" >"${source_tar}"
+archived_commit=$(trusted_git get-tar-commit-id <"${source_tar}")
+if [[ ${archived_commit} != "${commit}" ]]; then
+  printf '%s\n' 'source archive commit identity does not match the selected commit' >&2
+  exit 2
+fi
+gzip -n <"${source_tar}" >"${package_directory}/source/pigloros-source.tar.gz"
+source_directory=${work_directory}/source-checkout
+mkdir -p -- "${source_directory}"
+tar -xzf "${package_directory}/source/pigloros-source.tar.gz" -C "${source_directory}"
+
+pinned_rustc=$(trusted_rustup which rustc)
+pinned_cargo=$(trusted_rustup which cargo)
+if [[ ! -x ${pinned_rustc} || ! -x ${pinned_cargo} ]]; then
+  printf '%s\n' 'selected Rust toolchain does not contain cargo and rustc executables' >&2
+  exit 2
+fi
+toolchain_bin=$(dirname -- "${pinned_rustc}")
+build_path=${toolchain_bin}:${system_path}
+target=$("${pinned_rustc}" -vV | sed -n 's/^host: //p')
+if [[ -z ${target} ]]; then
+  printf '%s\n' 'selected Rust compiler did not report a host target' >&2
+  exit 2
+fi
+toolchain=$("${pinned_rustc}" --version)
+
 target_directory=${work_directory}/target
-CARGO_TARGET_DIR=${target_directory} cargo build \
-  --locked \
-  --release \
-  --package pos-reference \
-  --bin pos-reference-evaluator
+build_home=${work_directory}/build-home
+cargo_home=${work_directory}/cargo-home
+mkdir -p -- "${build_home}" "${cargo_home}"
+(
+  cd -- "${source_directory}"
+  env -i \
+    PATH="${build_path}" \
+    HOME="${build_home}" \
+    CARGO_HOME="${cargo_home}" \
+    CARGO_TARGET_DIR="${target_directory}" \
+    RUSTC="${pinned_rustc}" \
+    RUSTC_WRAPPER= \
+    RUSTC_WORKSPACE_WRAPPER= \
+    "${pinned_cargo}" build \
+    --locked \
+    --release \
+    --target "${target}" \
+    --package pos-reference \
+    --bin pos-reference-evaluator
+)
 install -m 0755 -- \
-  "${target_directory}/release/pos-reference-evaluator" \
+  "${target_directory}/${target}/release/pos-reference-evaluator" \
   "${package_directory}/bin/pos-reference-evaluator"
 
-git archive --format=tar HEAD | gzip -n >"${package_directory}/source/pigloros-source.tar.gz"
-install -m 0644 -- Cargo.lock "${package_directory}/Cargo.lock"
+install -m 0644 -- "${source_directory}/Cargo.lock" "${package_directory}/Cargo.lock"
 
 metadata=${work_directory}/cargo-metadata.json
-target=$(rustc -vV | sed -n 's/^host: //p')
-cargo metadata --format-version 1 --locked --filter-platform "${target}" >"${metadata}"
+(
+  cd -- "${source_directory}"
+  env -i \
+    PATH="${build_path}" \
+    HOME="${build_home}" \
+    CARGO_HOME="${cargo_home}" \
+    RUSTC="${pinned_rustc}" \
+    RUSTC_WRAPPER= \
+    RUSTC_WORKSPACE_WRAPPER= \
+    "${pinned_cargo}" metadata \
+    --format-version 1 \
+    --locked \
+    --filter-platform "${target}" >"${metadata}"
+)
 
 jq --sort-keys '
-  (.packages | map({ key: .id, value: . }) | from_entries) as $packages
+  .workspace_root as $workspace_root
+  | (.packages | map({ key: .id, value: . }) | from_entries) as $packages
   | (.resolve.nodes | map({
       key: .id,
       value: [.deps[] | select(any(.dep_kinds[]; .kind != "dev")) | .pkg]
@@ -66,6 +166,31 @@ jq --sort-keys '
   | ($packages | to_entries[] | select(.value.name == "pos-reference") | .key) as $root
   | def closure($id): [$id] + [($edges[$id] // [])[] | closure(.)[]];
     (closure($root) | unique) as $ids
+  | def stable_ref($package):
+      ($workspace_root + "/") as $workspace_prefix
+      | (if $package.source == null then
+           if ($package.manifest_path | startswith($workspace_prefix)) then
+             ($package.manifest_path | ltrimstr($workspace_prefix))
+           else
+             error("path package is outside the archived workspace: " + $package.name)
+           end
+         else
+           null
+         end) as $manifest
+      | ({
+          name: $package.name,
+          version: $package.version,
+          source: ($package.source // "path"),
+          manifest: $manifest
+        } | tojson | @base64)
+      | "urn:pigloros:cargo:" + .;
+    ([$ids[] as $id | { id: $id, ref: stable_ref($packages[$id]) }]) as $selected
+  | if ($selected | group_by(.ref) | any(length != 1)) then
+      error("stable Cargo package references are not unique")
+    else
+      .
+    end
+  | ($selected | map({ key: .id, value: .ref }) | from_entries) as $refs
   | {
       bomFormat: "CycloneDX",
       specVersion: "1.5",
@@ -73,7 +198,7 @@ jq --sort-keys '
       metadata: {
         component: {
           type: "application",
-          "bom-ref": $root,
+          "bom-ref": $refs[$root],
           name: $packages[$root].name,
           version: $packages[$root].version
         }
@@ -83,7 +208,7 @@ jq --sort-keys '
         | $packages[$id]
         | {
             type: (if .source == null then "application" else "library" end),
-            "bom-ref": .id,
+            "bom-ref": $refs[$id],
             name: .name,
             version: .version,
             licenses: (if .license == null then [] else [{ expression: .license }] end)
@@ -92,8 +217,8 @@ jq --sort-keys '
       dependencies: [
         $ids[] as $id
         | {
-            ref: $id,
-            dependsOn: [($edges[$id] // [])[] | select(. as $dependency | $ids | index($dependency))]
+            ref: $refs[$id],
+            dependsOn: [($edges[$id] // [])[] | $refs[.]]
               | sort
           }
       ] | sort_by(.ref)
@@ -124,10 +249,8 @@ binary_digest=$(b3sum "${package_directory}/bin/pos-reference-evaluator" | cut -
 lock_digest=$(b3sum "${package_directory}/Cargo.lock" | cut -d ' ' -f 1)
 sbom_digest=$(b3sum "${package_directory}/sbom.cdx.json" | cut -d ' ' -f 1)
 licences_digest=$(b3sum "${package_directory}/licences.json" | cut -d ' ' -f 1)
-commit=$(git rev-parse HEAD)
-toolchain=$(rustc --version)
 
-jq -n --sort-keys \
+jq -cS -n \
   --arg commit "${commit}" \
   --arg target "${target}" \
   --arg toolchain "${toolchain}" \
@@ -149,11 +272,24 @@ jq -n --sort-keys \
     licences_blake3: $licences_digest
   }' >"${package_directory}/provenance.json"
 
+jq -e \
+  --arg source_digest "${source_digest}" \
+  --arg binary_digest "${binary_digest}" \
+  '.schema == "PiglorOS.EvaluatorBuildProvenance.v1"
+    and .cargo_locked == true
+    and .evaluator_source_blake3 == $source_digest
+    and .evaluator_binary_blake3 == $binary_digest' \
+  "${package_directory}/provenance.json" >/dev/null
+
 (
   cd -- "${package_directory}"
-  find . -type f ! -name BLAKE3SUMS -print0 \
-    | sort -z \
-    | xargs -0 b3sum >BLAKE3SUMS
+  b3sum \
+    Cargo.lock \
+    bin/pos-reference-evaluator \
+    licences.json \
+    provenance.json \
+    sbom.cdx.json \
+    source/pigloros-source.tar.gz >BLAKE3SUMS
   b3sum --check BLAKE3SUMS
 )
 
