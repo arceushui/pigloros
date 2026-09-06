@@ -11,7 +11,7 @@ use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, TimelineId},
-    State,
+    ObservationSnapshotV1, State,
 };
 use std::borrow::Cow;
 
@@ -273,6 +273,7 @@ impl ObservationSnapshot {
         }
         ObservationView {
             snapshot: Some(self),
+            authorized_snapshot: None,
             direct_anchor: None,
             len: unique,
             events: if event_subscriptions.is_empty() {
@@ -305,6 +306,7 @@ impl ObservationSnapshot {
 /// `seq` order.
 pub struct ObservationView<'a> {
     snapshot: Option<&'a ObservationSnapshot>,
+    authorized_snapshot: Option<&'a ObservationSnapshotV1>,
     direct_anchor: Option<SnapshotAnchor>,
     len: usize,
     events: Cow<'a, [Event]>,
@@ -315,6 +317,7 @@ impl ObservationView<'_> {
     pub const fn empty() -> Self {
         Self {
             snapshot: None,
+            authorized_snapshot: None,
             direct_anchor: None,
             len: 0,
             events: Cow::Borrowed(&[]),
@@ -329,6 +332,7 @@ impl ObservationView<'_> {
     pub const fn anchored_empty(anchor: SnapshotAnchor) -> Self {
         Self {
             snapshot: None,
+            authorized_snapshot: None,
             direct_anchor: Some(anchor),
             len: 0,
             events: Cow::Borrowed(&[]),
@@ -338,6 +342,15 @@ impl ObservationView<'_> {
     #[must_use]
     pub fn state_for(&self, key: &ProjectionKey) -> Option<&State> {
         self.snapshot.and_then(|snapshot| snapshot.states.get(key))
+    }
+
+    /// Return the host-authorized, participant-specific snapshot for this step.
+    ///
+    /// Legacy public Driver steps return `None`; the authorized admission path
+    /// returns exactly one immutable OBS1 value and exposes no projection state.
+    #[must_use]
+    pub const fn authorized_snapshot(&self) -> Option<&ObservationSnapshotV1> {
+        self.authorized_snapshot
     }
 
     #[must_use]
@@ -353,7 +366,7 @@ impl ObservationView<'_> {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0 && self.events.is_empty()
+        self.authorized_snapshot.is_none() && self.len == 0 && self.events.is_empty()
     }
 
     /// Committed events forwarded to this driver for the current tick, in
@@ -372,9 +385,23 @@ impl<'a> ObservationView<'a> {
     pub const fn from_events(events: &'a [Event]) -> Self {
         Self {
             snapshot: None,
+            authorized_snapshot: None,
             direct_anchor: None,
             len: 0,
             events: Cow::Borrowed(events),
+        }
+    }
+    #[must_use]
+    pub(crate) fn from_authorized_snapshot(snapshot: &'a ObservationSnapshotV1) -> Self {
+        Self {
+            snapshot: None,
+            authorized_snapshot: Some(snapshot),
+            direct_anchor: Some(SnapshotAnchor::new(
+                snapshot.timeline_id(),
+                snapshot.observed_through(),
+            )),
+            len: snapshot.records().len(),
+            events: Cow::Borrowed(&[]),
         }
     }
 }

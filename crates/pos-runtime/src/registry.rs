@@ -12,7 +12,8 @@ use pos_core::{
     event::{Event, EventDraft, Kind},
     ids::PluginId,
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentError, ConsentGate, Plugin, ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ConsentError, ConsentGate, ObservationSnapshotV1, PersistedAuthorityV1, Plugin, ProposedAction,
+    Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::ProjectionRegistry;
 
@@ -251,6 +252,7 @@ mod coverage_paths {
             cadence_updates: Vec::new(),
             event_cursors: Vec::new(),
             operation: OperationContext::Public,
+            authorized: None,
         });
         registry.abort_step();
 
@@ -260,6 +262,7 @@ mod coverage_paths {
             cadence_updates: vec![(id, 1)],
             event_cursors: vec![(id, Seq::ZERO)],
             operation: OperationContext::Public,
+            authorized: None,
         });
         assert!(registry.commit_step_at(Seq::ZERO, 0).is_ok());
     }
@@ -657,6 +660,12 @@ struct PendingStep {
     cadence_updates: Vec<(PluginId, u128)>,
     event_cursors: Vec<(PluginId, Seq)>,
     operation: OperationContext,
+    authorized: Option<AuthorizedPendingStep>,
+}
+
+struct AuthorizedPendingStep {
+    snapshot: ObservationSnapshotV1,
+    drafts: Vec<EventDraft>,
 }
 
 /// Explicit host operation authorization for a Driver Tick or projection read.
@@ -1231,8 +1240,90 @@ impl PluginRegistry {
             cadence_updates,
             event_cursors,
             operation,
+            authorized: None,
         });
         Ok(all_drafts)
+    }
+
+    /// Stage one Driver using only a host-materialized participant observation.
+    ///
+    /// The selected Driver must have no legacy projection or Event
+    /// subscriptions. The runtime retains the exact snapshot and draft batch so
+    /// the work can only cross the matching fresh authority fence.
+    ///
+    /// # Errors
+    /// Returns a closed authority error for mismatched or ambient inputs, or a
+    /// Driver/resource error when staging fails.
+    pub fn stage_authorized_driver(
+        &mut self,
+        plugin_id: PluginId,
+        timeline: pos_core::ids::TimelineId,
+        snapshot: ObservationSnapshotV1,
+    ) -> Result<Vec<EventDraft>, RuntimeError> {
+        self.ensure_no_pending_step()?;
+        if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
+            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
+        }
+        let (invocation, driver_name) = {
+            let Some(entry) = self.plugins.get_mut(&plugin_id) else {
+                return Err(RuntimeError::NoDriver {
+                    name: plugin_id.to_string(),
+                });
+            };
+            let Some(driver) = entry.driver.as_mut() else {
+                return Err(RuntimeError::NoDriver {
+                    name: entry.name.clone(),
+                });
+            };
+            if !driver.subscriptions().is_empty() || !driver.event_subscriptions().is_empty() {
+                return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
+            }
+            (
+                invoke_driver(
+                    driver.as_mut(),
+                    timeline,
+                    crate::driver::ObservationView::from_authorized_snapshot(&snapshot),
+                ),
+                entry.name.clone(),
+            )
+        };
+        let output = match invocation {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = self.abort_drivers(&[plugin_id]);
+                return Err(error);
+            }
+        };
+        if let Err(error) = reject_host_owned_drafts(&output)
+            .and_then(|()| self.schemas.validate_batch(&output.drafts))
+        {
+            let _ = self.abort_drivers(&[plugin_id]);
+            return Err(error);
+        }
+        let requested = u64::try_from(output.drafts.len()).unwrap_or(u64::MAX);
+        if let Some(limit) = self.resource_limit {
+            if requested > limit {
+                let _ = self.abort_drivers(&[plugin_id]);
+                return Err(RuntimeError::ResourceExhausted {
+                    driver: driver_name,
+                    requested,
+                    limit,
+                });
+            }
+        }
+        let drafts = output.drafts;
+        self.pending_step = Some(PendingStep {
+            timeline,
+            driver_ids: vec![plugin_id],
+            cadence_updates: Vec::new(),
+            event_cursors: vec![(plugin_id, snapshot.observed_through())],
+            operation: OperationContext::Public,
+            authorized: Some(AuthorizedPendingStep {
+                snapshot,
+                drafts: drafts.clone(),
+            }),
+        });
+        Ok(drafts)
     }
 
     fn commit_pending_step(&mut self, pending: PendingStep) {
@@ -1277,6 +1368,10 @@ impl PluginRegistry {
         let Some(pending) = self.pending_step.take() else {
             return Ok(());
         };
+        if pending.authorized.is_some() {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(RuntimeError::AuthorityFenceRequired);
+        }
         if let Err(error) = self.validate_operation(
             pending.timeline,
             &pending.operation,
@@ -1309,6 +1404,10 @@ impl PluginRegistry {
         let Some(pending) = self.pending_step.take() else {
             return Err(RuntimeError::PendingDriverStep);
         };
+        if pending.authorized.is_some() {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(RuntimeError::AuthorityFenceRequired);
+        }
         let pending_timeline = pending.timeline;
         let operation = pending.operation.clone();
         let events = match operation {
@@ -1381,6 +1480,58 @@ impl PluginRegistry {
                         return Err(error.into());
                     }
                 }
+            }
+        };
+        self.commit_pending_step(pending);
+        Ok(events)
+    }
+
+    /// Revalidate, append, and commit one participant-authorized Driver step.
+    ///
+    /// The exact OBS1 grant/revocation identity is checked against current
+    /// durable authority before the exact staged drafts reach the Event store.
+    /// Any mismatch aborts the Driver while leaving the store untouched.
+    ///
+    /// # Errors
+    /// Returns a closed authority, draft, or store error and aborts staged work.
+    pub fn append_and_commit_authorized_step_at(
+        &mut self,
+        store: &mut dyn pos_core::store::EventStore,
+        drafts: &[EventDraft],
+        authority: &PersistedAuthorityV1,
+        authority_position: Seq,
+    ) -> Result<Vec<Event>, RuntimeError> {
+        let Some(pending) = self.pending_step.take() else {
+            return Err(RuntimeError::PendingDriverStep);
+        };
+        let Some(authorized) = pending.authorized.as_ref() else {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(RuntimeError::AuthorityFenceRequired);
+        };
+        let validation = authorized
+            .snapshot
+            .validate_authority_fence(authority, authority_position)
+            .map_err(RuntimeError::Authority)
+            .and_then(|()| {
+                if drafts == authorized.drafts.as_slice() {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::Authority(
+                        pos_core::AuthorityErrorV1::UnauthorizedSource,
+                    ))
+                }
+            })
+            .and_then(|()| reject_host_owned_draft_slice(drafts))
+            .and_then(|()| self.schemas.validate_batch(drafts));
+        if let Err(error) = validation {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(error);
+        }
+        let events = match store.append(pending.timeline, drafts) {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = self.abort_drivers(&pending.driver_ids);
+                return Err(error.into());
             }
         };
         self.commit_pending_step(pending);

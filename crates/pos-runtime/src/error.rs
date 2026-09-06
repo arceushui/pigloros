@@ -58,6 +58,12 @@ pub enum RuntimeError {
     #[error("protected operation failed its consent fence: {0}")]
     Consent(ConsentError),
 
+    #[error("participant observation authority failed closed: {0}")]
+    Authority(#[from] pos_core::AuthorityErrorV1),
+
+    #[error("participant-authorized Driver work requires a fresh authority fence")]
+    AuthorityFenceRequired,
+
     #[error(
         "driver '{driver}' cadence overflow: previous={previous_ns}ns, interval={interval_ns}ns"
     )]

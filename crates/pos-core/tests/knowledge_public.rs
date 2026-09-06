@@ -263,6 +263,7 @@ fn authority_fence_fixture(snapshot_epoch: u64) -> AuthorityFenceFixture {
     snapshot_draft.authority_timeline = authority_timeline;
     snapshot_draft.authority_position = Seq::from_u64(10);
     snapshot_draft.grant_chain_bindings = vec![grant_binding];
+    snapshot_draft.capability_policy_revision = policy_revision;
     snapshot_draft.revocation_epoch = snapshot_epoch;
     AuthorityFenceFixture {
         snapshot: ObservationSnapshotV1::try_from_draft(snapshot_draft).expect("snapshot"),

@@ -596,6 +596,22 @@ impl ObservationSnapshotV1 {
         {
             return Err(AuthorityErrorV1::DelegationInvalid);
         }
+        let Some(leaf) = grants.last() else {
+            return Err(AuthorityErrorV1::DelegationInvalid);
+        };
+        if leaf.grantee().principal() != &self.principal
+            || leaf.grantee().plugin_id() != Some(self.plugin_id)
+            || leaf.grantee().installation_id() != Some(self.installation_id)
+            || leaf.scope().plugin_id() != Some(self.plugin_id)
+            || leaf
+                .scope()
+                .participant_ids()
+                .binary_search(&self.participant_id)
+                .is_err()
+            || leaf.policy_revision() != self.capability_policy_revision
+        {
+            return Err(AuthorityErrorV1::DelegationInvalid);
+        }
         if grants.iter().any(|grant| {
             grant
                 .revocation_fence()
