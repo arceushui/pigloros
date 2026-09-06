@@ -201,6 +201,29 @@ impl Plugin for TestPlugin {
     }
 }
 
+struct DriverlessPlugin {
+    id: PluginId,
+}
+
+impl Plugin for DriverlessPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "participant-data"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: Vec::new(),
+            owned_entity_kinds: Vec::new(),
+            has_driver: false,
+            has_reducer: false,
+        }
+    }
+}
+
 #[derive(Default)]
 struct DriverState {
     observed_digest: Option<Hash>,
@@ -503,4 +526,95 @@ fn current_authority_fence_appends_then_commits_the_driver() {
     };
     assert_eq!(aborts, 0);
     assert_eq!(commits, 1);
+}
+
+#[test]
+fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
+    let fixture = fixture();
+    let mut missing = PluginRegistry::new();
+    assert!(matches!(
+        missing.stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.snapshot.clone(),
+        ),
+        Err(RuntimeError::NoDriver { .. })
+    ));
+
+    let mut driverless = PluginRegistry::new();
+    driverless
+        .register(
+            &DriverlessPlugin {
+                id: fixture.plugin_id,
+            },
+            None,
+            None,
+        )
+        .test_ok();
+    assert!(matches!(
+        driverless.stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.snapshot.clone(),
+        ),
+        Err(RuntimeError::NoDriver { .. })
+    ));
+
+    let (limited, limited_state) = registry(&fixture, false);
+    let mut limited = limited.with_resource_limit(0);
+    assert!(matches!(
+        limited.stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.snapshot.clone(),
+        ),
+        Err(RuntimeError::ResourceExhausted {
+            requested: 1,
+            limit: 0,
+            ..
+        })
+    ));
+    assert_eq!(
+        limited_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aborts,
+        1
+    );
+
+    let (mut registry, state) = registry(&fixture, false);
+    let drafts = registry
+        .stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.snapshot.clone(),
+        )
+        .test_ok();
+    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
+    let mut store = open_store(StoreConfig::Memory).test_ok();
+    assert!(matches!(
+        registry.append_and_commit_authorized_step_at(
+            store.as_mut(),
+            &drafts,
+            &authority,
+            Seq::from_u64(10),
+        ),
+        Err(RuntimeError::Store(_))
+    ));
+    assert_eq!(
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aborts,
+        1
+    );
+    assert!(matches!(
+        registry.append_and_commit_authorized_step_at(
+            store.as_mut(),
+            &drafts,
+            &authority,
+            Seq::from_u64(10),
+        ),
+        Err(RuntimeError::PendingDriverStep)
+    ));
 }
