@@ -305,6 +305,35 @@ impl ObservationSnapshot {
 /// The view also carries any committed [`Event`]s that the runtime chose to
 /// forward (e.g. action events for physics drivers). Events are in Timeline
 /// `seq` order.
+///
+/// Host capabilities are deliberately absent from this public input surface.
+/// These compile-fail contracts prevent later API growth from silently adding
+/// ambient cache, tool, audit, clock/watchdog, or network access:
+///
+/// ```compile_fail
+/// let view = pos_runtime::ObservationView::empty();
+/// let _ = view.cache();
+/// ```
+///
+/// ```compile_fail
+/// let view = pos_runtime::ObservationView::empty();
+/// let _ = view.host_tool("private.lookup");
+/// ```
+///
+/// ```compile_fail
+/// let view = pos_runtime::ObservationView::empty();
+/// let _ = view.audit_log();
+/// ```
+///
+/// ```compile_fail
+/// let view = pos_runtime::ObservationView::empty();
+/// let _ = view.wall_clock_or_watchdog();
+/// ```
+///
+/// ```compile_fail
+/// let view = pos_runtime::ObservationView::empty();
+/// let _ = view.network();
+/// ```
 pub struct ObservationView<'a> {
     snapshot: Option<&'a ObservationSnapshot>,
     authorized_snapshot: Option<&'a ObservationSnapshotV1>,
