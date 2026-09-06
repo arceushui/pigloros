@@ -1,11 +1,12 @@
 use std::sync::{Arc, Barrier};
 
+use ciborium::Value;
 use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
     AuthorityPersistencePortV1, AuthorityPersistenceStateV1, AuthorityRoleV1,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, DelegateClassV1, EntityId,
-    Hash, PrincipalRefV1, Seq, TimelineId, DELEGATE_ACTION_V1,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, DelegateClassV1, EntityId, Hash, PrincipalRefV1,
+    Seq, TimelineId, DELEGATE_ACTION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore, EventStore};
 use tempfile::tempdir;
@@ -34,80 +35,82 @@ fn principal(value: u8) -> PrincipalRefV1 {
 }
 
 fn scope(actions: &[&str], actors: Vec<EntityId>) -> CapabilityScopeV1 {
-    ok(CapabilityScopeV1::try_from_draft(
-        CapabilityScopeDraftV1 {
-            resources: vec!["profile".to_owned()],
-            actions: actions.iter().map(|value| (*value).to_owned()).collect(),
-            purposes: vec!["planning".to_owned()],
-            audiences: vec!["local-host".to_owned()],
-            actor_entity_ids: actors,
-            subject_ids: vec![entity(50)],
-            participant_ids: vec![entity(20)],
-            plugin_id: None,
-            principal_roles: vec![AuthorityRoleV1::Actor],
-            max_uses: 10,
-            budget: 100,
-            environment_constraints: vec!["local-only".to_owned()],
-        },
-    ))
+    ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        resources: vec!["profile".to_owned()],
+        actions: actions.iter().map(|value| (*value).to_owned()).collect(),
+        purposes: vec!["planning".to_owned()],
+        audiences: vec!["local-host".to_owned()],
+        actor_entity_ids: actors,
+        subject_ids: vec![entity(50)],
+        participant_ids: vec![entity(20)],
+        plugin_id: None,
+        principal_roles: vec![AuthorityRoleV1::Actor],
+        max_uses: 10,
+        budget: 100,
+        environment_constraints: vec!["local-only".to_owned()],
+    }))
 }
 
 fn root_grant() -> CapabilityGrantV1 {
-    ok(CapabilityGrantV1::try_from_draft(
-        CapabilityGrantDraftV1 {
-            grant_id: hash(1),
-            grantor: principal(1),
-            grantee: AuthorityGranteeV1::Principal(principal(2)),
-            trust_domain: "local.test".to_owned(),
-            scope: scope(&[DELEGATE_ACTION_V1, "read"], vec![entity(10), entity(11)]),
-            valid_from_position: Seq::from_u64(1),
-            valid_until_position: Seq::from_u64(100),
-            parent_grant_id: None,
-            delegation_depth: 0,
-            max_delegation_depth: 2,
-            permitted_delegate_classes: vec![DelegateClassV1::Principal],
-            consent_references: vec![hash(8)],
-            policy_revision: hash(9),
-            issuance_timeline: timeline(30),
-            issuance_seq: Seq::from_u64(1),
-            revocation_epoch: 0,
-            revocation_fence: None,
-            authority_registry_digest: hash(7),
-        },
-    ))
+    root_grant_at(1)
+}
+
+fn root_grant_at(issuance_position: u64) -> CapabilityGrantV1 {
+    ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+        grant_id: hash(1),
+        grantor: principal(1),
+        grantee: AuthorityGranteeV1::Principal(principal(2)),
+        trust_domain: "local.test".to_owned(),
+        scope: scope(&[DELEGATE_ACTION_V1, "read"], vec![entity(10), entity(11)]),
+        valid_from_position: Seq::from_u64(issuance_position),
+        valid_until_position: Seq::from_u64(100),
+        parent_grant_id: None,
+        delegation_depth: 0,
+        max_delegation_depth: 2,
+        permitted_delegate_classes: vec![DelegateClassV1::Principal],
+        consent_references: vec![hash(8)],
+        policy_revision: hash(9),
+        issuance_timeline: timeline(30),
+        issuance_seq: Seq::from_u64(issuance_position),
+        revocation_epoch: 0,
+        revocation_fence: None,
+        authority_registry_digest: hash(7),
+    }))
 }
 
 fn child_grant() -> CapabilityGrantV1 {
-    ok(CapabilityGrantV1::try_from_draft(
-        CapabilityGrantDraftV1 {
-            grant_id: hash(2),
-            grantor: principal(2),
-            grantee: AuthorityGranteeV1::Principal(principal(3)),
-            trust_domain: "local.test".to_owned(),
-            scope: scope(&["read"], vec![entity(10)]),
-            valid_from_position: Seq::from_u64(2),
-            valid_until_position: Seq::from_u64(90),
-            parent_grant_id: Some(hash(1)),
-            delegation_depth: 1,
-            max_delegation_depth: 1,
-            permitted_delegate_classes: vec![],
-            consent_references: vec![hash(8)],
-            policy_revision: hash(9),
-            issuance_timeline: timeline(30),
-            issuance_seq: Seq::from_u64(2),
-            revocation_epoch: 0,
-            revocation_fence: None,
-            authority_registry_digest: hash(7),
-        },
-    ))
+    ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+        grant_id: hash(2),
+        grantor: principal(2),
+        grantee: AuthorityGranteeV1::Principal(principal(3)),
+        trust_domain: "local.test".to_owned(),
+        scope: scope(&["read"], vec![entity(10)]),
+        valid_from_position: Seq::from_u64(2),
+        valid_until_position: Seq::from_u64(90),
+        parent_grant_id: Some(hash(1)),
+        delegation_depth: 1,
+        max_delegation_depth: 1,
+        permitted_delegate_classes: vec![],
+        consent_references: vec![hash(8)],
+        policy_revision: hash(9),
+        issuance_timeline: timeline(30),
+        issuance_seq: Seq::from_u64(2),
+        revocation_epoch: 0,
+        revocation_fence: None,
+        authority_registry_digest: hash(7),
+    }))
 }
 
 fn revocation() -> CapabilityRevocationV1 {
+    revocation_at(3)
+}
+
+fn revocation_at(fence_position: u64) -> CapabilityRevocationV1 {
     ok(CapabilityRevocationV1::try_from_draft(
         CapabilityRevocationDraftV1 {
             grant_id: hash(1),
             authority_timeline: timeline(30),
-            fence_position: Seq::from_u64(3),
+            fence_position: Seq::from_u64(fence_position),
             revocation_epoch: 1,
             policy_revision: hash(9),
             authority_registry_digest: hash(7),
@@ -132,7 +135,10 @@ fn exercise_port(
     assert_eq!(resolved.revocation_epoch(), 1);
     assert_eq!(resolved.head_position(), Seq::from_u64(3));
     assert_eq!(resolved.chain().grants().len(), 2);
-    assert_eq!(resolved.chain().grants()[0].revocation_fence(), Some(Seq::from_u64(3)));
+    assert_eq!(
+        resolved.chain().grants()[0].revocation_fence(),
+        Some(Seq::from_u64(3))
+    );
     assert_eq!(resolved.chain().grants()[1].revocation_fence(), None);
     Ok(outcomes)
 }
@@ -253,7 +259,14 @@ fn sqlite_reopen_cannot_reactivate_revoked_authority() {
     let reopened = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
     let resolved = ok(reopened.load_authority(hash(2)));
     assert_eq!(resolved.revocation_epoch(), 1);
-    assert_eq!(resolved.chain().grants()[0].revocation_fence(), Some(Seq::from_u64(3)));
+    assert_eq!(
+        resolved.chain().grants()[1].valid_until_position(),
+        Seq::from_u64(90)
+    );
+    assert_eq!(
+        resolved.chain().grants()[0].revocation_fence(),
+        Some(Seq::from_u64(3))
+    );
 }
 
 #[test]
@@ -266,14 +279,14 @@ fn concurrent_sqlite_revocation_is_serialized_and_idempotent() {
     }
     let barrier = Arc::new(Barrier::new(2));
     let handles = [(), ()].map(|()| {
-            let barrier = Arc::clone(&barrier);
-            let path = path.clone();
-            std::thread::spawn(move || {
-                let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
-                barrier.wait();
-                store.revoke_capability_grant(&revocation())
-            })
-        });
+        let barrier = Arc::clone(&barrier);
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+            barrier.wait();
+            store.revoke_capability_grant(&revocation())
+        })
+    });
     let mut outcomes = handles
         .into_iter()
         .map(|handle| ok(ok(handle.join())))
@@ -336,12 +349,15 @@ fn malformed_persisted_authority_fails_reopen() {
 fn failed_sqlite_authority_write_rolls_back_without_partial_state() {
     let directory = ok(tempdir());
     let path = directory.path().join("rollback.db");
-    drop(ok(SqliteStore::open(path.to_str().unwrap_or_default())));
+    {
+        let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+        ok(exercise_port(&mut store));
+    }
     {
         let connection = ok(rusqlite::Connection::open(&path));
         ok(connection.execute_batch(
-            "CREATE TRIGGER reject_authority_insert
-             BEFORE INSERT ON authority_state
+            "CREATE TRIGGER reject_authority_update
+             BEFORE UPDATE ON authority_state
              BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
         ));
     }
@@ -354,12 +370,14 @@ fn failed_sqlite_authority_write_rolls_back_without_partial_state() {
     }
     {
         let connection = ok(rusqlite::Connection::open(&path));
-        ok(connection.execute_batch("DROP TRIGGER reject_authority_insert"));
+        ok(connection.execute_batch("DROP TRIGGER reject_authority_update"));
     }
     let reopened = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+    let retained = ok(reopened.load_authority(hash(2)));
+    assert_eq!(retained.revocation_epoch(), 1);
     assert_eq!(
-        reopened.load_authority(hash(1)),
-        Err(AuthorityPersistenceErrorV1::Conflict)
+        retained.chain().grants()[0].revocation_fence(),
+        Some(Seq::from_u64(3))
     );
 }
 
@@ -385,6 +403,41 @@ fn revocation_codec_is_canonical_and_rejects_zero_fields() {
             policy_revision: Hash::zero(),
             authority_registry_digest: Hash::zero(),
         }),
+        Err(AuthorityPersistenceErrorV1::InvalidRecord)
+    );
+}
+
+#[test]
+fn authority_state_rejects_a_backdated_persisted_revocation() {
+    let mut state = AuthorityPersistenceStateV1::new();
+    ok(state.issue_grant(root_grant_at(5)));
+    ok(state.revoke_grant(revocation_at(6)));
+    let encoded = ok(state.to_persistence_bytes());
+    let mut outer: Value = ok(ciborium::de::from_reader(encoded.as_slice()));
+    let Value::Array(outer_fields) = &mut outer else {
+        panic!("APS1 fixture must be an array");
+    };
+    let Value::Array(revocations) = &mut outer_fields[3] else {
+        panic!("APS1 revocations must be an array");
+    };
+    let Value::Bytes(revocation_bytes) = &mut revocations[0] else {
+        panic!("APS1 revocation must contain canonical bytes");
+    };
+    let mut revocation_value: Value = ok(ciborium::de::from_reader(revocation_bytes.as_slice()));
+    let Value::Array(revocation_fields) = &mut revocation_value else {
+        panic!("CRF1 fixture must be an array");
+    };
+    revocation_fields[4] = Value::Integer(2_u64.into());
+    revocation_bytes.clear();
+    ok(ciborium::ser::into_writer(
+        &revocation_value,
+        &mut *revocation_bytes,
+    ));
+    let mut backdated = Vec::new();
+    ok(ciborium::ser::into_writer(&outer, &mut backdated));
+
+    assert_eq!(
+        AuthorityPersistenceStateV1::from_persistence_bytes(&backdated),
         Err(AuthorityPersistenceErrorV1::InvalidRecord)
     );
 }

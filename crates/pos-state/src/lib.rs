@@ -106,10 +106,21 @@ impl AuthorizationCacheV1 {
             .iter()
             .flat_map(|grant| grant.consent_references().iter().copied())
             .collect::<BTreeSet<_>>();
+        let first_grant = &grants[0];
         let valid_until_position = grants
             .iter()
-            .map(pos_core::CapabilityGrantV1::valid_until_position)
-            .min()?;
+            .skip(1)
+            .fold(first_grant.valid_until_position(), |shortest, grant| {
+                shortest.min(grant.valid_until_position())
+            });
+        let chain_bindings = match grants
+            .iter()
+            .map(pos_core::CapabilityGrantV1::binding_digest)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(bindings) => bindings,
+            Err(_) => return None,
+        };
         let authentication_expiry = request.authenticated().expires_at();
         let expires_at = match request.consent() {
             ConsentEvidenceV1::Resolved { grants } => grants
@@ -123,6 +134,7 @@ impl AuthorizationCacheV1 {
         };
         let digest_matches = decision.request_digest() == request.binding_digest();
         let request_matches = digest_matches
+            && decision.grant_chain_bindings() == chain_bindings.as_slice()
             && decision.authority_timeline() == request.authority_timeline()
             && decision.at_position() == request.at_position()
             && decision.capability_policy_revision() == request.capability_policy_revision()
@@ -136,8 +148,7 @@ impl AuthorizationCacheV1 {
         {
             return None;
         }
-        let key =
-            AuthorizationCacheKeyV1::from_decision(&decision, authority.revocation_epoch());
+        let key = AuthorizationCacheKeyV1::from_decision(&decision, authority.revocation_epoch());
         self.entries.insert(
             key.clone(),
             AuthorizationCacheEntryV1 {
@@ -526,10 +537,10 @@ mod tests {
         event::{CanonicalBytes, Kind, SchemaVersion},
         ids::EventId,
         AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-        AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-        AuthorityPersistenceStateV1, AuthorizationRequestDraftV1, AuthorizationRequestV1,
-        CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-        ConsentEvidenceV1, DelegationChainV1, PrincipalRefV1,
+        AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceStateV1,
+        AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
+        AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+        CapabilityScopeV1, ConsentEvidenceV1, DelegationChainV1, PrincipalRefV1,
     };
     use proptest::prelude::*;
 
@@ -577,7 +588,7 @@ mod tests {
     }
 
     fn active_decision(authority_timeline: TimelineId) -> CacheFixture {
-        decision_with_capability_trust(authority_timeline, true)
+        decision_with_capability_trust(authority_timeline, test_hash(5), true)
     }
 
     fn authority_registry(
@@ -601,6 +612,7 @@ mod tests {
 
     fn decision_with_capability_trust(
         authority_timeline: TimelineId,
+        grant_id: Hash,
         trust_capability: bool,
     ) -> CacheFixture {
         let principal = test_ok(PrincipalRefV1::try_new([1; 16], "local.test"));
@@ -616,25 +628,22 @@ mod tests {
             },
         ));
         let policy = test_hash(4);
-        let grant_id = test_hash(5);
         let consent_reference = test_hash(6);
         let registry_digest = test_hash(7);
-        let scope = test_ok(CapabilityScopeV1::try_from_draft(
-            CapabilityScopeDraftV1 {
-                resources: vec!["profile".to_owned()],
-                actions: vec!["read".to_owned()],
-                purposes: vec!["planning".to_owned()],
-                audiences: vec!["local-host".to_owned()],
-                actor_entity_ids: vec![actor],
-                subject_ids: vec![],
-                participant_ids: vec![],
-                plugin_id: None,
-                principal_roles: vec![AuthorityRoleV1::Actor],
-                max_uses: 2,
-                budget: 10,
-                environment_constraints: vec!["local-only".to_owned()],
-            },
-        ));
+        let scope = test_ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+            resources: vec!["profile".to_owned()],
+            actions: vec!["read".to_owned()],
+            purposes: vec!["planning".to_owned()],
+            audiences: vec!["local-host".to_owned()],
+            actor_entity_ids: vec![actor],
+            subject_ids: vec![],
+            participant_ids: vec![],
+            plugin_id: None,
+            principal_roles: vec![AuthorityRoleV1::Actor],
+            max_uses: 2,
+            budget: 10,
+            environment_constraints: vec!["local-only".to_owned()],
+        }));
         let grant = test_ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
             grant_id,
             grantor: principal.clone(),
@@ -922,18 +931,10 @@ mod tests {
 
         let mut epoch_cache = AuthorizationCacheV1::new();
         assert!(epoch_cache
-            .insert_active(
-                fixture.decision,
-                &fixture.request,
-                &fixture.authority,
-            )
+            .insert_active(fixture.decision, &fixture.request, &fixture.authority,)
             .is_some());
         assert!(epoch_cache
-            .insert_active(
-                other.decision,
-                &other.request,
-                &other.authority,
-            )
+            .insert_active(other.decision, &other.request, &other.authority,)
             .is_some());
         assert_eq!(epoch_cache.len(), 2);
         assert_eq!(epoch_cache.retain_revocation_epoch(timeline, 1), 1);
@@ -946,6 +947,7 @@ mod tests {
         let timeline = TimelineId::new();
         let fixture = active_decision(timeline);
         let mismatched = active_decision(TimelineId::new());
+        let mismatched_chain = decision_with_capability_trust(timeline, test_hash(15), true);
         let mut cache = AuthorizationCacheV1::new();
         assert!(cache
             .insert_active(
@@ -954,15 +956,18 @@ mod tests {
                 &fixture.authority,
             )
             .is_none());
-
-        let denied = decision_with_capability_trust(timeline, false);
-        assert!(!denied.decision.is_allowed());
         assert!(cache
             .insert_active(
-                denied.decision,
-                &denied.request,
-                &denied.authority,
+                fixture.decision.clone(),
+                &fixture.request,
+                &mismatched_chain.authority,
             )
+            .is_none());
+
+        let denied = decision_with_capability_trust(timeline, test_hash(5), false);
+        assert!(!denied.decision.is_allowed());
+        assert!(cache
+            .insert_active(denied.decision, &denied.request, &denied.authority,)
             .is_none());
     }
 

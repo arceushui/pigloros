@@ -44,10 +44,10 @@ use pos_core::{
     timeline::{Timeline, TimelineMeta, TimelineMode},
     AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
     AuthorityPersistenceStateV1, CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit,
-    CoreError, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
-    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    CoreError, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1, ErasurePersistencePortV1,
+    ErasureReferenceV1, ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
     StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
@@ -5063,27 +5063,6 @@ fn write_authority_state(
     })
 }
 
-fn finish_authority_transaction<T>(
-    conn: &Connection,
-    result: Result<T, AuthorityPersistenceErrorV1>,
-) -> Result<T, AuthorityPersistenceErrorV1> {
-    match result {
-        Ok(value) => conn
-            .execute_batch("COMMIT")
-            .map(|()| value)
-            .or_else(|_| {
-                conn.execute_batch("ROLLBACK")
-                    .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
-                    .and(Err(AuthorityPersistenceErrorV1::Unavailable))
-            }),
-        Err(error) => conn
-            .execute_batch("ROLLBACK")
-            .map(|()| error)
-            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
-            .and_then(Err),
-    }
-}
-
 impl AuthorityPersistencePortV1 for SqliteStore {
     fn issue_capability_grant(
         &mut self,
@@ -5091,13 +5070,20 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
         self.conn
             .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)?;
-        let result = read_authority_state(&self.conn).and_then(|mut state| {
-            state
-                .issue_grant(grant.clone())
-                .and_then(|outcome| write_authority_state(&self.conn, &state).map(|()| outcome))
-        });
-        finish_authority_transaction(&self.conn, result)
+            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
+            .and_then(|()| {
+                let result = read_authority_state(&self.conn).and_then(|mut state| {
+                    state.issue_grant(grant.clone()).and_then(|outcome| {
+                        write_authority_state(&self.conn, &state).map(|()| outcome)
+                    })
+                });
+                finish_transaction(
+                    &self.conn,
+                    result,
+                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                )
+            })
     }
 
     fn revoke_capability_grant(
@@ -5106,13 +5092,20 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
         self.conn
             .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)?;
-        let result = read_authority_state(&self.conn).and_then(|mut state| {
-            state
-                .revoke_grant(revocation.clone())
-                .and_then(|outcome| write_authority_state(&self.conn, &state).map(|()| outcome))
-        });
-        finish_authority_transaction(&self.conn, result)
+            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
+            .and_then(|()| {
+                let result = read_authority_state(&self.conn).and_then(|mut state| {
+                    state.revoke_grant(revocation.clone()).and_then(|outcome| {
+                        write_authority_state(&self.conn, &state).map(|()| outcome)
+                    })
+                });
+                finish_transaction(
+                    &self.conn,
+                    result,
+                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                )
+            })
     }
 
     fn load_authority(

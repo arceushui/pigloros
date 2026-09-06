@@ -536,6 +536,7 @@ impl AuthorityPersistenceStateV1 {
             if !provenance_matches
                 || revocation.revocation_epoch() <= grant.revocation_epoch()
                 || revocation.revocation_epoch() > timeline.revocation_epoch
+                || revocation.fence_position() <= grant.issuance_seq()
                 || revocation.fence_position() > timeline.head_position
                 || !coordinates
                     .insert((revocation.authority_timeline(), revocation.fence_position()))
@@ -567,10 +568,12 @@ impl AuthorityPersistenceStateV1 {
             let head_matches = positions.last().copied() == Some(timeline.head_position);
             let epoch_count_matches =
                 u64::try_from(epochs.len()).ok() == Some(timeline.revocation_epoch);
-            let epochs_are_contiguous = epochs
-                .iter()
-                .enumerate()
-                .all(|(index, epoch)| u64::try_from(index).ok().and_then(|n| n.checked_add(1)) == Some(*epoch));
+            let epochs_are_contiguous = epochs.iter().enumerate().all(|(index, epoch)| {
+                u64::try_from(index)
+                    .ok()
+                    .and_then(|number| number.checked_add(1))
+                    == Some(*epoch)
+            });
             if !head_matches || !epoch_count_matches || !epochs_are_contiguous {
                 return Err(AuthorityPersistenceErrorV1::InvalidRecord);
             }
