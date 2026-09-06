@@ -228,7 +228,7 @@ fn conflicts_stale_epochs_and_timeline_reordering_fail_closed() {
     };
     assert_eq!(
         state.revoke_grant(ok(CapabilityRevocationV1::try_from_draft(
-            conflicting_revocation.clone()
+            conflicting_revocation
         ))),
         Err(AuthorityPersistenceErrorV1::Conflict)
     );
@@ -265,8 +265,7 @@ fn concurrent_sqlite_revocation_is_serialized_and_idempotent() {
         ok(store.issue_capability_grant(&root_grant()));
     }
     let barrier = Arc::new(Barrier::new(2));
-    let handles = (0..2)
-        .map(|_| {
+    let handles = [(), ()].map(|()| {
             let barrier = Arc::clone(&barrier);
             let path = path.clone();
             std::thread::spawn(move || {
@@ -274,8 +273,7 @@ fn concurrent_sqlite_revocation_is_serialized_and_idempotent() {
                 barrier.wait();
                 store.revoke_capability_grant(&revocation())
             })
-        })
-        .collect::<Vec<_>>();
+        });
     let mut outcomes = handles
         .into_iter()
         .map(|handle| ok(ok(handle.join())))
