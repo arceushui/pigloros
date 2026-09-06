@@ -97,6 +97,28 @@ jobs:
           grep -q 'cgroup_limits=memory-cpu-pids-io-read-back-ok' cgroup-limits.txt
           grep -q 'stop_requested=true;worker_reaped=true;unit_absent=true' cgroup-limits.txt
 
+      - name: Enter retained namespace descriptors and prove controlled teardown
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          sudo ./target/debug/sandbox-provider-feasibility \
+            --namespace-entry-lifecycle | tee namespace-entry-lifecycle.txt
+          if ! grep -q '^namespace_entry_lifecycle=retained-fd-full-set-entered-' \
+            namespace-entry-lifecycle.txt; then
+            grep -q '^namespace_entry_lifecycle=required-full-set-unsupported;' \
+              namespace-entry-lifecycle.txt
+            grep -q 'mnt:entered-post-exit-fd-ok-post-drop-process-absent' \
+              namespace-entry-lifecycle.txt
+            grep -q 'pid:entered-post-exit-fd-ok-post-drop-process-absent' \
+              namespace-entry-lifecycle.txt
+            grep -q 'ipc:entered-post-exit-fd-ok-post-drop-process-absent' \
+              namespace-entry-lifecycle.txt
+            grep -q 'uts:entered-post-exit-fd-ok-post-drop-process-absent' \
+              namespace-entry-lifecycle.txt
+            grep -q 'user:unsupported' namespace-entry-lifecycle.txt
+            grep -q 'net:entered-post-exit-fd-ok-post-drop-process-absent' \
+              namespace-entry-lifecycle.txt
+          fi
+
       - name: Exercise eight concurrent attempts
         working-directory: prototypes/sandbox-provider-feasibility
         run: |
@@ -333,6 +355,7 @@ jobs:
             prototypes/sandbox-provider-feasibility/lifecycle-samples.txt
             prototypes/sandbox-provider-feasibility/lockfile-digest.txt
             prototypes/sandbox-provider-feasibility/lifecycle-p95.txt
+            prototypes/sandbox-provider-feasibility/namespace-entry-lifecycle.txt
             prototypes/sandbox-provider-feasibility/privileged-initial.txt
             prototypes/sandbox-provider-feasibility/restart-reconciliation.txt
             prototypes/sandbox-provider-feasibility/rust-toolchain-evidence.txt

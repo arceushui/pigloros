@@ -18,7 +18,7 @@ use netlink_packet_netfilter::{
     NetfilterProtoFamily,
 };
 use netlink_sys::{protocols::NETLINK_NETFILTER, Socket, SocketAddr};
-use nix::sched::{unshare, CloneFlags};
+use nix::sched::{setns, unshare, CloneFlags};
 use rtnetlink::{new_connection, LinkDummy};
 use std::{
     fs::File,
@@ -62,6 +62,30 @@ fn main() {
         .any(|argument| argument == "--namespace-worker")
     {
         run_namespace_worker(&arguments);
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--namespace-entry-worker")
+    {
+        run_namespace_entry_worker(&arguments);
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--namespace-inode-observer")
+    {
+        run_namespace_inode_observer(&arguments);
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--namespace-entry-lifecycle")
+    {
+        println!(
+            "namespace_entry_lifecycle={}",
+            probe_namespace_entry_lifecycle()
+        );
         return;
     }
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
@@ -252,6 +276,67 @@ fn namespace_flags(kind: &str) -> Option<CloneFlags> {
         "net" => Some(CloneFlags::CLONE_NEWNET),
         _ => None,
     }
+}
+
+fn run_namespace_entry_worker(arguments: &[String]) {
+    let Some(kind) = argument_value(arguments, "--namespace-kind") else {
+        std::process::exit(1);
+    };
+    let Some(target_inode) =
+        argument_value(arguments, "--target-inode").and_then(|inode| inode.parse::<u64>().ok())
+    else {
+        std::process::exit(1);
+    };
+    let Some(namespace_type) = namespace_flags(kind) else {
+        std::process::exit(1);
+    };
+    if setns(std::io::stdin(), namespace_type).is_err() {
+        std::process::exit(1);
+    }
+    let observed_inode = if kind == "pid" {
+        observe_child_namespace_inode(kind)
+    } else {
+        namespace_inode(format!("/proc/self/ns/{kind}"))
+    };
+    let Ok(observed_inode) = observed_inode else {
+        std::process::exit(1);
+    };
+    if observed_inode != target_inode {
+        std::process::exit(1);
+    }
+    println!(
+        "namespace-entry-ok;kind={kind};target_inode={target_inode};observed_inode={observed_inode}"
+    );
+}
+
+fn run_namespace_inode_observer(arguments: &[String]) {
+    let Some(kind) = argument_value(arguments, "--namespace-kind") else {
+        std::process::exit(1);
+    };
+    let Ok(inode) = namespace_inode(format!("/proc/self/ns/{kind}")) else {
+        std::process::exit(1);
+    };
+    println!("{inode}");
+}
+
+fn observe_child_namespace_inode(kind: &str) -> Result<u64, ()> {
+    let executable = std::env::current_exe().map_err(|_| ())?;
+    let output = Command::new(executable)
+        .arg("--namespace-inode-observer")
+        .arg("--namespace-kind")
+        .arg(kind)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|_| ())?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| ())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1267,7 +1352,36 @@ fn probe_namespace_descriptor_lifecycle() -> String {
     format!("required-full-set-unsupported;individual={individual}")
 }
 
+fn probe_namespace_entry_lifecycle() -> String {
+    const NAMESPACE_NAMES: [&str; 6] = ["mnt", "pid", "ipc", "uts", "user", "net"];
+    if exercise_namespace_handles("all", &NAMESPACE_NAMES, true).is_ok() {
+        return "retained-fd-full-set-entered-post-exit-fd-ok-post-drop-process-absent".to_owned();
+    }
+    let individual = NAMESPACE_NAMES
+        .iter()
+        .map(|name| {
+            let status =
+                if exercise_namespace_handles(name, std::slice::from_ref(name), true).is_ok() {
+                    "entered-post-exit-fd-ok-post-drop-process-absent"
+                } else {
+                    "unsupported"
+                };
+            format!("{name}:{status}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("required-full-set-unsupported;individual={individual}")
+}
+
 fn retain_namespace_handles(kind: &str, namespace_names: &[&str]) -> Result<(), ()> {
+    exercise_namespace_handles(kind, namespace_names, false)
+}
+
+fn exercise_namespace_handles(
+    kind: &str,
+    namespace_names: &[&str],
+    prove_entry_and_drop: bool,
+) -> Result<(), ()> {
     let host_inodes = namespace_names
         .iter()
         .map(|name| namespace_inode(format!("/proc/self/ns/{name}")))
@@ -1316,16 +1430,75 @@ fn retain_namespace_handles(kind: &str, namespace_names: &[&str]) -> Result<(), 
         }
         Ok((retained, retained_inodes))
     })();
+    let entry_result =
+        acquisition
+            .as_ref()
+            .map_err(|_| ())
+            .and_then(|(retained, retained_inodes)| {
+                if !prove_entry_and_drop {
+                    return Ok(());
+                }
+                namespace_names
+                    .iter()
+                    .zip(retained)
+                    .zip(retained_inodes)
+                    .try_for_each(|((name, namespace), inode)| {
+                        enter_namespace_handle(name, namespace, *inode)
+                    })
+            });
     drop(worker.stdin.take());
     let worker_succeeded = worker.wait().map_err(|_| ())?.success();
     let (retained, retained_inodes) = acquisition?;
-    if !worker_succeeded {
+    if !worker_succeeded || entry_result.is_err() {
         return Err(());
     }
     let post_exit_inodes = namespace_inodes(&retained)?;
-    (post_exit_inodes == retained_inodes)
+    if post_exit_inodes != retained_inodes {
+        return Err(());
+    }
+    if !prove_entry_and_drop {
+        return Ok(());
+    }
+    drop(retained);
+    namespace_names
+        .iter()
+        .zip(retained_inodes)
+        .all(|(name, inode)| namespace_process_reference_absent(name, inode))
         .then_some(())
         .ok_or(())
+}
+
+fn enter_namespace_handle(kind: &str, namespace: &File, inode: u64) -> Result<(), ()> {
+    let executable = std::env::current_exe().map_err(|_| ())?;
+    let output = Command::new(executable)
+        .arg("--namespace-entry-worker")
+        .arg("--namespace-kind")
+        .arg(kind)
+        .arg("--target-inode")
+        .arg(inode.to_string())
+        .stdin(Stdio::from(namespace.try_clone().map_err(|_| ())?))
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| ())?;
+    let expected =
+        format!("namespace-entry-ok;kind={kind};target_inode={inode};observed_inode={inode}\n");
+    (output.status.success() && output.stdout == expected.as_bytes())
+        .then_some(())
+        .ok_or(())
+}
+
+fn namespace_process_reference_absent(name: &str, inode: u64) -> bool {
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    processes.filter_map(Result::ok).all(|process| {
+        let file_name = process.file_name();
+        if !file_name.as_encoded_bytes().iter().all(u8::is_ascii_digit) {
+            return true;
+        }
+        let namespace = process.path().join("ns").join(name);
+        namespace_inode(namespace.to_string_lossy().into_owned()).is_err_or(|seen| seen != inode)
+    })
 }
 
 fn namespace_inodes(namespaces: &[File]) -> Result<Vec<u64>, ()> {
