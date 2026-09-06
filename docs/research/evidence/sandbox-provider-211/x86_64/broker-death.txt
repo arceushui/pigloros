@@ -1,0 +1,4 @@
+broker-ready;network_isolation=isolated-no-host-net;broker_pid=6251;broker_unit=pigloros-broker-death.scope;attempt_unit=pigloros-attempt-death.scope;worker-ready;worker_pid=6257;leaf_pid=6258
+termination_poll_count=1;worker_state=absent;leaf_state=absent
+broker-clean;broker_unit=absent;attempt_unit=absent
+broker_death_recovery_us=46188

@@ -1,0 +1,202 @@
+sandbox-provider-feasibility v0.0.0 (/home/runner/work/pigloros/pigloros/prototypes/sandbox-provider-feasibility)
+├── futures-util v0.3.34
+│   ├── futures-core v0.3.34
+│   ├── futures-macro v0.3.34 (proc-macro)
+│   │   ├── proc-macro2 v1.0.107
+│   │   │   └── unicode-ident v1.0.24
+│   │   ├── quote v1.0.47
+│   │   │   └── proc-macro2 v1.0.107 (*)
+│   │   └── syn v3.0.5
+│   │       ├── proc-macro2 v1.0.107 (*)
+│   │       ├── quote v1.0.47 (*)
+│   │       └── unicode-ident v1.0.24
+│   ├── futures-sink v0.3.34
+│   ├── futures-task v0.3.34
+│   ├── pin-project-lite v0.2.17
+│   └── slab v0.4.12
+├── netlink-packet-core v0.9.0
+├── netlink-packet-netfilter v0.4.0
+│   ├── bitflags v2.13.1
+│   ├── derive_more v0.99.20 (proc-macro)
+│   │   ├── convert_case v0.4.0
+│   │   ├── proc-macro2 v1.0.107 (*)
+│   │   ├── quote v1.0.47 (*)
+│   │   └── syn v2.0.119
+│   │       ├── proc-macro2 v1.0.107 (*)
+│   │       ├── quote v1.0.47 (*)
+│   │       └── unicode-ident v1.0.24
+│   │   [build-dependencies]
+│   │   └── rustc_version v0.4.1
+│   │       └── semver v1.0.28
+│   ├── libc v0.2.189
+│   ├── netlink-packet-core v0.9.0
+│   └── zerocopy v0.8.56
+│       └── zerocopy-derive v0.8.56 (proc-macro)
+│           ├── proc-macro2 v1.0.107 (*)
+│           ├── quote v1.0.47 (*)
+│           └── syn v2.0.119 (*)
+├── netlink-sys v0.9.0
+│   ├── bytes v1.12.1
+│   ├── futures-util v0.3.34 (*)
+│   ├── libc v0.2.189
+│   ├── log v0.4.34
+│   └── tokio v1.53.1
+│       ├── bytes v1.12.1
+│       ├── libc v0.2.189
+│       ├── mio v1.2.3
+│       │   └── libc v0.2.189
+│       ├── pin-project-lite v0.2.17
+│       ├── signal-hook-registry v1.4.8
+│       │   ├── errno v0.3.14
+│       │   │   └── libc v0.2.189
+│       │   └── libc v0.2.189
+│       ├── socket2 v0.6.5
+│       │   └── libc v0.2.189
+│       └── tokio-macros v2.7.2 (proc-macro)
+│           ├── proc-macro2 v1.0.107 (*)
+│           ├── quote v1.0.47 (*)
+│           └── syn v3.0.5 (*)
+├── nix v0.31.3
+│   ├── bitflags v2.13.1
+│   ├── cfg-if v1.0.4
+│   └── libc v0.2.189
+│   [build-dependencies]
+│   └── cfg_aliases v0.2.2
+├── rtnetlink v0.23.0
+│   ├── futures-channel v0.3.34
+│   │   └── futures-core v0.3.34
+│   ├── futures-util v0.3.34 (*)
+│   ├── log v0.4.34
+│   ├── netlink-packet-core v0.9.0
+│   ├── netlink-packet-route v0.33.0
+│   │   ├── bitflags v2.13.1
+│   │   ├── libc v0.2.189
+│   │   ├── log v0.4.34
+│   │   ├── netlink-packet-core v0.9.0
+│   │   └── zerocopy v0.8.56 (*)
+│   ├── netlink-proto v0.13.0
+│   │   ├── bytes v1.12.1
+│   │   ├── futures-channel v0.3.34 (*)
+│   │   ├── futures-util v0.3.34 (*)
+│   │   ├── log v0.4.34
+│   │   ├── netlink-packet-core v0.9.0
+│   │   ├── netlink-sys v0.9.0 (*)
+│   │   └── thiserror v2.0.20
+│   │       └── thiserror-impl v2.0.20 (proc-macro)
+│   │           ├── proc-macro2 v1.0.107 (*)
+│   │           ├── quote v1.0.47 (*)
+│   │           └── syn v3.0.5 (*)
+│   ├── netlink-sys v0.9.0 (*)
+│   ├── nix v0.30.1
+│   │   ├── bitflags v2.13.1
+│   │   ├── cfg-if v1.0.4
+│   │   └── libc v0.2.189
+│   │   [build-dependencies]
+│   │   └── cfg_aliases v0.2.2
+│   ├── thiserror v2.0.20 (*)
+│   └── tokio v1.53.1 (*)
+├── tokio v1.53.1 (*)
+├── zbus v5.19.0
+│   ├── async-broadcast v0.7.2
+│   │   ├── event-listener v5.4.2
+│   │   │   ├── parking v2.2.1
+│   │   │   └── pin-project-lite v0.2.17
+│   │   ├── event-listener-strategy v0.5.4
+│   │   │   ├── event-listener v5.4.2 (*)
+│   │   │   └── pin-project-lite v0.2.17
+│   │   ├── futures-core v0.3.34
+│   │   └── pin-project-lite v0.2.17
+│   ├── async-recursion v1.1.1 (proc-macro)
+│   │   ├── proc-macro2 v1.0.107 (*)
+│   │   ├── quote v1.0.47 (*)
+│   │   └── syn v2.0.119 (*)
+│   ├── async-trait v0.1.92 (proc-macro)
+│   │   ├── proc-macro2 v1.0.107 (*)
+│   │   ├── quote v1.0.47 (*)
+│   │   └── syn v3.0.5 (*)
+│   ├── enumflags2 v0.7.12
+│   │   ├── enumflags2_derive v0.7.12 (proc-macro)
+│   │   │   ├── proc-macro2 v1.0.107 (*)
+│   │   │   ├── quote v1.0.47 (*)
+│   │   │   └── syn v2.0.119 (*)
+│   │   └── serde v1.0.229
+│   │       ├── serde_core v1.0.229
+│   │       └── serde_derive v1.0.229 (proc-macro)
+│   │           ├── proc-macro2 v1.0.107 (*)
+│   │           ├── quote v1.0.47 (*)
+│   │           └── syn v3.0.5 (*)
+│   ├── event-listener v5.4.2 (*)
+│   ├── futures-core v0.3.34
+│   ├── futures-lite v2.6.1
+│   │   ├── fastrand v2.5.0
+│   │   ├── futures-core v0.3.34
+│   │   ├── futures-io v0.3.34
+│   │   ├── parking v2.2.1
+│   │   └── pin-project-lite v0.2.17
+│   ├── hex v0.4.3
+│   ├── libc v0.2.189
+│   ├── ordered-stream v0.2.0
+│   │   ├── futures-core v0.3.34
+│   │   └── pin-project-lite v0.2.17
+│   ├── rustix v1.1.4
+│   │   ├── bitflags v2.13.1
+│   │   └── linux-raw-sys v0.12.1
+│   ├── serde v1.0.229 (*)
+│   ├── serde_repr v0.1.21 (proc-macro)
+│   │   ├── proc-macro2 v1.0.107 (*)
+│   │   ├── quote v1.0.47 (*)
+│   │   └── syn v3.0.5 (*)
+│   ├── tokio v1.53.1 (*)
+│   ├── tracing v0.1.44
+│   │   ├── pin-project-lite v0.2.17
+│   │   ├── tracing-attributes v0.1.31 (proc-macro)
+│   │   │   ├── proc-macro2 v1.0.107 (*)
+│   │   │   ├── quote v1.0.47 (*)
+│   │   │   └── syn v2.0.119 (*)
+│   │   └── tracing-core v0.1.36
+│   │       └── once_cell v1.21.4
+│   ├── uuid v1.26.0
+│   │   └── serde_core v1.0.229
+│   ├── winnow v1.0.4
+│   ├── zbus_macros v5.19.0 (proc-macro)
+│   │   ├── proc-macro-crate v3.5.0
+│   │   │   └── toml_edit v0.25.13+spec-1.1.0
+│   │   │       ├── indexmap v2.14.2
+│   │   │       │   ├── equivalent v1.0.2
+│   │   │       │   └── hashbrown v0.17.1
+│   │   │       ├── toml_datetime v1.1.1+spec-1.1.0
+│   │   │       ├── toml_parser v1.1.3+spec-1.1.0
+│   │   │       │   └── winnow v1.0.4
+│   │   │       └── winnow v1.0.4
+│   │   ├── proc-macro2 v1.0.107 (*)
+│   │   ├── quote v1.0.47 (*)
+│   │   ├── syn v3.0.5 (*)
+│   │   ├── zbus_names v4.3.4
+│   │   │   ├── serde v1.0.229 (*)
+│   │   │   ├── winnow v1.0.4
+│   │   │   └── zvariant v5.15.0
+│   │   │       ├── endi v1.1.1
+│   │   │       ├── enumflags2 v0.7.12 (*)
+│   │   │       ├── serde v1.0.229 (*)
+│   │   │       ├── winnow v1.0.4
+│   │   │       ├── zcheapstr v1.1.0
+│   │   │       │   └── serde v1.0.229 (*)
+│   │   │       ├── zvariant_derive v5.15.0 (proc-macro)
+│   │   │       │   ├── proc-macro-crate v3.5.0 (*)
+│   │   │       │   ├── proc-macro2 v1.0.107 (*)
+│   │   │       │   ├── quote v1.0.47 (*)
+│   │   │       │   ├── syn v3.0.5 (*)
+│   │   │       │   └── zvariant_utils v4.2.0
+│   │   │       │       ├── proc-macro2 v1.0.107 (*)
+│   │   │       │       ├── quote v1.0.47 (*)
+│   │   │       │       ├── serde v1.0.229 (*)
+│   │   │       │       ├── syn v3.0.5 (*)
+│   │   │       │       └── winnow v1.0.4
+│   │   │       └── zvariant_utils v4.2.0 (*)
+│   │   ├── zvariant v5.15.0 (*)
+│   │   └── zvariant_utils v4.2.0 (*)
+│   ├── zbus_names v4.3.4 (*)
+│   └── zvariant v5.15.0 (*)
+└── zbus_systemd v0.26100.0
+    ├── serde v1.0.229 (*)
+    └── zbus v5.19.0 (*)

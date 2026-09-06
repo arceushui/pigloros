@@ -307,7 +307,7 @@ jobs:
         working-directory: prototypes/sandbox-provider-feasibility
         run: |
           set -euo pipefail
-          cargo tree --locked | tee dependency-tree.txt
+          cargo tree --locked --color never | tee dependency-tree.txt
           cargo metadata --locked --format-version 1 >dependency-metadata.json
           jq '[.packages[] | {name, version, source, license, rust_version}]' \
             dependency-metadata.json >dependency-packages.json

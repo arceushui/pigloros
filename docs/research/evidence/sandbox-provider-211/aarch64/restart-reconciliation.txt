@@ -1,0 +1,5 @@
+orphan-ready;network_isolation=isolated-no-host-net;orphan_unit=pigloros-orphan-restart.scope;worker-ready;worker_pid=6010;leaf_pid=6011
+orphan-reconcile-requested;network_isolation=isolated-no-host-net;orphan_unit=pigloros-orphan-restart.scope
+termination_poll_count=1;worker_state=absent;leaf_state=absent
+orphan-clean;orphan_unit=absent
+restart_reconciliation_us=43607

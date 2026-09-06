@@ -1,0 +1,9 @@
+expected_architecture=aarch64
+observed_architecture=aarch64
+kernel_release=7.0.0-1012-azure
+systemd_version=systemd 259 (259.5-0ubuntu3.4)
+runner_image_os=ubuntu26-arm64
+runner_image_version=20260831.111.1
+cgroup_filesystem=cgroup2fs
+cgroup_controllers=cpuset cpu io memory hugetlb pids rdma misc dmem 
+cgroup_kill=absent

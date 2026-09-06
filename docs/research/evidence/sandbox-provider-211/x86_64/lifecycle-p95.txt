@@ -1,0 +1,5 @@
+transient_slice_us_p95=3443
+dummy_link_us_p95=13995
+nftables_atomic_us_p95=9882
+namespace_us_p95=14244
+total_us_p95=36291

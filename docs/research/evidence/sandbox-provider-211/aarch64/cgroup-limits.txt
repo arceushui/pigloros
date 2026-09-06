@@ -1,0 +1,1 @@
+cgroup_limits=memory-cpu-pids-io-read-back-ok;network_isolation=isolated-no-host-net;stop_requested=true;worker_reaped=true;unit_absent=true
