@@ -510,7 +510,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
 }
 
 #[test]
-fn observation_policy_is_validated_once_and_required_for_materialization() {
+fn observation_policy_rejects_incomplete_or_noncanonical_configuration() {
     let revisions = (
         hash_from_repeated_byte(7),
         hash_from_repeated_byte(8),
@@ -573,7 +573,10 @@ fn observation_policy_is_validated_once_and_required_for_materialization() {
         ),
         Err(pos_core::AuthorityErrorV1::ProvenanceMissing)
     );
+}
 
+#[test]
+fn observation_policy_is_required_for_materialization() {
     let fixture = authority_fixture();
     let observable_policy = policy(vec!["count".to_owned()]);
     let mut invalid_registration = ProjectionRegistry::new();
