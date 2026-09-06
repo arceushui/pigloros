@@ -614,6 +614,68 @@ mod tests {
         ))
     }
 
+    fn delegation_scopes(actor: EntityId) -> (CapabilityScopeV1, CapabilityScopeV1) {
+        let scope = |actions| {
+            test_ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+                resources: vec!["profile".to_owned()],
+                actions,
+                purposes: vec!["planning".to_owned()],
+                audiences: vec!["local-host".to_owned()],
+                actor_entity_ids: vec![actor],
+                subject_ids: vec![],
+                participant_ids: vec![],
+                plugin_id: None,
+                principal_roles: vec![AuthorityRoleV1::Actor],
+                max_uses: 2,
+                budget: 10,
+                environment_constraints: vec!["local-only".to_owned()],
+            }))
+        };
+        (
+            scope(vec![DELEGATE_ACTION_V1.to_owned(), "read".to_owned()]),
+            scope(vec!["read".to_owned()]),
+        )
+    }
+
+    fn cache_request(
+        authenticated: AuthenticatedPrincipalResultV1,
+        actor: EntityId,
+        authority_timeline: TimelineId,
+        policy: Hash,
+        registry_digest: Hash,
+    ) -> AuthorizationRequestV1 {
+        test_ok(AuthorizationRequestV1::try_from_draft(
+            AuthorizationRequestDraftV1 {
+                authenticated,
+                actor_entity_id: actor,
+                subject_id: None,
+                participant_id: None,
+                plugin_id: None,
+                installation_id: None,
+                principal_role: AuthorityRoleV1::Actor,
+                resource: "profile".to_owned(),
+                data_category: "public".to_owned(),
+                action: "read".to_owned(),
+                purpose: "planning".to_owned(),
+                audience: "local-host".to_owned(),
+                at_time: WallTime::from_micros(10),
+                authority_timeline,
+                at_position: Seq::from_u64(10),
+                consent_timeline: None,
+                consent_at_position: None,
+                use_count: 1,
+                budget: 5,
+                consent_policy_revision: policy,
+                capability_policy_revision: policy,
+                revocation_epoch: 0,
+                revocation_state_current: true,
+                authority_registry_digest: registry_digest,
+                consent: ConsentEvidenceV1::NotRequired,
+                environment_constraints: vec!["local-only".to_owned()],
+            },
+        ))
+    }
+
     fn decision_with_capability_trust(
         authority_timeline: TimelineId,
         grant_id: Hash,
@@ -636,34 +698,7 @@ mod tests {
         let policy = test_hash(4);
         let consent_reference = test_hash(6);
         let registry_digest = test_hash(7);
-        let root_scope = test_ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-            resources: vec!["profile".to_owned()],
-            actions: vec![DELEGATE_ACTION_V1.to_owned(), "read".to_owned()],
-            purposes: vec!["planning".to_owned()],
-            audiences: vec!["local-host".to_owned()],
-            actor_entity_ids: vec![actor],
-            subject_ids: vec![],
-            participant_ids: vec![],
-            plugin_id: None,
-            principal_roles: vec![AuthorityRoleV1::Actor],
-            max_uses: 2,
-            budget: 10,
-            environment_constraints: vec!["local-only".to_owned()],
-        }));
-        let child_scope = test_ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-            resources: vec!["profile".to_owned()],
-            actions: vec!["read".to_owned()],
-            purposes: vec!["planning".to_owned()],
-            audiences: vec!["local-host".to_owned()],
-            actor_entity_ids: vec![actor],
-            subject_ids: vec![],
-            participant_ids: vec![],
-            plugin_id: None,
-            principal_roles: vec![AuthorityRoleV1::Actor],
-            max_uses: 2,
-            budget: 10,
-            environment_constraints: vec!["local-only".to_owned()],
-        }));
+        let (root_scope, child_scope) = delegation_scopes(actor);
         let parent_grant_id = test_hash(16);
         let parent = test_ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
             grant_id: parent_grant_id,
@@ -705,36 +740,13 @@ mod tests {
             revocation_fence: None,
             authority_registry_digest: registry_digest,
         }));
-        let request = test_ok(AuthorizationRequestV1::try_from_draft(
-            AuthorizationRequestDraftV1 {
-                authenticated,
-                actor_entity_id: actor,
-                subject_id: None,
-                participant_id: None,
-                plugin_id: None,
-                installation_id: None,
-                principal_role: AuthorityRoleV1::Actor,
-                resource: "profile".to_owned(),
-                data_category: "public".to_owned(),
-                action: "read".to_owned(),
-                purpose: "planning".to_owned(),
-                audience: "local-host".to_owned(),
-                at_time: WallTime::from_micros(10),
-                authority_timeline,
-                at_position: Seq::from_u64(10),
-                consent_timeline: None,
-                consent_at_position: None,
-                use_count: 1,
-                budget: 5,
-                consent_policy_revision: policy,
-                capability_policy_revision: policy,
-                revocation_epoch: 0,
-                revocation_state_current: true,
-                authority_registry_digest: registry_digest,
-                consent: ConsentEvidenceV1::NotRequired,
-                environment_constraints: vec!["local-only".to_owned()],
-            },
-        ));
+        let request = cache_request(
+            authenticated,
+            actor,
+            authority_timeline,
+            policy,
+            registry_digest,
+        );
         let grants = vec![parent.clone(), child.clone()];
         let registry = authority_registry(&request, &grants, registry_digest, trust_capability);
         let chain = test_ok(DelegationChainV1::try_from_grants(grants));
