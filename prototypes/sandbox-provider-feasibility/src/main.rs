@@ -1430,20 +1430,22 @@ fn exercise_namespace_handles(
         }
         Ok((retained, retained_inodes))
     })();
-    let entry_result = acquisition
-        .as_ref()
-        .and_then(|(retained, retained_inodes)| {
-            if !prove_entry_and_drop {
-                return Ok(());
-            }
-            namespace_names
-                .iter()
-                .zip(retained)
-                .zip(retained_inodes)
-                .try_for_each(|((name, namespace), inode)| {
-                    enter_namespace_handle(name, namespace, *inode)
-                })
-        });
+    let entry_result =
+        acquisition
+            .as_ref()
+            .map_err(|&()| ())
+            .and_then(|(retained, retained_inodes)| {
+                if !prove_entry_and_drop {
+                    return Ok(());
+                }
+                namespace_names
+                    .iter()
+                    .zip(retained)
+                    .zip(retained_inodes)
+                    .try_for_each(|((name, namespace), inode)| {
+                        enter_namespace_handle(name, namespace, *inode)
+                    })
+            });
     drop(worker.stdin.take());
     let worker_succeeded = worker.wait().map_err(|_| ())?.success();
     let (retained, retained_inodes) = acquisition?;
