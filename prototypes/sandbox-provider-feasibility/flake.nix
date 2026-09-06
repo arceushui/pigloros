@@ -42,6 +42,7 @@
               environment.systemPackages = [
                 prototype
                 pkgs.cryptsetup
+                pkgs.curl
                 pkgs.iproute2
                 pkgs.jq
                 pkgs.nftables
@@ -56,10 +57,36 @@
             };
 
             testScript = ''
+              import os
+              import socket
+              import time
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+
+              class IsolationEndpoint(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      self.send_response(200)
+                      self.end_headers()
+                      self.wfile.write(b"host-reachable")
+
+                  def log_message(self, _format, *args):
+                      pass
+
+              if os.fork() == 0:
+                  HTTPServer(("", 8000), IsolationEndpoint).serve_forever()
+
+              for _ in range(50):
+                  try:
+                      with socket.create_connection(("127.0.0.1", 8000), timeout=1):
+                          break
+                  except OSError:
+                      time.sleep(0.1)
+              else:
+                  raise AssertionError("host isolation endpoint did not start")
+
               start_all()
               machine.wait_for_unit("multi-user.target")
 
-              systemd_version = machine.succeed("systemd --version | head -1").strip()
+              systemd_version = machine.succeed("systemctl --version | head -1").strip()
               kernel_release = machine.succeed("uname -r").strip()
               architecture = machine.succeed("uname -m").strip()
               controllers = machine.succeed("cat /sys/fs/cgroup/cgroup.controllers").strip()
@@ -70,7 +97,10 @@
               machine.succeed("test -e /sys/fs/cgroup/cgroup.kill")
               machine.succeed("test -e /sys/module/dm_verity")
               machine.succeed("test -e /dev/mapper/control")
-              machine.succeed("! ip route show default | grep -q .")
+              machine.fail(
+                  "curl --fail --silent --show-error --connect-timeout 2 "
+                  "http://10.0.2.2:8000"
+              )
 
               print(
                   "PINNED_HOST_IDENTITY;"
@@ -79,7 +109,7 @@
                   f"systemd={systemd_version};"
                   f"controllers={controllers};"
                   "cgroup_kill=present;dm_verity=present;mapper_control=present;"
-                  "vm_external_route=absent"
+                  "vm_external_egress=blocked"
               )
 
               initial = machine.succeed(

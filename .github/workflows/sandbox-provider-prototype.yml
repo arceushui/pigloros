@@ -57,7 +57,7 @@ jobs:
           grep -q 'kernel=6.12.' pinned-host-profile.txt
           grep -q 'cgroup_kill=present' pinned-host-profile.txt
           grep -q 'dm_verity=present' pinned-host-profile.txt
-          grep -q 'vm_external_route=absent' pinned-host-profile.txt
+          grep -q 'vm_external_egress=blocked' pinned-host-profile.txt
           grep -q 'PINNED_NAMESPACE_PROBE;namespace_entry_lifecycle=retained-fd-full-set-entered-' \
             pinned-host-profile.txt
       - name: Record pinned VM closure
