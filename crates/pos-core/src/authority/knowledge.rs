@@ -289,15 +289,15 @@ impl ObservationRecordV1 {
     }
 
     fn binding_digest(&self) -> Result<Hash, AuthorityErrorV1> {
-        let encoded = encode_value(&self.value_without_digest())?;
+        let encoded = encode_value(&Value::Array(self.fields_without_digest()))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"PiglorOS.ObservationRecord.v1\0");
         hasher.update(&encoded);
         Ok(Hash::from_bytes(*hasher.finalize().as_bytes()))
     }
 
-    fn value_without_digest(&self) -> Value {
-        Value::Array(vec![
+    fn fields_without_digest(&self) -> Vec<Value> {
+        vec![
             bytes(&OBSERVATION_RECORD_MAGIC),
             uint(VERSION),
             bytes(&entity_bytes(self.participant_id)),
@@ -312,13 +312,11 @@ impl ObservationRecordV1 {
             optional_hash_value(self.projection_digest),
             hash_value(self.provenance_digest),
             hash_value(self.minimization_revision),
-        ])
+        ]
     }
 
     fn value_with_digest(&self, digest: Hash) -> Value {
-        let Value::Array(mut fields) = self.value_without_digest() else {
-            unreachable!("record encoder always builds an array")
-        };
+        let mut fields = self.fields_without_digest();
         fields.push(hash_value(digest));
         Value::Array(fields)
     }
@@ -622,14 +620,14 @@ impl ObservationSnapshotV1 {
     }
 
     fn binding_digest(&self) -> Result<Hash, AuthorityErrorV1> {
-        let encoded = encode_value(&self.value_without_digest()?)?;
+        let encoded = encode_value(&Value::Array(self.fields_without_digest()?))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"PiglorOS.ObservationSnapshot.v1\0");
         hasher.update(&encoded);
         Ok(Hash::from_bytes(*hasher.finalize().as_bytes()))
     }
 
-    fn value_without_digest(&self) -> Result<Value, AuthorityErrorV1> {
+    fn fields_without_digest(&self) -> Result<Vec<Value>, AuthorityErrorV1> {
         let records = self
             .records
             .iter()
@@ -646,7 +644,7 @@ impl ObservationSnapshotV1 {
                 ])
             })
             .collect();
-        Ok(Value::Array(vec![
+        Ok(vec![
             bytes(&OBSERVATION_SNAPSHOT_MAGIC),
             uint(VERSION),
             encode_principal(&self.principal),
@@ -676,13 +674,11 @@ impl ObservationSnapshotV1 {
             Value::Array(artifacts),
             optional_hash_value(self.prior_snapshot_digest),
             hash_value(self.provenance_digest),
-        ]))
+        ])
     }
 
     fn value_with_digest(&self, digest: Hash) -> Result<Value, AuthorityErrorV1> {
-        let Value::Array(mut fields) = self.value_without_digest()? else {
-            unreachable!("snapshot encoder always builds an array")
-        };
+        let mut fields = self.fields_without_digest()?;
         fields.push(hash_value(digest));
         Ok(Value::Array(fields))
     }
@@ -939,15 +935,15 @@ impl BeliefRecordV1 {
     }
 
     fn binding_digest(&self) -> Result<Hash, AuthorityErrorV1> {
-        let encoded = encode_value(&self.value_without_digest())?;
+        let encoded = encode_value(&Value::Array(self.fields_without_digest()))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"PiglorOS.BeliefRecord.v1\0");
         hasher.update(&encoded);
         Ok(Hash::from_bytes(*hasher.finalize().as_bytes()))
     }
 
-    fn value_without_digest(&self) -> Value {
-        Value::Array(vec![
+    fn fields_without_digest(&self) -> Vec<Value> {
+        vec![
             bytes(&entity_bytes(self.entity_id)),
             text(&self.predicate),
             uint(u64::from(self.confidence.millionths())),
@@ -959,13 +955,11 @@ impl BeliefRecordV1 {
                     .map(hash_value)
                     .collect(),
             ),
-        ])
+        ]
     }
 
     fn value_with_digest(&self) -> Value {
-        let Value::Array(mut fields) = self.value_without_digest() else {
-            unreachable!("belief encoder always builds an array")
-        };
+        let mut fields = self.fields_without_digest();
         fields.push(hash_value(self.digest));
         Value::Array(fields)
     }
@@ -999,7 +993,7 @@ pub struct KnowledgeSnapshotDraftV1 {
 /// Canonical KNS1 record of what one participant may know at one Timeline position.
 ///
 /// This is epistemic evidence, never authoritative world state. It deliberately
-/// cannot contain a Projection, EventStore, host handle, or action authority.
+/// cannot contain a Projection, `EventStore`, host handle, or action authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnowledgeSnapshotV1 {
     principal: PrincipalRefV1,
@@ -1206,21 +1200,21 @@ impl KnowledgeSnapshotV1 {
     }
 
     fn binding_digest(&self) -> Result<Hash, AuthorityErrorV1> {
-        let encoded = encode_value(&self.value_without_digest()?)?;
+        let encoded = encode_value(&Value::Array(self.fields_without_digest()?))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"PiglorOS.KnowledgeSnapshot.v1\0");
         hasher.update(&encoded);
         Ok(Hash::from_bytes(*hasher.finalize().as_bytes()))
     }
 
-    fn value_without_digest(&self) -> Result<Value, AuthorityErrorV1> {
+    fn fields_without_digest(&self) -> Result<Vec<Value>, AuthorityErrorV1> {
         let observations = self
             .observations
             .iter()
             .map(ObservationRecordV1::encode)
             .map(|result| result.map(|encoded| bytes(encoded.as_slice())))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Value::Array(vec![
+        Ok(vec![
             bytes(&KNOWLEDGE_SNAPSHOT_MAGIC),
             uint(VERSION),
             encode_principal(&self.principal),
@@ -1235,8 +1229,14 @@ impl KnowledgeSnapshotV1 {
                     .map(BeliefRecordV1::value_with_digest)
                     .collect(),
             ),
-            optional_hash_value(self.preference_value_revision.map(|value| value.digest())),
-            optional_hash_value(self.ai_goal_policy_revision.map(|value| value.digest())),
+            optional_hash_value(
+                self.preference_value_revision
+                    .map(PreferenceValueRevisionV1::digest),
+            ),
+            optional_hash_value(
+                self.ai_goal_policy_revision
+                    .map(AiGoalPolicyRevisionV1::digest),
+            ),
             hash_value(self.memory_policy_revision.digest()),
             optional_hash_value(self.prior_snapshot_digest),
             Value::Array(
@@ -1247,13 +1247,11 @@ impl KnowledgeSnapshotV1 {
                     .collect(),
             ),
             hash_value(self.provenance_digest),
-        ]))
+        ])
     }
 
     fn value_with_digest(&self) -> Result<Value, AuthorityErrorV1> {
-        let Value::Array(mut fields) = self.value_without_digest()? else {
-            unreachable!("knowledge encoder always builds an array")
-        };
+        let mut fields = self.fields_without_digest()?;
         fields.push(hash_value(self.digest));
         Ok(Value::Array(fields))
     }
