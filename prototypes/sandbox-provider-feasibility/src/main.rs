@@ -1408,7 +1408,8 @@ fn probe_namespace_descriptor_lifecycle() -> String {
 fn probe_namespace_entry_lifecycle() -> String {
     const NAMESPACE_NAMES: [&str; 6] = ["mnt", "pid", "ipc", "uts", "user", "net"];
     if exercise_namespace_handles("all", &NAMESPACE_NAMES, true).is_ok() {
-        return "retained-fd-full-set-entered-post-exit-fd-ok-post-drop-process-absent".to_owned();
+        return "retained-fd-full-set-each-entered-separately-post-exit-fd-ok-post-drop-process-absent"
+            .to_owned();
     }
     let individual = NAMESPACE_NAMES
         .iter()

@@ -126,7 +126,7 @@
               assert (
                   namespace
                   == "namespace_entry_lifecycle="
-                     "retained-fd-full-set-entered-post-exit-fd-ok-"
+                     "retained-fd-full-set-each-entered-separately-post-exit-fd-ok-"
                      "post-drop-process-absent"
               ), namespace
 
@@ -164,6 +164,10 @@
                       assert f"cleanup_sample={mode}" in cleanup, cleanup
                       assert "unit_absent=true" in cleanup, cleanup
                       cleanup_samples.append(cleanup)
+                      print(
+                          "PINNED_CLEANUP_SAMPLE;"
+                          f"mode={mode};ordinal={sample};{cleanup}"
+                      )
                   launch_p95 = percentile_95(cleanup_samples, "launch_us")
                   cleanup_p95 = percentile_95(cleanup_samples, "cleanup_us")
                   assert launch_p95 <= 2_000_000, launch_p95
@@ -188,6 +192,10 @@
                   ]
                   assert len(attempt_lines) == 1, lifecycle_output
                   lifecycle_samples.append(attempt_lines[0])
+                  print(
+                      "PINNED_LIFECYCLE_SAMPLE;"
+                      f"ordinal={sample};{attempt_lines[0]}"
+                  )
               total_p95 = percentile_95(lifecycle_samples, "total_us")
               assert total_p95 <= 2_000_000, total_p95
               print(
