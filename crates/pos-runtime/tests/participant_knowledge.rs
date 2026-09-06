@@ -153,7 +153,7 @@ fn fixture() -> Fixture {
     let grant_binding = grant.binding_digest().test_ok();
     let registry = AuthorityRegistrySnapshotV1::try_new(
         registry_digest,
-        Vec::new(),
+        vec![hash_from_repeated_byte(8)],
         vec![grant_binding],
         Vec::new(),
     )
