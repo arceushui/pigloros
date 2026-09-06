@@ -63,6 +63,27 @@ async fn main() {
         check_broker_units_absent(&attempt_id).await;
         return;
     }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--inject-orphan")
+    {
+        inject_reconciliation_orphan(&attempt_id, network_isolation).await;
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--reconcile-orphan")
+    {
+        reconcile_orphan(&attempt_id, network_isolation).await;
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--check-orphan-clean")
+    {
+        check_orphan_unit_absent(&attempt_id).await;
+        return;
+    }
     let dbus = probe_systemd().await;
     let route = probe_route_netlink().await;
     let nftables_packet_bytes = encode_nftables_probe();
@@ -139,53 +160,58 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
         return;
     }
 
-    let Ok(executable) = std::env::current_exe() else {
-        println!("broker-setup-rejected;reason=current-exe");
+    let Ok((_worker, worker_line)) = spawn_scoped_worker(
+        &proxy,
+        &attempt_unit,
+        std::slice::from_ref(&broker_unit),
+    )
+    .await
+    else {
+        println!("broker-setup-rejected;reason=attempt-worker");
         return;
     };
-    let Ok(mut worker) = Command::new(executable)
+    println!(
+        "broker-ready;network_isolation={network_isolation};broker_pid={};broker_unit={broker_unit};attempt_unit={attempt_unit};{}",
+        std::process::id(),
+        worker_line.trim_end()
+    );
+    let _ = std::io::stdout().flush();
+    std::future::pending::<()>().await;
+}
+
+async fn spawn_scoped_worker(
+    proxy: &zbus_systemd::systemd1::ManagerProxy<'_>,
+    unit: &str,
+    binds_to: &[String],
+) -> Result<(std::process::Child, String), ()> {
+    let executable = std::env::current_exe().map_err(|_| ())?;
+    let mut worker = Command::new(executable)
         .arg("--attempt-worker")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-    else {
-        println!("broker-setup-rejected;reason=worker-spawn");
-        return;
-    };
-    if start_transient_scope(
-        &proxy,
-        &attempt_unit,
-        &[worker.id()],
-        std::slice::from_ref(&broker_unit),
-    )
-    .await
-    .is_err()
+        .map_err(|_| ())?;
+    if start_transient_scope(proxy, unit, &[worker.id()], binds_to)
+        .await
+        .is_err()
+        || !wait_for_unit_cgroup(worker.id(), unit)
     {
         let _ = worker.kill();
-        println!("broker-setup-rejected;reason=attempt-scope");
-        return;
-    }
-    if !wait_for_unit_cgroup(worker.id(), &attempt_unit) {
-        let _ = worker.kill();
-        println!("broker-setup-rejected;reason=attempt-scope-attachment");
-        return;
+        return Err(());
     }
     let Some(mut worker_stdin) = worker.stdin.take() else {
         let _ = worker.kill();
-        println!("broker-setup-rejected;reason=worker-stdin");
-        return;
+        return Err(());
     };
     if worker_stdin.write_all(&[1]).is_err() {
         let _ = worker.kill();
-        println!("broker-setup-rejected;reason=worker-signal");
-        return;
+        return Err(());
     }
     drop(worker_stdin);
     let Some(worker_stdout) = worker.stdout.take() else {
         let _ = worker.kill();
-        println!("broker-setup-rejected;reason=worker-stdout");
-        return;
+        return Err(());
     };
     let mut worker_line = String::new();
     if BufReader::new(worker_stdout)
@@ -194,16 +220,53 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
         || !worker_line.starts_with("worker-ready;")
     {
         let _ = worker.kill();
-        println!("broker-setup-rejected;reason=worker-readiness");
-        return;
+        return Err(());
     }
+    Ok((worker, worker_line))
+}
+
+async fn inject_reconciliation_orphan(attempt_id: &str, network_isolation: &str) {
+    let Ok(connection) = zbus::Connection::system().await else {
+        println!("orphan-setup-rejected;reason=dbus-unavailable");
+        return;
+    };
+    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
+        println!("orphan-setup-rejected;reason=manager-unavailable");
+        return;
+    };
+    let orphan_unit = format!("pigloros-orphan-{attempt_id}.scope");
+    let Ok((_worker, worker_line)) = spawn_scoped_worker(&proxy, &orphan_unit, &[]).await else {
+        println!("orphan-setup-rejected;reason=attempt-worker");
+        return;
+    };
     println!(
-        "broker-ready;network_isolation={network_isolation};broker_pid={};broker_unit={broker_unit};attempt_unit={attempt_unit};{}",
-        std::process::id(),
+        "orphan-ready;network_isolation={network_isolation};orphan_unit={orphan_unit};{}",
         worker_line.trim_end()
     );
-    let _ = std::io::stdout().flush();
-    std::future::pending::<()>().await;
+}
+
+async fn reconcile_orphan(attempt_id: &str, network_isolation: &str) {
+    let Ok(connection) = zbus::Connection::system().await else {
+        println!("orphan-reconcile-rejected;reason=dbus-unavailable");
+        return;
+    };
+    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
+        println!("orphan-reconcile-rejected;reason=manager-unavailable");
+        return;
+    };
+    let orphan_unit = format!("pigloros-orphan-{attempt_id}.scope");
+    match proxy
+        .stop_unit(orphan_unit.clone(), "replace".to_owned())
+        .await
+    {
+        Ok(_) => println!(
+            "orphan-reconcile-requested;network_isolation={network_isolation};orphan_unit={orphan_unit}"
+        ),
+        Err(_) if proxy.get_unit(orphan_unit).await.is_err() => {
+            println!("orphan-reconcile-complete;unit=already-absent")
+        }
+        Err(_) => println!("orphan-reconcile-rejected;reason=stop-unit"),
+    }
 }
 
 fn wait_for_unit_cgroup(pid: u32, unit: &str) -> bool {
@@ -282,6 +345,23 @@ async fn check_broker_units_absent(attempt_id: &str) {
             if broker_absent { "absent" } else { "loaded" },
             if attempt_absent { "absent" } else { "loaded" }
         );
+    }
+}
+
+async fn check_orphan_unit_absent(attempt_id: &str) {
+    let Ok(connection) = zbus::Connection::system().await else {
+        println!("orphan-cleanliness-unproven;reason=dbus-unavailable");
+        return;
+    };
+    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
+        println!("orphan-cleanliness-unproven;reason=manager-unavailable");
+        return;
+    };
+    let orphan_unit = format!("pigloros-orphan-{attempt_id}.scope");
+    if proxy.get_unit(orphan_unit).await.is_err() {
+        println!("orphan-clean;orphan_unit=absent");
+    } else {
+        println!("orphan-residual;orphan_unit=loaded");
     }
 }
 
