@@ -546,7 +546,10 @@ fn process_cgroup_path(pid: u32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .ok()?
         .lines()
-        .find_map(|line| line.split_once("::").map(|(_, path)| path.to_owned()))
+        .find_map(|line| {
+            line.split_once("::")
+                .map(|(_, path)| path.trim_start_matches('/').to_owned())
+        })
 }
 
 fn read_trimmed(path: impl AsRef<std::path::Path>) -> Option<String> {
