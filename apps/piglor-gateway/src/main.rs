@@ -622,7 +622,7 @@ mod tests {
         let database = directory.join("gateway.db");
         let owner_key = directory.join("owner.key");
         owntracks::create_or_load_owner_key(&owner_key).test_ok()?;
-        let addr = "127.0.0.1:0".parse().test_ok()?;
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().test_ok()?;
         run_with_args_and_shutdown(
             &[
                 String::from("piglor-gateway"),
