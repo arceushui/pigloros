@@ -1433,7 +1433,7 @@ fn exercise_namespace_handles(
     let entry_result =
         acquisition
             .as_ref()
-            .map_err(|_| ())
+            .map_err(|()| ())
             .and_then(|(retained, retained_inodes)| {
                 if !prove_entry_and_drop {
                     return Ok(());
