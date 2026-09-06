@@ -375,11 +375,13 @@ async fn probe_cleanup_sample(attempt_id: &str, mode: CleanupMode, network_isola
                 .kill_unit(unit.clone(), "all".to_owned(), 9)
                 .await
                 .is_err()
-                || proxy
-                    .stop_unit(unit.clone(), "replace".to_owned())
-                    .await
-                    .is_err()
             {
+                let _ = worker.kill();
+                println!("cleanup-sample-rejected;reason=kill-signal");
+                return;
+            }
+            let stop_result = proxy.stop_unit(unit.clone(), "replace".to_owned()).await;
+            if stop_result.is_err() && proxy.get_unit(unit.clone()).await.is_ok() {
                 let _ = worker.kill();
                 println!("cleanup-sample-rejected;reason=forced-stop");
                 return;
