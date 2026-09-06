@@ -1,12 +1,108 @@
 use pos_core::{
-    CanonicalBytes, EntityId, Hash, ObservationArtifactV1, ObservationRecordDraftV1,
-    ObservationRecordV1, ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
-    PluginId, PrincipalRefV1, Seq, TimelineId,
+    AiGoalPolicyRevisionV1, BeliefRecordDraftV1, BeliefRecordV1, CanonicalBytes, ConfidenceV1,
+    EntityId, Hash, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
+    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PluginId,
+    PreferenceValueRevisionV1, PrincipalRefV1, Seq, TimelineId,
 };
 use ulid::Ulid;
 
 fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
+}
+
+fn belief_draft(entity_id: EntityId, predicate: &str) -> BeliefRecordDraftV1 {
+    BeliefRecordDraftV1 {
+        entity_id,
+        predicate: predicate.to_owned(),
+        confidence: ConfidenceV1::try_new(750_000).expect("bounded confidence"),
+        provenance_digest: hash_from_repeated_byte(23),
+        observation_record_digests: vec![hash_from_repeated_byte(24)],
+    }
+}
+
+#[test]
+fn knowledge_snapshot_preserves_epistemic_and_revision_meanings() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let belief = BeliefRecordV1::try_from_draft(belief_draft(participant_id, "prefers.tea"))
+        .expect("belief");
+    let snapshot = KnowledgeSnapshotV1::try_from_draft(KnowledgeSnapshotDraftV1 {
+        principal: PrincipalRefV1::try_new([7; 16], "host.test").expect("principal"),
+        participant_id,
+        timeline_id: TimelineId::from_ulid(Ulid::from(2_u128)),
+        observed_through: Seq::from_u64(7),
+        observation_snapshot_digest: hash_from_repeated_byte(25),
+        observation_record_digests: vec![hash_from_repeated_byte(24)],
+        beliefs: vec![belief.clone()],
+        preference_value_revision: Some(
+            PreferenceValueRevisionV1::try_new(hash_from_repeated_byte(26))
+                .expect("preference revision"),
+        ),
+        ai_goal_policy_revision: Some(
+            AiGoalPolicyRevisionV1::try_new(hash_from_repeated_byte(27))
+                .expect("AI policy revision"),
+        ),
+        memory_policy_revision: MemoryPolicyRevisionV1::try_new(hash_from_repeated_byte(28))
+            .expect("memory policy revision"),
+        prior_snapshot_digest: Some(hash_from_repeated_byte(29)),
+        external_provenance: vec![hash_from_repeated_byte(30)],
+        provenance_digest: hash_from_repeated_byte(31),
+    })
+    .expect("knowledge snapshot");
+
+    assert_eq!(snapshot.beliefs(), &[belief]);
+    assert_eq!(
+        snapshot
+            .preference_value_revision()
+            .map(PreferenceValueRevisionV1::digest),
+        Some(hash_from_repeated_byte(26))
+    );
+    assert_eq!(
+        snapshot
+            .ai_goal_policy_revision()
+            .map(AiGoalPolicyRevisionV1::digest),
+        Some(hash_from_repeated_byte(27))
+    );
+    assert_eq!(
+        snapshot.memory_policy_revision().digest(),
+        hash_from_repeated_byte(28)
+    );
+    assert_eq!(
+        KnowledgeSnapshotV1::decode(&snapshot.encode().expect("canonical KNS1")),
+        Ok(snapshot)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_rejects_noncanonical_belief_order() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let later = BeliefRecordV1::try_from_draft(belief_draft(participant_id, "z.last"))
+        .expect("later belief");
+    let earlier = BeliefRecordV1::try_from_draft(belief_draft(participant_id, "a.first"))
+        .expect("earlier belief");
+    let mut draft = KnowledgeSnapshotDraftV1 {
+        principal: PrincipalRefV1::try_new([7; 16], "host.test").expect("principal"),
+        participant_id,
+        timeline_id: TimelineId::from_ulid(Ulid::from(2_u128)),
+        observed_through: Seq::from_u64(7),
+        observation_snapshot_digest: hash_from_repeated_byte(25),
+        observation_record_digests: vec![hash_from_repeated_byte(24)],
+        beliefs: vec![later, earlier],
+        preference_value_revision: None,
+        ai_goal_policy_revision: None,
+        memory_policy_revision: MemoryPolicyRevisionV1::try_new(hash_from_repeated_byte(28))
+            .expect("memory policy revision"),
+        prior_snapshot_digest: None,
+        external_provenance: Vec::new(),
+        provenance_digest: hash_from_repeated_byte(31),
+    };
+
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_draft(draft.clone()),
+        Err(pos_core::AuthorityErrorV1::NonCanonicalOrder)
+    );
+    draft.beliefs.reverse();
+    assert!(KnowledgeSnapshotV1::try_from_draft(draft).is_ok());
 }
 
 fn observation_snapshot_draft(
