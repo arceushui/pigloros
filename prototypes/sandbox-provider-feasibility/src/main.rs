@@ -259,7 +259,7 @@ async fn reconcile_orphan(attempt_id: &str, network_isolation: &str) {
             "orphan-reconcile-requested;network_isolation={network_isolation};orphan_unit={orphan_unit}"
         ),
         Err(_) if proxy.get_unit(orphan_unit).await.is_err() => {
-            println!("orphan-reconcile-complete;unit=already-absent")
+            println!("orphan-reconcile-complete;unit=already-absent");
         }
         Err(_) => println!("orphan-reconcile-rejected;reason=stop-unit"),
     }
