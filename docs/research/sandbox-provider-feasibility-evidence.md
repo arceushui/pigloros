@@ -5,16 +5,16 @@ Decision governed by: [ADR-069](https://redmine.piglor.com/projects/pigloros/wik
 Prototype branch: `codex/ticket-211-sandbox-provider-prototype-v2`  
 Initial evidence commit: `e5a191a2d370e71551059a69630975644ce6588f`
 
-Pinned-host evidence commits: `c10c59705320f215d1b21900ee6a52b9ed838e8c`, strengthened by `8d613baad514d53c4ac984627e8dd42d1d1abdf0`
+Pinned-host evidence commits: `c10c59705320f215d1b21900ee6a52b9ed838e8c`, strengthened by `8d613baad514d53c4ac984627e8dd42d1d1abdf0`, with raw timing publication at `e1036f334303dcb4f007f0a2347754314cefa63e` and its workflow contract at `44ee605cc4c8c83ea3c34a9aec8c3c79b5418d83`
 
-Hosted runs: [initial 34022822716](https://github.com/arceushui/pigloros/actions/runs/34022822716), [pinned host 34036714171](https://github.com/arceushui/pigloros/actions/runs/34036714171), [strengthened pinned host 34037903952](https://github.com/arceushui/pigloros/actions/runs/34037903952)
+Hosted runs: [initial 34022822716](https://github.com/arceushui/pigloros/actions/runs/34022822716), [pinned host 34036714171](https://github.com/arceushui/pigloros/actions/runs/34036714171), [strengthened pinned host 34037903952](https://github.com/arceushui/pigloros/actions/runs/34037903952), [raw pinned timings 34039161762](https://github.com/arceushui/pigloros/actions/runs/34039161762)
 Recorded: 2026-09-06
 
 ## Conclusion
 
 The pure-Rust typed control-plane approach is feasible for systemd transient units, route netlink, direct nftables transactions, cgroup-v2 controls, broker-death cleanup, restart reconciliation, and concurrent attempts. Every measured latency is comfortably below the ADR-069 threshold on both hosted architectures.
 
-The pinned NixOS supplement closes only part of the host-baseline gap in the initial run. On both architectures it boots a disposable VM from exact nixpkgs revision `6713828a351efa628b025a1adf7f43cbf8597513` (`sha256-Fd3OB8J9JhgliQwOKcqx4M672CInxi1I5VnwsaXeSQo=`), verifies Linux 6.12.108 and systemd 260.2, configures QEMU restricted networking and confirms that a verified host-side IPv4/TCP endpoint is unreachable, creates all six namespaces together and enters each retained descriptor separately, observes dm-verity capability, executes 30-sample sets and records their p95 summaries, emits raw non-default cgroup values, and exercises `cgroup.kill` on a root-managed transient child cgroup.
+The pinned NixOS supplement closes only part of the host-baseline gap in the initial run. On both architectures it boots a disposable VM from exact nixpkgs revision `6713828a351efa628b025a1adf7f43cbf8597513` (`sha256-Fd3OB8J9JhgliQwOKcqx4M672CInxi1I5VnwsaXeSQo=`), verifies Linux 6.12.108 and systemd 260.2, configures QEMU restricted networking and confirms that a verified host-side IPv4/TCP endpoint is unreachable, creates all six namespaces together and enters each retained descriptor separately, observes dm-verity capability, publishes every value in its 30-sample timing sets together with independently calculated p95 summaries, emits raw non-default cgroup values, and exercises `cgroup.kill` on a root-managed transient child cgroup.
 
 ADR-069 is still **not ready for acceptance**. The evidence does not activate an admitted signed SIM1 image, prove the exact transient `Type=exec` security-property matrix and SCS1 readback, force every required limit outcome, emit complete HCP1/PCR1 records, or verify the full cleanup surface. Production implementation remains blocked.
 
@@ -63,18 +63,18 @@ Each architecture recorded 30 normal launches/cleanups, 30 cancellation launches
 
 The complete primitive lifecycle p95 was 36.291 ms on x86_64 and 39.048 ms on aarch64. Restart reconciliation remained far below the 10-second ADR threshold.
 
-The strengthened pinned-host run repeated the same sample counts on Linux 6.12.108 and systemd 260.2:
+Raw-sample run 34039161762 repeated the same sample counts on Linux 6.12.108 and systemd 260.2 and published every input used to calculate these summaries:
 
 | Architecture | Mode | Launch p95 | Cleanup p95 | Result |
 |---|---|---:|---:|---|
-| x86_64 | Normal | 34.618 ms | 85.331 ms | Pass |
-| x86_64 | Cancellation | 38.683 ms | 89.188 ms | Pass |
-| x86_64 | Forced | 38.792 ms | 195.521 ms | Pass |
-| aarch64 TCG | Normal | 206.262 ms | 1,008.718 ms | Pass |
-| aarch64 TCG | Cancellation | 197.715 ms | 1,097.645 ms | Pass |
-| aarch64 TCG | Forced | 226.071 ms | 1,135.263 ms | Pass |
+| x86_64 | Normal | 26.624 ms | 87.798 ms | Pass |
+| x86_64 | Cancellation | 36.280 ms | 90.273 ms | Pass |
+| x86_64 | Forced | 36.959 ms | 197.027 ms | Pass |
+| aarch64 TCG | Normal | 215.350 ms | 1,146.414 ms | Pass |
+| aarch64 TCG | Cancellation | 228.211 ms | 1,196.689 ms | Pass |
+| aarch64 TCG | Forced | 258.266 ms | 1,306.315 ms | Pass |
 
-Pinned complete-lifecycle p95 was 43.254 ms on x86_64 and 325.807 ms on aarch64 TCG. Every result remains below the ADR thresholds.
+Pinned complete-lifecycle p95 was 40.157 ms on x86_64 and 373.842 ms on aarch64 TCG. Every result remains below the ADR thresholds. Each durable archive contains exactly 90 raw cleanup records, 30 raw lifecycle records, three cleanup p95 summaries, and one lifecycle p95 summary.
 
 ## DependencyEvidence
 
@@ -97,7 +97,7 @@ Exact direct dependencies:
 
 The prototype declares Rust 1.87. Hosted `cargo +1.87.0 check --locked` passed on both architectures, and the highest transitive declared MSRV is 1.87.0. The evidence compiler was Rust 1.97.1. `cargo deny --locked check` concluded `advisories ok, bans ok, licenses ok, sources ok`; no package lacks a declared licence. All observed SPDX expressions are combinations of MIT, Apache-2.0, BSD-2-Clause, Unicode-3.0, LLVM exception, LGPL-2.1-or-later, or Unlicense covered by repository policy.
 
-The pinned-host prototype source digest is `3d6d449d798183994b94c9555cd78b54c8e4f3f505240eb46b8484c186c75a09` for `src/main.rs`. The prototype is explicitly throwaway and must not be copied into production code.
+The pinned-host prototype source digest is `956035324c9c40e307cdd97a94035449129e937703abdab880dd57aca57c45fa` for `src/main.rs`. The prototype is explicitly throwaway and must not be copied into production code.
 
 ## Remaining ADR-069 gates
 
@@ -105,10 +105,9 @@ The pinned-host prototype source digest is `3d6d449d798183994b94c9555cd78b54c8e4
 2. Prove a transient `Type=exec` service with every section 6 security property and the selected SCS1 requested/effective syscall arrays read back exactly.
 3. Force and observe the mandatory memory, task, CPU-watchdog, file, and output outcomes rather than relying only on configured-limit readback.
 4. Enter all six retained namespace descriptors in one process and use a delegated cgroup with exact D-Bus delegation readback.
-5. Publish every pinned-host timing sample and an independently reproducible p95 calculation; run 34037903952 retained only the calculated summaries.
-6. Emit complete HCP1/PCR1 evidence and verify cleanup of every owned cgroup, namespace, nftables, veth, mount, and tmpfs resource.
-7. Extend the prototype policy to the complete ADR filesystem, endpoint-proxy, bounded capture/replay, revocation, and provenance contract. The current exact allow rule proves nftables mechanics only.
+5. Emit complete HCP1/PCR1 evidence and verify cleanup of every owned cgroup, namespace, nftables, veth, mount, and tmpfs resource.
+6. Extend the prototype policy to the complete ADR filesystem, endpoint-proxy, bounded capture/replay, revocation, and provenance contract. The current exact allow rule proves nftables mechanics only.
 
 ## Preserved raw evidence
 
-The repository preserves both architecture host identities, initial results, cgroup read-back, eight-attempt summaries, all 90 cleanup samples, all 30 lifecycle samples, p95 summaries, broker-death and restart-reconciliation traces, the complete dependency graph/package list, source digest, compiler identity, and cargo-deny conclusion in [`docs/research/evidence/sandbox-provider-211`](evidence/sandbox-provider-211/). Run 34037903952 additionally preserves the exact flake identity, full VM transcript, pinned-host p95 summaries and transcripted sample invocations, and sorted build-derivation requisite closure for each architecture. The strengthened durable Redmine archives are [x86_64](https://redmine.piglor.com/attachments/download/10/ticket-211-pinned-host-x86_64-run-34037903952.zip), SHA-256 `26398d82d4afa0e625862c99580acdd4a559a7a94158fc6c0df8496e1d96e917`, and [aarch64](https://redmine.piglor.com/attachments/download/11/ticket-211-pinned-host-aarch64-run-34037903952.zip), SHA-256 `76f55fd8ec1727e58b8ae340d8772bc1fe7282c0626d46a1e688e5d163ffed40`. The earlier attachments 8/9 remain historical evidence of the incomplete output-path recording and are superseded by attachments 10/11.
+The repository preserves both architecture host identities, initial results, cgroup read-back, eight-attempt summaries, all 90 cleanup samples, all 30 lifecycle samples, p95 summaries, broker-death and restart-reconciliation traces, the complete dependency graph/package list, source digest, compiler identity, and cargo-deny conclusion in [`docs/research/evidence/sandbox-provider-211`](evidence/sandbox-provider-211/). Run 34039161762 additionally preserves the exact flake identity, full VM transcript, every pinned-host timing sample, independently calculated p95 summaries, and sorted build-derivation requisite closure for each architecture. The latest durable Redmine archives are [x86_64](https://redmine.piglor.com/attachments/download/12/ticket-211-pinned-host-x86_64-run-34039161762.zip), SHA-256 `27ef9e061a07074fc68a5f0521f624bd7656aee6c4f5975bf20f4a7f033f0017`, and [aarch64](https://redmine.piglor.com/attachments/download/13/ticket-211-pinned-host-aarch64-run-34039161762.zip), SHA-256 `eadb25b635d29a10556a0d06c4edf866004b0bc1d998355ae8270c50bee51d7c`. Attachments 8–11 remain historical evidence and are superseded for pinned timing publication by attachments 12/13.
