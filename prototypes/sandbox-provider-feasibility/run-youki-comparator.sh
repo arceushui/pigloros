@@ -27,9 +27,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$evidence_dir" "$runtime_root" \
-  "$bundle/rootfs/dev/pts" "$bundle/rootfs/dev/shm" "$bundle/rootfs/etc" \
-  "$bundle/rootfs/proc" "$bundle/rootfs/sys" "$bundle/rootfs/tmp"
+mkdir -p "$evidence_dir" "$runtime_root" "$bundle"
 curl --fail --location --silent --show-error "$download_url" --output "$scratch/$archive"
 printf '%s  %s\n' "$expected_archive_sha256" "$scratch/$archive" | sha256sum --check
 tar -xzf "$scratch/$archive" -C "$scratch"
@@ -40,7 +38,17 @@ if test "$youki_binary" != "$scratch/youki"; then
 fi
 
 cc -static -Os -Wall -Wextra -Werror youki-comparator-payload.c \
-  -o "$bundle/rootfs/payload"
+  -o "$scratch/payload"
+
+prepare_rootfs() {
+  rm -rf "$bundle/rootfs"
+  mkdir -p "$bundle/rootfs/dev/pts" "$bundle/rootfs/dev/shm" \
+    "$bundle/rootfs/etc" "$bundle/rootfs/proc" "$bundle/rootfs/sys" \
+    "$bundle/rootfs/tmp"
+  cp "$scratch/payload" "$bundle/rootfs/payload"
+}
+
+prepare_rootfs
 
 cp youki-comparator-config.json "$bundle/config.json"
 
@@ -127,6 +135,7 @@ mv "$scratch/sample-config.json" "$bundle/config.json"
 : >"$evidence_dir/launch-cleanup-samples-us.txt"
 for sample in $(seq 1 30); do
   sample_id="pigloros-youki-${architecture}-${sample}"
+  prepare_rootfs
   jq --arg path "pigloros/$sample_id" '.linux.cgroupsPath = $path' \
     "$bundle/config.json" >"$scratch/sample-config.json"
   mv "$scratch/sample-config.json" "$bundle/config.json"
@@ -157,4 +166,5 @@ libcgroups_lines=$(tail -n 1 "$evidence_dir/libcgroups-lines.txt" | awk '{ print
   printf 'network_policy=external-not-proved\n'
   printf 'signed_image_admission=external-not-proved\n'
   printf 'pigloros_authority_and_evidence=external-not-proved\n'
+  printf 'rootfs_reuse=requires-fresh-preparation-after-runtime-setup\n'
 } | tee "$summary"
