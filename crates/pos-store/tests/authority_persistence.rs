@@ -7,7 +7,9 @@ use pos_core::{
     AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
     CapabilityScopeDraftV1, CapabilityScopeV1, DelegateClassV1, EntityId, Hash, PrincipalRefV1,
-    Seq, TimelineId, DELEGATE_ACTION_V1,
+    Seq, TimelineId, DELEGATE_ACTION_V1, MAX_AUTHORITY_REGISTRY_BINDINGS,
+    MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_TEXT_BYTES, MAX_PERSISTED_AUTHORITY_GRANTS,
+    MAX_PERSISTED_AUTHORITY_STATE_BYTES,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore, EventStore};
 use tempfile::tempdir;
@@ -80,6 +82,47 @@ fn scope(actions: &[&str], actors: Vec<EntityId>) -> CapabilityScopeV1 {
         budget: 100,
         environment_constraints: vec!["local-only".to_owned()],
     }))
+}
+
+fn maximal_authority_strings(prefix: &str) -> Vec<String> {
+    (0..MAX_AUTHORITY_SCOPE_MEMBERS)
+        .map(|ordinal| {
+            let leading = format!("{prefix}-{ordinal:02}-");
+            format!(
+                "{leading}{}",
+                "x".repeat(MAX_AUTHORITY_TEXT_BYTES - leading.len())
+            )
+        })
+        .collect()
+}
+
+fn maximal_scope() -> CapabilityScopeV1 {
+    ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        resources: maximal_authority_strings("resource"),
+        actions: maximal_authority_strings("action"),
+        purposes: maximal_authority_strings("purpose"),
+        audiences: maximal_authority_strings("audience"),
+        actor_entity_ids: (1..=MAX_AUTHORITY_SCOPE_MEMBERS)
+            .map(|ordinal| entity(ok(u128::try_from(ordinal))))
+            .collect(),
+        subject_ids: (101..101 + MAX_AUTHORITY_SCOPE_MEMBERS)
+            .map(|ordinal| entity(ok(u128::try_from(ordinal))))
+            .collect(),
+        participant_ids: (201..201 + MAX_AUTHORITY_SCOPE_MEMBERS)
+            .map(|ordinal| entity(ok(u128::try_from(ordinal))))
+            .collect(),
+        plugin_id: None,
+        principal_roles: vec![AuthorityRoleV1::Actor],
+        max_uses: 10,
+        budget: 100,
+        environment_constraints: maximal_authority_strings("environment"),
+    }))
+}
+
+fn ordinal_hash(ordinal: usize) -> Hash {
+    let mut bytes = [0_u8; 32];
+    bytes[..8].copy_from_slice(&ok(u64::try_from(ordinal)).to_be_bytes());
+    Hash::from_bytes(bytes)
 }
 
 fn root_grant() -> CapabilityGrantV1 {
@@ -381,6 +424,40 @@ fn authority_state_round_trip_preserves_versions_links_and_fences() {
     assert_eq!(restored, state);
     assert_eq!(restored.grants().count(), 2);
     assert_eq!(restored.revocations().count(), 1);
+}
+
+#[test]
+fn authority_state_refuses_serialization_beyond_the_public_byte_bound() {
+    let maximal_scope = maximal_scope();
+    let mut sample_draft = grant_draft(&root_grant());
+    sample_draft.scope.clone_from(&maximal_scope);
+    sample_draft.valid_until_position = Seq::from_u64(u64::MAX);
+    let sample = ok(CapabilityGrantV1::try_from_draft(sample_draft));
+    let retained_grants = MAX_PERSISTED_AUTHORITY_STATE_BYTES / ok(sample.encode()).len() + 2;
+    assert!(retained_grants < MAX_PERSISTED_AUTHORITY_GRANTS);
+
+    let grants = (1..=retained_grants)
+        .map(|ordinal| {
+            let mut draft = grant_draft(&sample);
+            draft.grant_id = ordinal_hash(ordinal);
+            draft.valid_from_position = Seq::from_u64(ok(u64::try_from(ordinal)));
+            draft.issuance_seq = Seq::from_u64(ok(u64::try_from(ordinal)));
+            ok(CapabilityGrantV1::try_from_draft(draft))
+        })
+        .collect::<Vec<_>>();
+    let mut state = AuthorityPersistenceStateV1::new();
+    for batch in grants.chunks(MAX_AUTHORITY_REGISTRY_BINDINGS) {
+        let grant_refs = batch.iter().collect::<Vec<_>>();
+        let host = authority_host(hash(7), &grant_refs);
+        for grant in batch {
+            ok(state.issue_grant(ok(host.authorize_grant(grant)), grant.clone()));
+        }
+    }
+
+    assert_eq!(
+        state.to_persistence_bytes(),
+        Err(AuthorityPersistenceErrorV1::InvalidRecord)
+    );
 }
 
 #[test]
