@@ -138,14 +138,15 @@ impl AuthorityPersistenceHostV1 {
         grant: &CapabilityGrantV1,
         revocation: &CapabilityRevocationV1,
     ) -> Result<AuthorityMutationPermitV1, AuthorityPersistenceErrorV1> {
-        let provenance_matches = revocation.grant_id() == grant.grant_id()
-            && revocation.authority_timeline() == grant.issuance_timeline()
-            && revocation.policy_revision() == grant.policy_revision()
-            && revocation.authority_registry_digest() == self.binding.authority_registry_digest;
+        let grant_matches = revocation.grant_id() == grant.grant_id();
+        let timeline_matches = revocation.authority_timeline() == grant.issuance_timeline();
+        let policy_matches = revocation.policy_revision() == grant.policy_revision();
+        let registry_matches =
+            revocation.authority_registry_digest() == self.binding.authority_registry_digest;
         let Some(grant_binding) = self.registry.capability_binding(grant) else {
             return Err(AuthorityPersistenceErrorV1::Unavailable);
         };
-        if !provenance_matches {
+        if !(grant_matches && timeline_matches && policy_matches && registry_matches) {
             return Err(AuthorityPersistenceErrorV1::Unavailable);
         }
         Ok(AuthorityMutationPermitV1 {
