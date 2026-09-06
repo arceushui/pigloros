@@ -5,16 +5,16 @@ Decision governed by: [ADR-069](https://redmine.piglor.com/projects/pigloros/wik
 Prototype branch: `codex/ticket-211-sandbox-provider-prototype-v2`  
 Initial evidence commit: `e5a191a2d370e71551059a69630975644ce6588f`
 
-Pinned-host evidence commit: `c10c59705320f215d1b21900ee6a52b9ed838e8c`
+Pinned-host evidence commits: `c10c59705320f215d1b21900ee6a52b9ed838e8c`, strengthened by `8d613baad514d53c4ac984627e8dd42d1d1abdf0`
 
-Hosted runs: [initial 34022822716](https://github.com/arceushui/pigloros/actions/runs/34022822716), [pinned host 34036714171](https://github.com/arceushui/pigloros/actions/runs/34036714171)
+Hosted runs: [initial 34022822716](https://github.com/arceushui/pigloros/actions/runs/34022822716), [pinned host 34036714171](https://github.com/arceushui/pigloros/actions/runs/34036714171), [strengthened pinned host 34037903952](https://github.com/arceushui/pigloros/actions/runs/34037903952)
 Recorded: 2026-09-06
 
 ## Conclusion
 
 The pure-Rust typed control-plane approach is feasible for systemd transient units, route netlink, direct nftables transactions, cgroup-v2 controls, broker-death cleanup, restart reconciliation, and concurrent attempts. Every measured latency is comfortably below the ADR-069 threshold on both hosted architectures.
 
-The pinned NixOS supplement closes only part of the host-baseline gap in the initial run. On both architectures it boots a disposable VM from exact nixpkgs revision `6713828a351efa628b025a1adf7f43cbf8597513` (`sha256-Fd3OB8J9JhgliQwOKcqx4M672CInxi1I5VnwsaXeSQo=`), verifies Linux 6.12.108 and systemd 260.2, behaviorally proves QEMU-enforced no-egress, creates all six namespaces together and enters each retained descriptor separately, observes dm-verity capability, and reads back `memory.swap.max` plus the presence of `cgroup.kill` on a root-managed transient child cgroup.
+The pinned NixOS supplement closes only part of the host-baseline gap in the initial run. On both architectures it boots a disposable VM from exact nixpkgs revision `6713828a351efa628b025a1adf7f43cbf8597513` (`sha256-Fd3OB8J9JhgliQwOKcqx4M672CInxi1I5VnwsaXeSQo=`), verifies Linux 6.12.108 and systemd 260.2, behaviorally proves QEMU-enforced no-egress, creates all six namespaces together and enters each retained descriptor separately, observes dm-verity capability, records 30-sample distributions, emits raw non-default cgroup values, and exercises `cgroup.kill` on a root-managed transient child cgroup.
 
 ADR-069 is still **not ready for acceptance**. The evidence does not activate an admitted signed SIM1 image, prove the exact transient `Type=exec` security-property matrix and SCS1 readback, force every required limit outcome, emit complete HCP1/PCR1 records, or verify the full cleanup surface. Production implementation remains blocked.
 
@@ -29,8 +29,8 @@ The pinned supplement adds these guest environments:
 
 | Architecture | Guest source | Kernel | systemd | VM acceleration | Result |
 |---|---|---|---|---|---|
-| x86_64 | exact nixpkgs revision; incomplete test-result path record | `6.12.108` | `260 (260.2)` | KVM | Workflow passed |
-| aarch64 | exact nixpkgs revision; incomplete test-result path record | `6.12.108` | `260 (260.2)` | same-architecture TCG | Workflow passed |
+| x86_64 | exact nixpkgs revision and 4,609-entry build-derivation requisite closure | `6.12.108` | `260 (260.2)` | KVM | Workflow passed |
+| aarch64 | exact nixpkgs revision and 3,834-entry build-derivation requisite closure | `6.12.108` | `260 (260.2)` | same-architecture TCG | Workflow passed |
 
 The workflow grants only `contents: read`, disables checkout credential persistence, references no secrets or caches, and pins every action by commit SHA. The initial jobs establish a fresh secretless hosted job and process-level no-host-network execution. The supplemental NixOS VMs additionally set QEMU `restrict=on`; a verified HTTP endpoint on the VM host is unreachable from each guest, behaviorally proving the independent VM egress boundary rather than inferring it from guest route shape.
 
@@ -42,7 +42,7 @@ The workflow grants only `contents: read`, disables checkout credential persiste
 | Route netlink | `rtnetlink` creates, reads back, and deletes uniquely named dummy links | Feasible on both architectures and under eight concurrent attempts |
 | Atomic nftables policy | One typed NFNL batch creates an owned `inet` table, output base chain with default-drop policy, and one exact allow rule for IPv4 TCP `127.0.0.1:443`; table, chain, rule, expressions, and ownership data are read back before table deletion | Feasible on both architectures and under eight concurrent attempts |
 | Namespace handles | Parent retains descriptors across child exit and compares namespace inode identity | All six are created together in both pinned guests, but fresh helpers enter each retained descriptor separately; all-six entry in one process remains unproved |
-| cgroup v2 limits | systemd applies `MemoryMax=128 MiB`, `MemorySwapMax=0`, `CPUQuotaPerSecUSec=500000`, `TasksMax=16`, and default `IOWeight=100`; the probe matches `memory.max`, `memory.swap.max`, `cpu.max`, `pids.max`, `io.weight`, and observes `cgroup.kill` before cleanup | Feasible readback on both pinned architectures; delegation, non-default I/O control, raw-value evidence, and exercising `cgroup.kill` remain unproved |
+| cgroup v2 limits | systemd applies `MemoryMax=128 MiB`, `MemorySwapMax=0`, `CPUQuotaPerSecUSec=500000`, `TasksMax=16`, and non-default `IOWeight=200`; the probe emits and matches raw `memory.max`, `memory.swap.max`, `cpu.max`, `pids.max`, and `io.weight`, writes `1` to `cgroup.kill`, reaps the worker, and proves unit removal | Feasible on both pinned architectures; cgroup delegation and D-Bus delegation readback remain unproved |
 | dm-verity | Capability probe checks `/sys/module/dm_verity` and `/dev/mapper/control` and refuses unsigned/path-based substitution | Host mechanism present in both pinned guests; signed SIM1 activation remains unproved |
 | Broker death | Attempt scope is bound to the broker scope; worker and descendant termination plus both-unit disappearance are verified | 46.188 ms x86_64; 38.431 ms aarch64 |
 | Restart reconciliation | A later controller invocation discovers and stops an injected orphan scope, then verifies worker, descendant, and unit absence | 51.752 ms x86_64; 43.607 ms aarch64 |
@@ -62,6 +62,19 @@ Each architecture recorded 30 normal launches/cleanups, 30 cancellation launches
 | aarch64 | Forced | 22.503 ms | 105.137 ms | 2 s / 5 s | Pass |
 
 The complete primitive lifecycle p95 was 36.291 ms on x86_64 and 39.048 ms on aarch64. Restart reconciliation remained far below the 10-second ADR threshold.
+
+The strengthened pinned-host run repeated the same sample counts on Linux 6.12.108 and systemd 260.2:
+
+| Architecture | Mode | Launch p95 | Cleanup p95 | Result |
+|---|---|---:|---:|---|
+| x86_64 | Normal | 34.618 ms | 85.331 ms | Pass |
+| x86_64 | Cancellation | 38.683 ms | 89.188 ms | Pass |
+| x86_64 | Forced | 38.792 ms | 195.521 ms | Pass |
+| aarch64 TCG | Normal | 206.262 ms | 1,008.718 ms | Pass |
+| aarch64 TCG | Cancellation | 197.715 ms | 1,097.645 ms | Pass |
+| aarch64 TCG | Forced | 226.071 ms | 1,135.263 ms | Pass |
+
+Pinned complete-lifecycle p95 was 43.254 ms on x86_64 and 325.807 ms on aarch64 TCG. Every result remains below the ADR thresholds.
 
 ## DependencyEvidence
 
@@ -91,11 +104,10 @@ The pinned-host prototype source digest is `3d6d449d798183994b94c9555cd78b54c8e4
 1. Supply an admitted signed SIM1 image, verification keyring, immutable image handles, and dm-verity-capable host; prove activation and exact mounted identity. No unsigned compatibility path is allowed.
 2. Prove a transient `Type=exec` service with every section 6 security property and the selected SCS1 requested/effective syscall arrays read back exactly.
 3. Force and observe the mandatory memory, task, CPU-watchdog, file, and output outcomes rather than relying only on configured-limit readback.
-4. Enter all six retained namespace descriptors in one process, use a delegated cgroup, exercise `cgroup.kill`, and prove non-default I/O control with raw values.
-5. Record the required 30-sample distributions on both pinned host classes and preserve a complete durable VM derivation/closure identity.
-6. Emit complete HCP1/PCR1 evidence and verify cleanup of every owned cgroup, namespace, nftables, veth, mount, and tmpfs resource.
-7. Extend the prototype policy to the complete ADR filesystem, endpoint-proxy, bounded capture/replay, revocation, and provenance contract. The current exact allow rule proves nftables mechanics only.
+4. Enter all six retained namespace descriptors in one process and use a delegated cgroup with exact D-Bus delegation readback.
+5. Emit complete HCP1/PCR1 evidence and verify cleanup of every owned cgroup, namespace, nftables, veth, mount, and tmpfs resource.
+6. Extend the prototype policy to the complete ADR filesystem, endpoint-proxy, bounded capture/replay, revocation, and provenance contract. The current exact allow rule proves nftables mechanics only.
 
 ## Preserved raw evidence
 
-The repository preserves both architecture host identities, initial results, cgroup read-back, eight-attempt summaries, all 90 cleanup samples, all 30 lifecycle samples, p95 summaries, broker-death and restart-reconciliation traces, the complete dependency graph/package list, source digest, compiler identity, and cargo-deny conclusion in [`docs/research/evidence/sandbox-provider-211`](evidence/sandbox-provider-211/). Run 34036714171 additionally preserves the exact flake identity, VM transcript, and only the 96-byte successful test-result output path for each pinned architecture; the latter is not a complete VM closure. The durable Redmine archives are [x86_64](https://redmine.piglor.com/attachments/download/8/ticket-211-pinned-host-x86_64-run-34036714171.zip), SHA-256 `f9fe1324aaf7876fd11f547531cac80e56719e74418c8b24b8d0f71ef2c43a98`, and [aarch64](https://redmine.piglor.com/attachments/download/9/ticket-211-pinned-host-aarch64-run-34036714171.zip), SHA-256 `de34c4f4ecde8eeed08c3f87f5e61bda90447b8951dd8aa7da1137580290db55`.
+The repository preserves both architecture host identities, initial results, cgroup read-back, eight-attempt summaries, all 90 cleanup samples, all 30 lifecycle samples, p95 summaries, broker-death and restart-reconciliation traces, the complete dependency graph/package list, source digest, compiler identity, and cargo-deny conclusion in [`docs/research/evidence/sandbox-provider-211`](evidence/sandbox-provider-211/). Run 34037903952 additionally preserves the exact flake identity, full VM transcript, pinned-host distributions, and sorted build-derivation requisite closure for each architecture. The strengthened durable Redmine archives are [x86_64](https://redmine.piglor.com/attachments/download/10/ticket-211-pinned-host-x86_64-run-34037903952.zip), SHA-256 `26398d82d4afa0e625862c99580acdd4a559a7a94158fc6c0df8496e1d96e917`, and [aarch64](https://redmine.piglor.com/attachments/download/11/ticket-211-pinned-host-aarch64-run-34037903952.zip), SHA-256 `76f55fd8ec1727e58b8ae340d8772bc1fe7282c0626d46a1e688e5d163ffed40`. The earlier attachments 8/9 remain historical evidence of the incomplete output-path recording and are superseded by attachments 10/11.
