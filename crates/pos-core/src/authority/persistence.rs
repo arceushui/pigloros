@@ -434,23 +434,21 @@ impl AuthorityPersistenceStateV1 {
         {
             return Err(AuthorityPersistenceErrorV1::InvalidRecord);
         }
-        let grants = match self
+        let grants_result = self
             .grants
             .values()
             .map(|grant| grant.encode().map(|encoded| bytes(encoded.as_slice())))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(grants) => grants,
-            Err(error) => return Err(error.into()),
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(grants) = grants_result else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
         };
-        let revocations = match self
+        let revocations_result = self
             .revocations
             .values()
             .map(|revocation| revocation.encode().map(|encoded| bytes(encoded.as_slice())))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(revocations) => revocations,
-            Err(error) => return Err(error),
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(revocations) = revocations_result else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
         };
         let timelines = self
             .timelines
@@ -486,9 +484,9 @@ impl AuthorityPersistenceStateV1 {
     /// Returns a closed error without accepting missing, malformed, reordered, or
     /// conflicting authority evidence.
     pub fn from_persistence_bytes(bytes: &[u8]) -> Result<Self, AuthorityPersistenceErrorV1> {
-        let fields = match decode_bounded_array(bytes, MAX_PERSISTED_AUTHORITY_STATE_BYTES, 5) {
-            Ok(fields) => fields,
-            Err(error) => return Err(error.into()),
+        let fields_result = decode_bounded_array(bytes, MAX_PERSISTED_AUTHORITY_STATE_BYTES, 5);
+        let Ok(fields) = fields_result else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
         };
         if expect_header(&fields, PERSISTENCE_MAGIC).is_err() {
             return Err(AuthorityPersistenceErrorV1::InvalidRecord);
