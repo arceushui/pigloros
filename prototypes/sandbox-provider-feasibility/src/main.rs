@@ -217,11 +217,12 @@ async fn start_transient_scope(
         ("SendSIGKILL".to_owned(), OwnedValue::from(true)),
         (
             "TimeoutStopUSec".to_owned(),
-            OwnedValue::from(5_000_000_u64),
+            OwnedValue::from(1_000_000_u64),
         ),
     ];
     if !binds_to.is_empty() {
         properties.push(("BindsTo".to_owned(), owned_value(binds_to.to_vec())?));
+        properties.push(("After".to_owned(), owned_value(binds_to.to_vec())?));
     }
     proxy
         .start_transient_unit(name.to_owned(), "fail".to_owned(), properties, vec![])
