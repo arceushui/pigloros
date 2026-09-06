@@ -15,8 +15,10 @@ mod knowledge;
 mod persistence;
 
 pub use knowledge::{
-    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1, ObservationStatusV1,
-    MAX_OBSERVATION_ARTIFACT_BYTES, MAX_OBSERVATION_RECORD_BYTES,
+    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
+    MAX_OBSERVATION_ARTIFACT_BYTES, MAX_OBSERVATION_RECORD_BYTES, MAX_OBSERVATION_SNAPSHOT_BYTES,
+    MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 pub use persistence::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
