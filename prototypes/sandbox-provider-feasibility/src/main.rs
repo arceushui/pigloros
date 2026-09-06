@@ -166,6 +166,11 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
         println!("broker-setup-rejected;reason=attempt-scope");
         return;
     }
+    if !wait_for_unit_cgroup(worker.id(), &attempt_unit) {
+        let _ = worker.kill();
+        println!("broker-setup-rejected;reason=attempt-scope-attachment");
+        return;
+    }
     let Some(mut worker_stdin) = worker.stdin.take() else {
         let _ = worker.kill();
         println!("broker-setup-rejected;reason=worker-stdin");
@@ -199,6 +204,24 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
     );
     let _ = std::io::stdout().flush();
     std::future::pending::<()>().await;
+}
+
+fn wait_for_unit_cgroup(pid: u32, unit: &str) -> bool {
+    let expected_suffix = format!("/{unit}");
+    for _ in 0..100 {
+        let attached =
+            std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|cgroups| {
+                cgroups
+                    .lines()
+                    .filter_map(|line| line.split_once("::"))
+                    .any(|(_, path)| path.ends_with(&expected_suffix))
+            });
+        if attached {
+            return true;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
 }
 
 async fn start_transient_scope(
