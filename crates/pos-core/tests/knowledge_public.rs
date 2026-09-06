@@ -18,7 +18,7 @@ trait TestOk<T> {
 
 impl<T, E: std::fmt::Debug> TestOk<T> for Result<T, E> {
     fn test_ok(self) -> T {
-        assert!(self.is_ok(), "unexpected fixture error: {self:?}");
+        assert!(self.is_ok(), "unexpected fixture error");
         self.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
         })
@@ -126,8 +126,8 @@ fn knowledge_snapshot_preserves_epistemic_and_revision_meanings() {
         snapshot.observation_snapshot_digest(),
         hash_from_repeated_byte(25)
     );
-    assert_eq!(snapshot.observations(), &[observation]);
-    assert_eq!(snapshot.beliefs(), &[belief]);
+    assert_eq!(snapshot.observations(), std::slice::from_ref(&observation));
+    assert_eq!(snapshot.beliefs(), std::slice::from_ref(&belief));
     assert_eq!(belief.entity_id(), participant_id);
     assert_eq!(belief.predicate(), "prefers.tea");
     assert_eq!(belief.confidence().millionths(), 750_000);
