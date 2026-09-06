@@ -114,6 +114,88 @@ fn capability_grant(
     .test_ok()
 }
 
+fn consent_grant(
+    ids: &FixtureIds,
+    actor_id: EntityId,
+    subject_id: EntityId,
+    consent_id: Hash,
+    registry_digest: Hash,
+    policy_revision: Hash,
+) -> ConsentGrantRefV1 {
+    ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+        consent_id,
+        subject_id,
+        grantee_id: actor_id,
+        data_categories: vec!["profile.preferences".to_owned()],
+        purposes: vec!["planning".to_owned()],
+        audiences: vec!["local-host".to_owned()],
+        action_classes: vec!["observe".to_owned()],
+        valid_from: WallTime::from_micros(1),
+        valid_until: WallTime::from_micros(100),
+        withdrawal_retention_policy: "erase-derived-data".to_owned(),
+        policy_revision,
+        issuer: ids.principal.clone(),
+        issuer_evidence: hash_from_repeated_byte(9),
+        consent_timeline: ids.authority_timeline,
+        grant_position: Seq::from_u64(5),
+        status: ConsentGrantStatusV1::Active,
+        revocation_fence: None,
+        authority_registry_digest: registry_digest,
+    })
+    .test_ok()
+}
+
+fn authorization_request(
+    ids: &FixtureIds,
+    actor_id: EntityId,
+    subject_id: EntityId,
+    registry_digest: Hash,
+    policy_revision: Hash,
+    consent: ConsentGrantRefV1,
+) -> AuthorizationRequestV1 {
+    let authenticated =
+        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+            principal: ids.principal.clone(),
+            adapter_id: "test-adapter".to_owned(),
+            assurance: AssuranceLevelV1::try_new(1).test_ok(),
+            issued_at: WallTime::from_micros(1),
+            expires_at: WallTime::from_micros(100),
+            binding_digest: hash_from_repeated_byte(5),
+        })
+        .test_ok();
+    AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
+        authenticated,
+        actor_entity_id: actor_id,
+        subject_id: Some(subject_id),
+        participant_id: Some(ids.participant_id),
+        plugin_id: Some(ids.plugin_id),
+        installation_id: Some([11; 16]),
+        principal_role: AuthorityRoleV1::Actor,
+        resource: "projection.profile".to_owned(),
+        data_category: "profile.preferences".to_owned(),
+        action: "observe".to_owned(),
+        purpose: "planning".to_owned(),
+        audience: "local-host".to_owned(),
+        at_time: WallTime::from_micros(10),
+        authority_timeline: ids.authority_timeline,
+        at_position: Seq::from_u64(10),
+        consent_timeline: Some(ids.authority_timeline),
+        consent_at_position: Some(Seq::from_u64(10)),
+        use_count: 1,
+        budget: 5,
+        consent_policy_revision: policy_revision,
+        capability_policy_revision: policy_revision,
+        revocation_epoch: 0,
+        revocation_state_current: true,
+        authority_registry_digest: registry_digest,
+        consent: ConsentEvidenceV1::Resolved {
+            grants: vec![consent],
+        },
+        environment_constraints: vec!["local-only".to_owned()],
+    })
+    .test_ok()
+}
+
 fn knowledge_snapshot(snapshot: &pos_core::ObservationSnapshotV1) -> KnowledgeSnapshotV1 {
     KnowledgeSnapshotV1::try_from_observation_snapshot(
         KnowledgeSnapshotDraftV1 {
@@ -154,27 +236,14 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
     let actor_id = EntityId::new();
     let subject_id = EntityId::new();
     let consent_id = hash_from_repeated_byte(8);
-    let consent = ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
-        consent_id,
+    let consent = consent_grant(
+        &ids,
+        actor_id,
         subject_id,
-        grantee_id: actor_id,
-        data_categories: vec!["profile.preferences".to_owned()],
-        purposes: vec!["planning".to_owned()],
-        audiences: vec!["local-host".to_owned()],
-        action_classes: vec!["observe".to_owned()],
-        valid_from: WallTime::from_micros(1),
-        valid_until: WallTime::from_micros(100),
-        withdrawal_retention_policy: "erase-derived-data".to_owned(),
+        consent_id,
+        registry_digest,
         policy_revision,
-        issuer: ids.principal.clone(),
-        issuer_evidence: hash_from_repeated_byte(9),
-        consent_timeline: ids.authority_timeline,
-        grant_position: Seq::from_u64(5),
-        status: ConsentGrantStatusV1::Active,
-        revocation_fence: None,
-        authority_registry_digest: registry_digest,
-    })
-    .test_ok();
+    );
     let grant = capability_grant(
         &ids,
         actor_id,
@@ -184,47 +253,14 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
         policy_revision,
     );
     let grant_binding = grant.binding_digest().test_ok();
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-            principal: ids.principal.clone(),
-            adapter_id: "test-adapter".to_owned(),
-            assurance: AssuranceLevelV1::try_new(1).test_ok(),
-            issued_at: WallTime::from_micros(1),
-            expires_at: WallTime::from_micros(100),
-            binding_digest: hash_from_repeated_byte(5),
-        })
-        .test_ok();
-    let request = AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
-        authenticated,
-        actor_entity_id: actor_id,
-        subject_id: Some(subject_id),
-        participant_id: Some(ids.participant_id),
-        plugin_id: Some(ids.plugin_id),
-        installation_id: Some([11; 16]),
-        principal_role: AuthorityRoleV1::Actor,
-        resource: "projection.profile".to_owned(),
-        data_category: "profile.preferences".to_owned(),
-        action: "observe".to_owned(),
-        purpose: "planning".to_owned(),
-        audience: "local-host".to_owned(),
-        at_time: WallTime::from_micros(10),
-        authority_timeline: ids.authority_timeline,
-        at_position: Seq::from_u64(10),
-        consent_timeline: Some(ids.authority_timeline),
-        consent_at_position: Some(Seq::from_u64(10)),
-        use_count: 1,
-        budget: 5,
-        consent_policy_revision: policy_revision,
-        capability_policy_revision: policy_revision,
-        revocation_epoch: 0,
-        revocation_state_current: true,
-        authority_registry_digest: registry_digest,
-        consent: ConsentEvidenceV1::Resolved {
-            grants: vec![consent.clone()],
-        },
-        environment_constraints: vec!["local-only".to_owned()],
-    })
-    .test_ok();
+    let request = authorization_request(
+        &ids,
+        actor_id,
+        subject_id,
+        registry_digest,
+        policy_revision,
+        consent.clone(),
+    );
     let authentication_binding = request.authenticated().registry_binding_digest();
     let authority_registry = AuthorityRegistrySnapshotV1::try_new(
         registry_digest,
@@ -665,11 +701,14 @@ fn consent_revocation_after_staging_aborts_before_append() {
         Seq::from_u64(11),
     ))
     .contains("consent evidence is missing"));
-    let state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(state.aborts, 1);
-    assert_eq!(state.commits, 0);
+    let (aborts, commits) = {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.aborts, state.commits)
+    };
+    assert_eq!(aborts, 1);
+    assert_eq!(commits, 0);
 }
 
 #[test]
