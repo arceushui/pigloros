@@ -3,9 +3,9 @@ use pos_core::{
     AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
-    Event, EventId, Hash, Kind, PluginId, PrincipalRefV1, Reducer, SchemaVersion, Seq, State,
-    TimelineId, WallTime,
+    ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1,
+    DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationStatusV1, PluginId,
+    PrincipalRefV1, Reducer, SchemaVersion, Seq, State, TimelineId, WallTime,
 };
 use pos_state::{ProjectionObservationContextV1, ProjectionRegistry};
 use std::fmt::Debug;
@@ -60,6 +60,21 @@ impl Reducer for CountReducer {
     }
 }
 
+struct NestedReducer;
+
+impl Reducer for NestedReducer {
+    fn initial(&self) -> State {
+        State::new()
+    }
+
+    fn apply(&self, state: &mut State, _: &Event) {
+        state.set(
+            "nested",
+            serde_json::json!({"z": [{"b": 2, "a": 1}], "a": true}),
+        );
+    }
+}
+
 fn event(entity: EntityId, sequence: u64) -> Event {
     Event {
         id: EventId::new(),
@@ -80,6 +95,7 @@ fn event(entity: EntityId, sequence: u64) -> Event {
 struct AuthorityFixture {
     request: AuthorizationRequestV1,
     decision: AuthorizationDecisionV1,
+    chain: DelegationChainV1,
     participant_id: EntityId,
     plugin_id: PluginId,
 }
@@ -224,12 +240,13 @@ fn authority_fixture() -> AuthorityFixture {
         vec![consent.binding_digest()],
     )
     .test_ok();
-    let chain = pos_core::DelegationChainV1::try_from_grants(vec![grant]).test_ok();
+    let chain = DelegationChainV1::try_from_grants(vec![grant]).test_ok();
     let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &registry);
     assert!(decision.is_allowed());
     AuthorityFixture {
         request,
         decision,
+        chain,
         participant_id,
         plugin_id,
     }
@@ -302,5 +319,82 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
             context(TimelineId::new()),
         ),
         Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
+    );
+}
+
+#[test]
+fn materialization_represents_absence_without_inventing_an_artifact() {
+    let fixture = authority_fixture();
+    let mut registry = ProjectionRegistry::new();
+    registry.register("profile", Box::new(CountReducer));
+
+    let snapshot = registry
+        .materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            context(TimelineId::new()),
+        )
+        .test_ok();
+    let record = &snapshot.records()[0];
+    assert_eq!(record.status(), ObservationStatusV1::NotObserved);
+    assert_eq!(record.artifact_digest(), None);
+}
+
+#[test]
+fn materialization_canonicalizes_nested_projection_values() {
+    let fixture = authority_fixture();
+    let subject = fixture.request.subject_id().test_ok();
+    let mut registry = ProjectionRegistry::new();
+    registry.register("nested", Box::new(NestedReducer));
+    registry.fold_events(&[event(subject, 1)]);
+    let mut observation_context = context(TimelineId::new());
+    observation_context.reducer = "nested".to_owned();
+
+    let snapshot = registry
+        .materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            observation_context,
+        )
+        .test_ok();
+    let digest = snapshot.records()[0].artifact_digest().test_ok();
+    assert_eq!(
+        snapshot.artifact(digest).test_ok().bytes().as_slice(),
+        br#"{"nested":{"a":true,"z":[{"a":1,"b":2}]}}"#
+    );
+}
+
+#[test]
+fn materialization_rejects_denied_authority_and_empty_reducer_names() {
+    let fixture = authority_fixture();
+    let untrusted_registry = AuthorityRegistrySnapshotV1::try_new(
+        fixture.request.authority_registry_digest(),
+        vec![fixture.request.authenticated().registry_binding_digest()],
+        Vec::new(),
+        Vec::new(),
+    )
+    .test_ok();
+    let denied =
+        AuthorityEvaluatorV1::authorize(&fixture.request, &fixture.chain, &untrusted_registry);
+    assert!(!denied.is_allowed());
+    let registry = ProjectionRegistry::new();
+    assert_eq!(
+        registry.materialize_authorized_observation(
+            &fixture.request,
+            &denied,
+            context(TimelineId::new()),
+        ),
+        Err(denied.error().test_ok())
+    );
+
+    let mut observation_context = context(TimelineId::new());
+    observation_context.reducer.clear();
+    assert_eq!(
+        registry.materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            observation_context,
+        ),
+        Err(pos_core::AuthorityErrorV1::FieldOutOfBounds)
     );
 }
