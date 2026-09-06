@@ -11,8 +11,13 @@ use ciborium::Value;
 
 use crate::{CanonicalBytes, EntityId, Hash, PluginId, Seq, TimelineId, WallTime};
 
+mod knowledge;
 mod persistence;
 
+pub use knowledge::{
+    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1, ObservationStatusV1,
+    MAX_OBSERVATION_ARTIFACT_BYTES, MAX_OBSERVATION_RECORD_BYTES,
+};
 pub use persistence::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
