@@ -5,14 +5,14 @@ on:
     branches:
       - codex/ticket-211-sandbox-provider-prototype-v2
     paths:
-      - "prototypes/sandbox-provider-feasibility/**"
-      - ".github/workflows/sandbox-provider-prototype.yml"
-      - "docs/research/sandbox-provider-*.md"
+      - prototypes/sandbox-provider-feasibility/**
+      - .github/workflows/sandbox-provider-prototype.yml
+      - docs/research/sandbox-provider-*.md
   pull_request:
     paths:
-      - "prototypes/sandbox-provider-feasibility/**"
-      - ".github/workflows/sandbox-provider-prototype.yml"
-      - "docs/research/sandbox-provider-*.md"
+      - prototypes/sandbox-provider-feasibility/**
+      - .github/workflows/sandbox-provider-prototype.yml
+      - docs/research/sandbox-provider-*.md
   workflow_dispatch:
 
 concurrency:
@@ -131,7 +131,7 @@ jobs:
           find src -type f -print0 | sort -z | xargs -0 b3sum >source-digests.txt
           rustc --version --verbose >rust-toolchain-evidence.txt
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sandbox-provider-prototype-evidence-${{ matrix.architecture }}
           path: |

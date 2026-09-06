@@ -1,0 +1,6 @@
+paths:
+  .github/workflows/sandbox-provider-prototype.yml:
+    # GitHub already schedules these 26.04 hosted labels, but actionlint 1.7.12
+    # predates them. Keep validation strict for every other runner label.
+    ignore:
+      - 'label "ubuntu-26\.04(-arm)?" is unknown\.'
