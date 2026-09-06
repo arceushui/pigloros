@@ -113,13 +113,12 @@ impl AuthorizationCacheV1 {
             .fold(first_grant.valid_until_position(), |shortest, grant| {
                 shortest.min(grant.valid_until_position())
             });
-        let chain_bindings = match grants
+        let chain_bindings_result = grants
             .iter()
             .map(pos_core::CapabilityGrantV1::binding_digest)
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(bindings) => bindings,
-            Err(_) => return None,
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(chain_bindings) = chain_bindings_result else {
+            return None;
         };
         let authentication_expiry = request.authenticated().expires_at();
         let expires_at = match request.consent() {
