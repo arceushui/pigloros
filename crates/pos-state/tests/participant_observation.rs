@@ -3,8 +3,9 @@ use pos_core::{
     AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentEvidenceV1, EntityId, Event, EventId, Hash, Kind, PluginId, PrincipalRefV1, Reducer,
-    SchemaVersion, Seq, State, TimelineId, WallTime,
+    ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
+    Event, EventId, Hash, Kind, PluginId, PrincipalRefV1, Reducer, SchemaVersion, Seq, State,
+    TimelineId, WallTime,
 };
 use pos_state::{ProjectionObservationContextV1, ProjectionRegistry};
 use std::fmt::Debug;
@@ -93,7 +94,29 @@ fn authority_fixture() -> AuthorityFixture {
     let authority_timeline = TimelineId::new();
     let policy_revision = hash_from_repeated_byte(3);
     let registry_digest = hash_from_repeated_byte(4);
+    let consent_id = hash_from_repeated_byte(5);
     let authenticated = authenticated_principal(principal.clone());
+    let consent = ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+        consent_id,
+        subject_id: subject,
+        grantee_id: actor,
+        data_categories: vec!["profile.preferences".to_owned()],
+        purposes: vec!["planning".to_owned()],
+        audiences: vec!["local-host".to_owned()],
+        action_classes: vec!["observe".to_owned()],
+        valid_from: WallTime::from_micros(1),
+        valid_until: WallTime::from_micros(100),
+        withdrawal_retention_policy: "erase-derived-data".to_owned(),
+        policy_revision,
+        issuer: principal.clone(),
+        issuer_evidence: hash_from_repeated_byte(12),
+        consent_timeline: authority_timeline,
+        grant_position: Seq::from_u64(5),
+        status: ConsentGrantStatusV1::Active,
+        revocation_fence: None,
+        authority_registry_digest: registry_digest,
+    })
+    .test_ok();
     let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
         resources: vec!["projection.profile".to_owned()],
         actions: vec!["observe".to_owned()],
@@ -125,7 +148,7 @@ fn authority_fixture() -> AuthorityFixture {
         delegation_depth: 0,
         max_delegation_depth: 0,
         permitted_delegate_classes: Vec::new(),
-        consent_references: Vec::new(),
+        consent_references: vec![consent_id],
         policy_revision,
         issuance_timeline: authority_timeline,
         issuance_seq: Seq::from_u64(1),
@@ -159,7 +182,9 @@ fn authority_fixture() -> AuthorityFixture {
         revocation_epoch: 0,
         revocation_state_current: true,
         authority_registry_digest: registry_digest,
-        consent: ConsentEvidenceV1::NotRequired,
+        consent: ConsentEvidenceV1::Resolved {
+            grants: vec![consent.clone()],
+        },
         environment_constraints: vec!["local-only".to_owned()],
     })
     .test_ok();
@@ -167,7 +192,7 @@ fn authority_fixture() -> AuthorityFixture {
         registry_digest,
         vec![request.authenticated().registry_binding_digest()],
         vec![grant.binding_digest().test_ok()],
-        Vec::new(),
+        vec![consent.binding_digest()],
     )
     .test_ok();
     let chain = pos_core::DelegationChainV1::try_from_grants(vec![grant]).test_ok();
