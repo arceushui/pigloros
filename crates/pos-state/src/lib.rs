@@ -479,7 +479,7 @@ impl ProjectionRegistry {
                     source_timeline: context.timeline_id,
                     source_position: context.observed_through,
                     schema: policy.schema().to_owned(),
-                    source_digest: artifact_digest.unwrap_or(policy.digest()),
+                    source_digest: artifact_digest.unwrap_or_else(|| policy.digest()),
                     projection_digest,
                     provenance_digest: policy.digest(),
                     minimization_revision: policy.minimization_revision(),
