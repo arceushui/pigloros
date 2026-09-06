@@ -580,6 +580,25 @@ mod tests {
         decision_with_capability_trust(authority_timeline, true)
     }
 
+    fn authority_registry(
+        request: &AuthorizationRequestV1,
+        grant: &CapabilityGrantV1,
+        registry_digest: Hash,
+        trust_capability: bool,
+    ) -> AuthorityRegistrySnapshotV1 {
+        let capability_bindings = if trust_capability {
+            vec![test_ok(grant.binding_digest())]
+        } else {
+            vec![]
+        };
+        test_ok(AuthorityRegistrySnapshotV1::try_new(
+            registry_digest,
+            vec![request.authenticated().registry_binding_digest()],
+            capability_bindings,
+            vec![],
+        ))
+    }
+
     fn decision_with_capability_trust(
         authority_timeline: TimelineId,
         trust_capability: bool,
@@ -666,17 +685,7 @@ mod tests {
                 environment_constraints: vec!["local-only".to_owned()],
             },
         ));
-        let capability_bindings = if trust_capability {
-            vec![test_ok(grant.binding_digest())]
-        } else {
-            vec![]
-        };
-        let registry = test_ok(AuthorityRegistrySnapshotV1::try_new(
-            registry_digest,
-            vec![request.authenticated().registry_binding_digest()],
-            capability_bindings,
-            vec![],
-        ));
+        let registry = authority_registry(&request, &grant, registry_digest, trust_capability);
         let chain = test_ok(DelegationChainV1::try_from_grants(vec![grant.clone()]));
         let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &registry);
         let mut state = AuthorityPersistenceStateV1::new();
