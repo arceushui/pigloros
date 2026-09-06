@@ -5,10 +5,13 @@
 use futures_util::TryStreamExt as _;
 use netlink_packet_core::{
     Emitable as _, NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE,
-    NLM_F_EXCL, NLM_F_REQUEST,
+    NLM_F_EXCL, NLM_F_MATCH, NLM_F_REQUEST, NLM_F_ROOT,
 };
 use netlink_packet_netfilter::nftables::{
-    GenMessage, NfTablesMessage, TableAttribute, TableMessage,
+    ChainAttribute, ChainMessage, Cmp, DataAttribute, ExpressionAttribute, Expressions, GenMessage,
+    Hook, Immediate, InetHookNumber, ListAttribute, Meta, MetaKey, NfTablesMessage, Operator,
+    Payload, Register, RuleAttribute, RuleMessage, TableAttribute, TableMessage, Verdict,
+    VerdictAttribute,
 };
 use netlink_packet_netfilter::{
     none::ControlMessage, NetfilterHeader, NetfilterMessage, NetfilterMessageInner,
@@ -26,6 +29,8 @@ use std::{
     time::{Duration, Instant},
 };
 use zbus::zvariant::{OwnedValue, Type, Value};
+
+const CONTROL_PLANE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() {
@@ -550,15 +555,28 @@ fn isolate_network() -> &'static str {
 }
 
 async fn probe_systemd() -> &'static str {
-    let Ok(connection) = zbus::Connection::system().await else {
+    let Ok(Ok(connection)) =
+        tokio::time::timeout(CONTROL_PLANE_PROBE_TIMEOUT, zbus::Connection::system()).await
+    else {
         return "unavailable";
     };
-    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
+    let Ok(Ok(proxy)) = tokio::time::timeout(
+        CONTROL_PLANE_PROBE_TIMEOUT,
+        zbus_systemd::systemd1::ManagerProxy::new(&connection),
+    )
+    .await
+    else {
         return "unavailable";
     };
-    match proxy.get_unit("-.mount".to_owned()).await {
-        Ok(_) => "typed-get-unit-ok",
-        Err(_) => "typed-get-unit-rejected",
+    match tokio::time::timeout(
+        CONTROL_PLANE_PROBE_TIMEOUT,
+        proxy.get_unit("-.mount".to_owned()),
+    )
+    .await
+    {
+        Err(_) => "typed-get-unit-timeout",
+        Ok(Ok(_)) => "typed-get-unit-ok",
+        Ok(Err(_)) => "typed-get-unit-rejected",
     }
 }
 
@@ -568,10 +586,11 @@ async fn probe_route_netlink() -> &'static str {
     };
     tokio::spawn(connection);
     let mut links = handle.link().get().execute();
-    match links.try_next().await {
-        Ok(Some(_)) => "typed-link-read-ok",
-        Ok(None) => "typed-link-read-empty",
-        Err(_) => "typed-link-read-rejected",
+    match tokio::time::timeout(CONTROL_PLANE_PROBE_TIMEOUT, links.try_next()).await {
+        Err(_) => "typed-link-read-timeout",
+        Ok(Ok(Some(_))) => "typed-link-read-ok",
+        Ok(Ok(None)) => "typed-link-read-empty",
+        Ok(Err(_)) => "typed-link-read-rejected",
     }
 }
 
@@ -665,10 +684,6 @@ fn probe_nftables_read() -> &'static str {
     }
 }
 
-// This is one nftables transaction containing one table object.  It proves
-// direct typed install/read-back/delete and deliberately does not claim the
-// ADR's larger default-drop-plus-allow-rules transaction; that needs a tested
-// batch-envelope implementation before it can be evidence.
 fn probe_nftables_atomic_table(attempt_id: &str) -> &'static str {
     let Ok(mut socket) = Socket::new(NETLINK_NETFILTER) else {
         return "socket-unavailable";
@@ -678,39 +693,151 @@ fn probe_nftables_atomic_table(attempt_id: &str) -> &'static str {
     }
 
     let table_name = format!("pgl211_{attempt_id}");
+    let chain_name = "broker_output".to_owned();
     let ownership = format!("pigloros:#211:{attempt_id}:throwaway");
-    let create = NfTablesMessage::NewTable(TableMessage {
+    let table = NfTablesMessage::NewTable(TableMessage {
         attributes: vec![
             TableAttribute::Name(table_name.clone()),
             TableAttribute::UserData(ownership.as_bytes().to_vec()),
         ],
     });
-    if nftables_batch_request(&socket, create, NLM_F_CREATE | NLM_F_EXCL, 1).is_err() {
+    let chain = NfTablesMessage::NewChain(ChainMessage {
+        attributes: vec![
+            ChainAttribute::Table(table_name.clone()),
+            ChainAttribute::Name(chain_name.clone()),
+            ChainAttribute::Policy(0),
+            ChainAttribute::Type("filter".to_owned()),
+            ChainAttribute::Hook(vec![
+                Hook::Number(InetHookNumber::LocalOut.into()),
+                Hook::Priority(0),
+            ]),
+            ChainAttribute::UserData(ownership.as_bytes().to_vec()),
+        ],
+    });
+    let rule = NfTablesMessage::NewRule(RuleMessage {
+        attributes: vec![
+            RuleAttribute::Table(table_name.clone()),
+            RuleAttribute::Chain(chain_name.clone()),
+            RuleAttribute::Expressions(broker_allow_expressions()),
+            RuleAttribute::UserData(ownership.as_bytes().to_vec()),
+        ],
+    });
+    let create_flags = NLM_F_CREATE | NLM_F_EXCL;
+    if nftables_batch_request(
+        &socket,
+        vec![
+            (table, create_flags),
+            (chain, create_flags),
+            (rule, create_flags),
+        ],
+        1,
+    )
+    .is_err()
+    {
         return "install-rejected";
     }
 
-    let read_back = NfTablesMessage::GetTable(TableMessage {
+    let table_read_back = NfTablesMessage::GetTable(TableMessage {
         attributes: vec![TableAttribute::Name(table_name.clone())],
     });
-    let read_back_matches = nftables_request(&socket, read_back, 0, 2)
+    let table_matches = nftables_request(&socket, table_read_back, 0, 10)
         .is_ok_and(|reply| table_reply_matches(&reply, &table_name, ownership.as_bytes()));
+    let chain_read_back = NfTablesMessage::GetChain(ChainMessage {
+        attributes: vec![
+            ChainAttribute::Table(table_name.clone()),
+            ChainAttribute::Name(chain_name.clone()),
+        ],
+    });
+    let chain_matches = nftables_request(&socket, chain_read_back, 0, 11).is_ok_and(|reply| {
+        chain_reply_matches(&reply, &table_name, &chain_name, ownership.as_bytes())
+    });
+    let rule_read_back = NfTablesMessage::GetRule(RuleMessage {
+        attributes: vec![
+            RuleAttribute::Table(table_name.clone()),
+            RuleAttribute::Chain(chain_name.clone()),
+        ],
+    });
+    let rule_matches = nftables_dump_request(&socket, rule_read_back, 12).is_ok_and(|replies| {
+        replies
+            .iter()
+            .any(|reply| rule_reply_matches(reply, &table_name, &chain_name, ownership.as_bytes()))
+    });
 
     let delete = NfTablesMessage::DeleteTable(TableMessage {
         attributes: vec![TableAttribute::Name(table_name)],
     });
-    let deleted = nftables_batch_request(&socket, delete, 0, 3).is_ok();
+    let deleted = nftables_batch_request(&socket, vec![(delete, 0)], 20).is_ok();
 
-    match (read_back_matches, deleted) {
-        (true, true) => "typed-install-read-back-delete-ok",
-        (false, true) => "read-back-mismatch-cleaned",
+    match (table_matches && chain_matches && rule_matches, deleted) {
+        (true, true) => "typed-default-drop-allow-read-back-delete-ok",
+        (false, true) => "policy-read-back-mismatch-cleaned",
         (_, false) => "delete-rejected-needs-reconcile",
     }
 }
 
+fn broker_allow_expressions() -> Vec<ListAttribute<ExpressionAttribute>> {
+    vec![
+        Expressions::Meta(vec![
+            Meta::Key(MetaKey::Nfproto),
+            Meta::DestinationRegister(Register::Reg1),
+        ])
+        .into(),
+        Expressions::Cmp(vec![
+            Cmp::SourceRegister(Register::Reg1),
+            Cmp::Op(Operator::Equal),
+            Cmp::Data(DataAttribute::Value(vec![2])),
+        ])
+        .into(),
+        Expressions::Payload(vec![
+            Payload::DestinationRegister(Register::Reg1),
+            Payload::Base(1),
+            Payload::Offset(16),
+            Payload::Len(4),
+        ])
+        .into(),
+        Expressions::Cmp(vec![
+            Cmp::SourceRegister(Register::Reg1),
+            Cmp::Op(Operator::Equal),
+            Cmp::Data(DataAttribute::Value(vec![127, 0, 0, 1])),
+        ])
+        .into(),
+        Expressions::Meta(vec![
+            Meta::Key(MetaKey::L4Proto),
+            Meta::DestinationRegister(Register::Reg1),
+        ])
+        .into(),
+        Expressions::Cmp(vec![
+            Cmp::SourceRegister(Register::Reg1),
+            Cmp::Op(Operator::Equal),
+            Cmp::Data(DataAttribute::Value(vec![6])),
+        ])
+        .into(),
+        Expressions::Payload(vec![
+            Payload::DestinationRegister(Register::Reg1),
+            Payload::Base(2),
+            Payload::Offset(2),
+            Payload::Len(2),
+        ])
+        .into(),
+        Expressions::Cmp(vec![
+            Cmp::SourceRegister(Register::Reg1),
+            Cmp::Op(Operator::Equal),
+            Cmp::Data(DataAttribute::Value(vec![0x01, 0xbb])),
+        ])
+        .into(),
+        Expressions::Immediate(vec![
+            Immediate::DestinationRegister(Register::Verdict),
+            Immediate::Data(DataAttribute::Verdict(vec![VerdictAttribute::Code(
+                Verdict::Other(1),
+            )])),
+        ])
+        .into(),
+    ]
+}
+
 fn nftables_batch_request(
     socket: &Socket,
-    payload: NfTablesMessage,
-    operation_flags: u16,
+    operations: Vec<(NfTablesMessage, u16)>,
     sequence_number: u32,
 ) -> Result<(), ()> {
     const NFTABLES_SUBSYSTEM: u16 = 10;
@@ -723,36 +850,49 @@ fn nftables_batch_request(
         NLM_F_REQUEST,
         sequence_number,
     );
-    let operation = serialize_netfilter_message(
-        NetfilterMessage::new(
-            NetfilterHeader::new(NetfilterProtoFamily::Inet, 0, 0),
-            payload,
-        ),
-        NLM_F_REQUEST | NLM_F_ACK | operation_flags,
-        sequence_number + 1,
-    );
+    let operation_count = u32::try_from(operations.len()).map_err(|_| ())?;
     let end = serialize_netfilter_message(
         NetfilterMessage::new(
             NetfilterHeader::new(NetfilterProtoFamily::Unspec, 0, NFTABLES_SUBSYSTEM),
             ControlMessage::BatchEnd,
         ),
         NLM_F_REQUEST,
-        sequence_number + 2,
+        sequence_number + operation_count + 1,
     );
-    let mut batch = Vec::with_capacity(begin.len() + operation.len() + end.len());
+    let mut batch = Vec::with_capacity(begin.len() + end.len() + operations.len() * 128);
     batch.extend(begin);
-    batch.extend(operation);
+    for (index, (payload, operation_flags)) in operations.into_iter().enumerate() {
+        let offset = u32::try_from(index).map_err(|_| ())? + 1;
+        batch.extend(serialize_netfilter_message(
+            NetfilterMessage::new(
+                NetfilterHeader::new(NetfilterProtoFamily::Inet, 0, 0),
+                payload,
+            ),
+            NLM_F_REQUEST | NLM_F_ACK | operation_flags,
+            sequence_number + offset,
+        ));
+    }
     batch.extend(end);
     socket.send(&batch, 0).map_err(|_| ())?;
 
-    let reply = receive_netfilter_message(socket)?;
-    if reply.header.sequence_number != sequence_number + 1 {
-        return Err(());
+    let mut pending: Vec<u32> = (1..=operation_count)
+        .map(|offset| sequence_number + offset)
+        .collect();
+    while !pending.is_empty() {
+        for reply in receive_netfilter_messages(socket)? {
+            let Some(index) = pending
+                .iter()
+                .position(|sequence| *sequence == reply.header.sequence_number)
+            else {
+                continue;
+            };
+            if !matches!(reply.payload, NetlinkPayload::Error(ref error) if error.code.is_none()) {
+                return Err(());
+            }
+            pending.swap_remove(index);
+        }
     }
-    match reply.payload {
-        NetlinkPayload::Error(error) if error.code.is_none() => Ok(()),
-        _ => Err(()),
-    }
+    Ok(())
 }
 
 fn serialize_netfilter_message(
@@ -770,10 +910,30 @@ fn serialize_netfilter_message(
     bytes
 }
 
-fn receive_netfilter_message(socket: &Socket) -> Result<NetlinkMessage<NetfilterMessage>, ()> {
-    let mut response = vec![0; 8192];
+fn receive_netfilter_messages(
+    socket: &Socket,
+) -> Result<Vec<NetlinkMessage<NetfilterMessage>>, ()> {
+    let mut response = vec![0; 65_536];
     let size = socket.recv(&mut &mut response[..], 0).map_err(|_| ())?;
-    NetlinkMessage::<NetfilterMessage>::deserialize(&response[..size]).map_err(|_| ())
+    let mut messages = Vec::new();
+    let mut offset = 0;
+    while offset < size {
+        let length_bytes: [u8; 4] = response
+            .get(offset..offset + 4)
+            .ok_or(())?
+            .try_into()
+            .map_err(|_| ())?;
+        let length = usize::try_from(u32::from_ne_bytes(length_bytes)).map_err(|_| ())?;
+        if length < 16 || offset + length > size {
+            return Err(());
+        }
+        messages.push(
+            NetlinkMessage::<NetfilterMessage>::deserialize(&response[offset..offset + length])
+                .map_err(|_| ())?,
+        );
+        offset += (length + 3) & !3;
+    }
+    Ok(messages)
 }
 
 fn nftables_request(
@@ -798,13 +958,52 @@ fn nftables_request(
     if socket.send(&bytes, 0).is_err() {
         return Err(());
     }
-    let response = receive_netfilter_message(socket)?;
+    let response = receive_netfilter_messages(socket)?
+        .into_iter()
+        .find(|response| response.header.sequence_number == sequence_number)
+        .ok_or(())?;
     if response.header.sequence_number != sequence_number {
         return Err(());
     }
     match &response.payload {
         NetlinkPayload::Error(error) if error.code.is_some() => Err(()),
         _ => Ok(response),
+    }
+}
+
+fn nftables_dump_request(
+    socket: &Socket,
+    payload: NfTablesMessage,
+    sequence_number: u32,
+) -> Result<Vec<NetlinkMessage<NetfilterMessage>>, ()> {
+    let mut header = NetlinkHeader::default();
+    header.flags = NLM_F_REQUEST | NLM_F_ROOT | NLM_F_MATCH;
+    header.sequence_number = sequence_number;
+    let mut message = NetlinkMessage::new(
+        header,
+        NetlinkPayload::from(NetfilterMessage::new(
+            NetfilterHeader::new(NetfilterProtoFamily::Inet, 0, 0),
+            payload,
+        )),
+    );
+    message.finalize();
+    let mut bytes = vec![0; message.buffer_len()];
+    message.serialize(&mut bytes);
+    socket.send(&bytes, 0).map_err(|_| ())?;
+
+    let mut replies = Vec::new();
+    loop {
+        for reply in receive_netfilter_messages(socket)? {
+            if reply.header.sequence_number != sequence_number {
+                continue;
+            }
+            match reply.payload {
+                NetlinkPayload::Done(_) => return Ok(replies),
+                NetlinkPayload::Error(error) if error.code.is_some() => return Err(()),
+                NetlinkPayload::InnerMessage(_) => replies.push(reply),
+                _ => {}
+            }
+        }
     }
 }
 
@@ -827,6 +1026,61 @@ fn table_reply_matches(
         && table.attributes.iter().any(
             |attribute| matches!(attribute, TableAttribute::UserData(value) if value == ownership),
         )
+}
+
+fn chain_reply_matches(
+    reply: &NetlinkMessage<NetfilterMessage>,
+    table_name: &str,
+    chain_name: &str,
+    ownership: &[u8],
+) -> bool {
+    let NetlinkPayload::InnerMessage(NetfilterMessage {
+        inner: NetfilterMessageInner::NfTables(NfTablesMessage::NewChain(chain)),
+        ..
+    }) = &reply.payload
+    else {
+        return false;
+    };
+    let required = [
+        ChainAttribute::Table(table_name.to_owned()),
+        ChainAttribute::Name(chain_name.to_owned()),
+        ChainAttribute::Policy(0),
+        ChainAttribute::Type("filter".to_owned()),
+        ChainAttribute::Hook(vec![
+            Hook::Number(InetHookNumber::LocalOut.into()),
+            Hook::Priority(0),
+        ]),
+        ChainAttribute::UserData(ownership.to_vec()),
+    ];
+    required
+        .iter()
+        .all(|required_attribute| chain.attributes.contains(required_attribute))
+}
+
+fn rule_reply_matches(
+    reply: &NetlinkMessage<NetfilterMessage>,
+    table_name: &str,
+    chain_name: &str,
+    ownership: &[u8],
+) -> bool {
+    let NetlinkPayload::InnerMessage(NetfilterMessage {
+        inner: NetfilterMessageInner::NfTables(NfTablesMessage::NewRule(rule)),
+        ..
+    }) = &reply.payload
+    else {
+        return false;
+    };
+    rule.attributes
+        .contains(&RuleAttribute::Table(table_name.to_owned()))
+        && rule
+            .attributes
+            .contains(&RuleAttribute::Chain(chain_name.to_owned()))
+        && rule
+            .attributes
+            .contains(&RuleAttribute::Expressions(broker_allow_expressions()))
+        && rule
+            .attributes
+            .contains(&RuleAttribute::UserData(ownership.to_vec()))
 }
 
 // The descriptor, not a named /run/netns entry, is the ownership token.  The

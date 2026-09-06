@@ -106,7 +106,7 @@ jobs:
           test "$(grep -Ec 'typed-create-(stop|auto-cleanup)-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-create-read-delete-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-read-ok' concurrent-summary.txt)" -eq 8
-          test "$(grep -c 'typed-install-read-back-delete-ok' concurrent-summary.txt)" -eq 8
+          test "$(grep -c 'typed-default-drop-allow-read-back-delete-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'retained-fd-create-restore-drop-ok' concurrent-summary.txt)" -eq 8
 
       - name: Prove broker-death descendant cleanup
@@ -278,7 +278,7 @@ jobs:
           test "$(grep -c 'network_isolation=isolated-no-host-net' lifecycle-samples.txt)" -eq 30
           test "$(grep -Ec 'typed-create-(stop|auto-cleanup)-ok' lifecycle-samples.txt)" -eq 30
           test "$(grep -c 'typed-create-read-delete-ok' lifecycle-samples.txt)" -eq 30
-          test "$(grep -c 'typed-install-read-back-delete-ok' lifecycle-samples.txt)" -eq 30
+          test "$(grep -c 'typed-default-drop-allow-read-back-delete-ok' lifecycle-samples.txt)" -eq 30
           test "$(grep -c 'retained-fd-create-restore-drop-ok' lifecycle-samples.txt)" -eq 30
           percentile_95() {
             field="$1"
