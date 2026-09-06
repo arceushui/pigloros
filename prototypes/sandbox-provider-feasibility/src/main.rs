@@ -160,12 +160,8 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
         return;
     }
 
-    let Ok((_worker, worker_line)) = spawn_scoped_worker(
-        &proxy,
-        &attempt_unit,
-        std::slice::from_ref(&broker_unit),
-    )
-    .await
+    let Ok((_worker, worker_line)) =
+        spawn_scoped_worker(&proxy, &attempt_unit, std::slice::from_ref(&broker_unit)).await
     else {
         println!("broker-setup-rejected;reason=attempt-worker");
         return;
