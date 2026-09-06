@@ -601,14 +601,14 @@ fn observation_snapshot_is_authorization_bound_and_content_addressed() {
 fn observation_snapshot_rejects_noncanonical_records_and_unbound_artifacts() {
     let artifact =
         ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed")).test_ok();
-    let mut later = record_draft(ObservationStatusV1::Present, Some(artifact.digest()));
-    later.source_position = Seq::from_u64(8);
-    let later = ObservationRecordV1::try_from_draft(later).test_ok();
-    let earlier = ObservationRecordV1::try_from_draft(record_draft(
+    let later = ObservationRecordV1::try_from_draft(record_draft(
         ObservationStatusV1::Present,
         Some(artifact.digest()),
     ))
     .test_ok();
+    let mut earlier = record_draft(ObservationStatusV1::Present, Some(artifact.digest()));
+    earlier.source_position = Seq::from_u64(6);
+    let earlier = ObservationRecordV1::try_from_draft(earlier).test_ok();
 
     assert_eq!(
         ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
