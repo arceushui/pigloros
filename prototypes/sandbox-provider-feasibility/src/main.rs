@@ -18,7 +18,7 @@ use netlink_packet_netfilter::{
     NetfilterProtoFamily,
 };
 use netlink_sys::{protocols::NETLINK_NETFILTER, Socket, SocketAddr};
-use nix::sched::{setns, unshare, CloneFlags};
+use nix::sched::{unshare, CloneFlags};
 use rtnetlink::{new_connection, LinkDummy};
 use std::{
     fs::File,
@@ -32,12 +32,12 @@ use zbus::zvariant::{OwnedValue, Type, Value};
 
 const CONTROL_PLANE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let arguments: Vec<String> = std::env::args().collect();
     if arguments.iter().any(|argument| argument == "--leaf") {
-        std::future::pending::<()>().await;
-        return;
+        loop {
+            thread::park();
+        }
     }
     if arguments
         .iter()
@@ -53,6 +53,24 @@ async fn main() {
         run_normal_worker();
         return;
     }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--namespace-worker")
+    {
+        run_namespace_worker();
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    else {
+        eprintln!("runtime-unavailable");
+        return;
+    };
+    runtime.block_on(run(arguments));
+}
+
+async fn run(arguments: Vec<String>) {
     let privileged = arguments.iter().any(|argument| argument == "--privileged");
     let network_isolation =
         if privileged && arguments.iter().any(|argument| argument == "--offline") {
@@ -167,6 +185,39 @@ fn run_normal_worker() {
     }
     println!("worker-ready;worker_pid={}", std::process::id());
     let _ = std::io::stdout().flush();
+}
+
+fn run_namespace_worker() {
+    let namespaces = CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWPID
+        | CloneFlags::CLONE_NEWIPC
+        | CloneFlags::CLONE_NEWUTS
+        | CloneFlags::CLONE_NEWUSER
+        | CloneFlags::CLONE_NEWNET;
+    if unshare(namespaces).is_err() {
+        println!("namespace-worker-rejected");
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        println!("namespace-worker-rejected");
+        return;
+    };
+    let Ok(mut leaf) = Command::new(executable)
+        .arg("--leaf")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        println!("namespace-worker-rejected");
+        return;
+    };
+    println!("namespace-worker-ready;leaf_pid={}", leaf.id());
+    let _ = std::io::stdout().flush();
+    let mut release = [0_u8; 1];
+    let _ = std::io::stdin().read_exact(&mut release);
+    let _ = leaf.kill();
+    let _ = leaf.wait();
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1083,32 +1134,87 @@ fn rule_reply_matches(
             .contains(&RuleAttribute::UserData(ownership.to_vec()))
 }
 
-// The descriptor, not a named /run/netns entry, is the ownership token.  The
-// temporary network namespace is entered only by this thread and the original
-// namespace descriptor is retained until after restoration.
+// The descriptor, not a named /run/netns entry, is the ownership token. A
+// single-threaded helper creates the complete namespace set before spawning
+// its PID-namespace child. The broker retains all descriptors across child
+// exit and never re-resolves a mutable path after acquisition.
 fn probe_namespace_descriptor_lifecycle() -> &'static str {
-    let result = thread::spawn(|| {
-        let original = File::open("/proc/thread-self/ns/net").map_err(|_| ())?;
-        let original_inode = original.metadata().map_err(|_| ())?.ino();
-        unshare(CloneFlags::CLONE_NEWNET).map_err(|_| ())?;
-        let retained = File::open("/proc/thread-self/ns/net").map_err(|_| ())?;
-        let retained_inode = retained.metadata().map_err(|_| ())?.ino();
-        if retained_inode == original_inode {
-            return Err(());
-        }
-        setns(&original, CloneFlags::CLONE_NEWNET).map_err(|_| ())?;
-        let restored_inode = File::open("/proc/thread-self/ns/net")
-            .and_then(|namespace| namespace.metadata())
-            .map_err(|_| ())?
-            .ino();
-        (restored_inode == original_inode).then_some(()).ok_or(())
-    })
-    .join();
-    match result {
-        Ok(Ok(())) => "retained-fd-create-restore-drop-ok",
-        Ok(Err(())) => "create-or-restore-rejected",
-        Err(_) => "probe-thread-panicked",
+    match retain_namespace_set_across_child_exit() {
+        Ok(()) => "retained-fd-full-set-child-exit-drop-ok",
+        Err(()) => "full-set-create-or-retain-rejected",
     }
+}
+
+fn retain_namespace_set_across_child_exit() -> Result<(), ()> {
+    const NAMESPACE_NAMES: [&str; 6] = ["mnt", "pid", "ipc", "uts", "user", "net"];
+    let host_inodes = NAMESPACE_NAMES
+        .iter()
+        .map(|name| namespace_inode(format!("/proc/self/ns/{name}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let executable = std::env::current_exe().map_err(|_| ())?;
+    let mut worker = Command::new(executable)
+        .arg("--namespace-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ())?;
+    let worker_stdout = worker.stdout.take().ok_or(())?;
+    let mut ready = String::new();
+    BufReader::new(worker_stdout)
+        .read_line(&mut ready)
+        .map_err(|_| ())?;
+    let leaf_pid = ready
+        .trim()
+        .split(';')
+        .find_map(|field| field.strip_prefix("leaf_pid="))
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .ok_or(())?;
+
+    let retained = NAMESPACE_NAMES
+        .iter()
+        .map(|name| File::open(format!("/proc/{leaf_pid}/ns/{name}")).map_err(|_| ()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let retained_inodes = retained
+        .iter()
+        .map(|namespace| {
+            namespace
+                .metadata()
+                .map(|metadata| metadata.ino())
+                .map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if retained_inodes
+        .iter()
+        .zip(host_inodes)
+        .any(|(retained_inode, host_inode)| *retained_inode == host_inode)
+    {
+        return Err(());
+    }
+
+    drop(worker.stdin.take());
+    if !worker.wait().map_err(|_| ())?.success() {
+        return Err(());
+    }
+    let post_exit_inodes = retained
+        .iter()
+        .map(|namespace| {
+            namespace
+                .metadata()
+                .map(|metadata| metadata.ino())
+                .map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    (post_exit_inodes == retained_inodes)
+        .then_some(())
+        .ok_or(())
+}
+
+fn namespace_inode(path: String) -> Result<u64, ()> {
+    File::open(path)
+        .and_then(|namespace| namespace.metadata())
+        .map(|metadata| metadata.ino())
+        .map_err(|_| ())
 }
 
 // A hosted runner has neither an admitted SIM1 nor its signature/keyring
