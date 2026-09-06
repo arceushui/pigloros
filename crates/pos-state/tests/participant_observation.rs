@@ -303,7 +303,7 @@ fn authorized_materialization_ignores_every_other_subject() {
             &fixture.decision,
             &fixture.authority,
             Seq::from_u64(10),
-            context(timeline_id),
+            &context(timeline_id),
         )
         .test_ok();
     let second_snapshot = second
@@ -312,7 +312,7 @@ fn authorized_materialization_ignores_every_other_subject() {
             &fixture.decision,
             &fixture.authority,
             Seq::from_u64(10),
-            context(timeline_id),
+            &context(timeline_id),
         )
         .test_ok();
 
@@ -339,7 +339,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
             &fixture.decision,
             &fixture.authority,
             Seq::from_u64(10),
-            context(TimelineId::new()),
+            &context(TimelineId::new()),
         ),
         Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
     );
@@ -357,7 +357,7 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
             &fixture.decision,
             &fixture.authority,
             Seq::from_u64(10),
-            context(TimelineId::new()),
+            &context(TimelineId::new()),
         )
         .test_ok();
     let record = &snapshot.records()[0];
@@ -379,7 +379,7 @@ fn materialization_canonicalizes_nested_projection_values() {
             &fixture.decision,
             &fixture.authority,
             Seq::from_u64(10),
-            context(TimelineId::new()),
+            &context(TimelineId::new()),
         )
         .test_ok();
     let digest = snapshot.records()[0].artifact_digest().test_ok();
@@ -409,7 +409,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &denied,
             &fixture.authority,
             Seq::from_u64(10),
-            context(TimelineId::new()),
+            &context(TimelineId::new()),
         ),
         Err(denied.error().test_ok())
     );
@@ -422,7 +422,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &fixture.decision,
             &fixture.authority,
             Seq::from_u64(10),
-            observation_context,
+            &observation_context,
         ),
         Err(pos_core::AuthorityErrorV1::FieldOutOfBounds)
     );
@@ -435,7 +435,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &fixture.decision,
             &fixture.authority,
             Seq::from_u64(10),
-            unrelated_reducer,
+            &unrelated_reducer,
         ),
         Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
     );
@@ -445,7 +445,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &fixture.decision,
             &fixture.authority,
             Seq::from_u64(9),
-            context(TimelineId::new()),
+            &context(TimelineId::new()),
         ),
         Err(pos_core::AuthorityErrorV1::RevocationStateStale)
     );

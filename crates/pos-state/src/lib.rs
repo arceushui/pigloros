@@ -377,11 +377,11 @@ impl ProjectionRegistry {
         decision: &AuthorizationDecisionV1,
         authority: &PersistedAuthorityV1,
         authority_position: Seq,
-        context: ProjectionObservationContextV1,
+        context: &ProjectionObservationContextV1,
     ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
         authority
             .validate_observation_authorization(request, decision, authority_position)
-            .and_then(|()| self.materialize_authorized_projection(request, decision, &context))
+            .and_then(|()| self.materialize_authorized_projection(request, decision, context))
     }
 
     fn materialize_authorized_projection(
