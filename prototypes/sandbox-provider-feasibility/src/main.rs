@@ -124,7 +124,7 @@ async fn probe_transient_slice(attempt_id: &str) -> &'static str {
     {
         return "create-rejected";
     }
-    match proxy.stop_unit(name.clone(), "fail".to_owned()).await {
+    match proxy.stop_unit(name.clone(), "replace".to_owned()).await {
         Ok(_) => "typed-create-stop-ok",
         Err(_) if proxy.get_unit(name).await.is_err() => "typed-create-auto-cleanup-ok",
         Err(_) => "stop-rejected-unit-still-loaded",
