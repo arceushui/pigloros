@@ -42,11 +42,14 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
-    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
+    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
+    ErasureErrorV1, ErasureIndexInsertV1, ErasurePersistencePortV1, ErasureReferenceV1,
+    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -137,6 +140,7 @@ pub struct SqliteStore {
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
+    authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -645,6 +649,7 @@ impl SqliteStore {
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
+            authority_persistence_binding: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
@@ -663,6 +668,7 @@ impl SqliteStore {
                     self.validate_erasure_schema()
                 }
             })
+            .and_then(|()| self.prepare_authority_schema())
     }
 
     fn should_initialize_schema(&self, initialize: bool) -> Result<bool, CoreError> {
@@ -903,6 +909,50 @@ impl SqliteStore {
         ERASURE_SCHEMA_TABLES
             .iter()
             .try_for_each(|table| self.validate_erasure_schema_table(table))
+    }
+
+    fn prepare_authority_schema(&self) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS authority_state (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                     state_cbor BLOB NOT NULL
+                 );
+                 COMMIT;",
+            )
+            .map_err(Self::into_storage_error)
+            .and_then(|()| self.validate_authority_schema())
+            .and_then(|()| {
+                read_authority_state(&self.conn)
+                    .map(|_| ())
+                    .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
+            })
+    }
+
+    fn validate_authority_schema(&self) -> Result<(), CoreError> {
+        let sql = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'authority_state'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(Self::into_storage_error)?;
+        let normalized = normalize_schema_sql(&sql);
+        for required in [
+            "singleton integer primary key check (singleton = 1)",
+            "schema_version integer not null check (schema_version = 1)",
+            "state_cbor blob not null",
+        ] {
+            if !normalized.contains(&normalize_schema_sql(required)) {
+                return Err(CoreError::Storage(
+                    "SQLite authority_state table has an incompatible schema".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn validate_erasure_schema_table(&self, table: &ErasureSchemaTable) -> Result<(), CoreError> {
@@ -4979,6 +5029,119 @@ fn finish_immediate_transaction<T>(
             CoreError::Storage(format!("{error}; rollback failed: {rollback_error}"))
         },
     )
+}
+
+fn read_authority_state(
+    conn: &Connection,
+) -> Result<AuthorityPersistenceStateV1, AuthorityPersistenceErrorV1> {
+    conn.query_row(
+        "SELECT schema_version, state_cbor FROM authority_state WHERE singleton = 1",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+    )
+    .optional()
+    .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
+    .and_then(|record| match record {
+        None => Ok(AuthorityPersistenceStateV1::new()),
+        Some((1, bytes)) => AuthorityPersistenceStateV1::from_persistence_bytes(&bytes),
+        Some(_) => Err(AuthorityPersistenceErrorV1::InvalidRecord),
+    })
+}
+
+fn write_authority_state(
+    conn: &Connection,
+    state: &AuthorityPersistenceStateV1,
+) -> Result<(), AuthorityPersistenceErrorV1> {
+    state.to_persistence_bytes().and_then(|bytes| {
+        conn.execute(
+            "INSERT INTO authority_state (singleton, schema_version, state_cbor)
+             VALUES (1, 1, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET
+                 schema_version = excluded.schema_version,
+                 state_cbor = excluded.state_cbor",
+            params![bytes],
+        )
+        .map(|_| ())
+        .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
+    })
+}
+
+impl AuthorityPersistencePortV1 for SqliteStore {
+    fn bind_authority_persistence(
+        &mut self,
+        binding: AuthorityPersistenceBindingV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        match self.authority_persistence_binding {
+            Some(bound) if bound != binding => Err(AuthorityPersistenceErrorV1::Unavailable),
+            _ => {
+                self.authority_persistence_binding = Some(binding);
+                Ok(())
+            }
+        }
+    }
+
+    fn issue_capability_grant(
+        &mut self,
+        permit: AuthorityMutationPermitV1,
+        grant: &CapabilityGrantV1,
+    ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
+            .and_then(|()| {
+                let result = read_authority_state(&self.conn).and_then(|mut state| {
+                    state
+                        .issue_grant(permit, grant.clone())
+                        .and_then(|outcome| {
+                            write_authority_state(&self.conn, &state).map(|()| outcome)
+                        })
+                });
+                finish_transaction(
+                    &self.conn,
+                    result,
+                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                )
+            })
+    }
+
+    fn revoke_capability_grant(
+        &mut self,
+        permit: AuthorityMutationPermitV1,
+        revocation: &CapabilityRevocationV1,
+    ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
+            .and_then(|()| {
+                let result = read_authority_state(&self.conn).and_then(|mut state| {
+                    state
+                        .revoke_grant(permit, revocation.clone())
+                        .and_then(|outcome| {
+                            write_authority_state(&self.conn, &state).map(|()| outcome)
+                        })
+                });
+                finish_transaction(
+                    &self.conn,
+                    result,
+                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                )
+            })
+    }
+
+    fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        read_authority_state(&self.conn).and_then(|state| state.resolve(leaf_grant_id))
+    }
 }
 
 fn finish_transaction<T, E>(

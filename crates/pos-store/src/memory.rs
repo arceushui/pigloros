@@ -42,11 +42,13 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    ConsentAppendPermit, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
-    ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
-    ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1, PreparedErasureCasV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
+    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
+    ErasureErrorV1, ErasureIndexInsertV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
+    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -154,6 +156,10 @@ pub struct MemoryStore {
     consent_authority_permit: Option<ConsentAppendPermit>,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
+    /// Canonical authority records shared with the durable adapter contract.
+    authority_state: AuthorityPersistenceStateV1,
+    /// Opaque trusted-host capability bound to authority mutations.
+    authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
@@ -459,6 +465,8 @@ impl MemoryStore {
             geographic_cell_links: HashMap::new(),
             consent_authority_permit: None,
             key_registry: None,
+            authority_state: AuthorityPersistenceStateV1::new(),
+            authority_persistence_binding: None,
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
@@ -1134,6 +1142,64 @@ impl MemoryStore {
         self.timelines
             .insert(child.id(), TimelineState::new(child.clone(), fork_hash));
         Ok(child)
+    }
+}
+
+impl AuthorityPersistencePortV1 for MemoryStore {
+    fn bind_authority_persistence(
+        &mut self,
+        binding: AuthorityPersistenceBindingV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        match self.authority_persistence_binding {
+            Some(bound) if bound != binding => Err(AuthorityPersistenceErrorV1::Unavailable),
+            _ => {
+                self.authority_persistence_binding = Some(binding);
+                Ok(())
+            }
+        }
+    }
+
+    fn issue_capability_grant(
+        &mut self,
+        permit: AuthorityMutationPermitV1,
+        grant: &CapabilityGrantV1,
+    ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        let mut pending = self.authority_state.clone();
+        match pending.issue_grant(permit, grant.clone()) {
+            Ok(outcome) => {
+                self.authority_state = pending;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn revoke_capability_grant(
+        &mut self,
+        permit: AuthorityMutationPermitV1,
+        revocation: &CapabilityRevocationV1,
+    ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        let mut pending = self.authority_state.clone();
+        match pending.revoke_grant(permit, revocation.clone()) {
+            Ok(outcome) => {
+                self.authority_state = pending;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        self.authority_state.resolve(leaf_grant_id)
     }
 }
 
