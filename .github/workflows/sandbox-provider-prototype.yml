@@ -16,6 +16,63 @@ permissions:
   contents: read
 
 jobs:
+  pinned-host-profile:
+    name: pinned-host-profile (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            nix_system: x86_64-linux
+            runner: ubuntu-26.04
+          - architecture: aarch64
+            nix_system: aarch64-linux
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Record exact Nix input identity
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          nix flake metadata --json --no-write-lock-file \
+            | jq '{locks: .locks, path: .path}' \
+            | tee pinned-flake-metadata.json
+          test "$(jq -r '.locks.nodes.nixpkgs.locked.rev' pinned-flake-metadata.json)" \
+            = 6713828a351efa628b025a1adf7f43cbf8597513
+      - name: Prove the pinned disposable host profile
+        working-directory: prototypes/sandbox-provider-feasibility
+        env:
+          NIX_SYSTEM: ${{ matrix.nix_system }}
+        run: |
+          set -o pipefail
+          nix build --print-build-logs --no-write-lock-file \
+            ".#checks.${NIX_SYSTEM}.sandbox-provider-host-profile" \
+            2>&1 | tee pinned-host-profile.txt
+          grep -q 'PINNED_HOST_IDENTITY;' pinned-host-profile.txt
+          grep -q 'systemd=systemd 260 ' pinned-host-profile.txt
+          grep -q 'kernel=6.12.' pinned-host-profile.txt
+          grep -q 'cgroup_kill=present' pinned-host-profile.txt
+          grep -q 'dm_verity=present' pinned-host-profile.txt
+          grep -q 'vm_external_route=absent' pinned-host-profile.txt
+          grep -q 'PINNED_NAMESPACE_PROBE;namespace_entry_lifecycle=retained-fd-full-set-entered-' \
+            pinned-host-profile.txt
+      - name: Record pinned VM closure
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: nix path-info --json --recursive ./result >pinned-host-closure.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sandbox-provider-pinned-host-${{ matrix.architecture }}
+          path: |
+            prototypes/sandbox-provider-feasibility/pinned-flake-metadata.json
+            prototypes/sandbox-provider-feasibility/pinned-host-closure.json
+            prototypes/sandbox-provider-feasibility/pinned-host-profile.txt
+          if-no-files-found: error
+          retention-days: 14
+
   typed-control-plane:
     name: typed-control-plane (${{ matrix.architecture }})
     strategy:
