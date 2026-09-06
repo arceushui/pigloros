@@ -29,6 +29,12 @@
           sandbox-provider-host-profile = pkgs.testers.runNixOSTest {
             name = "sandbox-provider-host-profile";
 
+            # GitHub's native Arm runner has no /dev/kvm. NixOS tests fall back
+            # to same-architecture TCG when KVM is not forced, so make that
+            # supported execution mode explicit without weakening the guest
+            # architecture, kernel, or systemd assertions below.
+            requiredFeatures.kvm = system == "x86_64-linux";
+
             nodes.machine = { pkgs, ... }: {
               boot.kernelPackages = pkgs.linuxPackages_6_12;
               boot.kernelModules = [ "dm_verity" ];
