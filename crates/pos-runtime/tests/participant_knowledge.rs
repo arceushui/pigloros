@@ -374,6 +374,69 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
 }
 
 #[test]
+fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
+    let fixture = fixture();
+    let (mut legacy, legacy_state) = registry(&fixture, false);
+    let legacy_drafts = legacy
+        .stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.snapshot.clone(),
+        )
+        .expect("stage legacy-bypass attempt");
+    let mut legacy_store = open_store(StoreConfig::Memory).expect("memory store");
+    assert!(matches!(
+        legacy.append_and_commit_step_at(
+            legacy_store.as_mut(),
+            Seq::from_u64(12),
+            0,
+            &legacy_drafts,
+        ),
+        Err(RuntimeError::AuthorityFenceRequired)
+    ));
+    assert_eq!(
+        legacy_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aborts,
+        1
+    );
+
+    let (mut substituted, substituted_state) = registry(&fixture, false);
+    let mut changed_drafts = substituted
+        .stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.snapshot.clone(),
+        )
+        .expect("stage substitution attempt");
+    changed_drafts[0].payload = CanonicalBytes::from_static(b"substituted");
+    let authority = fixture
+        .state
+        .resolve(fixture.grant.grant_id())
+        .expect("resolved authority");
+    let mut substituted_store = open_store(StoreConfig::Memory).expect("memory store");
+    assert!(matches!(
+        substituted.append_and_commit_authorized_step_at(
+            substituted_store.as_mut(),
+            &changed_drafts,
+            &authority,
+            Seq::from_u64(10),
+        ),
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
+    ));
+    assert_eq!(
+        substituted_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aborts,
+        1
+    );
+}
+
+#[test]
 fn current_authority_fence_appends_then_commits_the_driver() {
     let fixture = fixture();
     let (mut registry, state) = registry(&fixture, false);
