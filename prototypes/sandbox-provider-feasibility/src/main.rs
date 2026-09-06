@@ -31,6 +31,10 @@ use std::{
 use zbus::zvariant::{OwnedValue, Type, Value};
 
 const CONTROL_PLANE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_MEMORY_MAX: u64 = 128 * 1024 * 1024;
+const PROBE_TASKS_MAX: u64 = 16;
+const PROBE_CPU_QUOTA_PER_SECOND_US: u64 = 500_000;
+const PROBE_IO_WEIGHT: u64 = 100;
 
 fn main() {
     let arguments: Vec<String> = std::env::args().collect();
@@ -57,7 +61,7 @@ fn main() {
         .iter()
         .any(|argument| argument == "--namespace-worker")
     {
-        run_namespace_worker();
+        run_namespace_worker(&arguments);
         return;
     }
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
@@ -84,6 +88,13 @@ async fn run(arguments: Vec<String>) {
         .any(|argument| argument == "--cleanup-sample")
     {
         probe_cleanup_sample(&attempt_id, cleanup_mode(&arguments), network_isolation).await;
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--cgroup-limits")
+    {
+        probe_cgroup_limits(&attempt_id, network_isolation).await;
         return;
     }
     if arguments
@@ -187,15 +198,14 @@ fn run_normal_worker() {
     let _ = std::io::stdout().flush();
 }
 
-fn run_namespace_worker() {
-    let namespaces = CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWPID
-        | CloneFlags::CLONE_NEWIPC
-        | CloneFlags::CLONE_NEWUTS
-        | CloneFlags::CLONE_NEWUSER
-        | CloneFlags::CLONE_NEWNET;
-    if unshare(namespaces).is_err() {
-        println!("namespace-worker-rejected");
+fn run_namespace_worker(arguments: &[String]) {
+    let kind = argument_value(arguments, "--namespace-kind").unwrap_or("all");
+    let Some(namespaces) = namespace_flags(kind) else {
+        println!("namespace-worker-rejected;kind={kind};reason=unknown-kind");
+        return;
+    };
+    if let Err(error) = unshare(namespaces) {
+        println!("namespace-worker-rejected;kind={kind};reason={error}");
         return;
     }
     let Ok(executable) = std::env::current_exe() else {
@@ -212,12 +222,36 @@ fn run_namespace_worker() {
         println!("namespace-worker-rejected");
         return;
     };
-    println!("namespace-worker-ready;leaf_pid={}", leaf.id());
+    println!(
+        "namespace-worker-ready;worker_pid={};leaf_pid={}",
+        std::process::id(),
+        leaf.id()
+    );
     let _ = std::io::stdout().flush();
     let mut release = [0_u8; 1];
     let _ = std::io::stdin().read_exact(&mut release);
     let _ = leaf.kill();
     let _ = leaf.wait();
+}
+
+fn namespace_flags(kind: &str) -> Option<CloneFlags> {
+    match kind {
+        "all" => Some(
+            CloneFlags::CLONE_NEWNS
+                | CloneFlags::CLONE_NEWPID
+                | CloneFlags::CLONE_NEWIPC
+                | CloneFlags::CLONE_NEWUTS
+                | CloneFlags::CLONE_NEWUSER
+                | CloneFlags::CLONE_NEWNET,
+        ),
+        "mnt" => Some(CloneFlags::CLONE_NEWNS),
+        "pid" => Some(CloneFlags::CLONE_NEWPID),
+        "ipc" => Some(CloneFlags::CLONE_NEWIPC),
+        "uts" => Some(CloneFlags::CLONE_NEWUTS),
+        "user" => Some(CloneFlags::CLONE_NEWUSER),
+        "net" => Some(CloneFlags::CLONE_NEWNET),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -456,6 +490,71 @@ async fn probe_cleanup_sample(attempt_id: &str, mode: CleanupMode, network_isola
     );
 }
 
+async fn probe_cgroup_limits(attempt_id: &str, network_isolation: &str) {
+    let Ok(connection) = zbus::Connection::system().await else {
+        println!("cgroup-limits-rejected;reason=dbus-unavailable");
+        return;
+    };
+    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
+        println!("cgroup-limits-rejected;reason=manager-unavailable");
+        return;
+    };
+    let unit = format!("pigloros-limits-{attempt_id}.scope");
+    let Ok((mut worker, _)) = spawn_scoped_worker(&proxy, &unit, &[], "--attempt-worker").await
+    else {
+        println!("cgroup-limits-rejected;reason=worker-launch");
+        return;
+    };
+    let applied = cgroup_limits_match(worker.id());
+    let stop_requested = proxy
+        .stop_unit(unit.clone(), "replace".to_owned())
+        .await
+        .is_ok();
+    let worker_reaped = worker.wait().is_ok();
+    let unit_absent = wait_for_unit_absent(&proxy, &unit).await;
+    println!(
+        "cgroup_limits={};network_isolation={network_isolation};stop_requested={stop_requested};worker_reaped={worker_reaped};unit_absent={unit_absent}",
+        if applied {
+            "memory-cpu-pids-io-read-back-ok"
+        } else {
+            "read-back-mismatch"
+        }
+    );
+}
+
+fn cgroup_limits_match(pid: u32) -> bool {
+    let Some(relative_path) = process_cgroup_path(pid) else {
+        return false;
+    };
+    let cgroup = std::path::Path::new("/sys/fs/cgroup").join(relative_path);
+    let memory_matches = read_trimmed(cgroup.join("memory.max"))
+        .is_some_and(|value| value == PROBE_MEMORY_MAX.to_string());
+    let tasks_match = read_trimmed(cgroup.join("pids.max"))
+        .is_some_and(|value| value == PROBE_TASKS_MAX.to_string());
+    let io_matches = read_trimmed(cgroup.join("io.weight"))
+        .is_some_and(|value| value == format!("default {PROBE_IO_WEIGHT}"));
+    let cpu_matches = read_trimmed(cgroup.join("cpu.max")).is_some_and(|value| {
+        let mut fields = value.split_whitespace();
+        let quota = fields.next().and_then(|field| field.parse::<u64>().ok());
+        let period = fields.next().and_then(|field| field.parse::<u64>().ok());
+        matches!((quota, period), (Some(quota), Some(period)) if quota * 2 == period)
+    });
+    memory_matches && tasks_match && io_matches && cpu_matches
+}
+
+fn process_cgroup_path(pid: u32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.split_once("::").map(|(_, path)| path.to_owned()))
+}
+
+fn read_trimmed(path: impl AsRef<std::path::Path>) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_owned())
+}
+
 async fn wait_for_unit_absent(
     proxy: &zbus_systemd::systemd1::ManagerProxy<'_>,
     unit: &str,
@@ -505,6 +604,13 @@ async fn start_transient_scope(
             "TimeoutStopUSec".to_owned(),
             OwnedValue::from(1_000_000_u64),
         ),
+        ("MemoryMax".to_owned(), OwnedValue::from(PROBE_MEMORY_MAX)),
+        ("TasksMax".to_owned(), OwnedValue::from(PROBE_TASKS_MAX)),
+        (
+            "CPUQuotaPerSecUSec".to_owned(),
+            OwnedValue::from(PROBE_CPU_QUOTA_PER_SECOND_US),
+        ),
+        ("IOWeight".to_owned(), OwnedValue::from(PROBE_IO_WEIGHT)),
     ];
     if !binds_to.is_empty() {
         properties.push(("BindsTo".to_owned(), owned_value(binds_to.to_vec())?));
@@ -1138,22 +1244,36 @@ fn rule_reply_matches(
 // single-threaded helper creates the complete namespace set before spawning
 // its PID-namespace child. The broker retains all descriptors across child
 // exit and never re-resolves a mutable path after acquisition.
-fn probe_namespace_descriptor_lifecycle() -> &'static str {
-    match retain_namespace_set_across_child_exit() {
-        Ok(()) => "retained-fd-full-set-child-exit-drop-ok",
-        Err(()) => "full-set-create-or-retain-rejected",
+fn probe_namespace_descriptor_lifecycle() -> String {
+    const NAMESPACE_NAMES: [&str; 6] = ["mnt", "pid", "ipc", "uts", "user", "net"];
+    if retain_namespace_handles("all", &NAMESPACE_NAMES).is_ok() {
+        return "retained-fd-full-set-child-exit-drop-ok".to_owned();
     }
+    let individual = NAMESPACE_NAMES
+        .iter()
+        .map(|name| {
+            let status = if retain_namespace_handles(name, std::slice::from_ref(name)).is_ok() {
+                "ok"
+            } else {
+                "unsupported"
+            };
+            format!("{name}:{status}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("required-full-set-unsupported;individual={individual}")
 }
 
-fn retain_namespace_set_across_child_exit() -> Result<(), ()> {
-    const NAMESPACE_NAMES: [&str; 6] = ["mnt", "pid", "ipc", "uts", "user", "net"];
-    let host_inodes = NAMESPACE_NAMES
+fn retain_namespace_handles(kind: &str, namespace_names: &[&str]) -> Result<(), ()> {
+    let host_inodes = namespace_names
         .iter()
         .map(|name| namespace_inode(format!("/proc/self/ns/{name}")))
         .collect::<Result<Vec<_>, _>>()?;
     let executable = std::env::current_exe().map_err(|_| ())?;
     let mut worker = Command::new(executable)
         .arg("--namespace-worker")
+        .arg("--namespace-kind")
+        .arg(kind)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1164,50 +1284,57 @@ fn retain_namespace_set_across_child_exit() -> Result<(), ()> {
     BufReader::new(worker_stdout)
         .read_line(&mut ready)
         .map_err(|_| ())?;
-    let leaf_pid = ready
-        .trim()
-        .split(';')
-        .find_map(|field| field.strip_prefix("leaf_pid="))
-        .and_then(|pid| pid.parse::<u32>().ok())
-        .ok_or(())?;
-
-    let retained = NAMESPACE_NAMES
-        .iter()
-        .map(|name| File::open(format!("/proc/{leaf_pid}/ns/{name}")).map_err(|_| ()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let retained_inodes = retained
-        .iter()
-        .map(|namespace| {
-            namespace
-                .metadata()
-                .map(|metadata| metadata.ino())
-                .map_err(|_| ())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if retained_inodes
-        .iter()
-        .zip(host_inodes)
-        .any(|(retained_inode, host_inode)| *retained_inode == host_inode)
-    {
-        return Err(());
+    let field_pid = |field_name: &str| {
+        ready
+            .trim()
+            .split(';')
+            .find_map(|field| field.strip_prefix(field_name))
+            .and_then(|pid| pid.parse::<u32>().ok())
+    };
+    let subject_pid = if matches!(kind, "all" | "pid") {
+        field_pid("leaf_pid=")
+    } else {
+        field_pid("worker_pid=")
     }
+    .ok_or(())?;
 
+    let acquisition = (|| {
+        let retained = namespace_names
+            .iter()
+            .map(|name| File::open(format!("/proc/{subject_pid}/ns/{name}")).map_err(|_| ()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let retained_inodes = namespace_inodes(&retained)?;
+        if retained_inodes
+            .iter()
+            .zip(host_inodes)
+            .any(|(retained_inode, host_inode)| *retained_inode == host_inode)
+        {
+            return Err(());
+        }
+        Ok((retained, retained_inodes))
+    })();
     drop(worker.stdin.take());
-    if !worker.wait().map_err(|_| ())?.success() {
+    let worker_succeeded = worker.wait().map_err(|_| ())?.success();
+    let (retained, retained_inodes) = acquisition?;
+    if !worker_succeeded {
         return Err(());
     }
-    let post_exit_inodes = retained
-        .iter()
-        .map(|namespace| {
-            namespace
-                .metadata()
-                .map(|metadata| metadata.ino())
-                .map_err(|_| ())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let post_exit_inodes = namespace_inodes(&retained)?;
     (post_exit_inodes == retained_inodes)
         .then_some(())
         .ok_or(())
+}
+
+fn namespace_inodes(namespaces: &[File]) -> Result<Vec<u64>, ()> {
+    namespaces
+        .iter()
+        .map(|namespace| {
+            namespace
+                .metadata()
+                .map(|metadata| metadata.ino())
+                .map_err(|_| ())
+        })
+        .collect()
 }
 
 fn namespace_inode(path: String) -> Result<u64, ()> {

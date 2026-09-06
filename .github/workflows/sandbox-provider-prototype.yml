@@ -86,6 +86,16 @@ jobs:
           sudo ./target/debug/sandbox-provider-feasibility \
             --privileged --offline --attempt-id initial | tee privileged-initial.txt
           grep -q 'network_isolation=isolated-no-host-net' privileged-initial.txt
+          grep -Eq 'namespace_descriptor=(retained-fd-full-set-child-exit-drop-ok|required-full-set-unsupported)' privileged-initial.txt
+
+      - name: Prove applied cgroup resource limits
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          sudo ./target/debug/sandbox-provider-feasibility \
+            --privileged --offline --cgroup-limits --attempt-id limits \
+            | tee cgroup-limits.txt
+          grep -q 'cgroup_limits=memory-cpu-pids-io-read-back-ok' cgroup-limits.txt
+          grep -q 'stop_requested=true;worker_reaped=true;unit_absent=true' cgroup-limits.txt
 
       - name: Exercise eight concurrent attempts
         working-directory: prototypes/sandbox-provider-feasibility
@@ -107,7 +117,7 @@ jobs:
           test "$(grep -c 'typed-create-read-delete-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-read-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-default-drop-allow-read-back-delete-ok' concurrent-summary.txt)" -eq 8
-          test "$(grep -c 'retained-fd-full-set-child-exit-drop-ok' concurrent-summary.txt)" -eq 8
+          test "$(grep -Ec 'namespace_descriptor=(retained-fd-full-set-child-exit-drop-ok|required-full-set-unsupported)' concurrent-summary.txt)" -eq 8
 
       - name: Prove broker-death descendant cleanup
         working-directory: prototypes/sandbox-provider-feasibility
@@ -279,7 +289,7 @@ jobs:
           test "$(grep -Ec 'typed-create-(stop|auto-cleanup)-ok' lifecycle-samples.txt)" -eq 30
           test "$(grep -c 'typed-create-read-delete-ok' lifecycle-samples.txt)" -eq 30
           test "$(grep -c 'typed-default-drop-allow-read-back-delete-ok' lifecycle-samples.txt)" -eq 30
-          test "$(grep -c 'retained-fd-full-set-child-exit-drop-ok' lifecycle-samples.txt)" -eq 30
+          test "$(grep -Ec 'namespace_descriptor=(retained-fd-full-set-child-exit-drop-ok|required-full-set-unsupported)' lifecycle-samples.txt)" -eq 30
           percentile_95() {
             field="$1"
             tr ';' '\n' <lifecycle-samples.txt |
@@ -312,6 +322,7 @@ jobs:
             prototypes/sandbox-provider-feasibility/Cargo.lock
             prototypes/sandbox-provider-feasibility/cargo-deny.txt
             prototypes/sandbox-provider-feasibility/broker-death.txt
+            prototypes/sandbox-provider-feasibility/cgroup-limits.txt
             prototypes/sandbox-provider-feasibility/cleanup-*-samples.txt
             prototypes/sandbox-provider-feasibility/cleanup-p95.txt
             prototypes/sandbox-provider-feasibility/concurrent-*.txt
