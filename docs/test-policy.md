@@ -1,6 +1,6 @@
 # Test & coverage policy
 
-Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors this in-repo.
+Shared reference for humans and agents.
 
 ## Rules
 

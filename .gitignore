@@ -4,9 +4,6 @@
 *.key
 SQLCipher.db
 *.db
-.cursor/*
-!.cursor/rules/
-!.cursor/rules/**
 **/__pycache__/
 .mcp.json
 .worktrees/

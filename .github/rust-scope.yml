@@ -8,5 +8,4 @@ rust:
   - '!**/*.adoc'
   - '!**/*.rst'
   - '!.agents/**'
-  - '!.cursor/**'
   - '!docs/**'

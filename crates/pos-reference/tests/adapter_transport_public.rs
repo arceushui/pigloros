@@ -532,6 +532,17 @@ fn process_adapter_preserves_lifecycle_failure_precedence() -> TestResult {
         Err(AdapterError::Unavailable)
     );
 
+    let mut malformed = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/bin/sh",
+        vec![OsString::from("-c"), OsString::from("cat >/dev/null")],
+    )?;
+    assert_eq!(
+        malformed.execute(&operational),
+        Err(AdapterError::ProtocolFailure)
+    );
+
     let mut timed_out = ProcessAdapter::new(
         SubjectAdapterKind::ExportedArtifact,
         [1; 32],
@@ -541,17 +552,6 @@ fn process_adapter_preserves_lifecycle_failure_precedence() -> TestResult {
     assert_eq!(
         timed_out.execute(&attempt()),
         Err(AdapterError::WatchdogExpired)
-    );
-
-    let mut malformed = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/cat",
-        Vec::new(),
-    )?;
-    assert_eq!(
-        malformed.execute(&operational),
-        Err(AdapterError::ProtocolFailure)
     );
 
     let mut missing = ProcessAdapter::new(
