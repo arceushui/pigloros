@@ -1411,6 +1411,14 @@ impl PluginRegistry {
         timeline_head: Seq,
         commit_now_secs: u64,
     ) -> Result<(), RuntimeError> {
+        self.commit_legacy_step_at(timeline_head, commit_now_secs)
+    }
+
+    fn commit_legacy_step_at(
+        &mut self,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+    ) -> Result<(), RuntimeError> {
         let Some(pending) = self.take_legacy_pending_step()? else {
             return Ok(());
         };
@@ -1437,6 +1445,16 @@ impl PluginRegistry {
     /// Returns the consent or store error and aborts the staged step when the
     /// fence or append fails.
     pub fn append_and_commit_step_at(
+        &mut self,
+        store: &mut dyn pos_core::store::EventStore,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, RuntimeError> {
+        self.append_and_commit_legacy_step_at(store, timeline_head, commit_now_secs, drafts)
+    }
+
+    fn append_and_commit_legacy_step_at(
         &mut self,
         store: &mut dyn pos_core::store::EventStore,
         timeline_head: Seq,
