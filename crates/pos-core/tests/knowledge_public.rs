@@ -362,7 +362,7 @@ fn observation_record_round_trip_binds_participant_source_and_minimization() {
     assert_ne!(record.digest(), Hash::zero());
     assert_eq!(
         ObservationRecordV1::decode(&record.encode().expect("canonical OBR1")),
-        Ok(record)
+        Ok(record.clone())
     );
 
     let mut changed_timeline = draft.clone();

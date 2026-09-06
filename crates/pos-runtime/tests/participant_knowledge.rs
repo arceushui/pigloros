@@ -8,9 +8,24 @@ use pos_core::{
 };
 use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
 use pos_store::{open_store, StoreConfig};
-use std::sync::{Arc, Mutex};
+use std::{
+    fmt::Debug,
+    sync::{Arc, Mutex},
+};
 
-fn hash_from_repeated_byte(byte: u8) -> Hash {
+trait TestOk<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: Debug> TestOk<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
+        })
+    }
+}
+
+const fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
@@ -23,14 +38,19 @@ struct Fixture {
     timeline_id: TimelineId,
 }
 
-fn fixture() -> Fixture {
-    let principal = PrincipalRefV1::try_new([1; 16], "host.test").expect("principal");
-    let participant_id = EntityId::new();
-    let plugin_id = PluginId::new();
-    let timeline_id = TimelineId::new();
-    let authority_timeline = TimelineId::new();
-    let registry_digest = hash_from_repeated_byte(6);
-    let policy_revision = hash_from_repeated_byte(7);
+struct FixtureIds {
+    principal: PrincipalRefV1,
+    participant_id: EntityId,
+    plugin_id: PluginId,
+    timeline_id: TimelineId,
+    authority_timeline: TimelineId,
+}
+
+fn capability_grant(
+    ids: &FixtureIds,
+    registry_digest: Hash,
+    policy_revision: Hash,
+) -> CapabilityGrantV1 {
     let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
         resources: vec!["projection.profile".to_owned()],
         actions: vec!["observe".to_owned()],
@@ -38,20 +58,20 @@ fn fixture() -> Fixture {
         audiences: vec!["local-host".to_owned()],
         actor_entity_ids: vec![EntityId::new()],
         subject_ids: vec![EntityId::new()],
-        participant_ids: vec![participant_id],
-        plugin_id: Some(plugin_id),
+        participant_ids: vec![ids.participant_id],
+        plugin_id: Some(ids.plugin_id),
         principal_roles: vec![AuthorityRoleV1::Actor],
         max_uses: 2,
         budget: 10,
         environment_constraints: vec!["local-only".to_owned()],
     })
-    .expect("scope");
-    let grant = CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+    .test_ok();
+    CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
         grant_id: hash_from_repeated_byte(10),
-        grantor: principal.clone(),
+        grantor: ids.principal.clone(),
         grantee: AuthorityGranteeV1::PluginInstallation {
-            controller: principal.clone(),
-            plugin_id,
+            controller: ids.principal.clone(),
+            plugin_id: ids.plugin_id,
             installation_id: [11; 16],
         },
         trust_domain: "host.test".to_owned(),
@@ -64,36 +84,27 @@ fn fixture() -> Fixture {
         permitted_delegate_classes: Vec::new(),
         consent_references: Vec::new(),
         policy_revision,
-        issuance_timeline: authority_timeline,
+        issuance_timeline: ids.authority_timeline,
         issuance_seq: Seq::from_u64(1),
         revocation_epoch: 0,
         revocation_fence: None,
         authority_registry_digest: registry_digest,
     })
-    .expect("grant");
-    let grant_binding = grant.binding_digest().expect("grant binding");
-    let registry = AuthorityRegistrySnapshotV1::try_new(
-        registry_digest,
-        Vec::new(),
-        vec![grant_binding],
-        Vec::new(),
-    )
-    .expect("registry");
-    let host = AuthorityPersistenceHostV1::new(&registry);
-    let mut state = AuthorityPersistenceStateV1::new();
-    state
-        .issue_grant(
-            host.authorize_grant(&grant).expect("issue permit"),
-            grant.clone(),
-        )
-        .expect("persist grant");
+    .test_ok()
+}
+
+fn observation_snapshot(
+    ids: &FixtureIds,
+    grant_binding: Hash,
+    policy_revision: Hash,
+) -> ObservationSnapshotV1 {
     let record = ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
-        participant_id,
+        participant_id: ids.participant_id,
         resource: "projection.profile".to_owned(),
         data_category: "profile.preferences".to_owned(),
         status: ObservationStatusV1::NotObserved,
         artifact_digest: None,
-        source_timeline: timeline_id,
+        source_timeline: ids.timeline_id,
         source_position: Seq::from_u64(12),
         schema: "profile.v1".to_owned(),
         source_digest: hash_from_repeated_byte(13),
@@ -101,15 +112,15 @@ fn fixture() -> Fixture {
         provenance_digest: hash_from_repeated_byte(14),
         minimization_revision: hash_from_repeated_byte(15),
     })
-    .expect("record");
-    let snapshot = ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
-        principal,
-        participant_id,
-        plugin_id,
+    .test_ok();
+    ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
+        principal: ids.principal.clone(),
+        participant_id: ids.participant_id,
+        plugin_id: ids.plugin_id,
         installation_id: [11; 16],
-        timeline_id,
+        timeline_id: ids.timeline_id,
         observed_through: Seq::from_u64(12),
-        authority_timeline,
+        authority_timeline: ids.authority_timeline,
         authority_position: Seq::from_u64(10),
         authorization_request_digest: hash_from_repeated_byte(16),
         authorization_decision_digest: hash_from_repeated_byte(17),
@@ -125,14 +136,41 @@ fn fixture() -> Fixture {
         prior_snapshot_digest: None,
         provenance_digest: hash_from_repeated_byte(20),
     })
-    .expect("snapshot");
+    .test_ok()
+}
+
+fn fixture() -> Fixture {
+    let ids = FixtureIds {
+        principal: PrincipalRefV1::try_new([1; 16], "host.test").test_ok(),
+        participant_id: EntityId::new(),
+        plugin_id: PluginId::new(),
+        timeline_id: TimelineId::new(),
+        authority_timeline: TimelineId::new(),
+    };
+    let registry_digest = hash_from_repeated_byte(6);
+    let policy_revision = hash_from_repeated_byte(7);
+    let grant = capability_grant(&ids, registry_digest, policy_revision);
+    let grant_binding = grant.binding_digest().test_ok();
+    let registry = AuthorityRegistrySnapshotV1::try_new(
+        registry_digest,
+        Vec::new(),
+        vec![grant_binding],
+        Vec::new(),
+    )
+    .test_ok();
+    let host = AuthorityPersistenceHostV1::new(&registry);
+    let mut state = AuthorityPersistenceStateV1::new();
+    state
+        .issue_grant(host.authorize_grant(&grant).test_ok(), grant.clone())
+        .test_ok();
+    let snapshot = observation_snapshot(&ids, grant_binding, policy_revision);
     Fixture {
         snapshot,
         state,
         host,
         grant,
-        plugin_id,
-        timeline_id,
+        plugin_id: ids.plugin_id,
+        timeline_id: ids.timeline_id,
     }
 }
 
@@ -188,18 +226,20 @@ impl Driver for ParticipantDriver {
         _: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.observed_digest = observations
-            .authorized_snapshot()
-            .map(ObservationSnapshotV1::digest);
-        state.saw_raw_state = self
-            .ambient_subscription
-            .as_ref()
-            .is_some_and(|key| observations.state_for(key).is_some());
-        state.saw_raw_events = !observations.events().is_empty();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.observed_digest = observations
+                .authorized_snapshot()
+                .map(ObservationSnapshotV1::digest);
+            state.saw_raw_state = self
+                .ambient_subscription
+                .as_ref()
+                .is_some_and(|key| observations.state_for(key).is_some());
+            state.saw_raw_events = !observations.events().is_empty();
+        }
         Ok(StepOutput::new(vec![EventDraft::new(
             self.entity,
             Kind::new("participant.planned"),
@@ -238,7 +278,7 @@ fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<Driv
             None,
             Some(Box::new(driver)),
         )
-        .expect("register driver");
+        .test_ok();
     (registry, state)
 }
 
@@ -252,7 +292,7 @@ fn authorized_driver_receives_only_the_bound_snapshot_and_requires_its_commit_fe
             fixture.timeline_id,
             fixture.snapshot.clone(),
         )
-        .expect("stage authorized driver");
+        .test_ok();
     let observed = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -299,11 +339,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
 
     let (mut ambient, ambient_state) = registry(&fixture, true);
     assert!(matches!(
-        ambient.stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        ),
+        ambient.stage_authorized_driver(fixture.plugin_id, fixture.timeline_id, fixture.snapshot,),
         Err(RuntimeError::Authority(
             pos_core::AuthorityErrorV1::UnauthorizedSource
         ))
@@ -327,7 +363,7 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
             fixture.timeline_id,
             fixture.snapshot.clone(),
         )
-        .expect("stage authorized driver");
+        .test_ok();
     let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
         grant_id: fixture.grant.grant_id(),
         authority_timeline: fixture.grant.issuance_timeline(),
@@ -336,22 +372,19 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
         policy_revision: fixture.grant.policy_revision(),
         authority_registry_digest: fixture.grant.authority_registry_digest(),
     })
-    .expect("revocation");
+    .test_ok();
     fixture
         .state
         .revoke_grant(
             fixture
                 .host
                 .authorize_revocation(&fixture.grant, &revocation)
-                .expect("revocation permit"),
+                .test_ok(),
             revocation,
         )
-        .expect("persist revocation");
-    let authority = fixture
-        .state
-        .resolve(fixture.grant.grant_id())
-        .expect("resolved authority");
-    let mut store = open_store(StoreConfig::Memory).expect("memory store");
+        .test_ok();
+    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
+    let mut store = open_store(StoreConfig::Memory).test_ok();
 
     assert!(matches!(
         registry.append_and_commit_authorized_step_at(
@@ -364,11 +397,14 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
             pos_core::AuthorityErrorV1::RevokedAtFence
         ))
     ));
-    let state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(state.aborts, 1);
-    assert_eq!(state.commits, 0);
+    let (aborts, commits) = {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.aborts, state.commits)
+    };
+    assert_eq!(aborts, 1);
+    assert_eq!(commits, 0);
 }
 
 #[test]
@@ -381,8 +417,8 @@ fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
             fixture.timeline_id,
             fixture.snapshot.clone(),
         )
-        .expect("stage legacy-bypass attempt");
-    let mut legacy_store = open_store(StoreConfig::Memory).expect("memory store");
+        .test_ok();
+    let mut legacy_store = open_store(StoreConfig::Memory).test_ok();
     assert!(matches!(
         legacy.append_and_commit_step_at(
             legacy_store.as_mut(),
@@ -407,13 +443,10 @@ fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
             fixture.timeline_id,
             fixture.snapshot.clone(),
         )
-        .expect("stage substitution attempt");
+        .test_ok();
     changed_drafts[0].payload = CanonicalBytes::from_static(b"substituted");
-    let authority = fixture
-        .state
-        .resolve(fixture.grant.grant_id())
-        .expect("resolved authority");
-    let mut substituted_store = open_store(StoreConfig::Memory).expect("memory store");
+    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
+    let mut substituted_store = open_store(StoreConfig::Memory).test_ok();
     assert!(matches!(
         substituted.append_and_commit_authorized_step_at(
             substituted_store.as_mut(),
@@ -444,12 +477,9 @@ fn current_authority_fence_appends_then_commits_the_driver() {
             fixture.timeline_id,
             fixture.snapshot.clone(),
         )
-        .expect("stage authorized driver");
-    let authority = fixture
-        .state
-        .resolve(fixture.grant.grant_id())
-        .expect("resolved authority");
-    let mut store = open_store(StoreConfig::Memory).expect("memory store");
+        .test_ok();
+    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
+    let mut store = open_store(StoreConfig::Memory).test_ok();
     let events = registry
         .append_and_commit_authorized_step_at(
             store.as_mut(),
@@ -457,12 +487,15 @@ fn current_authority_fence_appends_then_commits_the_driver() {
             &authority,
             Seq::from_u64(10),
         )
-        .expect("append authorized step");
+        .test_ok();
 
     assert_eq!(events.len(), 1);
-    let state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(state.aborts, 0);
-    assert_eq!(state.commits, 1);
+    let (aborts, commits) = {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.aborts, state.commits)
+    };
+    assert_eq!(aborts, 0);
+    assert_eq!(commits, 1);
 }
