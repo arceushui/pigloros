@@ -130,19 +130,22 @@ if sudo "$scratch/youki" --root "$runtime_root" state "$container_id" \
 fi
 lifecycle_us=$((($(date +%s%N) - lifecycle_started) / 1000))
 
-jq '.process.args = ["/payload"]' "$bundle/config.json" >"$scratch/sample-config.json"
+jq '.process.args = ["/payload", "1"]' "$bundle/config.json" >"$scratch/sample-config.json"
 mv "$scratch/sample-config.json" "$bundle/config.json"
 : >"$evidence_dir/launch-cleanup-samples-us.txt"
 for sample in $(seq 1 30); do
   sample_id="pigloros-youki-${architecture}-${sample}"
+  container_id=$sample_id
   prepare_rootfs
   jq --arg path "pigloros/$sample_id" '.linux.cgroupsPath = $path' \
     "$bundle/config.json" >"$scratch/sample-config.json"
   mv "$scratch/sample-config.json" "$bundle/config.json"
   sample_started=$(date +%s%N)
-  sudo "$scratch/youki" --root "$runtime_root" run --bundle "$bundle" "$sample_id"
-  printf '%s\n' "$((($(date +%s%N) - sample_started) / 1000))" \
-    >>"$evidence_dir/launch-cleanup-samples-us.txt"
+  sudo timeout --kill-after=2s 10s "$scratch/youki" --root "$runtime_root" \
+    run --bundle "$bundle" "$sample_id"
+  sample_us=$((($(date +%s%N) - sample_started) / 1000))
+  printf '%s\n' "$sample_us" >>"$evidence_dir/launch-cleanup-samples-us.txt"
+  printf 'youki_sample=%s;duration_us=%s\n' "$sample" "$sample_us"
 done
 launch_cleanup_p95_us=$(sort -n "$evidence_dir/launch-cleanup-samples-us.txt" | sed -n '29p')
 
