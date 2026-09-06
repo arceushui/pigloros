@@ -768,6 +768,7 @@ impl PersistedAuthorityV1 {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ObservationAuthorityBinding<'a> {
     authority_position: Seq,
     revocation_epoch: u64,
@@ -1363,13 +1364,13 @@ impl KnowledgeSnapshotV1 {
         &self,
         observation: &ObservationSnapshotV1,
     ) -> Result<(), AuthorityErrorV1> {
-        if self.principal == observation.principal
+        let identity_and_position_match = self.principal == observation.principal
             && self.participant_id == observation.participant_id
             && self.timeline_id == observation.timeline_id
-            && self.observed_through == observation.observed_through
-            && self.observation_snapshot_digest == observation.digest
-            && self.observations == observation.records
-        {
+            && self.observed_through == observation.observed_through;
+        let evidence_matches = self.observation_snapshot_digest == observation.digest
+            && self.observations == observation.records;
+        if identity_and_position_match && evidence_matches {
             Ok(())
         } else {
             Err(AuthorityErrorV1::ProvenanceMissing)
