@@ -405,10 +405,7 @@ impl ObservationView<'_> {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.authorized_snapshot.is_none()
-            && self.authorized_knowledge.is_none()
-            && self.len == 0
-            && self.events.is_empty()
+        self.len == 0 && self.events.is_empty()
     }
 
     /// Committed events forwarded to this driver for the current tick, in

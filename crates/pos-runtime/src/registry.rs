@@ -1388,6 +1388,17 @@ impl PluginRegistry {
         }
     }
 
+    fn take_legacy_pending_step(&mut self) -> Result<Option<PendingStep>, RuntimeError> {
+        self.pending_step.take().map_or(Ok(None), |pending| {
+            if pending.authorized.is_some() {
+                let _ = self.abort_drivers(&pending.driver_ids);
+                Err(RuntimeError::AuthorityFenceRequired)
+            } else {
+                Ok(Some(pending))
+            }
+        })
+    }
+
     /// Commit a staged step after revalidating it at the supplied fresh time.
     ///
     /// # Errors
@@ -1400,13 +1411,9 @@ impl PluginRegistry {
         timeline_head: Seq,
         commit_now_secs: u64,
     ) -> Result<(), RuntimeError> {
-        let Some(pending) = self.pending_step.take() else {
+        let Some(pending) = self.take_legacy_pending_step()? else {
             return Ok(());
         };
-        if pending.authorized.is_some() {
-            let _ = self.abort_drivers(&pending.driver_ids);
-            return Err(RuntimeError::AuthorityFenceRequired);
-        }
         if let Err(error) = self.validate_operation(
             pending.timeline,
             &pending.operation,
@@ -1436,13 +1443,9 @@ impl PluginRegistry {
         commit_now_secs: u64,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, RuntimeError> {
-        let Some(pending) = self.pending_step.take() else {
+        let Some(pending) = self.take_legacy_pending_step()? else {
             return Err(RuntimeError::PendingDriverStep);
         };
-        if pending.authorized.is_some() {
-            let _ = self.abort_drivers(&pending.driver_ids);
-            return Err(RuntimeError::AuthorityFenceRequired);
-        }
         let pending_timeline = pending.timeline;
         let operation = pending.operation.clone();
         let events = match operation {
