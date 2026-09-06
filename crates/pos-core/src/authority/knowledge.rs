@@ -12,7 +12,7 @@ use super::{
     encode_value, entity_bytes, exact_array, expect_header, hash_value, optional_hash_value,
     plugin_bytes, text, timeline_bytes, uint, validate_entity_id, validate_hash,
     validate_optional_plugin_id, validate_text, validate_timeline_id, AuthorityErrorV1,
-    PrincipalRefV1, MAX_AUTHORITY_DELEGATION_DEPTH, VERSION,
+    PersistedAuthorityV1, PrincipalRefV1, MAX_AUTHORITY_DELEGATION_DEPTH, VERSION,
 };
 use crate::{CanonicalBytes, EntityId, Hash, PluginId, Seq, TimelineId};
 
@@ -563,6 +563,52 @@ impl ObservationSnapshotV1 {
     #[must_use]
     pub const fn digest(&self) -> Hash {
         self.digest
+    }
+
+    /// Revalidate the snapshot's complete grant and revocation identity at a
+    /// later authority fence before staged work may commit.
+    ///
+    /// # Errors
+    /// Returns a closed fail-closed error when the authority state is stale,
+    /// advanced to a new revocation epoch, changed grant chain, expired, or revoked.
+    pub fn validate_authority_fence(
+        &self,
+        authority: &PersistedAuthorityV1,
+        at_position: Seq,
+    ) -> Result<(), AuthorityErrorV1> {
+        if at_position < self.authority_position {
+            return Err(AuthorityErrorV1::RevocationStateStale);
+        }
+        match authority.revocation_epoch().cmp(&self.revocation_epoch) {
+            std::cmp::Ordering::Less => return Err(AuthorityErrorV1::RevocationStateStale),
+            std::cmp::Ordering::Greater => return Err(AuthorityErrorV1::RevokedAtFence),
+            std::cmp::Ordering::Equal => {}
+        }
+        let grants = authority.chain().grants();
+        let bindings = grants
+            .iter()
+            .map(super::CapabilityGrantV1::binding_digest)
+            .collect::<Result<Vec<_>, _>>()?;
+        if bindings != self.grant_chain_bindings
+            || grants
+                .iter()
+                .any(|grant| grant.issuance_timeline() != self.authority_timeline)
+        {
+            return Err(AuthorityErrorV1::DelegationInvalid);
+        }
+        if grants.iter().any(|grant| {
+            grant
+                .revocation_fence()
+                .is_some_and(|fence| fence <= at_position)
+        }) {
+            return Err(AuthorityErrorV1::RevokedAtFence);
+        }
+        if grants.iter().any(|grant| {
+            at_position < grant.valid_from_position() || at_position >= grant.valid_until_position()
+        }) {
+            return Err(AuthorityErrorV1::CapabilityMissing);
+        }
+        Ok(())
     }
 
     /// Encode the exact deterministic-CBOR OBS1 snapshot.
