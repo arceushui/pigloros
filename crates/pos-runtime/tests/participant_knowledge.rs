@@ -247,6 +247,38 @@ struct ParticipantDriver {
     ambient_subscription: Option<pos_runtime::ProjectionKey>,
 }
 
+struct RejectedDriver {
+    state: Arc<Mutex<DriverState>>,
+    entity: EntityId,
+    fail_step: bool,
+}
+
+impl Driver for RejectedDriver {
+    fn name(&self) -> &'static str {
+        "rejected-participant-driver"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        if self.fail_step {
+            return Err(RuntimeError::NoDriver {
+                name: self.name().to_owned(),
+            });
+        }
+        Ok(StepOutput::new(vec![EventDraft::new(
+            self.entity,
+            Kind::new(pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE),
+            CanonicalBytes::from_static(b"host-owned"),
+        )]))
+    }
+
+    fn abort_step(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aborts += 1;
+    }
+}
+
 impl Driver for ParticipantDriver {
     fn name(&self) -> &'static str {
         "participant-driver"
@@ -630,4 +662,47 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         Seq::from_u64(10),
     ))
     .contains("already pending"));
+}
+
+#[test]
+fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
+    let fixture = fixture();
+    let authority = current_authority(&fixture);
+    for (fail_step, expected) in [
+        (true, "has no driver"),
+        (false, "Gateway-owned consent event type"),
+    ] {
+        let state = Arc::new(Mutex::new(DriverState::default()));
+        let driver = RejectedDriver {
+            state: Arc::clone(&state),
+            entity: EntityId::new(),
+            fail_step,
+        };
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(
+                &TestPlugin {
+                    id: fixture.plugin_id,
+                },
+                None,
+                Some(Box::new(driver)),
+            )
+            .test_ok();
+
+        let error = error_text(registry.stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.snapshot.clone(),
+            &authority,
+            Seq::from_u64(10),
+        ));
+        assert!(error.contains(expected));
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .aborts,
+            1
+        );
+    }
 }
