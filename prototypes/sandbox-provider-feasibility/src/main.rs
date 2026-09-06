@@ -186,13 +186,6 @@ impl CleanupMode {
             Self::Cancel | Self::Forced => "--attempt-worker",
         }
     }
-
-    const fn kill_signal(self) -> Option<i32> {
-        match self {
-            Self::Forced => Some(19),
-            Self::Normal | Self::Cancel => None,
-        }
-    }
 }
 
 fn cleanup_mode(arguments: &[String]) -> CleanupMode {
@@ -214,7 +207,7 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
     };
     let broker_unit = format!("pigloros-broker-{attempt_id}.scope");
     let attempt_unit = format!("pigloros-attempt-{attempt_id}.scope");
-    if start_transient_scope(&proxy, &broker_unit, &[std::process::id()], &[], None)
+    if start_transient_scope(&proxy, &broker_unit, &[std::process::id()], &[])
         .await
         .is_err()
     {
@@ -227,7 +220,6 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
         &attempt_unit,
         std::slice::from_ref(&broker_unit),
         "--attempt-worker",
-        None,
     )
     .await
     else {
@@ -248,7 +240,6 @@ async fn spawn_scoped_worker(
     unit: &str,
     binds_to: &[String],
     worker_argument: &str,
-    kill_signal: Option<i32>,
 ) -> Result<(std::process::Child, String), ()> {
     let executable = std::env::current_exe().map_err(|_| ())?;
     let mut worker = Command::new(executable)
@@ -258,7 +249,7 @@ async fn spawn_scoped_worker(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| ())?;
-    if start_transient_scope(proxy, unit, &[worker.id()], binds_to, kill_signal)
+    if start_transient_scope(proxy, unit, &[worker.id()], binds_to)
         .await
         .is_err()
         || !wait_for_unit_cgroup(worker.id(), unit)
@@ -302,7 +293,7 @@ async fn inject_reconciliation_orphan(attempt_id: &str, network_isolation: &str)
     };
     let orphan_unit = format!("pigloros-orphan-{attempt_id}.scope");
     let Ok((_worker, worker_line)) =
-        spawn_scoped_worker(&proxy, &orphan_unit, &[], "--attempt-worker", None).await
+        spawn_scoped_worker(&proxy, &orphan_unit, &[], "--attempt-worker").await
     else {
         println!("orphan-setup-rejected;reason=attempt-worker");
         return;
@@ -348,29 +339,52 @@ async fn probe_cleanup_sample(attempt_id: &str, mode: CleanupMode, network_isola
     };
     let unit = format!("pigloros-cleanup-{}-{attempt_id}.scope", mode.name());
     let launch_started = Instant::now();
-    let Ok((mut worker, _worker_line)) = spawn_scoped_worker(
-        &proxy,
-        &unit,
-        &[],
-        mode.worker_argument(),
-        mode.kill_signal(),
-    )
-    .await
+    let Ok((mut worker, _worker_line)) =
+        spawn_scoped_worker(&proxy, &unit, &[], mode.worker_argument()).await
     else {
         println!("cleanup-sample-rejected;reason=worker-launch");
         return;
     };
     let launch_us = launch_started.elapsed().as_micros();
     let cleanup_started = Instant::now();
-    if mode != CleanupMode::Normal
-        && proxy
-            .stop_unit(unit.clone(), "replace".to_owned())
-            .await
-            .is_err()
-    {
-        let _ = worker.kill();
-        println!("cleanup-sample-rejected;reason=stop-unit");
-        return;
+    match mode {
+        CleanupMode::Normal => {}
+        CleanupMode::Cancel => {
+            if proxy
+                .stop_unit(unit.clone(), "replace".to_owned())
+                .await
+                .is_err()
+            {
+                let _ = worker.kill();
+                println!("cleanup-sample-rejected;reason=stop-unit");
+                return;
+            }
+        }
+        CleanupMode::Forced => {
+            if proxy
+                .kill_unit(unit.clone(), "all".to_owned(), 19)
+                .await
+                .is_err()
+            {
+                let _ = worker.kill();
+                println!("cleanup-sample-rejected;reason=stop-signal");
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+            if proxy
+                .kill_unit(unit.clone(), "all".to_owned(), 9)
+                .await
+                .is_err()
+                || proxy
+                    .stop_unit(unit.clone(), "replace".to_owned())
+                    .await
+                    .is_err()
+            {
+                let _ = worker.kill();
+                println!("cleanup-sample-rejected;reason=forced-stop");
+                return;
+            }
+        }
     }
     if worker.wait().is_err() {
         println!("cleanup-sample-rejected;reason=worker-wait");
@@ -420,7 +434,6 @@ async fn start_transient_scope(
     name: &str,
     pids: &[u32],
     binds_to: &[String],
-    kill_signal: Option<i32>,
 ) -> Result<(), ()> {
     let mut properties = vec![
         (
@@ -438,9 +451,6 @@ async fn start_transient_scope(
     if !binds_to.is_empty() {
         properties.push(("BindsTo".to_owned(), owned_value(binds_to.to_vec())?));
         properties.push(("After".to_owned(), owned_value(binds_to.to_vec())?));
-    }
-    if let Some(signal) = kill_signal {
-        properties.push(("KillSignal".to_owned(), OwnedValue::from(signal)));
     }
     proxy
         .start_transient_unit(name.to_owned(), "fail".to_owned(), properties, vec![])
