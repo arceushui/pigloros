@@ -1179,6 +1179,13 @@ impl PluginRegistry {
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
             self.collect_anchored_selection(selection)?;
+        let protected = match &operation {
+            OperationContext::Public => false,
+            OperationContext::Protected { .. } => true,
+        };
+        if protected && (!subscriptions.is_empty() || !committed_events.is_empty()) {
+            return Err(RuntimeError::AuthorityFenceRequired);
+        }
         let mut event_cursors = Vec::new();
 
         let anchor = SnapshotAnchor::new(timeline, observed_through);
@@ -1259,8 +1266,15 @@ impl PluginRegistry {
         plugin_id: PluginId,
         timeline: pos_core::ids::TimelineId,
         snapshot: ObservationSnapshotV1,
+        authority: &PersistedAuthorityV1,
+        authority_position: Seq,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        self.ensure_no_pending_step()?;
+        if let Err(error) = self.ensure_no_pending_step() {
+            return Err(error);
+        }
+        if let Err(error) = snapshot.validate_authority_fence(authority, authority_position) {
+            return Err(RuntimeError::Authority(error));
+        }
         if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
             return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
         }

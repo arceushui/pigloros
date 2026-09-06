@@ -1,11 +1,13 @@
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1,
-    DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationStatusV1, PluginId,
-    PrincipalRefV1, Reducer, SchemaVersion, Seq, State, TimelineId, WallTime,
+    DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationStatusV1,
+    PersistedAuthorityV1, PluginId, PrincipalRefV1, Reducer, SchemaVersion, Seq, State, TimelineId,
+    WallTime,
 };
 use pos_state::{ProjectionObservationContextV1, ProjectionRegistry};
 use std::fmt::Debug;
@@ -96,6 +98,7 @@ struct AuthorityFixture {
     request: AuthorizationRequestV1,
     decision: AuthorizationDecisionV1,
     chain: DelegationChainV1,
+    authority: PersistedAuthorityV1,
     participant_id: EntityId,
     plugin_id: PluginId,
 }
@@ -153,6 +156,18 @@ fn observation_scope(
         environment_constraints: vec!["local-only".to_owned()],
     })
     .test_ok()
+}
+
+fn persisted_authority(
+    registry: &AuthorityRegistrySnapshotV1,
+    grant: &CapabilityGrantV1,
+) -> PersistedAuthorityV1 {
+    let host = AuthorityPersistenceHostV1::new(registry);
+    let mut state = AuthorityPersistenceStateV1::new();
+    state
+        .issue_grant(host.authorize_grant(grant).test_ok(), grant.clone())
+        .test_ok();
+    state.resolve(grant.grant_id()).test_ok()
 }
 
 fn authority_fixture() -> AuthorityFixture {
@@ -240,13 +255,15 @@ fn authority_fixture() -> AuthorityFixture {
         vec![consent.binding_digest()],
     )
     .test_ok();
-    let chain = DelegationChainV1::try_from_grants(vec![grant]).test_ok();
+    let chain = DelegationChainV1::try_from_grants(vec![grant.clone()]).test_ok();
     let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &registry);
     assert!(decision.is_allowed());
+    let authority = persisted_authority(&registry, &grant);
     AuthorityFixture {
         request,
         decision,
         chain,
+        authority,
         participant_id,
         plugin_id,
     }
@@ -284,6 +301,8 @@ fn authorized_materialization_ignores_every_other_subject() {
         .materialize_authorized_observation(
             &fixture.request,
             &fixture.decision,
+            &fixture.authority,
+            Seq::from_u64(10),
             context(timeline_id),
         )
         .test_ok();
@@ -291,6 +310,8 @@ fn authorized_materialization_ignores_every_other_subject() {
         .materialize_authorized_observation(
             &fixture.request,
             &fixture.decision,
+            &fixture.authority,
+            Seq::from_u64(10),
             context(timeline_id),
         )
         .test_ok();
@@ -316,6 +337,8 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
         registry.materialize_authorized_observation(
             &unrelated.request,
             &fixture.decision,
+            &fixture.authority,
+            Seq::from_u64(10),
             context(TimelineId::new()),
         ),
         Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
@@ -332,6 +355,8 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
         .materialize_authorized_observation(
             &fixture.request,
             &fixture.decision,
+            &fixture.authority,
+            Seq::from_u64(10),
             context(TimelineId::new()),
         )
         .test_ok();
@@ -345,16 +370,16 @@ fn materialization_canonicalizes_nested_projection_values() {
     let fixture = authority_fixture();
     let subject = fixture.request.subject_id().test_ok();
     let mut registry = ProjectionRegistry::new();
-    registry.register("nested", Box::new(NestedReducer));
+    registry.register("profile", Box::new(NestedReducer));
     registry.fold_events(&[event(subject, 1)]);
-    let mut observation_context = context(TimelineId::new());
-    observation_context.reducer = "nested".to_owned();
 
     let snapshot = registry
         .materialize_authorized_observation(
             &fixture.request,
             &fixture.decision,
-            observation_context,
+            &fixture.authority,
+            Seq::from_u64(10),
+            context(TimelineId::new()),
         )
         .test_ok();
     let digest = snapshot.records()[0].artifact_digest().test_ok();
@@ -382,6 +407,8 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
         registry.materialize_authorized_observation(
             &fixture.request,
             &denied,
+            &fixture.authority,
+            Seq::from_u64(10),
             context(TimelineId::new()),
         ),
         Err(denied.error().test_ok())
@@ -393,8 +420,33 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
         registry.materialize_authorized_observation(
             &fixture.request,
             &fixture.decision,
+            &fixture.authority,
+            Seq::from_u64(10),
             observation_context,
         ),
         Err(pos_core::AuthorityErrorV1::FieldOutOfBounds)
+    );
+
+    let mut unrelated_reducer = context(TimelineId::new());
+    unrelated_reducer.reducer = "private-profile".to_owned();
+    assert_eq!(
+        registry.materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            Seq::from_u64(10),
+            unrelated_reducer,
+        ),
+        Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
+    );
+    assert_eq!(
+        registry.materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            Seq::from_u64(9),
+            context(TimelineId::new()),
+        ),
+        Err(pos_core::AuthorityErrorV1::RevocationStateStale)
     );
 }

@@ -147,19 +147,26 @@ impl ObservationRecordV1 {
         validate_text(&draft.data_category)?;
         validate_timeline_id(draft.source_timeline)?;
         validate_text(&draft.schema)?;
-        validate_hash(draft.source_digest)?;
-        if let Some(digest) = draft.projection_digest {
-            validate_hash(digest)?;
-        }
-        validate_hash(draft.provenance_digest)?;
         validate_hash(draft.minimization_revision)?;
+        if draft.status == ObservationStatusV1::Unauthorized {
+            if draft.artifact_digest.is_some()
+                || draft.projection_digest.is_some()
+                || draft.source_digest != Hash::zero()
+                || draft.provenance_digest != Hash::zero()
+            {
+                return Err(AuthorityErrorV1::UnauthorizedSource);
+            }
+        } else {
+            validate_hash(draft.source_digest)?;
+            if let Some(digest) = draft.projection_digest {
+                validate_hash(digest)?;
+            }
+            validate_hash(draft.provenance_digest)?;
+        }
         match (draft.status, draft.artifact_digest) {
             (ObservationStatusV1::Present, Some(digest)) => validate_hash(digest)?,
             (ObservationStatusV1::Present, None) => {
                 return Err(AuthorityErrorV1::SourceUnavailable);
-            }
-            (ObservationStatusV1::Unauthorized, Some(_)) => {
-                return Err(AuthorityErrorV1::UnauthorizedSource);
             }
             (_, Some(_)) => return Err(AuthorityErrorV1::FieldOutOfBounds),
             (_, None) => {}
@@ -415,6 +422,8 @@ impl ObservationSnapshotV1 {
         validate_grant_bindings(&draft.grant_chain_bindings)?;
         validate_snapshot_records(
             draft.participant_id,
+            draft.timeline_id,
+            draft.observed_through,
             draft.minimization_revision,
             &draft.records,
         )?;
@@ -576,55 +585,21 @@ impl ObservationSnapshotV1 {
         authority: &PersistedAuthorityV1,
         at_position: Seq,
     ) -> Result<(), AuthorityErrorV1> {
-        if at_position < self.authority_position {
-            return Err(AuthorityErrorV1::RevocationStateStale);
-        }
-        match authority.revocation_epoch().cmp(&self.revocation_epoch) {
-            std::cmp::Ordering::Less => return Err(AuthorityErrorV1::RevocationStateStale),
-            std::cmp::Ordering::Greater => return Err(AuthorityErrorV1::RevokedAtFence),
-            std::cmp::Ordering::Equal => {}
-        }
-        let grants = authority.chain().grants();
-        let bindings = grants
-            .iter()
-            .map(super::CapabilityGrantV1::binding_digest)
-            .collect::<Result<Vec<_>, _>>()?;
-        if bindings != self.grant_chain_bindings
-            || grants
-                .iter()
-                .any(|grant| grant.issuance_timeline() != self.authority_timeline)
-        {
-            return Err(AuthorityErrorV1::DelegationInvalid);
-        }
-        let Some(leaf) = grants.last() else {
-            return Err(AuthorityErrorV1::DelegationInvalid);
-        };
-        if leaf.grantee().principal() != &self.principal
-            || leaf.grantee().plugin_id() != Some(self.plugin_id)
-            || leaf.grantee().installation_id() != Some(self.installation_id)
-            || leaf.scope().plugin_id() != Some(self.plugin_id)
-            || leaf
-                .scope()
-                .participant_ids()
-                .binary_search(&self.participant_id)
-                .is_err()
-            || leaf.policy_revision() != self.capability_policy_revision
-        {
-            return Err(AuthorityErrorV1::DelegationInvalid);
-        }
-        if grants.iter().any(|grant| {
-            grant
-                .revocation_fence()
-                .is_some_and(|fence| fence <= at_position)
-        }) {
-            return Err(AuthorityErrorV1::RevokedAtFence);
-        }
-        if grants.iter().any(|grant| {
-            at_position < grant.valid_from_position() || at_position >= grant.valid_until_position()
-        }) {
-            return Err(AuthorityErrorV1::CapabilityMissing);
-        }
-        Ok(())
+        validate_current_observation_authority(
+            authority,
+            at_position,
+            ObservationAuthorityBinding {
+                authority_position: self.authority_position,
+                revocation_epoch: self.revocation_epoch,
+                grant_chain_bindings: &self.grant_chain_bindings,
+                authority_timeline: self.authority_timeline,
+                principal: &self.principal,
+                plugin_id: self.plugin_id,
+                installation_id: self.installation_id,
+                participant_id: self.participant_id,
+                capability_policy_revision: self.capability_policy_revision,
+            },
+        )
     }
 
     /// Encode the exact deterministic-CBOR OBS1 snapshot.
@@ -746,6 +721,148 @@ impl ObservationSnapshotV1 {
     }
 }
 
+impl PersistedAuthorityV1 {
+    /// Validate an observation request and decision against current durable authority.
+    ///
+    /// This check is intended for the host immediately before it reads a
+    /// protected Projection or invokes a participant Driver.
+    ///
+    /// # Errors
+    /// Returns a closed authority error when the decision does not exactly bind
+    /// the request or when the durable grant/revocation fence is stale or changed.
+    pub fn validate_observation_authorization(
+        &self,
+        request: &super::AuthorizationRequestV1,
+        decision: &super::AuthorizationDecisionV1,
+        at_position: Seq,
+    ) -> Result<(), AuthorityErrorV1> {
+        if !observation_decision_matches_request(request, decision) {
+            return Err(decision
+                .error()
+                .unwrap_or(AuthorityErrorV1::UnauthorizedSource));
+        }
+        let Some(participant_id) = request.participant_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let Some(plugin_id) = request.plugin_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let Some(installation_id) = request.installation_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        validate_current_observation_authority(
+            self,
+            at_position,
+            ObservationAuthorityBinding {
+                authority_position: decision.at_position(),
+                revocation_epoch: request.revocation_epoch(),
+                grant_chain_bindings: decision.grant_chain_bindings(),
+                authority_timeline: decision.authority_timeline(),
+                principal: decision.principal(),
+                plugin_id,
+                installation_id,
+                participant_id,
+                capability_policy_revision: decision.capability_policy_revision(),
+            },
+        )
+    }
+}
+
+struct ObservationAuthorityBinding<'a> {
+    authority_position: Seq,
+    revocation_epoch: u64,
+    grant_chain_bindings: &'a [Hash],
+    authority_timeline: TimelineId,
+    principal: &'a super::PrincipalRefV1,
+    plugin_id: PluginId,
+    installation_id: [u8; 16],
+    participant_id: EntityId,
+    capability_policy_revision: Hash,
+}
+
+fn observation_decision_matches_request(
+    request: &super::AuthorizationRequestV1,
+    decision: &super::AuthorizationDecisionV1,
+) -> bool {
+    decision.is_allowed()
+        && decision.request_digest() == request.binding_digest()
+        && decision.principal() == request.authenticated().principal()
+        && decision.actor_entity_id() == request.actor_entity_id()
+        && decision.subject_id() == request.subject_id()
+        && decision.participant_id() == request.participant_id()
+        && decision.plugin_id() == request.plugin_id()
+        && decision.installation_id() == request.installation_id()
+        && decision.principal_role() == request.principal_role()
+        && decision.authority_timeline() == request.authority_timeline()
+        && decision.at_position() == request.at_position()
+        && decision.consent_timeline() == request.consent_timeline()
+        && decision.consent_at_position() == request.consent_at_position()
+        && decision.consent_policy_revision() == request.consent_policy_revision()
+        && decision.capability_policy_revision() == request.capability_policy_revision()
+        && decision.authority_registry_digest() == request.authority_registry_digest()
+        && request.revocation_state_current()
+        && !decision.grant_chain_bindings().is_empty()
+}
+
+fn validate_current_observation_authority(
+    authority: &PersistedAuthorityV1,
+    at_position: Seq,
+    binding: ObservationAuthorityBinding<'_>,
+) -> Result<(), AuthorityErrorV1> {
+    if at_position < binding.authority_position {
+        return Err(AuthorityErrorV1::RevocationStateStale);
+    }
+    match authority.revocation_epoch().cmp(&binding.revocation_epoch) {
+        std::cmp::Ordering::Less => return Err(AuthorityErrorV1::RevocationStateStale),
+        std::cmp::Ordering::Greater => return Err(AuthorityErrorV1::RevokedAtFence),
+        std::cmp::Ordering::Equal => {}
+    }
+    let grants = authority.chain().grants();
+    let bindings = grants
+        .iter()
+        .map(super::CapabilityGrantV1::binding_digest)
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(bindings) = bindings else {
+        return Err(AuthorityErrorV1::InvalidEncoding);
+    };
+    if bindings != binding.grant_chain_bindings
+        || grants
+            .iter()
+            .any(|grant| grant.issuance_timeline() != binding.authority_timeline)
+    {
+        return Err(AuthorityErrorV1::DelegationInvalid);
+    }
+    let Some(leaf) = grants.last() else {
+        return Err(AuthorityErrorV1::DelegationInvalid);
+    };
+    if leaf.grantee().principal() != binding.principal
+        || leaf.grantee().plugin_id() != Some(binding.plugin_id)
+        || leaf.grantee().installation_id() != Some(binding.installation_id)
+        || leaf.scope().plugin_id() != Some(binding.plugin_id)
+        || leaf
+            .scope()
+            .participant_ids()
+            .binary_search(&binding.participant_id)
+            .is_err()
+        || leaf.policy_revision() != binding.capability_policy_revision
+    {
+        return Err(AuthorityErrorV1::DelegationInvalid);
+    }
+    if grants.iter().any(|grant| {
+        grant
+            .revocation_fence()
+            .is_some_and(|fence| fence <= at_position)
+    }) {
+        return Err(AuthorityErrorV1::RevokedAtFence);
+    }
+    if grants.iter().any(|grant| {
+        at_position < grant.valid_from_position() || at_position >= grant.valid_until_position()
+    }) {
+        return Err(AuthorityErrorV1::CapabilityMissing);
+    }
+    Ok(())
+}
+
 fn validate_grant_bindings(bindings: &[Hash]) -> Result<(), AuthorityErrorV1> {
     if bindings.is_empty()
         || bindings.len() > usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1
@@ -763,6 +880,8 @@ fn validate_grant_bindings(bindings: &[Hash]) -> Result<(), AuthorityErrorV1> {
 
 fn validate_snapshot_records(
     participant_id: EntityId,
+    timeline_id: TimelineId,
+    observed_through: Seq,
     minimization_revision: Hash,
     records: &[ObservationRecordV1],
 ) -> Result<(), AuthorityErrorV1> {
@@ -771,6 +890,8 @@ fn validate_snapshot_records(
     }
     if records.iter().any(|record| {
         record.participant_id != participant_id
+            || record.source_timeline != timeline_id
+            || record.source_position > observed_through
             || record.minimization_revision != minimization_revision
     }) {
         return Err(AuthorityErrorV1::UnauthorizedSource);
@@ -1075,6 +1196,22 @@ pub struct KnowledgeSnapshotV1 {
 }
 
 impl KnowledgeSnapshotV1 {
+    /// Derive KNS1 only when its observation anchor and contents are exact.
+    ///
+    /// # Errors
+    /// Returns a closed validation error when the draft does not carry the
+    /// identity, position, digest, and observation records of `observation`.
+    pub fn try_from_observation_snapshot(
+        draft: KnowledgeSnapshotDraftV1,
+        observation: &ObservationSnapshotV1,
+    ) -> Result<Self, AuthorityErrorV1> {
+        Self::try_from_draft(draft).and_then(|snapshot| {
+            snapshot
+                .validate_observation_snapshot(observation)
+                .map(|()| snapshot)
+        })
+    }
+
     /// Validate observation and belief provenance and calculate the KNS1 digest.
     ///
     /// # Errors
@@ -1096,6 +1233,8 @@ impl KnowledgeSnapshotV1 {
         if let Some(first) = draft.observations.first() {
             validate_snapshot_records(
                 draft.participant_id,
+                draft.timeline_id,
+                draft.observed_through,
                 first.minimization_revision(),
                 &draft.observations,
             )?;
@@ -1213,6 +1352,28 @@ impl KnowledgeSnapshotV1 {
     #[must_use]
     pub const fn digest(&self) -> Hash {
         self.digest
+    }
+
+    /// Verify the OBS1 evidence from which this KNS1 was derived.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityErrorV1::ProvenanceMissing`] when the claimed OBS1
+    /// identity or observation records differ.
+    pub fn validate_observation_snapshot(
+        &self,
+        observation: &ObservationSnapshotV1,
+    ) -> Result<(), AuthorityErrorV1> {
+        if self.principal == observation.principal
+            && self.participant_id == observation.participant_id
+            && self.timeline_id == observation.timeline_id
+            && self.observed_through == observation.observed_through
+            && self.observation_snapshot_digest == observation.digest
+            && self.observations == observation.records
+        {
+            Ok(())
+        } else {
+            Err(AuthorityErrorV1::ProvenanceMissing)
+        }
     }
 
     /// Encode the exact deterministic-CBOR KNS1 snapshot.

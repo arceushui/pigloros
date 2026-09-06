@@ -4,7 +4,8 @@ use pos_core::{
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
     CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, EventDraft, Hash, Kind,
     ObservationRecordDraftV1, ObservationRecordV1, ObservationSnapshotDraftV1,
-    ObservationSnapshotV1, ObservationStatusV1, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId,
+    ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1, Plugin, PluginId,
+    PrincipalRefV1, Seq, TimelineId,
 };
 use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
 use pos_store::{open_store, StoreConfig};
@@ -22,6 +23,13 @@ impl<T, E: Debug> TestOk<T> for Result<T, E> {
         self.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
         })
+    }
+}
+
+fn error_text<T>(result: Result<T, RuntimeError>) -> String {
+    match result {
+        Ok(_) => std::panic::resume_unwind(Box::new("expected runtime error")),
+        Err(error) => error.to_string(),
     }
 }
 
@@ -309,17 +317,28 @@ fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<Driv
     (registry, state)
 }
 
+fn current_authority(fixture: &Fixture) -> PersistedAuthorityV1 {
+    fixture.state.resolve(fixture.grant.grant_id()).test_ok()
+}
+
+fn stage_current(
+    registry: &mut PluginRegistry,
+    fixture: &Fixture,
+) -> Result<Vec<EventDraft>, RuntimeError> {
+    registry.stage_authorized_driver(
+        fixture.plugin_id,
+        fixture.timeline_id,
+        fixture.snapshot.clone(),
+        &current_authority(fixture),
+        Seq::from_u64(10),
+    )
+}
+
 #[test]
 fn authorized_driver_receives_only_the_bound_snapshot_and_requires_its_commit_fence() {
     let fixture = fixture();
     let (mut registry, state) = registry(&fixture, false);
-    let drafts = registry
-        .stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        )
-        .test_ok();
+    let drafts = stage_current(&mut registry, &fixture).test_ok();
     let observed = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -328,10 +347,8 @@ fn authorized_driver_receives_only_the_bound_snapshot_and_requires_its_commit_fe
     assert!(!observed.saw_raw_events);
     drop(observed);
 
-    assert!(matches!(
-        registry.commit_step_at(Seq::from_u64(12), 0),
-        Err(RuntimeError::AuthorityFenceRequired)
-    ));
+    assert!(error_text(registry.commit_step_at(Seq::from_u64(12), 0))
+        .contains("requires a fresh authority fence"));
     assert_eq!(drafts.len(), 1);
     assert_eq!(
         state
@@ -346,16 +363,15 @@ fn authorized_driver_receives_only_the_bound_snapshot_and_requires_its_commit_fe
 fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
     let fixture = fixture();
     let (mut mismatched, mismatch_state) = registry(&fixture, false);
-    assert!(matches!(
-        mismatched.stage_authorized_driver(
-            fixture.plugin_id,
-            TimelineId::new(),
-            fixture.snapshot.clone(),
-        ),
-        Err(RuntimeError::Authority(
-            pos_core::AuthorityErrorV1::UnauthorizedSource
-        ))
-    ));
+    let authority = current_authority(&fixture);
+    assert!(error_text(mismatched.stage_authorized_driver(
+        fixture.plugin_id,
+        TimelineId::new(),
+        fixture.snapshot.clone(),
+        &authority,
+        Seq::from_u64(10),
+    ))
+    .contains("authority source is unauthorized"));
     assert_eq!(
         mismatch_state
             .lock()
@@ -365,12 +381,14 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
     );
 
     let (mut ambient, ambient_state) = registry(&fixture, true);
-    assert!(matches!(
-        ambient.stage_authorized_driver(fixture.plugin_id, fixture.timeline_id, fixture.snapshot,),
-        Err(RuntimeError::Authority(
-            pos_core::AuthorityErrorV1::UnauthorizedSource
-        ))
-    ));
+    assert!(error_text(ambient.stage_authorized_driver(
+        fixture.plugin_id,
+        fixture.timeline_id,
+        fixture.snapshot,
+        &authority,
+        Seq::from_u64(10),
+    ))
+    .contains("authority source is unauthorized"));
     assert_eq!(
         ambient_state
             .lock()
@@ -384,13 +402,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
 fn authority_is_revalidated_before_any_staged_draft_is_appended() {
     let mut fixture = fixture();
     let (mut registry, state) = registry(&fixture, false);
-    let drafts = registry
-        .stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        )
-        .test_ok();
+    let drafts = stage_current(&mut registry, &fixture).test_ok();
     let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
         grant_id: fixture.grant.grant_id(),
         authority_timeline: fixture.grant.issuance_timeline(),
@@ -413,17 +425,13 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
     let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
     let mut store = open_store(StoreConfig::Memory).test_ok();
 
-    assert!(matches!(
-        registry.append_and_commit_authorized_step_at(
-            store.as_mut(),
-            &drafts,
-            &authority,
-            Seq::from_u64(11),
-        ),
-        Err(RuntimeError::Authority(
-            pos_core::AuthorityErrorV1::RevokedAtFence
-        ))
-    ));
+    assert!(error_text(registry.append_and_commit_authorized_step_at(
+        store.as_mut(),
+        &drafts,
+        &authority,
+        Seq::from_u64(11),
+    ))
+    .contains("authority was revoked at the evaluation fence"));
     let (aborts, commits) = {
         let state = state
             .lock()
@@ -435,26 +443,60 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
 }
 
 #[test]
+fn revoked_authority_is_rejected_before_driver_invocation() {
+    let mut fixture = fixture();
+    let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+        grant_id: fixture.grant.grant_id(),
+        authority_timeline: fixture.grant.issuance_timeline(),
+        fence_position: Seq::from_u64(11),
+        revocation_epoch: 1,
+        policy_revision: fixture.grant.policy_revision(),
+        authority_registry_digest: fixture.grant.authority_registry_digest(),
+    })
+    .test_ok();
+    fixture
+        .state
+        .revoke_grant(
+            fixture
+                .host
+                .authorize_revocation(&fixture.grant, &revocation)
+                .test_ok(),
+            revocation,
+        )
+        .test_ok();
+    let authority = current_authority(&fixture);
+    let (mut registry, state) = registry(&fixture, false);
+
+    assert!(error_text(registry.stage_authorized_driver(
+        fixture.plugin_id,
+        fixture.timeline_id,
+        fixture.snapshot,
+        &authority,
+        Seq::from_u64(11),
+    ))
+    .contains("authority was revoked at the evaluation fence"));
+    assert_eq!(
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observed_digest,
+        None
+    );
+}
+
+#[test]
 fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
     let fixture = fixture();
     let (mut legacy, legacy_state) = registry(&fixture, false);
-    let legacy_drafts = legacy
-        .stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        )
-        .test_ok();
+    let legacy_drafts = stage_current(&mut legacy, &fixture).test_ok();
     let mut legacy_store = open_store(StoreConfig::Memory).test_ok();
-    assert!(matches!(
-        legacy.append_and_commit_step_at(
-            legacy_store.as_mut(),
-            Seq::from_u64(12),
-            0,
-            &legacy_drafts,
-        ),
-        Err(RuntimeError::AuthorityFenceRequired)
-    ));
+    assert!(error_text(legacy.append_and_commit_step_at(
+        legacy_store.as_mut(),
+        Seq::from_u64(12),
+        0,
+        &legacy_drafts,
+    ))
+    .contains("requires a fresh authority fence"));
     assert_eq!(
         legacy_state
             .lock()
@@ -464,27 +506,17 @@ fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
     );
 
     let (mut substituted, substituted_state) = registry(&fixture, false);
-    let mut changed_drafts = substituted
-        .stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        )
-        .test_ok();
+    let mut changed_drafts = stage_current(&mut substituted, &fixture).test_ok();
     changed_drafts[0].payload = CanonicalBytes::from_static(b"substituted");
     let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
     let mut substituted_store = open_store(StoreConfig::Memory).test_ok();
-    assert!(matches!(
-        substituted.append_and_commit_authorized_step_at(
-            substituted_store.as_mut(),
-            &changed_drafts,
-            &authority,
-            Seq::from_u64(10),
-        ),
-        Err(RuntimeError::Authority(
-            pos_core::AuthorityErrorV1::UnauthorizedSource
-        ))
-    ));
+    assert!(error_text(substituted.append_and_commit_authorized_step_at(
+        substituted_store.as_mut(),
+        &changed_drafts,
+        &authority,
+        Seq::from_u64(10),
+    ))
+    .contains("authority source is unauthorized"));
     assert_eq!(
         substituted_state
             .lock()
@@ -500,13 +532,7 @@ fn current_authority_fence_appends_then_commits_the_driver() {
     let timeline = store.create_timeline("authorized-participant").test_ok();
     let fixture = fixture_with_timeline(timeline.id());
     let (mut registry, state) = registry(&fixture, false);
-    let drafts = registry
-        .stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        )
-        .test_ok();
+    let drafts = stage_current(&mut registry, &fixture).test_ok();
     let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
     let events = registry
         .append_and_commit_authorized_step_at(
@@ -531,15 +557,16 @@ fn current_authority_fence_appends_then_commits_the_driver() {
 #[test]
 fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     let fixture = fixture();
+    let authority = current_authority(&fixture);
     let mut missing = PluginRegistry::new();
-    assert!(matches!(
-        missing.stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        ),
-        Err(RuntimeError::NoDriver { .. })
-    ));
+    assert!(error_text(missing.stage_authorized_driver(
+        fixture.plugin_id,
+        fixture.timeline_id,
+        fixture.snapshot.clone(),
+        &authority,
+        Seq::from_u64(10),
+    ))
+    .contains("has no driver"));
 
     let mut driverless = PluginRegistry::new();
     driverless
@@ -551,29 +578,26 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
             None,
         )
         .test_ok();
-    assert!(matches!(
-        driverless.stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        ),
-        Err(RuntimeError::NoDriver { .. })
-    ));
+    assert!(error_text(driverless.stage_authorized_driver(
+        fixture.plugin_id,
+        fixture.timeline_id,
+        fixture.snapshot.clone(),
+        &authority,
+        Seq::from_u64(10),
+    ))
+    .contains("has no driver"));
 
     let (limited, limited_state) = registry(&fixture, false);
     let mut limited = limited.with_resource_limit(0);
-    assert!(matches!(
-        limited.stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        ),
-        Err(RuntimeError::ResourceExhausted {
-            requested: 1,
-            limit: 0,
-            ..
-        })
+    let exhausted = error_text(limited.stage_authorized_driver(
+        fixture.plugin_id,
+        fixture.timeline_id,
+        fixture.snapshot.clone(),
+        &authority,
+        Seq::from_u64(10),
     ));
+    assert!(exhausted.contains("requested=1"));
+    assert!(exhausted.contains("limit=0"));
     assert_eq!(
         limited_state
             .lock()
@@ -583,24 +607,15 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     );
 
     let (mut registry, state) = registry(&fixture, false);
-    let drafts = registry
-        .stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
-            fixture.snapshot.clone(),
-        )
-        .test_ok();
-    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
+    let drafts = stage_current(&mut registry, &fixture).test_ok();
     let mut store = open_store(StoreConfig::Memory).test_ok();
-    assert!(matches!(
-        registry.append_and_commit_authorized_step_at(
-            store.as_mut(),
-            &drafts,
-            &authority,
-            Seq::from_u64(10),
-        ),
-        Err(RuntimeError::Store(_))
-    ));
+    assert!(error_text(registry.append_and_commit_authorized_step_at(
+        store.as_mut(),
+        &drafts,
+        &authority,
+        Seq::from_u64(10),
+    ))
+    .contains("store error"));
     assert_eq!(
         state
             .lock()
@@ -608,13 +623,11 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
             .aborts,
         1
     );
-    assert!(matches!(
-        registry.append_and_commit_authorized_step_at(
-            store.as_mut(),
-            &drafts,
-            &authority,
-            Seq::from_u64(10),
-        ),
-        Err(RuntimeError::PendingDriverStep)
-    ));
+    assert!(error_text(registry.append_and_commit_authorized_step_at(
+        store.as_mut(),
+        &drafts,
+        &authority,
+        Seq::from_u64(10),
+    ))
+    .contains("already pending"));
 }

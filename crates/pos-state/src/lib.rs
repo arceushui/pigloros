@@ -375,42 +375,55 @@ impl ProjectionRegistry {
         &self,
         request: &AuthorizationRequestV1,
         decision: &AuthorizationDecisionV1,
+        authority: &PersistedAuthorityV1,
+        authority_position: Seq,
         context: ProjectionObservationContextV1,
     ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
-        validate_observation_authorization(request, decision)?;
+        if let Err(error) =
+            authority.validate_observation_authorization(request, decision, authority_position)
+        {
+            return Err(error);
+        }
         if context.reducer.is_empty() || context.reducer.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES
         {
             return Err(AuthorityErrorV1::FieldOutOfBounds);
         }
-        let subject_id = request
-            .subject_id()
-            .ok_or(AuthorityErrorV1::ConsentMissing)?;
-        let participant_id = request
-            .participant_id()
-            .ok_or(AuthorityErrorV1::UnauthorizedSource)?;
-        let plugin_id = request
-            .plugin_id()
-            .ok_or(AuthorityErrorV1::UnauthorizedSource)?;
-        let installation_id = request
-            .installation_id()
-            .ok_or(AuthorityErrorV1::UnauthorizedSource)?;
-        let (status, artifact_digest, projection_digest, artifacts) = self
+        if request.resource().strip_prefix("projection.") != Some(context.reducer.as_str()) {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        }
+        let Some(subject_id) = request.subject_id() else {
+            return Err(AuthorityErrorV1::ConsentMissing);
+        };
+        let Some(participant_id) = request.participant_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let Some(plugin_id) = request.plugin_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let Some(installation_id) = request.installation_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let artifact = self
             .state_for_reducer(&context.reducer, &subject_id)
             .map(canonical_state_artifact)
-            .transpose()?
-            .map_or(
-                (ObservationStatusV1::NotObserved, None, None, Vec::new()),
-                |artifact| {
-                    let digest = artifact.digest();
-                    (
-                        ObservationStatusV1::Present,
-                        Some(digest),
-                        Some(digest),
-                        vec![artifact],
-                    )
-                },
-            );
-        let record = ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
+            .transpose();
+        let artifact = match artifact {
+            Ok(artifact) => artifact,
+            Err(error) => return Err(error),
+        };
+        let (status, artifact_digest, projection_digest, artifacts) = artifact.map_or(
+            (ObservationStatusV1::NotObserved, None, None, Vec::new()),
+            |artifact| {
+                let digest = artifact.digest();
+                (
+                    ObservationStatusV1::Present,
+                    Some(digest),
+                    Some(digest),
+                    vec![artifact],
+                )
+            },
+        );
+        ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
             participant_id,
             resource: request.resource().to_owned(),
             data_category: request.data_category().to_owned(),
@@ -423,29 +436,31 @@ impl ProjectionRegistry {
             projection_digest,
             provenance_digest: context.provenance_digest,
             minimization_revision: context.minimization_revision,
-        })?;
-        ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
-            principal: decision.principal().clone(),
-            participant_id,
-            plugin_id,
-            installation_id,
-            timeline_id: context.timeline_id,
-            observed_through: context.observed_through,
-            authority_timeline: decision.authority_timeline(),
-            authority_position: decision.at_position(),
-            authorization_request_digest: request.binding_digest(),
-            authorization_decision_digest: decision.decision_digest(),
-            grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
-            consent_policy_revision: decision.consent_policy_revision(),
-            capability_policy_revision: decision.capability_policy_revision(),
-            revocation_epoch: request.revocation_epoch(),
-            visibility_policy_revision: context.visibility_policy_revision,
-            schema_revision: context.schema_revision,
-            minimization_revision: context.minimization_revision,
-            records: vec![record],
-            artifacts,
-            prior_snapshot_digest: context.prior_snapshot_digest,
-            provenance_digest: context.provenance_digest,
+        })
+        .and_then(|record| {
+            ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
+                principal: decision.principal().clone(),
+                participant_id,
+                plugin_id,
+                installation_id,
+                timeline_id: context.timeline_id,
+                observed_through: context.observed_through,
+                authority_timeline: decision.authority_timeline(),
+                authority_position: decision.at_position(),
+                authorization_request_digest: request.binding_digest(),
+                authorization_decision_digest: decision.decision_digest(),
+                grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
+                consent_policy_revision: decision.consent_policy_revision(),
+                capability_policy_revision: decision.capability_policy_revision(),
+                revocation_epoch: request.revocation_epoch(),
+                visibility_policy_revision: context.visibility_policy_revision,
+                schema_revision: context.schema_revision,
+                minimization_revision: context.minimization_revision,
+                records: vec![record],
+                artifacts,
+                prior_snapshot_digest: context.prior_snapshot_digest,
+                provenance_digest: context.provenance_digest,
+            })
         })
     }
 
@@ -549,39 +564,6 @@ pub struct ProjectionObservationContextV1 {
     pub source_digest: Hash,
     pub provenance_digest: Hash,
     pub prior_snapshot_digest: Option<Hash>,
-}
-
-fn validate_observation_authorization(
-    request: &AuthorizationRequestV1,
-    decision: &AuthorizationDecisionV1,
-) -> Result<(), AuthorityErrorV1> {
-    if !decision.is_allowed() {
-        return Err(decision
-            .error()
-            .unwrap_or(AuthorityErrorV1::UnauthorizedSource));
-    }
-    let exact_binding = decision.request_digest() == request.binding_digest()
-        && decision.principal() == request.authenticated().principal()
-        && decision.actor_entity_id() == request.actor_entity_id()
-        && decision.subject_id() == request.subject_id()
-        && decision.participant_id() == request.participant_id()
-        && decision.plugin_id() == request.plugin_id()
-        && decision.installation_id() == request.installation_id()
-        && decision.principal_role() == request.principal_role()
-        && decision.authority_timeline() == request.authority_timeline()
-        && decision.at_position() == request.at_position()
-        && decision.consent_timeline() == request.consent_timeline()
-        && decision.consent_at_position() == request.consent_at_position()
-        && decision.consent_policy_revision() == request.consent_policy_revision()
-        && decision.capability_policy_revision() == request.capability_policy_revision()
-        && decision.authority_registry_digest() == request.authority_registry_digest()
-        && request.revocation_state_current()
-        && !decision.grant_chain_bindings().is_empty();
-    if exact_binding {
-        Ok(())
-    } else {
-        Err(AuthorityErrorV1::UnauthorizedSource)
-    }
 }
 
 fn canonical_state_artifact(state: &State) -> Result<ObservationArtifactV1, AuthorityErrorV1> {

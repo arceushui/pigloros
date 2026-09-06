@@ -167,6 +167,33 @@ fn knowledge_snapshot_preserves_epistemic_and_revision_meanings() {
 }
 
 #[test]
+fn knowledge_snapshot_requires_its_exact_observation_anchor() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let record =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .test_ok();
+    let observation = ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
+        vec![record.clone()],
+        Vec::new(),
+    ))
+    .test_ok();
+    let mut draft = knowledge_draft(participant_id, vec![record], Vec::new());
+    draft.observation_snapshot_digest = observation.digest();
+    let knowledge =
+        KnowledgeSnapshotV1::try_from_observation_snapshot(draft.clone(), &observation).test_ok();
+    assert_eq!(
+        knowledge.validate_observation_snapshot(&observation),
+        Ok(())
+    );
+
+    draft.observation_snapshot_digest = hash_from_repeated_byte(99);
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_observation_snapshot(draft, &observation),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+}
+
+#[test]
 fn knowledge_snapshot_rejects_noncanonical_belief_order() {
     let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
     let observation =
@@ -242,6 +269,7 @@ fn record_draft(
     status: ObservationStatusV1,
     artifact_digest: Option<Hash>,
 ) -> ObservationRecordDraftV1 {
+    let unauthorized = status == ObservationStatusV1::Unauthorized;
     ObservationRecordDraftV1 {
         participant_id: EntityId::from_ulid(Ulid::from(1_u128)),
         resource: "projection.profile".to_owned(),
@@ -251,9 +279,17 @@ fn record_draft(
         source_timeline: TimelineId::from_ulid(Ulid::from(2_u128)),
         source_position: Seq::from_u64(7),
         schema: "profile.v1".to_owned(),
-        source_digest: hash_from_repeated_byte(3),
-        projection_digest: Some(hash_from_repeated_byte(4)),
-        provenance_digest: hash_from_repeated_byte(5),
+        source_digest: if unauthorized {
+            Hash::zero()
+        } else {
+            hash_from_repeated_byte(3)
+        },
+        projection_digest: (!unauthorized).then(|| hash_from_repeated_byte(4)),
+        provenance_digest: if unauthorized {
+            Hash::zero()
+        } else {
+            hash_from_repeated_byte(5)
+        },
         minimization_revision: hash_from_repeated_byte(6),
     }
 }
@@ -474,6 +510,13 @@ fn typed_absence_cannot_carry_observation_value_bytes() {
     ));
 
     assert_eq!(result, Err(pos_core::AuthorityErrorV1::UnauthorizedSource));
+
+    let mut metadata_leak = record_draft(ObservationStatusV1::Unauthorized, None);
+    metadata_leak.source_digest = hash_from_repeated_byte(2);
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(metadata_leak),
+        Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
+    );
 }
 
 #[test]
@@ -726,6 +769,25 @@ fn observation_snapshot_validation_rejects_identity_provenance_and_size_drift() 
     invalid.participant_id = EntityId::from_ulid(Ulid::from(99_u128));
     assert_eq!(
         ObservationSnapshotV1::try_from_draft(invalid),
+        Err(AuthorityErrorV1::UnauthorizedSource)
+    );
+    let mut other_timeline = record_draft(ObservationStatusV1::NotObserved, None);
+    other_timeline.source_timeline = TimelineId::from_ulid(Ulid::from(99_u128));
+    let other_timeline = ObservationRecordV1::try_from_draft(other_timeline).test_ok();
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
+            vec![other_timeline],
+            Vec::new(),
+        )),
+        Err(AuthorityErrorV1::UnauthorizedSource)
+    );
+    let mut future = record_draft(ObservationStatusV1::NotObserved, None);
+    future.source_position = Seq::from_u64(8);
+    let future = ObservationRecordV1::try_from_draft(future).test_ok();
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(
+            observation_snapshot_draft(vec![future], Vec::new(),)
+        ),
         Err(AuthorityErrorV1::UnauthorizedSource)
     );
     let invalid = observation_snapshot_draft(
