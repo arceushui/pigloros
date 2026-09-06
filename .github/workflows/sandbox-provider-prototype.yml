@@ -227,6 +227,44 @@ jobs:
             | tee -a restart-reconciliation.txt
           test "$recovery_us" -le 10000000
 
+      - name: Record normal cancellation and forced cleanup distributions
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          set -euo pipefail
+          percentile_95() {
+            file="$1"
+            field="$2"
+            tr ';' '\n' <"$file" |
+              awk -F= -v field="$field" '$1 == field { print $2 }' |
+              sort -n | sed -n '29p'
+          }
+          : >cleanup-p95.txt
+          for mode in normal cancel forced; do
+            samples="cleanup-${mode}-samples.txt"
+            : >"$samples"
+            for attempt in $(seq 1 30); do
+              sudo ./target/debug/sandbox-provider-feasibility \
+                --privileged --offline --cleanup-sample \
+                --cleanup-mode "$mode" --attempt-id "${mode}${attempt}" \
+                >>"$samples"
+            done
+            test "$(wc -l <"$samples")" -eq 30
+            test "$(grep -c "cleanup_sample=${mode}" "$samples")" -eq 30
+            test "$(grep -c 'network_isolation=isolated-no-host-net' "$samples")" -eq 30
+            test "$(grep -c 'unit_absent=true' "$samples")" -eq 30
+            launch_p95=$(percentile_95 "$samples" launch_us)
+            cleanup_p95=$(percentile_95 "$samples" cleanup_us)
+            printf '%s_launch_us_p95=%s\n%s_cleanup_us_p95=%s\n' \
+              "$mode" "$launch_p95" "$mode" "$cleanup_p95" \
+              | tee -a cleanup-p95.txt
+            test "$launch_p95" -le 2000000
+            if test "$mode" = forced; then
+              test "$cleanup_p95" -le 5000000
+            else
+              test "$cleanup_p95" -le 2000000
+            fi
+          done
+
       - name: Record thirty sequential lifecycle samples
         working-directory: prototypes/sandbox-provider-feasibility
         run: |
@@ -274,6 +312,8 @@ jobs:
             prototypes/sandbox-provider-feasibility/Cargo.lock
             prototypes/sandbox-provider-feasibility/cargo-deny.txt
             prototypes/sandbox-provider-feasibility/broker-death.txt
+            prototypes/sandbox-provider-feasibility/cleanup-*-samples.txt
+            prototypes/sandbox-provider-feasibility/cleanup-p95.txt
             prototypes/sandbox-provider-feasibility/concurrent-*.txt
             prototypes/sandbox-provider-feasibility/dependency-metadata.json
             prototypes/sandbox-provider-feasibility/dependency-packages.json

@@ -23,7 +23,7 @@ use std::{
     os::unix::fs::MetadataExt as _,
     process::{Command, Stdio},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use zbus::zvariant::{OwnedValue, Type, Value};
 
@@ -41,6 +41,13 @@ async fn main() {
         run_attempt_worker();
         return;
     }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--normal-worker")
+    {
+        run_normal_worker();
+        return;
+    }
     let privileged = arguments.iter().any(|argument| argument == "--privileged");
     let network_isolation =
         if privileged && arguments.iter().any(|argument| argument == "--offline") {
@@ -49,6 +56,13 @@ async fn main() {
             "not-requested"
         };
     let attempt_id = attempt_id(&arguments);
+    if arguments
+        .iter()
+        .any(|argument| argument == "--cleanup-sample")
+    {
+        probe_cleanup_sample(&attempt_id, cleanup_mode(&arguments), network_isolation).await;
+        return;
+    }
     if arguments
         .iter()
         .any(|argument| argument == "--broker-death")
@@ -141,6 +155,54 @@ fn run_attempt_worker() {
     }
 }
 
+fn run_normal_worker() {
+    let mut signal = [0_u8; 1];
+    if std::io::stdin().read_exact(&mut signal).is_err() {
+        return;
+    }
+    println!("worker-ready;worker_pid={}", std::process::id());
+    let _ = std::io::stdout().flush();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CleanupMode {
+    Normal,
+    Cancel,
+    Forced,
+}
+
+impl CleanupMode {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Cancel => "cancel",
+            Self::Forced => "forced",
+        }
+    }
+
+    const fn worker_argument(self) -> &'static str {
+        match self {
+            Self::Normal => "--normal-worker",
+            Self::Cancel | Self::Forced => "--attempt-worker",
+        }
+    }
+
+    const fn kill_signal(self) -> Option<i32> {
+        match self {
+            Self::Forced => Some(19),
+            Self::Normal | Self::Cancel => None,
+        }
+    }
+}
+
+fn cleanup_mode(arguments: &[String]) -> CleanupMode {
+    match argument_value(arguments, "--cleanup-mode") {
+        Some("cancel") => CleanupMode::Cancel,
+        Some("forced") => CleanupMode::Forced,
+        _ => CleanupMode::Normal,
+    }
+}
+
 async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
     let Ok(connection) = zbus::Connection::system().await else {
         println!("broker-setup-rejected;reason=dbus-unavailable");
@@ -152,7 +214,7 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
     };
     let broker_unit = format!("pigloros-broker-{attempt_id}.scope");
     let attempt_unit = format!("pigloros-attempt-{attempt_id}.scope");
-    if start_transient_scope(&proxy, &broker_unit, &[std::process::id()], &[])
+    if start_transient_scope(&proxy, &broker_unit, &[std::process::id()], &[], None)
         .await
         .is_err()
     {
@@ -160,8 +222,14 @@ async fn probe_broker_death(attempt_id: &str, network_isolation: &str) {
         return;
     }
 
-    let Ok((_worker, worker_line)) =
-        spawn_scoped_worker(&proxy, &attempt_unit, std::slice::from_ref(&broker_unit)).await
+    let Ok((_worker, worker_line)) = spawn_scoped_worker(
+        &proxy,
+        &attempt_unit,
+        std::slice::from_ref(&broker_unit),
+        "--attempt-worker",
+        None,
+    )
+    .await
     else {
         println!("broker-setup-rejected;reason=attempt-worker");
         return;
@@ -179,16 +247,18 @@ async fn spawn_scoped_worker(
     proxy: &zbus_systemd::systemd1::ManagerProxy<'_>,
     unit: &str,
     binds_to: &[String],
+    worker_argument: &str,
+    kill_signal: Option<i32>,
 ) -> Result<(std::process::Child, String), ()> {
     let executable = std::env::current_exe().map_err(|_| ())?;
     let mut worker = Command::new(executable)
-        .arg("--attempt-worker")
+        .arg(worker_argument)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| ())?;
-    if start_transient_scope(proxy, unit, &[worker.id()], binds_to)
+    if start_transient_scope(proxy, unit, &[worker.id()], binds_to, kill_signal)
         .await
         .is_err()
         || !wait_for_unit_cgroup(worker.id(), unit)
@@ -231,7 +301,9 @@ async fn inject_reconciliation_orphan(attempt_id: &str, network_isolation: &str)
         return;
     };
     let orphan_unit = format!("pigloros-orphan-{attempt_id}.scope");
-    let Ok((_worker, worker_line)) = spawn_scoped_worker(&proxy, &orphan_unit, &[]).await else {
+    let Ok((_worker, worker_line)) =
+        spawn_scoped_worker(&proxy, &orphan_unit, &[], "--attempt-worker", None).await
+    else {
         println!("orphan-setup-rejected;reason=attempt-worker");
         return;
     };
@@ -265,6 +337,66 @@ async fn reconcile_orphan(attempt_id: &str, network_isolation: &str) {
     }
 }
 
+async fn probe_cleanup_sample(attempt_id: &str, mode: CleanupMode, network_isolation: &str) {
+    let Ok(connection) = zbus::Connection::system().await else {
+        println!("cleanup-sample-rejected;reason=dbus-unavailable");
+        return;
+    };
+    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
+        println!("cleanup-sample-rejected;reason=manager-unavailable");
+        return;
+    };
+    let unit = format!("pigloros-cleanup-{}-{attempt_id}.scope", mode.name());
+    let launch_started = Instant::now();
+    let Ok((mut worker, _worker_line)) = spawn_scoped_worker(
+        &proxy,
+        &unit,
+        &[],
+        mode.worker_argument(),
+        mode.kill_signal(),
+    )
+    .await
+    else {
+        println!("cleanup-sample-rejected;reason=worker-launch");
+        return;
+    };
+    let launch_us = launch_started.elapsed().as_micros();
+    let cleanup_started = Instant::now();
+    if mode != CleanupMode::Normal
+        && proxy
+            .stop_unit(unit.clone(), "replace".to_owned())
+            .await
+            .is_err()
+    {
+        let _ = worker.kill();
+        println!("cleanup-sample-rejected;reason=stop-unit");
+        return;
+    }
+    if worker.wait().is_err() {
+        println!("cleanup-sample-rejected;reason=worker-wait");
+        return;
+    }
+    let unit_absent = wait_for_unit_absent(&proxy, &unit).await;
+    let cleanup_us = cleanup_started.elapsed().as_micros();
+    println!(
+        "cleanup_sample={};attempt={attempt_id};network_isolation={network_isolation};launch_us={launch_us};cleanup_us={cleanup_us};unit_absent={unit_absent}",
+        mode.name()
+    );
+}
+
+async fn wait_for_unit_absent(
+    proxy: &zbus_systemd::systemd1::ManagerProxy<'_>,
+    unit: &str,
+) -> bool {
+    for _ in 0..100 {
+        if proxy.get_unit(unit.to_owned()).await.is_err() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 fn wait_for_unit_cgroup(pid: u32, unit: &str) -> bool {
     let expected_suffix = format!("/{unit}");
     for _ in 0..100 {
@@ -278,7 +410,7 @@ fn wait_for_unit_cgroup(pid: u32, unit: &str) -> bool {
         if attached {
             return true;
         }
-        thread::sleep(std::time::Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(10));
     }
     false
 }
@@ -288,6 +420,7 @@ async fn start_transient_scope(
     name: &str,
     pids: &[u32],
     binds_to: &[String],
+    kill_signal: Option<i32>,
 ) -> Result<(), ()> {
     let mut properties = vec![
         (
@@ -305,6 +438,9 @@ async fn start_transient_scope(
     if !binds_to.is_empty() {
         properties.push(("BindsTo".to_owned(), owned_value(binds_to.to_vec())?));
         properties.push(("After".to_owned(), owned_value(binds_to.to_vec())?));
+    }
+    if let Some(signal) = kill_signal {
+        properties.push(("KillSignal".to_owned(), OwnedValue::from(signal)));
     }
     proxy
         .start_transient_unit(name.to_owned(), "fail".to_owned(), properties, vec![])
@@ -362,22 +498,24 @@ async fn check_orphan_unit_absent(attempt_id: &str) {
 }
 
 fn attempt_id(arguments: &[String]) -> String {
-    let mut arguments = arguments.iter();
-    while let Some(argument) = arguments.next() {
-        if argument == "--attempt-id" {
-            if let Some(value) = arguments.next() {
-                let filtered: String = value
-                    .chars()
-                    .filter(char::is_ascii_alphanumeric)
-                    .take(11)
-                    .collect();
-                if !filtered.is_empty() {
-                    return filtered;
-                }
-            }
+    if let Some(value) = argument_value(arguments, "--attempt-id") {
+        let filtered: String = value
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(11)
+            .collect();
+        if !filtered.is_empty() {
+            return filtered;
         }
     }
     std::process::id().to_string()
+}
+
+fn argument_value<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].as_str())
 }
 
 fn isolate_network() -> &'static str {
