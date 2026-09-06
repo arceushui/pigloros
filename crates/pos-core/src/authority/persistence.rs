@@ -179,21 +179,14 @@ impl AuthorityMutationPermitV1 {
         }
     }
 
-    fn permits_revocation_record(&self, revocation: &CapabilityRevocationV1) -> bool {
+    fn revoked_grant_binding(&self, revocation: &CapabilityRevocationV1) -> Option<Hash> {
         match self.evidence {
             AuthorityMutationEvidenceV1::Revoke {
-                revocation_binding, ..
-            } => revocation.binding_digest() == revocation_binding,
-            AuthorityMutationEvidenceV1::Issue { .. } => false,
-        }
-    }
-
-    fn permits_revoked_grant(&self, grant: &CapabilityGrantV1) -> bool {
-        match self.evidence {
-            AuthorityMutationEvidenceV1::Revoke { grant_binding, .. } => grant
-                .binding_digest()
-                .is_ok_and(|binding| binding == grant_binding),
-            AuthorityMutationEvidenceV1::Issue { .. } => false,
+                grant_binding,
+                revocation_binding,
+            } if revocation.binding_digest() == revocation_binding => Some(grant_binding),
+            AuthorityMutationEvidenceV1::Issue { .. }
+            | AuthorityMutationEvidenceV1::Revoke { .. } => None,
         }
     }
 }
@@ -448,9 +441,7 @@ impl AuthorityPersistenceStateV1 {
         if grant.revocation_epoch() != current.revocation_epoch {
             return Err(AuthorityPersistenceErrorV1::StaleEpoch);
         }
-        if grant.issuance_seq() <= current.head_position
-            || self.coordinate_is_recorded(timeline, grant.issuance_seq())
-        {
+        if grant.issuance_seq() <= current.head_position {
             return Err(AuthorityPersistenceErrorV1::TimelineOrder);
         }
         let grant_id = grant.grant_id();
@@ -489,13 +480,16 @@ impl AuthorityPersistenceStateV1 {
         permit: AuthorityMutationPermitV1,
         revocation: CapabilityRevocationV1,
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
-        if !permit.permits_revocation_record(&revocation) {
+        let Some(grant_binding) = permit.revoked_grant_binding(&revocation) else {
             return Err(AuthorityPersistenceErrorV1::Unavailable);
-        }
+        };
         let Some(grant) = self.grants.get(&revocation.grant_id()) else {
             return Err(AuthorityPersistenceErrorV1::Conflict);
         };
-        if !permit.permits_revoked_grant(grant) {
+        if !grant
+            .binding_digest()
+            .is_ok_and(|binding| binding == grant_binding)
+        {
             return Err(AuthorityPersistenceErrorV1::Unavailable);
         }
         if let Some(existing) = self.revocations.get(&revocation.grant_id()) {
@@ -504,13 +498,6 @@ impl AuthorityPersistenceStateV1 {
             } else {
                 Err(AuthorityPersistenceErrorV1::Conflict)
             };
-        }
-        let timeline_matches = revocation.authority_timeline() == grant.issuance_timeline();
-        let policy_matches = revocation.policy_revision() == grant.policy_revision();
-        let registry_matches =
-            revocation.authority_registry_digest() == grant.authority_registry_digest();
-        if !(timeline_matches && policy_matches && registry_matches) {
-            return Err(AuthorityPersistenceErrorV1::Conflict);
         }
         let Some(current) = self
             .timelines
@@ -522,12 +509,7 @@ impl AuthorityPersistenceStateV1 {
         if revocation.revocation_epoch() != current.revocation_epoch.saturating_add(1) {
             return Err(AuthorityPersistenceErrorV1::StaleEpoch);
         }
-        if revocation.fence_position() <= current.head_position
-            || self.coordinate_is_recorded(
-                revocation.authority_timeline(),
-                revocation.fence_position(),
-            )
-        {
+        if revocation.fence_position() <= current.head_position {
             return Err(AuthorityPersistenceErrorV1::TimelineOrder);
         }
         self.timelines.insert(
@@ -549,6 +531,11 @@ impl AuthorityPersistenceStateV1 {
         &self,
         leaf_grant_id: Hash,
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        let timeline = self
+            .grants
+            .get(&leaf_grant_id)
+            .map(CapabilityGrantV1::issuance_timeline)
+            .ok_or(AuthorityPersistenceErrorV1::Conflict)?;
         let mut chain = Vec::new();
         let mut next = Some(leaf_grant_id);
         while let Some(grant_id) = next {
@@ -568,9 +555,6 @@ impl AuthorityPersistenceStateV1 {
             next = grant.parent_grant_id();
         }
         chain.reverse();
-        let Some(timeline) = chain.last().map(CapabilityGrantV1::issuance_timeline) else {
-            return Err(AuthorityPersistenceErrorV1::Conflict);
-        };
         let Some(current) = self.timelines.get(&timeline).copied() else {
             return Err(AuthorityPersistenceErrorV1::InvalidRecord);
         };
@@ -811,16 +795,6 @@ impl AuthorityPersistenceStateV1 {
             }
         }
         Ok(())
-    }
-
-    fn coordinate_is_recorded(&self, timeline: TimelineId, position: Seq) -> bool {
-        self.grants
-            .values()
-            .any(|grant| grant.issuance_timeline() == timeline && grant.issuance_seq() == position)
-            || self.revocations.values().any(|revocation| {
-                revocation.authority_timeline() == timeline
-                    && revocation.fence_position() == position
-            })
     }
 }
 

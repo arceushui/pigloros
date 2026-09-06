@@ -132,6 +132,69 @@ fn child_grant() -> CapabilityGrantV1 {
     }))
 }
 
+fn grant_draft(grant: &CapabilityGrantV1) -> CapabilityGrantDraftV1 {
+    CapabilityGrantDraftV1 {
+        grant_id: grant.grant_id(),
+        grantor: grant.grantor().clone(),
+        grantee: grant.grantee().clone(),
+        trust_domain: grant.trust_domain().to_owned(),
+        scope: grant.scope().clone(),
+        valid_from_position: grant.valid_from_position(),
+        valid_until_position: grant.valid_until_position(),
+        parent_grant_id: grant.parent_grant_id(),
+        delegation_depth: grant.delegation_depth(),
+        max_delegation_depth: grant.max_delegation_depth(),
+        permitted_delegate_classes: grant.permitted_delegate_classes().to_vec(),
+        consent_references: grant.consent_references().to_vec(),
+        policy_revision: grant.policy_revision(),
+        issuance_timeline: grant.issuance_timeline(),
+        issuance_seq: grant.issuance_seq(),
+        revocation_epoch: grant.revocation_epoch(),
+        revocation_fence: grant.revocation_fence(),
+        authority_registry_digest: grant.authority_registry_digest(),
+    }
+}
+
+fn authority_stores() -> [Box<dyn AuthorityPersistencePortV1>; 2] {
+    [
+        Box::new(MemoryStore::new()),
+        Box::new(ok(SqliteStore::open_in_memory())),
+    ]
+}
+
+fn authority_fixture_value() -> Value {
+    let root = root_grant();
+    let child = child_grant();
+    let revocation = revocation();
+    let host = authority_host(hash(7), &[&root, &child]);
+    let mut state = AuthorityPersistenceStateV1::new();
+    ok(state.issue_grant(ok(host.authorize_grant(&root)), root));
+    ok(state.issue_grant(ok(host.authorize_grant(&child)), child));
+    ok(state.revoke_grant(
+        ok(host.authorize_revocation(&root_grant(), &revocation)),
+        revocation,
+    ));
+    ok(ciborium::de::from_reader(
+        ok(state.to_persistence_bytes()).as_slice(),
+    ))
+}
+
+fn value_array(value: &mut Value) -> &mut Vec<Value> {
+    let Value::Array(values) = value else {
+        std::panic::resume_unwind(Box::new("authority fixture value must be an array"));
+    };
+    values
+}
+
+fn assert_invalid_persistence_value(value: &Value) {
+    let mut encoded = Vec::new();
+    ok(ciborium::ser::into_writer(value, &mut encoded));
+    assert_eq!(
+        AuthorityPersistenceStateV1::from_persistence_bytes(&encoded),
+        Err(AuthorityPersistenceErrorV1::InvalidRecord)
+    );
+}
+
 fn revocation() -> CapabilityRevocationV1 {
     revocation_at(3)
 }
@@ -195,21 +258,14 @@ fn memory_and_sqlite_have_identical_public_authority_contracts() {
 }
 
 #[test]
-fn authority_adapters_require_the_bound_host_mutation_permit() {
+fn authority_ports_reject_unbound_and_foreign_host_bindings() {
     let root = root_grant();
-    let revocation = revocation();
     let host = authority_host(hash(7), &[&root]);
     let foreign_host = authority_host(hash(7), &[&root]);
     let permit = ok(host.authorize_grant(&root));
-    let revocation_permit = ok(host.authorize_revocation(&root, &revocation));
     let foreign = ok(foreign_host.authorize_grant(&root));
-    let foreign_revocation = ok(foreign_host.authorize_revocation(&root, &revocation));
-    let mut stores: [Box<dyn AuthorityPersistencePortV1>; 2] = [
-        Box::new(MemoryStore::new()),
-        Box::new(ok(SqliteStore::open_in_memory())),
-    ];
 
-    for store in &mut stores {
+    for store in &mut authority_stores() {
         assert_eq!(
             store.issue_capability_grant(permit, &root),
             Err(AuthorityPersistenceErrorV1::Unavailable)
@@ -224,29 +280,49 @@ fn authority_adapters_require_the_bound_host_mutation_permit() {
             store.issue_capability_grant(foreign, &root),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
+    }
+}
+
+#[test]
+fn authority_mutation_permits_are_operation_and_record_specific() {
+    let root = root_grant();
+    let revocation = revocation();
+    let host = authority_host(hash(7), &[&root]);
+    let issue_permit = ok(host.authorize_grant(&root));
+    let revoke_permit = ok(host.authorize_revocation(&root, &revocation));
+    let foreign_host = authority_host(hash(7), &[&root]);
+    let foreign_revoke = ok(foreign_host.authorize_revocation(&root, &revocation));
+
+    for store in &mut authority_stores() {
+        ok(store.bind_authority_persistence(host.persistence_binding()));
         assert_eq!(
-            store.issue_capability_grant(revocation_permit, &root),
+            store.issue_capability_grant(revoke_permit, &root),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
         assert_eq!(
-            store.issue_capability_grant(permit, &child_grant()),
+            store.issue_capability_grant(issue_permit, &child_grant()),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
-        ok(store.issue_capability_grant(permit, &root));
+        ok(store.issue_capability_grant(issue_permit, &root));
         assert_eq!(
-            store.revoke_capability_grant(foreign_revocation, &revocation),
-            Err(AuthorityPersistenceErrorV1::Unavailable)
-        );
-        assert_eq!(
-            store.revoke_capability_grant(permit, &revocation),
+            store.revoke_capability_grant(foreign_revoke, &revocation),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
         assert_eq!(
-            store.revoke_capability_grant(revocation_permit, &revocation_at(4)),
+            store.revoke_capability_grant(issue_permit, &revocation),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(
+            store.revoke_capability_grant(revoke_permit, &revocation_at(4)),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
     }
+}
 
+#[test]
+fn authority_host_authorizes_only_registry_attested_exact_records() {
+    let root = root_grant();
+    let revocation = revocation();
     let untrusted_host = authority_host(hash(7), &[]);
     assert_eq!(
         untrusted_host.authorize_grant(&root),
@@ -304,6 +380,76 @@ fn authority_state_round_trip_preserves_versions_links_and_fences() {
     assert_eq!(restored, state);
     assert_eq!(restored.grants().count(), 2);
     assert_eq!(restored.revocations().count(), 1);
+}
+
+#[test]
+fn grant_identity_conflicts_and_persisted_fences_fail_closed() {
+    let root = root_grant();
+    let mut conflicting_draft = grant_draft(&root);
+    conflicting_draft.valid_until_position = Seq::from_u64(99);
+    let conflicting = ok(CapabilityGrantV1::try_from_draft(conflicting_draft));
+    let mut fenced_draft = grant_draft(&root);
+    fenced_draft.grant_id = hash(3);
+    fenced_draft.issuance_seq = Seq::from_u64(2);
+    fenced_draft.valid_from_position = Seq::from_u64(2);
+    fenced_draft.revocation_fence = Some(Seq::from_u64(3));
+    let fenced = ok(CapabilityGrantV1::try_from_draft(fenced_draft));
+    let host = authority_host(hash(7), &[&root, &conflicting, &fenced]);
+    let mut state = AuthorityPersistenceStateV1::new();
+
+    ok(state.issue_grant(ok(host.authorize_grant(&root)), root));
+    assert_eq!(
+        state.issue_grant(ok(host.authorize_grant(&conflicting)), conflicting),
+        Err(AuthorityPersistenceErrorV1::Conflict)
+    );
+    assert_eq!(
+        state.issue_grant(ok(host.authorize_grant(&fenced)), fenced),
+        Err(AuthorityPersistenceErrorV1::InvalidRecord)
+    );
+}
+
+#[test]
+fn invalid_delegation_rolls_back_grant_and_timeline_atomically() {
+    let root = root_grant();
+    let child = child_grant();
+    let mut invalid_draft = grant_draft(&child);
+    invalid_draft.grantor = principal(4);
+    let invalid_child = ok(CapabilityGrantV1::try_from_draft(invalid_draft));
+    let host = authority_host(hash(7), &[&root, &child, &invalid_child]);
+    let mut state = AuthorityPersistenceStateV1::new();
+
+    ok(state.issue_grant(ok(host.authorize_grant(&root)), root));
+    assert_eq!(
+        state.issue_grant(ok(host.authorize_grant(&invalid_child)), invalid_child),
+        Err(AuthorityPersistenceErrorV1::InvalidRecord)
+    );
+    assert_eq!(state.grants().count(), 1);
+    assert_eq!(
+        ok(state.issue_grant(ok(host.authorize_grant(&child)), child)),
+        AuthorityCommitOutcomeV1::Committed
+    );
+}
+
+#[test]
+fn revocation_requires_the_exact_persisted_grant_binding() {
+    let root = root_grant();
+    let mut alternate_draft = grant_draft(&root);
+    alternate_draft.valid_until_position = Seq::from_u64(99);
+    let alternate = ok(CapabilityGrantV1::try_from_draft(alternate_draft));
+    let revocation = revocation();
+    let host = authority_host(hash(7), &[&root, &alternate]);
+    let alternate_permit = ok(host.authorize_revocation(&alternate, &revocation));
+    let mut state = AuthorityPersistenceStateV1::new();
+
+    assert_eq!(
+        state.revoke_grant(alternate_permit, revocation.clone()),
+        Err(AuthorityPersistenceErrorV1::Conflict)
+    );
+    ok(state.issue_grant(ok(host.authorize_grant(&root)), root));
+    assert_eq!(
+        state.revoke_grant(alternate_permit, revocation),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
 }
 
 #[test]
@@ -559,6 +705,57 @@ fn revocation_codec_is_canonical_and_rejects_zero_fields() {
         }),
         Err(AuthorityPersistenceErrorV1::InvalidRecord)
     );
+}
+
+#[test]
+fn authority_state_codec_rejects_malformed_collections_and_rows() {
+    let fixture = authority_fixture_value();
+
+    for field_index in 2..=4 {
+        let mut malformed = fixture.clone();
+        value_array(&mut malformed)[field_index] = Value::Integer(1_u64.into());
+        assert_invalid_persistence_value(&malformed);
+    }
+
+    for field_index in 2..=3 {
+        let mut wrong_entry_type = fixture.clone();
+        value_array(&mut value_array(&mut wrong_entry_type)[field_index])[0] =
+            Value::Integer(1_u64.into());
+        assert_invalid_persistence_value(&wrong_entry_type);
+
+        let mut malformed_record = fixture.clone();
+        value_array(&mut value_array(&mut malformed_record)[field_index])[0] =
+            Value::Bytes(vec![0]);
+        assert_invalid_persistence_value(&malformed_record);
+
+        let mut duplicate_record = fixture.clone();
+        let records = value_array(&mut value_array(&mut duplicate_record)[field_index]);
+        records.insert(0, records[0].clone());
+        assert_invalid_persistence_value(&duplicate_record);
+    }
+
+    let mut wrong_row_type = fixture.clone();
+    value_array(&mut value_array(&mut wrong_row_type)[4])[0] = Value::Integer(1_u64.into());
+    assert_invalid_persistence_value(&wrong_row_type);
+
+    let mut short_row = fixture.clone();
+    value_array(&mut value_array(&mut value_array(&mut short_row)[4])[0]).pop();
+    assert_invalid_persistence_value(&short_row);
+
+    let mut malformed_timeline = fixture.clone();
+    value_array(&mut value_array(&mut value_array(&mut malformed_timeline)[4])[0])[0] =
+        Value::Bytes(vec![0]);
+    assert_invalid_persistence_value(&malformed_timeline);
+
+    let mut duplicate_timeline = fixture.clone();
+    let timelines = value_array(&mut value_array(&mut duplicate_timeline)[4]);
+    timelines.insert(0, timelines[0].clone());
+    assert_invalid_persistence_value(&duplicate_timeline);
+
+    let mut malformed_timeline_state = fixture;
+    value_array(&mut value_array(&mut value_array(&mut malformed_timeline_state)[4])[0])[1] =
+        Value::Text("not-an-epoch".to_owned());
+    assert_invalid_persistence_value(&malformed_timeline_state);
 }
 
 #[test]
