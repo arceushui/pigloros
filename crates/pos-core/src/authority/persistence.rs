@@ -159,9 +159,8 @@ impl CapabilityRevocationV1 {
                 expect_header(&fields, REVOCATION_MAGIC)
                     .and_then(|()| decode_hash(&fields[2]))
                     .and_then(|grant_id| {
-                        decode_timeline(&fields[3]).map(|authority_timeline| {
-                            (grant_id, authority_timeline)
-                        })
+                        decode_timeline(&fields[3])
+                            .map(|authority_timeline| (grant_id, authority_timeline))
                     })
                     .and_then(|(grant_id, authority_timeline)| {
                         decode_u64(&fields[4]).map(|fence_position| {
@@ -170,7 +169,12 @@ impl CapabilityRevocationV1 {
                     })
                     .and_then(|(grant_id, authority_timeline, fence_position)| {
                         decode_u64(&fields[5]).map(|revocation_epoch| {
-                            (grant_id, authority_timeline, fence_position, revocation_epoch)
+                            (
+                                grant_id,
+                                authority_timeline,
+                                fence_position,
+                                revocation_epoch,
+                            )
                         })
                     })
                     .and_then(|values| decode_hash(&fields[6]).map(|policy| (values, policy)))

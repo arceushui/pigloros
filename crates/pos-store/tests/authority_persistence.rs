@@ -421,9 +421,7 @@ fn authority_state_rejects_a_backdated_persisted_revocation() {
         std::panic::resume_unwind(Box::new("APS1 revocations must be an array"));
     };
     let Value::Bytes(revocation_bytes) = &mut revocations[0] else {
-        std::panic::resume_unwind(Box::new(
-            "APS1 revocation must contain canonical bytes",
-        ));
+        std::panic::resume_unwind(Box::new("APS1 revocation must contain canonical bytes"));
     };
     let mut revocation_value: Value = ok(ciborium::de::from_reader(revocation_bytes.as_slice()));
     let Value::Array(revocation_fields) = &mut revocation_value else {
