@@ -302,16 +302,7 @@ impl ProjectionRegistry {
     /// If a reducer with the same name was already registered it is replaced and
     /// its accumulated state is cleared.
     pub fn register(&mut self, name: &str, reducer: Box<dyn Reducer>) {
-        // Remove any previous entry with the same name.
-        self.slots.retain(|(n, _)| n != name);
-        self.slots.push((
-            name.to_owned(),
-            Slot {
-                reducer,
-                registry: StateRegistry::new(),
-                observation_policy: None,
-            },
-        ));
+        self.register_with_policy(name, reducer, None);
     }
 
     /// Register a named reducer with immutable host observation policy.
@@ -328,16 +319,25 @@ impl ProjectionRegistry {
         if name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES {
             return Err(AuthorityErrorV1::FieldOutOfBounds);
         }
+        self.register_with_policy(name, reducer, Some(policy));
+        Ok(())
+    }
+
+    fn register_with_policy(
+        &mut self,
+        name: &str,
+        reducer: Box<dyn Reducer>,
+        observation_policy: Option<ProjectionObservationPolicyV1>,
+    ) {
         self.slots.retain(|(registered, _)| registered != name);
         self.slots.push((
             name.to_owned(),
             Slot {
                 reducer,
                 registry: StateRegistry::new(),
-                observation_policy: Some(policy),
+                observation_policy,
             },
         ));
-        Ok(())
     }
 
     /// Apply a single event to every registered reducer.
@@ -407,7 +407,7 @@ impl ProjectionRegistry {
         authority_registry: &AuthorityRegistrySnapshotV1,
         authority_position: Seq,
         context: &ProjectionObservationContextV1,
-    ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
+    ) -> Result<AuthorizedObservationV1, AuthorityErrorV1> {
         authority
             .validate_observation_authorization(
                 request,
@@ -416,6 +416,11 @@ impl ProjectionRegistry {
                 authority_position,
             )
             .and_then(|()| self.materialize_authorized_projection(request, decision, context))
+            .map(|snapshot| AuthorizedObservationV1 {
+                snapshot,
+                request: request.clone(),
+                decision: decision.clone(),
+            })
     }
 
     fn materialize_authorized_projection(
@@ -458,18 +463,26 @@ impl ProjectionRegistry {
             .map(|state| canonical_state_artifact(state, policy.permitted_fields()))
             .transpose()
             .and_then(|artifact| {
-                let (status, artifact_digest, projection_digest, artifacts) = artifact.map_or(
-                    (ObservationStatusV1::NotObserved, None, None, Vec::new()),
-                    |artifact| {
-                        let digest = artifact.digest();
+                let (status, artifact_digest, projection_digest, source_digest, artifacts) =
+                    artifact.map_or(
                         (
-                            ObservationStatusV1::Present,
-                            Some(digest),
-                            Some(digest),
-                            vec![artifact],
-                        )
-                    },
-                );
+                            ObservationStatusV1::NotObserved,
+                            None,
+                            None,
+                            absence_source_digest(context, subject_id),
+                            Vec::new(),
+                        ),
+                        |artifact| {
+                            let digest = artifact.digest();
+                            (
+                                ObservationStatusV1::Present,
+                                Some(digest),
+                                Some(digest),
+                                digest,
+                                vec![artifact],
+                            )
+                        },
+                    );
                 ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
                     participant_id,
                     resource: request.resource().to_owned(),
@@ -479,7 +492,7 @@ impl ProjectionRegistry {
                     source_timeline: context.timeline_id,
                     source_position: context.observed_through,
                     schema: policy.schema().to_owned(),
-                    source_digest: artifact_digest.unwrap_or_else(|| policy.digest()),
+                    source_digest,
                     projection_digest,
                     provenance_digest: policy.digest(),
                     minimization_revision: policy.minimization_revision(),
@@ -599,6 +612,67 @@ impl ProjectionRegistry {
     }
 }
 
+/// Host-materialized observation carrying the authority evidence used to derive it.
+///
+/// The private fields make this the admission token for participant execution:
+/// callers may inspect or clone a materialized observation, but only this crate
+/// can create one from protected `Projection` state.
+///
+/// ```compile_fail
+/// use pos_core::{AuthorizationDecisionV1, AuthorizationRequestV1, ObservationSnapshotV1};
+/// use pos_state::AuthorizedObservationV1;
+///
+/// fn forge(
+///     snapshot: ObservationSnapshotV1,
+///     request: AuthorizationRequestV1,
+///     decision: AuthorizationDecisionV1,
+/// ) -> AuthorizedObservationV1 {
+///     AuthorizedObservationV1 { snapshot, request, decision }
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedObservationV1 {
+    snapshot: ObservationSnapshotV1,
+    request: AuthorizationRequestV1,
+    decision: AuthorizationDecisionV1,
+}
+
+impl AuthorizedObservationV1 {
+    /// Return the minimized immutable OBS1 snapshot.
+    #[must_use]
+    pub const fn snapshot(&self) -> &ObservationSnapshotV1 {
+        &self.snapshot
+    }
+
+    /// Re-evaluate consent, capability, delegation, and revocation evidence at
+    /// the current authority boundary.
+    ///
+    /// # Errors
+    /// Returns a closed authority error when any current evidence differs from
+    /// the evidence that authorized materialization.
+    pub fn revalidate(
+        &self,
+        authority: &PersistedAuthorityV1,
+        registry: &AuthorityRegistrySnapshotV1,
+        at_position: Seq,
+    ) -> Result<(), AuthorityErrorV1> {
+        authority.validate_observation_authorization(
+            &self.request,
+            &self.decision,
+            registry,
+            at_position,
+        )
+    }
+}
+
+impl std::ops::Deref for AuthorizedObservationV1 {
+    type Target = ObservationSnapshotV1;
+
+    fn deref(&self) -> &Self::Target {
+        self.snapshot()
+    }
+}
+
 /// Host-owned inputs required to materialize one Projection observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectionObservationContextV1 {
@@ -606,6 +680,16 @@ pub struct ProjectionObservationContextV1 {
     pub observed_through: Seq,
     pub reducer: String,
     pub prior_snapshot_digest: Option<Hash>,
+}
+
+fn absence_source_digest(context: &ProjectionObservationContextV1, subject_id: EntityId) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.ProjectionObservationAbsence.v1\0");
+    hasher.update(&context.timeline_id.inner().to_bytes());
+    hasher.update(&subject_id.inner().to_bytes());
+    hasher.update(&context.observed_through.as_u64().to_be_bytes());
+    hasher.update(blake3::hash(context.reducer.as_bytes()).as_bytes());
+    Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 /// Immutable host policy installed at the same composition seam as a Reducer.

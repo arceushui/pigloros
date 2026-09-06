@@ -396,6 +396,7 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
     let fixture = authority_fixture();
     let mut registry = ProjectionRegistry::new();
     register_profile(&mut registry, Box::new(CountReducer));
+    let timeline_id = TimelineId::new();
 
     let snapshot = registry
         .materialize_authorized_observation(
@@ -404,12 +405,28 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
             &fixture.authority,
             &fixture.registry,
             Seq::from_u64(10),
-            &context(TimelineId::new()),
+            &context(timeline_id),
         )
         .test_ok();
     let record = &snapshot.records()[0];
     assert_eq!(record.status(), ObservationStatusV1::NotObserved);
     assert_eq!(record.artifact_digest(), None);
+    assert_ne!(record.source_digest(), record.provenance_digest());
+
+    let later = registry
+        .materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            &fixture.registry,
+            Seq::from_u64(10),
+            &ProjectionObservationContextV1 {
+                observed_through: Seq::from_u64(8),
+                ..context(timeline_id)
+            },
+        )
+        .test_ok();
+    assert_ne!(record.source_digest(), later.records()[0].source_digest());
 }
 
 #[test]
