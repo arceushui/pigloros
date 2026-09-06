@@ -346,9 +346,9 @@ fn conflicts_stale_epochs_and_timeline_reordering_fail_closed() {
     );
     draft.issuance_seq = Seq::from_u64(2);
     draft.revocation_epoch = 1;
-    let stale = ok(CapabilityGrantV1::try_from_draft(draft));
+    let stale_grant = ok(CapabilityGrantV1::try_from_draft(draft));
     assert_eq!(
-        state.issue_grant(grant_permit(&stale), stale),
+        state.issue_grant(grant_permit(&stale_grant), stale_grant),
         Err(AuthorityPersistenceErrorV1::StaleEpoch)
     );
 
@@ -375,11 +375,14 @@ fn conflicts_stale_epochs_and_timeline_reordering_fail_closed() {
     );
     conflicting_revocation.grant_id = hash(2);
     conflicting_revocation.revocation_epoch = 1;
-    let stale = ok(CapabilityRevocationV1::try_from_draft(
+    let stale_revocation = ok(CapabilityRevocationV1::try_from_draft(
         conflicting_revocation,
     ));
     assert_eq!(
-        state.revoke_grant(revocation_permit(&child, &stale), stale),
+        state.revoke_grant(
+            revocation_permit(&child, &stale_revocation),
+            stale_revocation,
+        ),
         Err(AuthorityPersistenceErrorV1::StaleEpoch)
     );
 }
