@@ -3,15 +3,20 @@
 Status: completed throwaway prototype for Redmine #211  
 Decision governed by: [ADR-069](https://redmine.piglor.com/projects/pigloros/wiki/ADR-069_Linux_public_adapter_process_sandbox)  
 Prototype branch: `codex/ticket-211-sandbox-provider-prototype-v2`  
-Evidence commit: `e5a191a2d370e71551059a69630975644ce6588f`  
-Hosted run: [34022822716](https://github.com/arceushui/pigloros/actions/runs/34022822716)  
+Initial evidence commit: `e5a191a2d370e71551059a69630975644ce6588f`
+
+Pinned-host evidence commit: `c10c59705320f215d1b21900ee6a52b9ed838e8c`
+
+Hosted runs: [initial 34022822716](https://github.com/arceushui/pigloros/actions/runs/34022822716), [pinned host 34036714171](https://github.com/arceushui/pigloros/actions/runs/34036714171)
 Recorded: 2026-09-06
 
 ## Conclusion
 
 The pure-Rust typed control-plane approach is feasible for systemd transient units, route netlink, direct nftables transactions, cgroup-v2 controls, broker-death cleanup, restart reconciliation, and concurrent attempts. Every measured latency is comfortably below the ADR-069 threshold on both hosted architectures.
 
-ADR-069 is **not ready for acceptance** from this evidence. GitHub-hosted Ubuntu 26.04 supplied systemd 259 rather than the required systemd-260 baseline, rejected creation of a user namespace and therefore the complete required namespace set, and lacked dm-verity capability plus an admitted signed SIM1/keyring/image. The runner labels are floating rather than digest-pinned, and network isolation is enforced by the privileged probe entering a fresh network namespace rather than by independent VM-level egress policy. Production implementation remains blocked.
+The pinned NixOS supplement closes the host-baseline gaps in the initial run. On both architectures it boots a disposable VM from exact nixpkgs revision `6713828a351efa628b025a1adf7f43cbf8597513` (`sha256-Fd3OB8J9JhgliQwOKcqx4M672CInxi1I5VnwsaXeSQo=`), verifies Linux 6.12.108 and systemd 260.2, behaviorally proves QEMU-enforced no-egress, enters and tears down the complete namespace set, observes dm-verity capability, and reads back `memory.swap.max` plus `cgroup.kill` on a non-root transient cgroup.
+
+ADR-069 is still **not ready for acceptance**. The evidence does not activate an admitted signed SIM1 image, prove the exact transient `Type=exec` security-property matrix and SCS1 readback, force every required limit outcome, emit complete HCP1/PCR1 records, or verify the full cleanup surface. Production implementation remains blocked.
 
 ## Evidence environment
 
@@ -20,18 +25,25 @@ ADR-069 is **not ready for acceptance** from this evidence. GitHub-hosted Ubuntu
 | x86_64 | `ubuntu26` `20260831.124.1` | `7.0.0-1012-azure` | `259 (259.5-0ubuntu3.4)` | Workflow passed |
 | aarch64 | `ubuntu26-arm64` `20260831.111.1` | `7.0.0-1012-azure` | `259 (259.5-0ubuntu3.4)` | Workflow passed |
 
-The workflow grants only `contents: read`, disables checkout credential persistence, references no secrets or caches, pins every action by commit SHA, and runs the privileged executable after it unshares its network namespace. These controls establish a fresh secretless hosted job and process-level no-host-network execution. They do not establish a digest-pinned VM or independently enforced no-egress infrastructure.
+The pinned supplement adds these guest environments:
+
+| Architecture | Guest source | Kernel | systemd | VM acceleration | Result |
+|---|---|---|---|---|---|
+| x86_64 | exact nixpkgs revision and recorded closure | `6.12.108` | `260 (260.2)` | KVM | Workflow passed |
+| aarch64 | exact nixpkgs revision and recorded closure | `6.12.108` | `260 (260.2)` | same-architecture TCG | Workflow passed |
+
+The workflow grants only `contents: read`, disables checkout credential persistence, references no secrets or caches, and pins every action by commit SHA. The initial jobs establish a fresh secretless hosted job and process-level no-host-network execution. The supplemental NixOS VMs additionally set QEMU `restrict=on`; a verified HTTP endpoint on the VM host is unreachable from each guest, behaviorally proving the independent VM egress boundary rather than inferring it from guest route shape.
 
 ## Primitive results
 
 | Requirement | Evidence | Conclusion |
 |---|---|---|
-| Typed systemd D-Bus | Generated `zbus_systemd` calls create, bind, stop, kill, query, and reconcile transient units without `systemd-run` | Feasible on systemd 259; systemd 260 still requires validation |
+| Typed systemd D-Bus | Generated `zbus_systemd` calls create, bind, stop, kill, query, and reconcile transient units without `systemd-run` | Feasible on systemd 259 and pinned systemd 260.2; exact `Type=exec` policy remains unproved |
 | Route netlink | `rtnetlink` creates, reads back, and deletes uniquely named dummy links | Feasible on both architectures and under eight concurrent attempts |
 | Atomic nftables policy | One typed NFNL batch creates an owned `inet` table, output base chain with default-drop policy, and one exact allow rule for IPv4 TCP `127.0.0.1:443`; table, chain, rule, expressions, and ownership data are read back before table deletion | Feasible on both architectures and under eight concurrent attempts |
-| Namespace handles | Parent retains descriptors across child exit and compares namespace inode identity | Mount, PID, IPC, UTS, and network pass individually; user namespace and therefore the complete set are unsupported on both hosted runners |
-| cgroup v2 limits | systemd applies `MemoryMax=128 MiB`, `CPUQuotaPerSecUSec=500000`, `TasksMax=16`, and `IOWeight=100`; the probe reads effective `memory.max`, `cpu.max`, `pids.max`, and `io.weight` before cleanup | Feasible on both architectures |
-| dm-verity | Capability probe checks `/sys/module/dm_verity` and `/dev/mapper/control` and refuses unsigned/path-based substitution | Unsupported: host capability absent and no admitted SIM1, keyring, or image was available |
+| Namespace handles | Parent retains descriptors across child exit and compares namespace inode identity | Mount, PID, IPC, UTS, user, and network pass together in both pinned guests; the initial hosted environments still reject user namespaces |
+| cgroup v2 limits | systemd applies `MemoryMax=128 MiB`, `MemorySwapMax=0`, `CPUQuotaPerSecUSec=500000`, `TasksMax=16`, and `IOWeight=100`; the probe reads effective `memory.max`, `memory.swap.max`, `cpu.max`, `pids.max`, `io.weight`, and non-root `cgroup.kill` before cleanup | Feasible on both pinned architectures |
+| dm-verity | Capability probe checks `/sys/module/dm_verity` and `/dev/mapper/control` and refuses unsigned/path-based substitution | Host mechanism present in both pinned guests; signed SIM1 activation remains unproved |
 | Broker death | Attempt scope is bound to the broker scope; worker and descendant termination plus both-unit disappearance are verified | 46.188 ms x86_64; 38.431 ms aarch64 |
 | Restart reconciliation | A later controller invocation discovers and stops an injected orphan scope, then verifies worker, descendant, and unit absence | 51.752 ms x86_64; 43.607 ms aarch64 |
 | Eight concurrent attempts | Unique systemd, link, and nftables identities are exercised concurrently | Passed on both architectures |
@@ -72,16 +84,16 @@ Exact direct dependencies:
 
 The prototype declares Rust 1.87. Hosted `cargo +1.87.0 check --locked` passed on both architectures, and the highest transitive declared MSRV is 1.87.0. The evidence compiler was Rust 1.97.1. `cargo deny --locked check` concluded `advisories ok, bans ok, licenses ok, sources ok`; no package lacks a declared licence. All observed SPDX expressions are combinations of MIT, Apache-2.0, BSD-2-Clause, Unicode-3.0, LLVM exception, LGPL-2.1-or-later, or Unlicense covered by repository policy.
 
-The final prototype source digest is `c1376622d2698e0396822f6f9176fe11140260be007f58ad3ecaf7282ac6f7c1` for `src/main.rs`. The prototype is explicitly throwaway and must not be copied into production code.
+The pinned-host prototype source digest is `3d6d449d798183994b94c9555cd78b54c8e4f3f505240eb46b8484c186c75a09` for `src/main.rs`. The prototype is explicitly throwaway and must not be copied into production code.
 
 ## Remaining ADR-069 gates
 
-1. Run the same evidence on digest-pinned x86_64 and aarch64 disposable VMs with Linux 6.12 and systemd 260, with independently enforced no-egress policy during privileged execution.
-2. Enable and prove the complete mount/PID/IPC/UTS/user/network namespace set. The hosted runner's user-namespace rejection is a hard blocker, not an optional fallback.
-3. Supply an admitted signed SIM1 image, verification keyring, immutable image handles, and dm-verity-capable host; prove activation and exact mounted identity. No unsigned compatibility path is allowed.
-4. Compare the same minimal attempt against youki `libcontainer`/`libcgroups`, including code surface, native dependencies, exact policy read-back, launch/cleanup latency, and lifecycle recovery. The existing [open-source landscape](sandbox-provider-open-source-landscape.md) is a design comparison, not this missing execution benchmark.
-5. Extend the prototype policy to the complete ADR filesystem, seccomp, capability, endpoint-proxy, bounded capture/replay, revocation, and provenance contract. The current exact allow rule proves nftables mechanics only.
+1. Supply an admitted signed SIM1 image, verification keyring, immutable image handles, and dm-verity-capable host; prove activation and exact mounted identity. No unsigned compatibility path is allowed.
+2. Prove a transient `Type=exec` service with every section 6 security property and the selected SCS1 requested/effective syscall arrays read back exactly.
+3. Force and observe the mandatory memory, task, CPU-watchdog, file, and output outcomes rather than relying only on configured-limit readback.
+4. Emit complete HCP1/PCR1 evidence and verify cleanup of every owned cgroup, namespace, nftables, veth, mount, and tmpfs resource.
+5. Extend the prototype policy to the complete ADR filesystem, endpoint-proxy, bounded capture/replay, revocation, and provenance contract. The current exact allow rule proves nftables mechanics only.
 
 ## Preserved raw evidence
 
-The repository preserves both architecture host identities, initial results, cgroup read-back, eight-attempt summaries, all 90 cleanup samples, all 30 lifecycle samples, p95 summaries, broker-death and restart-reconciliation traces, the complete dependency graph/package list, source digest, compiler identity, and cargo-deny conclusion in [`docs/research/evidence/sandbox-provider-211`](evidence/sandbox-provider-211/). The GitHub run remains the authoritative execution record for commit `e5a191a2`.
+The repository preserves both architecture host identities, initial results, cgroup read-back, eight-attempt summaries, all 90 cleanup samples, all 30 lifecycle samples, p95 summaries, broker-death and restart-reconciliation traces, the complete dependency graph/package list, source digest, compiler identity, and cargo-deny conclusion in [`docs/research/evidence/sandbox-provider-211`](evidence/sandbox-provider-211/). Run 34036714171 additionally preserves the exact flake identity, Nix closure, and VM transcript for each pinned architecture. SHA-256 digests of the Redmine-attached pinned-host archives are `f9fe1324aaf7876fd11f547531cac80e56719e74418c8b24b8d0f71ef2c43a98` (x86_64) and `de34c4f4ecde8eeed08c3f87f5e61bda90447b8951dd8aa7da1137580290db55` (aarch64).
