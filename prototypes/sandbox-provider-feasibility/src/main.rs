@@ -11,7 +11,8 @@ use netlink_packet_netfilter::nftables::{
     GenMessage, NfTablesMessage, TableAttribute, TableMessage,
 };
 use netlink_packet_netfilter::{
-    NetfilterHeader, NetfilterMessage, NetfilterMessageInner, NetfilterProtoFamily,
+    none::ControlMessage, NetfilterHeader, NetfilterMessage, NetfilterMessageInner,
+    NetfilterProtoFamily,
 };
 use netlink_sys::{protocols::NETLINK_NETFILTER, Socket, SocketAddr};
 use nix::sched::{setns, unshare, CloneFlags};
@@ -58,7 +59,7 @@ fn attempt_id() -> String {
                 let filtered: String = value
                     .chars()
                     .filter(char::is_ascii_alphanumeric)
-                    .take(8)
+                    .take(11)
                     .collect();
                 if !filtered.is_empty() {
                     return filtered;
@@ -204,7 +205,7 @@ fn probe_nftables_atomic_table(attempt_id: &str) -> &'static str {
             TableAttribute::UserData(ownership.as_bytes().to_vec()),
         ],
     });
-    if nftables_request(&socket, create, NLM_F_CREATE | NLM_F_EXCL, 1).is_err() {
+    if nftables_batch_request(&socket, create, NLM_F_CREATE | NLM_F_EXCL, 1).is_err() {
         return "install-rejected";
     }
 
@@ -217,13 +218,82 @@ fn probe_nftables_atomic_table(attempt_id: &str) -> &'static str {
     let delete = NfTablesMessage::DeleteTable(TableMessage {
         attributes: vec![TableAttribute::Name(table_name)],
     });
-    let deleted = nftables_request(&socket, delete, 0, 3).is_ok();
+    let deleted = nftables_batch_request(&socket, delete, 0, 3).is_ok();
 
     match (read_back_matches, deleted) {
         (true, true) => "typed-install-read-back-delete-ok",
         (false, true) => "read-back-mismatch-cleaned",
         (_, false) => "delete-rejected-needs-reconcile",
     }
+}
+
+fn nftables_batch_request(
+    socket: &Socket,
+    payload: NfTablesMessage,
+    operation_flags: u16,
+    sequence_number: u32,
+) -> Result<(), ()> {
+    const NFTABLES_SUBSYSTEM: u16 = 10;
+
+    let begin = serialize_netfilter_message(
+        NetfilterMessage::new(
+            NetfilterHeader::new(NetfilterProtoFamily::Unspec, 0, NFTABLES_SUBSYSTEM),
+            ControlMessage::BatchBegin,
+        ),
+        NLM_F_REQUEST,
+        sequence_number,
+    );
+    let operation = serialize_netfilter_message(
+        NetfilterMessage::new(
+            NetfilterHeader::new(NetfilterProtoFamily::Inet, 0, 0),
+            payload,
+        ),
+        NLM_F_REQUEST | NLM_F_ACK | operation_flags,
+        sequence_number + 1,
+    );
+    let end = serialize_netfilter_message(
+        NetfilterMessage::new(
+            NetfilterHeader::new(NetfilterProtoFamily::Unspec, 0, NFTABLES_SUBSYSTEM),
+            ControlMessage::BatchEnd,
+        ),
+        NLM_F_REQUEST,
+        sequence_number + 2,
+    );
+    let mut batch = Vec::with_capacity(begin.len() + operation.len() + end.len());
+    batch.extend(begin);
+    batch.extend(operation);
+    batch.extend(end);
+    socket.send(&batch, 0).map_err(|_| ())?;
+
+    let reply = receive_netfilter_message(socket)?;
+    if reply.header.sequence_number != sequence_number + 1 {
+        return Err(());
+    }
+    match reply.payload {
+        NetlinkPayload::Error(error) if error.code.is_none() => Ok(()),
+        _ => Err(()),
+    }
+}
+
+fn serialize_netfilter_message(
+    payload: NetfilterMessage,
+    flags: u16,
+    sequence_number: u32,
+) -> Vec<u8> {
+    let mut header = NetlinkHeader::default();
+    header.flags = flags;
+    header.sequence_number = sequence_number;
+    let mut message = NetlinkMessage::new(header, NetlinkPayload::from(payload));
+    message.finalize();
+    let mut bytes = vec![0; message.buffer_len()];
+    message.serialize(&mut bytes);
+    bytes
+}
+
+fn receive_netfilter_message(socket: &Socket) -> Result<NetlinkMessage<NetfilterMessage>, ()> {
+    let mut response = vec![0; 8192];
+    let size = socket.recv(&mut &mut response[..], 0).map_err(|_| ())?;
+    NetlinkMessage::<NetfilterMessage>::deserialize(&response[..size]).map_err(|_| ())
 }
 
 fn nftables_request(
@@ -248,10 +318,7 @@ fn nftables_request(
     if socket.send(&bytes, 0).is_err() {
         return Err(());
     }
-    let mut response = vec![0; 8192];
-    let size = socket.recv(&mut &mut response[..], 0).map_err(|_| ())?;
-    let response =
-        NetlinkMessage::<NetfilterMessage>::deserialize(&response[..size]).map_err(|_| ())?;
+    let response = receive_netfilter_message(socket)?;
     if response.header.sequence_number != sequence_number {
         return Err(());
     }
