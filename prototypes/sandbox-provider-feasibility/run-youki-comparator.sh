@@ -51,9 +51,11 @@ prepare_rootfs() {
 prepare_rootfs
 
 cp youki-comparator-config.json "$bundle/config.json"
+test "$(jq -r '.ociVersion' "$bundle/config.json")" = 1.1.0
 
 cp "$bundle/config.json" "$evidence_dir/oci-config.json"
 "$scratch/youki" --version | tee "$evidence_dir/youki-version.txt"
+grep -q '^spec: 1\.1\.0$' "$evidence_dir/youki-version.txt"
 sha256sum "$scratch/youki" "$scratch/$archive" | tee "$evidence_dir/youki-digests.txt"
 stat --format='youki_binary_bytes=%s' "$scratch/youki" | tee "$evidence_dir/youki-size.txt"
 ldd "$scratch/youki" | tee "$evidence_dir/youki-ldd.txt"
@@ -79,6 +81,7 @@ sudo "$scratch/youki" --root "$runtime_root" create --bundle "$bundle" \
   --pid-file "$scratch/container.pid" "$container_id"
 sudo "$scratch/youki" --root "$runtime_root" state "$container_id" \
   | tee "$evidence_dir/state-created.json"
+test "$(jq -r '.ociVersion' "$evidence_dir/state-created.json")" = 1.1.0
 sudo "$scratch/youki" --root "$runtime_root" start "$container_id"
 sudo "$scratch/youki" --root "$runtime_root" state "$container_id" \
   | tee "$evidence_dir/state-running.json"
@@ -157,6 +160,7 @@ libcgroups_lines=$(tail -n 1 "$evidence_dir/libcgroups-lines.txt" | awk '{ print
   printf 'version=%s\n' "$youki_version"
   printf 'archive_sha256=%s\n' "$expected_archive_sha256"
   printf 'source_commit=%s\n' "$youki_source_commit"
+  printf 'oci_version=1.1.0\n'
   printf 'namespace_separation=mnt-pid-ipc-uts-net-cgroup\n'
   printf 'user_namespace=requested-false\n'
   printf 'cgroup_readback=memory-cpu-pids-ok\n'
