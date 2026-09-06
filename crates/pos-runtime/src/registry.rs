@@ -1317,7 +1317,7 @@ impl PluginRegistry {
                 invoke_driver(
                     driver.as_mut(),
                     timeline,
-                    crate::driver::ObservationView::from_authorized_snapshot(&snapshot, knowledge),
+                    crate::driver::ObservationView::from_authorized_snapshot(snapshot, knowledge),
                 ),
                 entry.name.clone(),
             )
