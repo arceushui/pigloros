@@ -12,8 +12,8 @@ use pos_core::{
     event::{Event, EventDraft, Kind},
     ids::PluginId,
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentError, ConsentGate, ObservationSnapshotV1, PersistedAuthorityV1, Plugin, ProposedAction,
-    Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ConsentError, ConsentGate, KnowledgeSnapshotV1, ObservationSnapshotV1, PersistedAuthorityV1,
+    Plugin, ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::ProjectionRegistry;
 
@@ -610,9 +610,12 @@ fn reject_host_owned_draft_slice(drafts: &[EventDraft]) -> Result<(), RuntimeErr
         .find(|draft| {
             pos_core::is_geographic_event_type(&draft.event_type)
                 || pos_core::is_consent_event_type(&draft.event_type)
+                || draft.event_type.as_str() == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
         })
         .map_or(Ok(()), |draft| {
-            if pos_core::is_consent_event_type(&draft.event_type) {
+            if pos_core::is_consent_event_type(&draft.event_type)
+                || draft.event_type.as_str() == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+            {
                 Err(RuntimeError::ConsentDraft {
                     event_type: draft.event_type.as_str().to_owned(),
                 })
@@ -665,6 +668,7 @@ struct PendingStep {
 
 struct AuthorizedPendingStep {
     snapshot: ObservationSnapshotV1,
+    knowledge: KnowledgeSnapshotV1,
     drafts: Vec<EventDraft>,
 }
 
@@ -1259,6 +1263,7 @@ impl PluginRegistry {
         plugin_id: PluginId,
         timeline: pos_core::ids::TimelineId,
         snapshot: ObservationSnapshotV1,
+        knowledge: KnowledgeSnapshotV1,
         authority: &PersistedAuthorityV1,
         authority_position: Seq,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
@@ -1268,7 +1273,14 @@ impl PluginRegistry {
                     .validate_authority_fence(authority, authority_position)
                     .map_err(RuntimeError::Authority)
             })
-            .and_then(|()| self.stage_authorized_driver_after_fence(plugin_id, timeline, snapshot))
+            .and_then(|()| {
+                knowledge
+                    .validate_observation_snapshot(&snapshot)
+                    .map_err(RuntimeError::Authority)
+            })
+            .and_then(|()| {
+                self.stage_authorized_driver_after_fence(plugin_id, timeline, snapshot, knowledge)
+            })
     }
 
     fn stage_authorized_driver_after_fence(
@@ -1276,6 +1288,7 @@ impl PluginRegistry {
         plugin_id: PluginId,
         timeline: pos_core::ids::TimelineId,
         snapshot: ObservationSnapshotV1,
+        knowledge: KnowledgeSnapshotV1,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
         if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
             return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
@@ -1298,7 +1311,7 @@ impl PluginRegistry {
                 invoke_driver(
                     driver.as_mut(),
                     timeline,
-                    crate::driver::ObservationView::from_authorized_snapshot(&snapshot),
+                    crate::driver::ObservationView::from_authorized_snapshot(&snapshot, &knowledge),
                 ),
                 entry.name.clone(),
             )
@@ -1336,6 +1349,7 @@ impl PluginRegistry {
             operation: OperationContext::Public,
             authorized: Some(AuthorizedPendingStep {
                 snapshot,
+                knowledge,
                 drafts: drafts.clone(),
             }),
         });
@@ -1528,6 +1542,12 @@ impl PluginRegistry {
             .snapshot
             .validate_authority_fence(authority, authority_position)
             .map_err(RuntimeError::Authority)
+            .and_then(|()| {
+                authorized
+                    .knowledge
+                    .validate_observation_snapshot(&authorized.snapshot)
+                    .map_err(RuntimeError::Authority)
+            })
             .and_then(|()| {
                 if drafts == authorized.drafts.as_slice() {
                     Ok(())

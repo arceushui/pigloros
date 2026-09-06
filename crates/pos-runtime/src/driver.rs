@@ -11,7 +11,7 @@ use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, TimelineId},
-    ObservationSnapshotV1, State,
+    KnowledgeSnapshotV1, ObservationSnapshotV1, State,
 };
 use std::borrow::Cow;
 
@@ -274,6 +274,7 @@ impl ObservationSnapshot {
         ObservationView {
             snapshot: Some(self),
             authorized_snapshot: None,
+            authorized_knowledge: None,
             direct_anchor: None,
             len: unique,
             events: if event_subscriptions.is_empty() {
@@ -307,6 +308,7 @@ impl ObservationSnapshot {
 pub struct ObservationView<'a> {
     snapshot: Option<&'a ObservationSnapshot>,
     authorized_snapshot: Option<&'a ObservationSnapshotV1>,
+    authorized_knowledge: Option<&'a KnowledgeSnapshotV1>,
     direct_anchor: Option<SnapshotAnchor>,
     len: usize,
     events: Cow<'a, [Event]>,
@@ -318,6 +320,7 @@ impl ObservationView<'_> {
         Self {
             snapshot: None,
             authorized_snapshot: None,
+            authorized_knowledge: None,
             direct_anchor: None,
             len: 0,
             events: Cow::Borrowed(&[]),
@@ -333,6 +336,7 @@ impl ObservationView<'_> {
         Self {
             snapshot: None,
             authorized_snapshot: None,
+            authorized_knowledge: None,
             direct_anchor: Some(anchor),
             len: 0,
             events: Cow::Borrowed(&[]),
@@ -353,6 +357,12 @@ impl ObservationView<'_> {
         self.authorized_snapshot
     }
 
+    /// Return the exact participant knowledge derived from the authorized OBS1.
+    #[must_use]
+    pub const fn authorized_knowledge(&self) -> Option<&KnowledgeSnapshotV1> {
+        self.authorized_knowledge
+    }
+
     #[must_use]
     pub fn anchor(&self) -> Option<SnapshotAnchor> {
         self.direct_anchor
@@ -366,7 +376,10 @@ impl ObservationView<'_> {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.authorized_snapshot.is_none() && self.len == 0 && self.events.is_empty()
+        self.authorized_snapshot.is_none()
+            && self.authorized_knowledge.is_none()
+            && self.len == 0
+            && self.events.is_empty()
     }
 
     /// Committed events forwarded to this driver for the current tick, in
@@ -386,16 +399,21 @@ impl<'a> ObservationView<'a> {
         Self {
             snapshot: None,
             authorized_snapshot: None,
+            authorized_knowledge: None,
             direct_anchor: None,
             len: 0,
             events: Cow::Borrowed(events),
         }
     }
     #[must_use]
-    pub(crate) fn from_authorized_snapshot(snapshot: &'a ObservationSnapshotV1) -> Self {
+    pub(crate) fn from_authorized_snapshot(
+        snapshot: &'a ObservationSnapshotV1,
+        knowledge: &'a KnowledgeSnapshotV1,
+    ) -> Self {
         Self {
             snapshot: None,
             authorized_snapshot: Some(snapshot),
+            authorized_knowledge: Some(knowledge),
             direct_anchor: Some(SnapshotAnchor::new(
                 snapshot.timeline_id(),
                 snapshot.observed_through(),

@@ -3,6 +3,7 @@ use pos_core::{
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
     CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, EventDraft, Hash, Kind,
+    KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
     ObservationRecordDraftV1, ObservationRecordV1, ObservationSnapshotDraftV1,
     ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1, Plugin, PluginId,
     PrincipalRefV1, Seq, TimelineId,
@@ -39,6 +40,7 @@ const fn hash_from_repeated_byte(byte: u8) -> Hash {
 
 struct Fixture {
     snapshot: ObservationSnapshotV1,
+    knowledge: KnowledgeSnapshotV1,
     state: AuthorityPersistenceStateV1,
     host: AuthorityPersistenceHostV1,
     grant: CapabilityGrantV1,
@@ -147,6 +149,29 @@ fn observation_snapshot(
     .test_ok()
 }
 
+fn knowledge_snapshot(snapshot: &ObservationSnapshotV1) -> KnowledgeSnapshotV1 {
+    KnowledgeSnapshotV1::try_from_observation_snapshot(
+        KnowledgeSnapshotDraftV1 {
+            principal: snapshot.principal().clone(),
+            participant_id: snapshot.participant_id(),
+            timeline_id: snapshot.timeline_id(),
+            observed_through: snapshot.observed_through(),
+            observation_snapshot_digest: snapshot.digest(),
+            observations: snapshot.records().to_vec(),
+            beliefs: Vec::new(),
+            preference_value_revision: None,
+            ai_goal_policy_revision: None,
+            memory_policy_revision: MemoryPolicyRevisionV1::try_new(hash_from_repeated_byte(21))
+                .test_ok(),
+            prior_snapshot_digest: None,
+            external_provenance: Vec::new(),
+            provenance_digest: hash_from_repeated_byte(22),
+        },
+        snapshot,
+    )
+    .test_ok()
+}
+
 fn fixture() -> Fixture {
     fixture_with_timeline(TimelineId::new())
 }
@@ -176,8 +201,10 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
         .issue_grant(host.authorize_grant(&grant).test_ok(), grant.clone())
         .test_ok();
     let snapshot = observation_snapshot(&ids, grant_binding, policy_revision);
+    let knowledge = knowledge_snapshot(&snapshot);
     Fixture {
         snapshot,
+        knowledge,
         state,
         host,
         grant,
@@ -235,6 +262,7 @@ impl Plugin for DriverlessPlugin {
 #[derive(Default)]
 struct DriverState {
     observed_digest: Option<Hash>,
+    knowledge_digest: Option<Hash>,
     saw_raw_state: bool,
     saw_raw_events: bool,
     commits: u32,
@@ -301,6 +329,9 @@ impl Driver for ParticipantDriver {
             state.observed_digest = observations
                 .authorized_snapshot()
                 .map(ObservationSnapshotV1::digest);
+            state.knowledge_digest = observations
+                .authorized_knowledge()
+                .map(KnowledgeSnapshotV1::digest);
             state.saw_raw_state = self
                 .ambient_subscription
                 .as_ref()
@@ -361,6 +392,7 @@ fn stage_current(
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
+        fixture.knowledge.clone(),
         &current_authority(fixture),
         Seq::from_u64(10),
     )
@@ -375,6 +407,7 @@ fn authorized_driver_receives_only_the_bound_snapshot_and_requires_its_commit_fe
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(observed.observed_digest, Some(fixture.snapshot.digest()));
+    assert_eq!(observed.knowledge_digest, Some(fixture.knowledge.digest()));
     assert!(!observed.saw_raw_state);
     assert!(!observed.saw_raw_events);
     drop(observed);
@@ -400,6 +433,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         fixture.plugin_id,
         TimelineId::new(),
         fixture.snapshot.clone(),
+        fixture.knowledge.clone(),
         &authority,
         Seq::from_u64(10),
     ))
@@ -412,11 +446,30 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         None
     );
 
+    let (mut wrong_knowledge, knowledge_state) = registry(&fixture, false);
+    assert!(error_text(wrong_knowledge.stage_authorized_driver(
+        fixture.plugin_id,
+        fixture.timeline_id,
+        fixture.snapshot.clone(),
+        fixture_with_timeline(fixture.timeline_id).knowledge,
+        &authority,
+        Seq::from_u64(10),
+    ))
+    .contains("provenance is missing"));
+    assert_eq!(
+        knowledge_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observed_digest,
+        None
+    );
+
     let (mut ambient, ambient_state) = registry(&fixture, true);
     assert!(error_text(ambient.stage_authorized_driver(
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot,
+        fixture.knowledge,
         &authority,
         Seq::from_u64(10),
     ))
@@ -503,6 +556,7 @@ fn revoked_authority_is_rejected_before_driver_invocation() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot,
+        fixture.knowledge,
         &authority,
         Seq::from_u64(11),
     ))
@@ -595,6 +649,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
+        fixture.knowledge.clone(),
         &authority,
         Seq::from_u64(10),
     ))
@@ -614,6 +669,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
+        fixture.knowledge.clone(),
         &authority,
         Seq::from_u64(10),
     ))
@@ -625,6 +681,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
+        fixture.knowledge.clone(),
         &authority,
         Seq::from_u64(10),
     ));
@@ -693,6 +750,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
             fixture.plugin_id,
             fixture.timeline_id,
             fixture.snapshot.clone(),
+            fixture.knowledge.clone(),
             &authority,
             Seq::from_u64(10),
         ));

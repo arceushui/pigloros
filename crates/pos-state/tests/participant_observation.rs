@@ -9,7 +9,9 @@ use pos_core::{
     PersistedAuthorityV1, PluginId, PrincipalRefV1, Reducer, SchemaVersion, Seq, State, TimelineId,
     WallTime,
 };
-use pos_state::{ProjectionObservationContextV1, ProjectionRegistry};
+use pos_state::{
+    ProjectionObservationContextV1, ProjectionObservationPolicyV1, ProjectionRegistry,
+};
 use std::fmt::Debug;
 
 trait TestOk<T> {
@@ -74,6 +76,7 @@ impl Reducer for NestedReducer {
             "nested",
             serde_json::json!({"z": [{"b": 2, "a": 1}], "a": true}),
         );
+        state.set("secret", serde_json::json!("must-not-cross-boundary"));
     }
 }
 
@@ -274,14 +277,25 @@ fn context(timeline_id: TimelineId) -> ProjectionObservationContextV1 {
         timeline_id,
         observed_through: Seq::from_u64(7),
         reducer: "profile".to_owned(),
-        schema: "profile.v1".to_owned(),
-        visibility_policy_revision: hash_from_repeated_byte(7),
-        schema_revision: hash_from_repeated_byte(8),
-        minimization_revision: hash_from_repeated_byte(9),
-        source_digest: hash_from_repeated_byte(10),
-        provenance_digest: hash_from_repeated_byte(11),
         prior_snapshot_digest: None,
     }
+}
+
+fn policy(permitted_fields: Vec<String>) -> ProjectionObservationPolicyV1 {
+    ProjectionObservationPolicyV1::try_new(
+        permitted_fields,
+        "profile.v1".to_owned(),
+        hash_from_repeated_byte(7),
+        hash_from_repeated_byte(8),
+        hash_from_repeated_byte(9),
+    )
+    .test_ok()
+}
+
+fn register_profile(registry: &mut ProjectionRegistry, reducer: Box<dyn Reducer>) {
+    registry
+        .register_observable("profile", reducer, policy(vec!["count".to_owned()]))
+        .test_ok();
 }
 
 #[test]
@@ -291,10 +305,10 @@ fn authorized_materialization_ignores_every_other_subject() {
     let other = EntityId::new();
     let timeline_id = TimelineId::new();
     let mut first = ProjectionRegistry::new();
-    first.register("profile", Box::new(CountReducer));
+    register_profile(&mut first, Box::new(CountReducer));
     first.fold_events(&[event(subject, 1), event(other, 2)]);
     let mut second = ProjectionRegistry::new();
-    second.register("profile", Box::new(CountReducer));
+    register_profile(&mut second, Box::new(CountReducer));
     second.fold_events(&[event(subject, 1), event(other, 2), event(other, 3)]);
 
     let first_snapshot = first
@@ -324,6 +338,11 @@ fn authorized_materialization_ignores_every_other_subject() {
         .artifact(record.artifact_digest().test_ok())
         .test_ok();
     assert_eq!(artifact.bytes().as_slice(), br#"{"count":1}"#);
+    assert_eq!(record.source_digest(), artifact.digest());
+    assert_eq!(
+        record.provenance_digest(),
+        first_snapshot.provenance_digest()
+    );
 }
 
 #[test]
@@ -331,7 +350,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
     let fixture = authority_fixture();
     let unrelated = authority_fixture();
     let mut registry = ProjectionRegistry::new();
-    registry.register("profile", Box::new(CountReducer));
+    register_profile(&mut registry, Box::new(CountReducer));
     registry.fold_events(&[event(fixture.request.subject_id().test_ok(), 1)]);
     assert_eq!(
         registry.materialize_authorized_observation(
@@ -349,7 +368,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
 fn materialization_represents_absence_without_inventing_an_artifact() {
     let fixture = authority_fixture();
     let mut registry = ProjectionRegistry::new();
-    registry.register("profile", Box::new(CountReducer));
+    register_profile(&mut registry, Box::new(CountReducer));
 
     let snapshot = registry
         .materialize_authorized_observation(
@@ -370,7 +389,13 @@ fn materialization_canonicalizes_nested_projection_values() {
     let fixture = authority_fixture();
     let subject = fixture.request.subject_id().test_ok();
     let mut registry = ProjectionRegistry::new();
-    registry.register("profile", Box::new(NestedReducer));
+    registry
+        .register_observable(
+            "profile",
+            Box::new(NestedReducer),
+            policy(vec!["nested".to_owned()]),
+        )
+        .test_ok();
     registry.fold_events(&[event(subject, 1)]);
 
     let snapshot = registry
@@ -448,5 +473,58 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &context(TimelineId::new()),
         ),
         Err(pos_core::AuthorityErrorV1::RevocationStateStale)
+    );
+}
+
+#[test]
+fn observation_policy_is_validated_once_and_required_for_materialization() {
+    let revisions = (
+        hash_from_repeated_byte(7),
+        hash_from_repeated_byte(8),
+        hash_from_repeated_byte(9),
+    );
+    assert_eq!(
+        ProjectionObservationPolicyV1::try_new(
+            Vec::new(),
+            "profile.v1".to_owned(),
+            revisions.0,
+            revisions.1,
+            revisions.2,
+        ),
+        Err(pos_core::AuthorityErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        ProjectionObservationPolicyV1::try_new(
+            vec!["secret".to_owned(), "count".to_owned()],
+            "profile.v1".to_owned(),
+            revisions.0,
+            revisions.1,
+            revisions.2,
+        ),
+        Err(pos_core::AuthorityErrorV1::NonCanonicalOrder)
+    );
+    assert_eq!(
+        ProjectionObservationPolicyV1::try_new(
+            vec!["count".to_owned()],
+            "profile.v1".to_owned(),
+            Hash::zero(),
+            revisions.1,
+            revisions.2,
+        ),
+        Err(pos_core::AuthorityErrorV1::ProvenanceMissing)
+    );
+
+    let fixture = authority_fixture();
+    let mut registry = ProjectionRegistry::new();
+    registry.register("profile", Box::new(CountReducer));
+    assert_eq!(
+        registry.materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            Seq::from_u64(10),
+            &context(TimelineId::new()),
+        ),
+        Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
     );
 }
