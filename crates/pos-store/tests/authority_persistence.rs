@@ -323,6 +323,7 @@ fn authority_mutation_permits_are_operation_and_record_specific() {
 fn authority_host_authorizes_only_registry_attested_exact_records() {
     let root = root_grant();
     let revocation = revocation();
+    let host = authority_host(hash(7), &[&root]);
     let untrusted_host = authority_host(hash(7), &[]);
     assert_eq!(
         untrusted_host.authorize_grant(&root),
