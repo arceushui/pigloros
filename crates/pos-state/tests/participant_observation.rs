@@ -639,3 +639,81 @@ fn observation_policy_is_required_for_materialization() {
         Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
     );
 }
+
+#[test]
+fn observation_policy_rejects_each_zero_revision() {
+    let valid = (
+        hash_from_repeated_byte(7),
+        hash_from_repeated_byte(8),
+        hash_from_repeated_byte(9),
+    );
+    for revisions in [
+        (Hash::zero(), valid.1, valid.2),
+        (valid.0, Hash::zero(), valid.2),
+        (valid.0, valid.1, Hash::zero()),
+    ] {
+        assert_eq!(
+            ProjectionObservationPolicyV1::try_new(
+                vec!["count".to_owned()],
+                "profile.v1".to_owned(),
+                revisions.0,
+                revisions.1,
+                revisions.2,
+            ),
+            Err(pos_core::AuthorityErrorV1::ProvenanceMissing)
+        );
+    }
+}
+
+#[test]
+fn observation_policy_rejects_duplicate_permitted_fields() {
+    assert_eq!(
+        ProjectionObservationPolicyV1::try_new(
+            vec!["count".to_owned(), "count".to_owned()],
+            "profile.v1".to_owned(),
+            hash_from_repeated_byte(7),
+            hash_from_repeated_byte(8),
+            hash_from_repeated_byte(9),
+        ),
+        Err(pos_core::AuthorityErrorV1::NonCanonicalOrder)
+    );
+}
+
+#[test]
+fn prior_observation_snapshot_changes_host_provenance() {
+    let fixture = authority_fixture();
+    let mut registry = ProjectionRegistry::new();
+    register_profile(&mut registry, Box::new(CountReducer));
+    let timeline_id = TimelineId::new();
+    let without_prior = registry
+        .materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            &fixture.registry,
+            Seq::from_u64(10),
+            &context(timeline_id),
+        )
+        .test_ok();
+    let prior_digest = hash_from_repeated_byte(42);
+    let with_prior = registry
+        .materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            &fixture.registry,
+            Seq::from_u64(10),
+            &ProjectionObservationContextV1 {
+                prior_snapshot_digest: Some(prior_digest),
+                ..context(timeline_id)
+            },
+        )
+        .test_ok();
+
+    assert_eq!(with_prior.prior_snapshot_digest(), Some(prior_digest));
+    assert_ne!(with_prior.digest(), without_prior.digest());
+    assert_ne!(
+        with_prior.provenance_digest(),
+        without_prior.provenance_digest()
+    );
+}

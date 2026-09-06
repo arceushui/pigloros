@@ -998,3 +998,429 @@ fn knowledge_snapshot_codec_rejects_nested_confidence_and_digest_tampering() {
         Err(AuthorityErrorV1::DigestMismatch)
     );
 }
+
+#[test]
+fn observation_record_rejects_a_nil_participant() {
+    let mut draft = record_draft(ObservationStatusV1::NotObserved, None);
+    draft.participant_id = EntityId::from_ulid(Ulid::nil());
+
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_record_rejects_an_empty_data_category() {
+    let mut draft = record_draft(ObservationStatusV1::NotObserved, None);
+    draft.data_category.clear();
+
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_record_rejects_an_empty_schema() {
+    let mut draft = record_draft(ObservationStatusV1::NotObserved, None);
+    draft.schema.clear();
+
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_record_rejects_a_nil_source_timeline() {
+    let mut draft = record_draft(ObservationStatusV1::NotObserved, None);
+    draft.source_timeline = TimelineId::from_ulid(Ulid::nil());
+
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_record_rejects_a_zero_minimization_revision() {
+    let mut draft = record_draft(ObservationStatusV1::NotObserved, None);
+    draft.minimization_revision = Hash::zero();
+
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn present_observation_rejects_a_zero_artifact_digest() {
+    let draft = record_draft(ObservationStatusV1::Present, Some(Hash::zero()));
+
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn unauthorized_observation_rejects_projection_evidence() {
+    let mut draft = record_draft(ObservationStatusV1::Unauthorized, None);
+    draft.projection_digest = Some(hash_from_repeated_byte(4));
+
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::UnauthorizedSource)
+    );
+}
+
+#[test]
+fn unauthorized_observation_rejects_provenance_evidence() {
+    let mut draft = record_draft(ObservationStatusV1::Unauthorized, None);
+    draft.provenance_digest = hash_from_repeated_byte(5);
+
+    assert_eq!(
+        ObservationRecordV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::UnauthorizedSource)
+    );
+}
+
+#[test]
+fn observation_record_decoder_rejects_malformed_identity_and_text_fields() {
+    let record =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .test_ok();
+    let encoded = record.encode().test_ok();
+
+    for index in [2, 3, 4, 7, 9] {
+        let malformed = changed_array(&encoded, |fields| fields[index] = Value::Null);
+        assert_eq!(
+            ObservationRecordV1::decode(&malformed),
+            Err(AuthorityErrorV1::InvalidEncoding),
+            "field {index} must retain its canonical type"
+        );
+    }
+}
+
+#[test]
+fn observation_record_decoder_rejects_malformed_evidence_fields() {
+    let record =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .test_ok();
+    let encoded = record.encode().test_ok();
+
+    for index in [6, 8, 10, 11, 12, 13] {
+        let malformed = changed_array(&encoded, |fields| {
+            fields[index] = Value::Text("wrong-type".to_owned());
+        });
+        assert_eq!(
+            ObservationRecordV1::decode(&malformed),
+            Err(AuthorityErrorV1::InvalidEncoding),
+            "field {index} must retain its canonical type"
+        );
+    }
+}
+
+#[test]
+fn observation_snapshot_rejects_a_zero_plugin_identity() {
+    let record =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .test_ok();
+    let mut draft = observation_snapshot_draft(vec![record], Vec::new());
+    draft.plugin_id = PluginId::from_ulid(Ulid::nil());
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_snapshot_rejects_a_nil_observation_timeline() {
+    let mut draft = observation_snapshot_draft(Vec::new(), Vec::new());
+    draft.timeline_id = TimelineId::from_ulid(Ulid::nil());
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_snapshot_rejects_a_nil_authority_timeline() {
+    let mut draft = observation_snapshot_draft(Vec::new(), Vec::new());
+    draft.authority_timeline = TimelineId::from_ulid(Ulid::nil());
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_snapshot_rejects_each_zero_authority_revision() {
+    let valid = observation_snapshot_draft(Vec::new(), Vec::new());
+    for mutate in [
+        |draft: &mut ObservationSnapshotDraftV1| draft.authorization_request_digest = Hash::zero(),
+        |draft: &mut ObservationSnapshotDraftV1| draft.authorization_decision_digest = Hash::zero(),
+        |draft: &mut ObservationSnapshotDraftV1| draft.consent_policy_revision = Hash::zero(),
+        |draft: &mut ObservationSnapshotDraftV1| draft.capability_policy_revision = Hash::zero(),
+        |draft: &mut ObservationSnapshotDraftV1| draft.visibility_policy_revision = Hash::zero(),
+        |draft: &mut ObservationSnapshotDraftV1| draft.schema_revision = Hash::zero(),
+        |draft: &mut ObservationSnapshotDraftV1| draft.minimization_revision = Hash::zero(),
+        |draft: &mut ObservationSnapshotDraftV1| draft.provenance_digest = Hash::zero(),
+    ] {
+        let mut draft = valid.clone();
+        mutate(&mut draft);
+        assert_eq!(
+            ObservationSnapshotV1::try_from_draft(draft),
+            Err(AuthorityErrorV1::FieldOutOfBounds)
+        );
+    }
+}
+
+#[test]
+fn observation_snapshot_rejects_a_zero_prior_snapshot_digest() {
+    let mut draft = observation_snapshot_draft(Vec::new(), Vec::new());
+    draft.prior_snapshot_digest = Some(Hash::zero());
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_snapshot_rejects_a_record_from_another_minimization_revision() {
+    let mut record = record_draft(ObservationStatusV1::NotObserved, None);
+    record.minimization_revision = hash_from_repeated_byte(99);
+    let record = ObservationRecordV1::try_from_draft(record).test_ok();
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(vec![record], Vec::new())),
+        Err(AuthorityErrorV1::UnauthorizedSource)
+    );
+}
+
+#[test]
+fn observation_snapshot_rejects_noncanonical_artifact_order() {
+    let first = ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"first")).test_ok();
+    let second = ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"second")).test_ok();
+    let mut artifacts = vec![first, second];
+    artifacts.sort_by_key(ObservationArtifactV1::digest);
+    artifacts.reverse();
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(Vec::new(), artifacts)),
+        Err(AuthorityErrorV1::NonCanonicalOrder)
+    );
+}
+
+#[test]
+fn observation_snapshot_rejects_a_missing_artifact() {
+    let record = ObservationRecordV1::try_from_draft(record_draft(
+        ObservationStatusV1::Present,
+        Some(hash_from_repeated_byte(99)),
+    ))
+    .test_ok();
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(vec![record], Vec::new())),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+}
+
+#[test]
+fn observation_snapshot_decoder_rejects_malformed_identity_fields() {
+    let snapshot =
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(Vec::new(), Vec::new()))
+            .test_ok();
+    let encoded = snapshot.encode().test_ok();
+
+    for index in [2, 3, 4, 5, 6, 8] {
+        let malformed = changed_array(&encoded, |fields| fields[index] = Value::Null);
+        assert_eq!(
+            ObservationSnapshotV1::decode(&malformed),
+            Err(AuthorityErrorV1::InvalidEncoding),
+            "field {index} must retain its canonical type"
+        );
+    }
+}
+
+#[test]
+fn observation_snapshot_decoder_rejects_malformed_authority_fields() {
+    let snapshot =
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(Vec::new(), Vec::new()))
+            .test_ok();
+    let encoded = snapshot.encode().test_ok();
+
+    for index in [7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22] {
+        let malformed = changed_array(&encoded, |fields| {
+            fields[index] = Value::Text("wrong-type".to_owned());
+        });
+        assert_eq!(
+            ObservationSnapshotV1::decode(&malformed),
+            Err(AuthorityErrorV1::InvalidEncoding),
+            "field {index} must retain its canonical type"
+        );
+    }
+}
+
+#[test]
+fn observation_snapshot_decoder_rejects_a_malformed_prior_digest() {
+    let snapshot =
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(Vec::new(), Vec::new()))
+            .test_ok();
+    let encoded = snapshot.encode().test_ok();
+    let malformed = changed_array(&encoded, |fields| {
+        fields[21] = Value::Text("wrong-type".to_owned());
+    });
+
+    assert_eq!(
+        ObservationSnapshotV1::decode(&malformed),
+        Err(AuthorityErrorV1::InvalidEncoding)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_rejects_a_nil_participant() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let mut draft = knowledge_draft(participant_id, Vec::new(), Vec::new());
+    draft.participant_id = EntityId::from_ulid(Ulid::nil());
+
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_rejects_a_nil_timeline() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let mut draft = knowledge_draft(participant_id, Vec::new(), Vec::new());
+    draft.timeline_id = TimelineId::from_ulid(Ulid::nil());
+
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_rejects_a_zero_observation_anchor() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let mut draft = knowledge_draft(participant_id, Vec::new(), Vec::new());
+    draft.observation_snapshot_digest = Hash::zero();
+
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_rejects_a_zero_provenance_digest() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let mut draft = knowledge_draft(participant_id, Vec::new(), Vec::new());
+    draft.provenance_digest = Hash::zero();
+
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_rejects_a_zero_prior_snapshot_digest() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let mut draft = knowledge_draft(participant_id, Vec::new(), Vec::new());
+    draft.prior_snapshot_digest = Some(Hash::zero());
+
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_decoder_rejects_malformed_identity_and_anchor_fields() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let snapshot = KnowledgeSnapshotV1::try_from_draft(knowledge_draft(
+        participant_id,
+        Vec::new(),
+        Vec::new(),
+    ))
+    .test_ok();
+    let encoded = snapshot.encode().test_ok();
+
+    for index in [2, 3, 4, 5, 6] {
+        let malformed = changed_array(&encoded, |fields| fields[index] = Value::Null);
+        assert_eq!(
+            KnowledgeSnapshotV1::decode(&malformed),
+            Err(AuthorityErrorV1::InvalidEncoding),
+            "field {index} must retain its canonical type"
+        );
+    }
+}
+
+#[test]
+fn knowledge_snapshot_decoder_rejects_malformed_policy_and_provenance_fields() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let snapshot = KnowledgeSnapshotV1::try_from_draft(knowledge_draft(
+        participant_id,
+        Vec::new(),
+        Vec::new(),
+    ))
+    .test_ok();
+    let encoded = snapshot.encode().test_ok();
+
+    for index in [9, 10, 11, 12, 13, 14] {
+        let malformed = changed_array(&encoded, |fields| {
+            fields[index] = Value::Text("wrong-type".to_owned());
+        });
+        assert_eq!(
+            KnowledgeSnapshotV1::decode(&malformed),
+            Err(AuthorityErrorV1::InvalidEncoding),
+            "field {index} must retain its canonical type"
+        );
+    }
+}
+
+#[test]
+fn knowledge_snapshot_decoder_rejects_each_malformed_belief_field() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let observation =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .test_ok();
+    let belief = BeliefRecordV1::try_from_draft(belief_draft(
+        participant_id,
+        "prefers.tea",
+        observation.digest(),
+    ))
+    .test_ok();
+    let snapshot = KnowledgeSnapshotV1::try_from_draft(knowledge_draft(
+        participant_id,
+        vec![observation],
+        vec![belief],
+    ))
+    .test_ok();
+    let encoded = snapshot.encode().test_ok();
+
+    for index in [0, 1, 2, 3, 4, 5] {
+        let malformed = changed_array(&encoded, |fields| {
+            let Value::Array(beliefs) = &mut fields[8] else {
+                std::panic::resume_unwind(Box::new("expected belief array"));
+            };
+            let Value::Array(belief_fields) = &mut beliefs[0] else {
+                std::panic::resume_unwind(Box::new("expected belief record"));
+            };
+            belief_fields[index] = Value::Null;
+        });
+        assert_eq!(
+            KnowledgeSnapshotV1::decode(&malformed),
+            Err(AuthorityErrorV1::InvalidEncoding),
+            "belief field {index} must retain its canonical type"
+        );
+    }
+}
