@@ -15,8 +15,10 @@
 use std::collections::{BTreeSet, HashMap};
 
 use pos_core::{
-    AuthorizationDecisionV1, AuthorizationRequestV1, ConsentEvidenceV1,
-    ConsentRevocationFoldListener, ConsentRevokedV1, EntityId, Event, Hash, PersistedAuthorityV1,
+    AuthorityErrorV1, AuthorizationDecisionV1, AuthorizationRequestV1, CanonicalBytes,
+    ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId, Event, Hash,
+    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
     Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
     EVENT_TYPE_CONSENT_REVOKED_V1,
 };
@@ -358,6 +360,95 @@ impl ProjectionRegistry {
             .and_then(|(_, slot)| slot.registry.get(entity))
     }
 
+    /// Materialize exactly one host-authorized participant observation.
+    ///
+    /// Authorization is validated before projection lookup. The returned OBS1
+    /// owns only canonical value bytes and provenance; it exposes neither this
+    /// registry nor a `State`/`Event` handle. State for every other subject and
+    /// reducer is therefore outside the derivation's data dependencies.
+    ///
+    /// # Errors
+    /// Returns a closed authority error when the decision is denied, does not
+    /// exactly bind the request, lacks participant/Plugin installation identity,
+    /// or the requested materialization cannot form a valid bounded OBS1.
+    pub fn materialize_authorized_observation(
+        &self,
+        request: &AuthorizationRequestV1,
+        decision: &AuthorizationDecisionV1,
+        context: ProjectionObservationContextV1,
+    ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
+        validate_observation_authorization(request, decision)?;
+        if context.reducer.is_empty() || context.reducer.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES
+        {
+            return Err(AuthorityErrorV1::FieldOutOfBounds);
+        }
+        let subject_id = request
+            .subject_id()
+            .ok_or(AuthorityErrorV1::ConsentMissing)?;
+        let participant_id = request
+            .participant_id()
+            .ok_or(AuthorityErrorV1::UnauthorizedSource)?;
+        let plugin_id = request
+            .plugin_id()
+            .ok_or(AuthorityErrorV1::UnauthorizedSource)?;
+        let installation_id = request
+            .installation_id()
+            .ok_or(AuthorityErrorV1::UnauthorizedSource)?;
+        let (status, artifact_digest, projection_digest, artifacts) = self
+            .state_for_reducer(&context.reducer, &subject_id)
+            .map(canonical_state_artifact)
+            .transpose()?
+            .map_or(
+                (ObservationStatusV1::NotObserved, None, None, Vec::new()),
+                |artifact| {
+                    let digest = artifact.digest();
+                    (
+                        ObservationStatusV1::Present,
+                        Some(digest),
+                        Some(digest),
+                        vec![artifact],
+                    )
+                },
+            );
+        let record = ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
+            participant_id,
+            resource: request.resource().to_owned(),
+            data_category: request.data_category().to_owned(),
+            status,
+            artifact_digest,
+            source_timeline: context.timeline_id,
+            source_position: context.observed_through,
+            schema: context.schema,
+            source_digest: context.source_digest,
+            projection_digest,
+            provenance_digest: context.provenance_digest,
+            minimization_revision: context.minimization_revision,
+        })?;
+        ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
+            principal: decision.principal().clone(),
+            participant_id,
+            plugin_id,
+            installation_id,
+            timeline_id: context.timeline_id,
+            observed_through: context.observed_through,
+            authority_timeline: decision.authority_timeline(),
+            authority_position: decision.at_position(),
+            authorization_request_digest: request.binding_digest(),
+            authorization_decision_digest: decision.decision_digest(),
+            grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
+            consent_policy_revision: decision.consent_policy_revision(),
+            capability_policy_revision: decision.capability_policy_revision(),
+            revocation_epoch: request.revocation_epoch(),
+            visibility_policy_revision: context.visibility_policy_revision,
+            schema_revision: context.schema_revision,
+            minimization_revision: context.minimization_revision,
+            records: vec![record],
+            artifacts,
+            prior_snapshot_digest: context.prior_snapshot_digest,
+            provenance_digest: context.provenance_digest,
+        })
+    }
+
     /// Return the names of all registered reducers in insertion order.
     #[must_use]
     pub fn reducer_names(&self) -> Vec<&str> {
@@ -442,6 +533,83 @@ impl ProjectionRegistry {
             }
         }
         None
+    }
+}
+
+/// Host-owned inputs required to materialize one Projection observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectionObservationContextV1 {
+    pub timeline_id: TimelineId,
+    pub observed_through: Seq,
+    pub reducer: String,
+    pub schema: String,
+    pub visibility_policy_revision: Hash,
+    pub schema_revision: Hash,
+    pub minimization_revision: Hash,
+    pub source_digest: Hash,
+    pub provenance_digest: Hash,
+    pub prior_snapshot_digest: Option<Hash>,
+}
+
+fn validate_observation_authorization(
+    request: &AuthorizationRequestV1,
+    decision: &AuthorizationDecisionV1,
+) -> Result<(), AuthorityErrorV1> {
+    if !decision.is_allowed() {
+        return Err(decision
+            .error()
+            .unwrap_or(AuthorityErrorV1::UnauthorizedSource));
+    }
+    let exact_binding = decision.request_digest() == request.binding_digest()
+        && decision.principal() == request.authenticated().principal()
+        && decision.actor_entity_id() == request.actor_entity_id()
+        && decision.subject_id() == request.subject_id()
+        && decision.participant_id() == request.participant_id()
+        && decision.plugin_id() == request.plugin_id()
+        && decision.installation_id() == request.installation_id()
+        && decision.principal_role() == request.principal_role()
+        && decision.authority_timeline() == request.authority_timeline()
+        && decision.at_position() == request.at_position()
+        && decision.consent_timeline() == request.consent_timeline()
+        && decision.consent_at_position() == request.consent_at_position()
+        && decision.consent_policy_revision() == request.consent_policy_revision()
+        && decision.capability_policy_revision() == request.capability_policy_revision()
+        && decision.authority_registry_digest() == request.authority_registry_digest()
+        && request.revocation_state_current()
+        && !decision.grant_chain_bindings().is_empty();
+    if exact_binding {
+        Ok(())
+    } else {
+        Err(AuthorityErrorV1::UnauthorizedSource)
+    }
+}
+
+fn canonical_state_artifact(state: &State) -> Result<ObservationArtifactV1, AuthorityErrorV1> {
+    let value = serde_json::Value::Object(
+        state
+            .fields
+            .iter()
+            .map(|(key, value)| (key.clone(), canonical_json(value)))
+            .collect(),
+    );
+    serde_json::to_vec(&value)
+        .map(CanonicalBytes::from_vec)
+        .map_err(|_| AuthorityErrorV1::InvalidEncoding)
+        .and_then(ObservationArtifactV1::try_new)
+}
+
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_json(value)))
+                .collect(),
+        ),
+        value => value.clone(),
     }
 }
 
