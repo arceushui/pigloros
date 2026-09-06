@@ -370,7 +370,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
 
     let stripped_registry = AuthorityRegistrySnapshotV1::try_new(
         fixture.request.authority_registry_digest(),
-        Vec::new(),
+        vec![fixture.request.authenticated().registry_binding_digest()],
         Vec::new(),
         Vec::new(),
     )
