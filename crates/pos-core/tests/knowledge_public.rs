@@ -11,28 +11,39 @@ fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
-fn belief_draft(entity_id: EntityId, predicate: &str) -> BeliefRecordDraftV1 {
+fn belief_draft(
+    entity_id: EntityId,
+    predicate: &str,
+    observation_digest: Hash,
+) -> BeliefRecordDraftV1 {
     BeliefRecordDraftV1 {
         entity_id,
         predicate: predicate.to_owned(),
         confidence: ConfidenceV1::try_new(750_000).expect("bounded confidence"),
         provenance_digest: hash_from_repeated_byte(23),
-        observation_record_digests: vec![hash_from_repeated_byte(24)],
+        observation_record_digests: vec![observation_digest],
     }
 }
 
 #[test]
 fn knowledge_snapshot_preserves_epistemic_and_revision_meanings() {
     let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
-    let belief = BeliefRecordV1::try_from_draft(belief_draft(participant_id, "prefers.tea"))
-        .expect("belief");
+    let observation =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .expect("observation reference");
+    let belief = BeliefRecordV1::try_from_draft(belief_draft(
+        participant_id,
+        "prefers.tea",
+        observation.digest(),
+    ))
+    .expect("belief");
     let snapshot = KnowledgeSnapshotV1::try_from_draft(KnowledgeSnapshotDraftV1 {
         principal: PrincipalRefV1::try_new([7; 16], "host.test").expect("principal"),
         participant_id,
         timeline_id: TimelineId::from_ulid(Ulid::from(2_u128)),
         observed_through: Seq::from_u64(7),
         observation_snapshot_digest: hash_from_repeated_byte(25),
-        observation_record_digests: vec![hash_from_repeated_byte(24)],
+        observations: vec![observation],
         beliefs: vec![belief.clone()],
         preference_value_revision: Some(
             PreferenceValueRevisionV1::try_new(hash_from_repeated_byte(26))
@@ -76,17 +87,28 @@ fn knowledge_snapshot_preserves_epistemic_and_revision_meanings() {
 #[test]
 fn knowledge_snapshot_rejects_noncanonical_belief_order() {
     let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
-    let later = BeliefRecordV1::try_from_draft(belief_draft(participant_id, "z.last"))
-        .expect("later belief");
-    let earlier = BeliefRecordV1::try_from_draft(belief_draft(participant_id, "a.first"))
-        .expect("earlier belief");
+    let observation =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .expect("observation reference");
+    let later = BeliefRecordV1::try_from_draft(belief_draft(
+        participant_id,
+        "z.last",
+        observation.digest(),
+    ))
+    .expect("later belief");
+    let earlier = BeliefRecordV1::try_from_draft(belief_draft(
+        participant_id,
+        "a.first",
+        observation.digest(),
+    ))
+    .expect("earlier belief");
     let mut draft = KnowledgeSnapshotDraftV1 {
         principal: PrincipalRefV1::try_new([7; 16], "host.test").expect("principal"),
         participant_id,
         timeline_id: TimelineId::from_ulid(Ulid::from(2_u128)),
         observed_through: Seq::from_u64(7),
         observation_snapshot_digest: hash_from_repeated_byte(25),
-        observation_record_digests: vec![hash_from_repeated_byte(24)],
+        observations: vec![observation],
         beliefs: vec![later, earlier],
         preference_value_revision: None,
         ai_goal_policy_revision: None,

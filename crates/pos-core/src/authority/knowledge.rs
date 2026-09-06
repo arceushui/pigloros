@@ -18,6 +18,7 @@ use crate::{CanonicalBytes, EntityId, Hash, PluginId, Seq, TimelineId};
 
 const OBSERVATION_RECORD_MAGIC: [u8; 4] = *b"OBR1";
 const OBSERVATION_SNAPSHOT_MAGIC: [u8; 4] = *b"OBS1";
+const KNOWLEDGE_SNAPSHOT_MAGIC: [u8; 4] = *b"KNS1";
 
 /// Maximum canonical OBR1 record size.
 pub const MAX_OBSERVATION_RECORD_BYTES: usize = 4 * 1_024;
@@ -27,6 +28,10 @@ pub const MAX_OBSERVATION_ARTIFACT_BYTES: usize = 1_024 * 1_024;
 pub const MAX_OBSERVATION_SNAPSHOT_BYTES: usize = 1_024 * 1_024;
 /// Maximum records in one OBS1 snapshot.
 pub const MAX_OBSERVATION_SNAPSHOT_RECORDS: usize = 4_096;
+/// Maximum canonical KNS1 snapshot size.
+pub const MAX_KNOWLEDGE_SNAPSHOT_BYTES: usize = 2 * 1_024 * 1_024;
+/// Maximum combined observations and beliefs in one KNS1 snapshot.
+pub const MAX_KNOWLEDGE_SNAPSHOT_RECORDS: usize = 4_096;
 
 /// Immutable content-addressed value bytes referenced by an observation record.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -796,4 +801,506 @@ fn decode_fixed_bytes<const N: usize>(value: &Value) -> Result<[u8; N], Authorit
             .map_err(|_| AuthorityErrorV1::InvalidEncoding),
         _ => Err(AuthorityErrorV1::InvalidEncoding),
     }
+}
+
+/// Fixed-point confidence in millionths, from 0.0 through 1.0 inclusive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConfidenceV1(u32);
+
+impl ConfidenceV1 {
+    /// Construct a bounded confidence value.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityErrorV1::FieldOutOfBounds`] above one million.
+    pub const fn try_new(millionths: u32) -> Result<Self, AuthorityErrorV1> {
+        if millionths <= 1_000_000 {
+            Ok(Self(millionths))
+        } else {
+            Err(AuthorityErrorV1::FieldOutOfBounds)
+        }
+    }
+
+    #[must_use]
+    pub const fn millionths(self) -> u32 {
+        self.0
+    }
+}
+
+macro_rules! revision_type {
+    ($name:ident, $description:literal) => {
+        #[doc = $description]
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub struct $name(Hash);
+
+        impl $name {
+            /// Construct a non-zero immutable revision reference.
+            ///
+            /// # Errors
+            /// Returns [`AuthorityErrorV1::FieldOutOfBounds`] for the zero digest.
+            pub fn try_new(digest: Hash) -> Result<Self, AuthorityErrorV1> {
+                validate_hash(digest).map(|()| Self(digest))
+            }
+
+            #[must_use]
+            pub const fn digest(self) -> Hash {
+                self.0
+            }
+        }
+    };
+}
+
+revision_type!(
+    PreferenceValueRevisionV1,
+    "Revision of participant Preference/value evidence; never an AI goal."
+);
+revision_type!(
+    AiGoalPolicyRevisionV1,
+    "Revision of AI goal/policy evidence; never a participant Preference."
+);
+revision_type!(
+    MemoryPolicyRevisionV1,
+    "Revision governing memory retention, forgetting, and recall."
+);
+
+/// Unvalidated fields for one participant belief.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeliefRecordDraftV1 {
+    pub entity_id: EntityId,
+    pub predicate: String,
+    pub confidence: ConfidenceV1,
+    pub provenance_digest: Hash,
+    pub observation_record_digests: Vec<Hash>,
+}
+
+/// One typed belief in a participant's non-authoritative knowledge snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeliefRecordV1 {
+    entity_id: EntityId,
+    predicate: String,
+    confidence: ConfidenceV1,
+    provenance_digest: Hash,
+    observation_record_digests: Vec<Hash>,
+    digest: Hash,
+}
+
+impl BeliefRecordV1 {
+    /// Validate and bind one typed belief.
+    ///
+    /// # Errors
+    /// Returns a closed validation error for malformed or noncanonical evidence.
+    pub fn try_from_draft(draft: BeliefRecordDraftV1) -> Result<Self, AuthorityErrorV1> {
+        validate_entity_id(draft.entity_id)?;
+        validate_text(&draft.predicate)?;
+        validate_hash(draft.provenance_digest)?;
+        validate_strict_hashes(
+            &draft.observation_record_digests,
+            MAX_KNOWLEDGE_SNAPSHOT_RECORDS,
+        )?;
+        let mut belief = Self {
+            entity_id: draft.entity_id,
+            predicate: draft.predicate,
+            confidence: draft.confidence,
+            provenance_digest: draft.provenance_digest,
+            observation_record_digests: draft.observation_record_digests,
+            digest: Hash::zero(),
+        };
+        belief.digest = belief.binding_digest()?;
+        Ok(belief)
+    }
+
+    #[must_use]
+    pub const fn entity_id(&self) -> EntityId {
+        self.entity_id
+    }
+
+    #[must_use]
+    pub fn predicate(&self) -> &str {
+        &self.predicate
+    }
+
+    #[must_use]
+    pub const fn confidence(&self) -> ConfidenceV1 {
+        self.confidence
+    }
+
+    #[must_use]
+    pub const fn provenance_digest(&self) -> Hash {
+        self.provenance_digest
+    }
+
+    #[must_use]
+    pub fn observation_record_digests(&self) -> &[Hash] {
+        &self.observation_record_digests
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> Hash {
+        self.digest
+    }
+
+    fn binding_digest(&self) -> Result<Hash, AuthorityErrorV1> {
+        let encoded = encode_value(&self.value_without_digest())?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.BeliefRecord.v1\0");
+        hasher.update(&encoded);
+        Ok(Hash::from_bytes(*hasher.finalize().as_bytes()))
+    }
+
+    fn value_without_digest(&self) -> Value {
+        Value::Array(vec![
+            bytes(&entity_bytes(self.entity_id)),
+            text(&self.predicate),
+            uint(u64::from(self.confidence.millionths())),
+            hash_value(self.provenance_digest),
+            Value::Array(
+                self.observation_record_digests
+                    .iter()
+                    .copied()
+                    .map(hash_value)
+                    .collect(),
+            ),
+        ])
+    }
+
+    fn value_with_digest(&self) -> Value {
+        let Value::Array(mut fields) = self.value_without_digest() else {
+            unreachable!("belief encoder always builds an array")
+        };
+        fields.push(hash_value(self.digest));
+        Value::Array(fields)
+    }
+
+    fn canonical_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.entity_id
+            .cmp(&other.entity_id)
+            .then_with(|| self.predicate.cmp(&other.predicate))
+            .then_with(|| self.provenance_digest.cmp(&other.provenance_digest))
+    }
+}
+
+/// Unvalidated fields for one participant's non-authoritative knowledge snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnowledgeSnapshotDraftV1 {
+    pub principal: PrincipalRefV1,
+    pub participant_id: EntityId,
+    pub timeline_id: TimelineId,
+    pub observed_through: Seq,
+    pub observation_snapshot_digest: Hash,
+    pub observations: Vec<ObservationRecordV1>,
+    pub beliefs: Vec<BeliefRecordV1>,
+    pub preference_value_revision: Option<PreferenceValueRevisionV1>,
+    pub ai_goal_policy_revision: Option<AiGoalPolicyRevisionV1>,
+    pub memory_policy_revision: MemoryPolicyRevisionV1,
+    pub prior_snapshot_digest: Option<Hash>,
+    pub external_provenance: Vec<Hash>,
+    pub provenance_digest: Hash,
+}
+
+/// Canonical KNS1 record of what one participant may know at one Timeline position.
+///
+/// This is epistemic evidence, never authoritative world state. It deliberately
+/// cannot contain a Projection, EventStore, host handle, or action authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnowledgeSnapshotV1 {
+    principal: PrincipalRefV1,
+    participant_id: EntityId,
+    timeline_id: TimelineId,
+    observed_through: Seq,
+    observation_snapshot_digest: Hash,
+    observations: Vec<ObservationRecordV1>,
+    beliefs: Vec<BeliefRecordV1>,
+    preference_value_revision: Option<PreferenceValueRevisionV1>,
+    ai_goal_policy_revision: Option<AiGoalPolicyRevisionV1>,
+    memory_policy_revision: MemoryPolicyRevisionV1,
+    prior_snapshot_digest: Option<Hash>,
+    external_provenance: Vec<Hash>,
+    provenance_digest: Hash,
+    digest: Hash,
+}
+
+impl KnowledgeSnapshotV1 {
+    /// Validate observation and belief provenance and calculate the KNS1 digest.
+    ///
+    /// # Errors
+    /// Returns a closed validation or codec error for incomplete, unbounded, or
+    /// noncanonical participant knowledge.
+    pub fn try_from_draft(draft: KnowledgeSnapshotDraftV1) -> Result<Self, AuthorityErrorV1> {
+        validate_entity_id(draft.participant_id)?;
+        validate_timeline_id(draft.timeline_id)?;
+        validate_hash(draft.observation_snapshot_digest)?;
+        validate_hash(draft.provenance_digest)?;
+        if let Some(digest) = draft.prior_snapshot_digest {
+            validate_hash(digest)?;
+        }
+        if draft.observations.len().saturating_add(draft.beliefs.len())
+            > MAX_KNOWLEDGE_SNAPSHOT_RECORDS
+        {
+            return Err(AuthorityErrorV1::FieldOutOfBounds);
+        }
+        if let Some(first) = draft.observations.first() {
+            validate_snapshot_records(
+                draft.participant_id,
+                first.minimization_revision(),
+                &draft.observations,
+            )?;
+        }
+        if draft
+            .beliefs
+            .windows(2)
+            .any(|pair| pair[0].canonical_cmp(&pair[1]) != std::cmp::Ordering::Less)
+        {
+            return Err(AuthorityErrorV1::NonCanonicalOrder);
+        }
+        let observation_digests = draft
+            .observations
+            .iter()
+            .map(ObservationRecordV1::digest)
+            .collect::<Vec<_>>();
+        if draft.beliefs.iter().any(|belief| {
+            belief
+                .observation_record_digests
+                .iter()
+                .any(|digest| !observation_digests.contains(digest))
+        }) {
+            return Err(AuthorityErrorV1::ProvenanceMissing);
+        }
+        validate_strict_hashes(&draft.external_provenance, MAX_KNOWLEDGE_SNAPSHOT_RECORDS)?;
+
+        let mut snapshot = Self {
+            principal: draft.principal,
+            participant_id: draft.participant_id,
+            timeline_id: draft.timeline_id,
+            observed_through: draft.observed_through,
+            observation_snapshot_digest: draft.observation_snapshot_digest,
+            observations: draft.observations,
+            beliefs: draft.beliefs,
+            preference_value_revision: draft.preference_value_revision,
+            ai_goal_policy_revision: draft.ai_goal_policy_revision,
+            memory_policy_revision: draft.memory_policy_revision,
+            prior_snapshot_digest: draft.prior_snapshot_digest,
+            external_provenance: draft.external_provenance,
+            provenance_digest: draft.provenance_digest,
+            digest: Hash::zero(),
+        };
+        snapshot.digest = snapshot.binding_digest()?;
+        if snapshot.encode()?.len() > MAX_KNOWLEDGE_SNAPSHOT_BYTES {
+            return Err(AuthorityErrorV1::FieldOutOfBounds);
+        }
+        Ok(snapshot)
+    }
+
+    #[must_use]
+    pub const fn principal(&self) -> &PrincipalRefV1 {
+        &self.principal
+    }
+
+    #[must_use]
+    pub const fn participant_id(&self) -> EntityId {
+        self.participant_id
+    }
+
+    #[must_use]
+    pub const fn timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+
+    #[must_use]
+    pub const fn observed_through(&self) -> Seq {
+        self.observed_through
+    }
+
+    #[must_use]
+    pub const fn observation_snapshot_digest(&self) -> Hash {
+        self.observation_snapshot_digest
+    }
+
+    #[must_use]
+    pub fn observations(&self) -> &[ObservationRecordV1] {
+        &self.observations
+    }
+
+    #[must_use]
+    pub fn beliefs(&self) -> &[BeliefRecordV1] {
+        &self.beliefs
+    }
+
+    #[must_use]
+    pub const fn preference_value_revision(&self) -> Option<PreferenceValueRevisionV1> {
+        self.preference_value_revision
+    }
+
+    #[must_use]
+    pub const fn ai_goal_policy_revision(&self) -> Option<AiGoalPolicyRevisionV1> {
+        self.ai_goal_policy_revision
+    }
+
+    #[must_use]
+    pub const fn memory_policy_revision(&self) -> MemoryPolicyRevisionV1 {
+        self.memory_policy_revision
+    }
+
+    #[must_use]
+    pub const fn prior_snapshot_digest(&self) -> Option<Hash> {
+        self.prior_snapshot_digest
+    }
+
+    #[must_use]
+    pub fn external_provenance(&self) -> &[Hash] {
+        &self.external_provenance
+    }
+
+    #[must_use]
+    pub const fn provenance_digest(&self) -> Hash {
+        self.provenance_digest
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> Hash {
+        self.digest
+    }
+
+    /// Encode the exact deterministic-CBOR KNS1 snapshot.
+    ///
+    /// # Errors
+    /// Returns a closed codec error if serialization fails.
+    pub fn encode(&self) -> Result<CanonicalBytes, AuthorityErrorV1> {
+        encode_value(&self.value_with_digest()?).map(CanonicalBytes::from_vec)
+    }
+
+    /// Decode and validate one exact deterministic-CBOR KNS1 snapshot.
+    ///
+    /// # Errors
+    /// Returns a closed codec, validation, or digest error for malformed input.
+    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, AuthorityErrorV1> {
+        let fields = decode_bounded_array(bytes.as_slice(), MAX_KNOWLEDGE_SNAPSHOT_BYTES, 16)?;
+        expect_header(&fields, KNOWLEDGE_SNAPSHOT_MAGIC)?;
+        let observations = decode_values(&fields[7])?
+            .iter()
+            .map(decode_observation_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        let beliefs = decode_values(&fields[8])?
+            .iter()
+            .map(decode_belief)
+            .collect::<Result<Vec<_>, _>>()?;
+        let decoded_digest = decode_hash(&fields[15])?;
+        let snapshot = Self::try_from_draft(KnowledgeSnapshotDraftV1 {
+            principal: decode_principal_value(&fields[2])?,
+            participant_id: decode_entity(&fields[3])?,
+            timeline_id: decode_timeline(&fields[4])?,
+            observed_through: Seq::from_u64(decode_u64(&fields[5])?),
+            observation_snapshot_digest: decode_hash(&fields[6])?,
+            observations,
+            beliefs,
+            preference_value_revision: decode_optional_preference_revision(&fields[9])?,
+            ai_goal_policy_revision: decode_optional_ai_revision(&fields[10])?,
+            memory_policy_revision: MemoryPolicyRevisionV1::try_new(decode_hash(&fields[11])?)?,
+            prior_snapshot_digest: decode_optional_hash(&fields[12])?,
+            external_provenance: decode_hash_array(&fields[13])?,
+            provenance_digest: decode_hash(&fields[14])?,
+        })?;
+        if snapshot.digest == decoded_digest {
+            Ok(snapshot)
+        } else {
+            Err(AuthorityErrorV1::DigestMismatch)
+        }
+    }
+
+    fn binding_digest(&self) -> Result<Hash, AuthorityErrorV1> {
+        let encoded = encode_value(&self.value_without_digest()?)?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.KnowledgeSnapshot.v1\0");
+        hasher.update(&encoded);
+        Ok(Hash::from_bytes(*hasher.finalize().as_bytes()))
+    }
+
+    fn value_without_digest(&self) -> Result<Value, AuthorityErrorV1> {
+        let observations = self
+            .observations
+            .iter()
+            .map(ObservationRecordV1::encode)
+            .map(|result| result.map(|encoded| bytes(encoded.as_slice())))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Value::Array(vec![
+            bytes(&KNOWLEDGE_SNAPSHOT_MAGIC),
+            uint(VERSION),
+            encode_principal(&self.principal),
+            bytes(&entity_bytes(self.participant_id)),
+            bytes(&timeline_bytes(self.timeline_id)),
+            uint(self.observed_through.as_u64()),
+            hash_value(self.observation_snapshot_digest),
+            Value::Array(observations),
+            Value::Array(
+                self.beliefs
+                    .iter()
+                    .map(BeliefRecordV1::value_with_digest)
+                    .collect(),
+            ),
+            optional_hash_value(self.preference_value_revision.map(|value| value.digest())),
+            optional_hash_value(self.ai_goal_policy_revision.map(|value| value.digest())),
+            hash_value(self.memory_policy_revision.digest()),
+            optional_hash_value(self.prior_snapshot_digest),
+            Value::Array(
+                self.external_provenance
+                    .iter()
+                    .copied()
+                    .map(hash_value)
+                    .collect(),
+            ),
+            hash_value(self.provenance_digest),
+        ]))
+    }
+
+    fn value_with_digest(&self) -> Result<Value, AuthorityErrorV1> {
+        let Value::Array(mut fields) = self.value_without_digest()? else {
+            unreachable!("knowledge encoder always builds an array")
+        };
+        fields.push(hash_value(self.digest));
+        Ok(Value::Array(fields))
+    }
+}
+
+fn validate_strict_hashes(values: &[Hash], max: usize) -> Result<(), AuthorityErrorV1> {
+    if values.len() > max || values.iter().any(|value| *value == Hash::zero()) {
+        return Err(AuthorityErrorV1::FieldOutOfBounds);
+    }
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(AuthorityErrorV1::NonCanonicalOrder);
+    }
+    Ok(())
+}
+
+fn decode_belief(value: &Value) -> Result<BeliefRecordV1, AuthorityErrorV1> {
+    let fields = exact_array(value, 6)?;
+    let confidence = u32::try_from(decode_u64(&fields[2])?)
+        .map_err(|_| AuthorityErrorV1::FieldOutOfBounds)
+        .and_then(ConfidenceV1::try_new)?;
+    let decoded_digest = decode_hash(&fields[5])?;
+    let belief = BeliefRecordV1::try_from_draft(BeliefRecordDraftV1 {
+        entity_id: decode_entity(&fields[0])?,
+        predicate: decode_text(&fields[1])?,
+        confidence,
+        provenance_digest: decode_hash(&fields[3])?,
+        observation_record_digests: decode_hash_array(&fields[4])?,
+    })?;
+    if belief.digest == decoded_digest {
+        Ok(belief)
+    } else {
+        Err(AuthorityErrorV1::DigestMismatch)
+    }
+}
+
+fn decode_optional_preference_revision(
+    value: &Value,
+) -> Result<Option<PreferenceValueRevisionV1>, AuthorityErrorV1> {
+    decode_optional_hash(value)?
+        .map(PreferenceValueRevisionV1::try_new)
+        .transpose()
+}
+
+fn decode_optional_ai_revision(
+    value: &Value,
+) -> Result<Option<AiGoalPolicyRevisionV1>, AuthorityErrorV1> {
+    decode_optional_hash(value)?
+        .map(AiGoalPolicyRevisionV1::try_new)
+        .transpose()
 }
