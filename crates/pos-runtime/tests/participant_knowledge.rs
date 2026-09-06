@@ -9,7 +9,6 @@ use pos_core::{
 use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
 use pos_store::{open_store, StoreConfig};
 use std::sync::{Arc, Mutex};
-use ulid::Ulid;
 
 fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -26,10 +25,10 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let principal = PrincipalRefV1::try_new([1; 16], "host.test").expect("principal");
-    let participant_id = EntityId::from_ulid(Ulid::from(2_u128));
-    let plugin_id = PluginId::from_ulid(Ulid::from(3_u128));
-    let timeline_id = TimelineId::from_ulid(Ulid::from(4_u128));
-    let authority_timeline = TimelineId::from_ulid(Ulid::from(5_u128));
+    let participant_id = EntityId::new();
+    let plugin_id = PluginId::new();
+    let timeline_id = TimelineId::new();
+    let authority_timeline = TimelineId::new();
     let registry_digest = hash_from_repeated_byte(6);
     let policy_revision = hash_from_repeated_byte(7);
     let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
@@ -37,8 +36,8 @@ fn fixture() -> Fixture {
         actions: vec!["observe".to_owned()],
         purposes: vec!["planning".to_owned()],
         audiences: vec!["local-host".to_owned()],
-        actor_entity_ids: vec![EntityId::from_ulid(Ulid::from(8_u128))],
-        subject_ids: vec![EntityId::from_ulid(Ulid::from(9_u128))],
+        actor_entity_ids: vec![EntityId::new()],
+        subject_ids: vec![EntityId::new()],
         participant_ids: vec![participant_id],
         plugin_id: Some(plugin_id),
         principal_roles: vec![AuthorityRoleV1::Actor],
@@ -227,9 +226,8 @@ fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<Driv
     let state = Arc::new(Mutex::new(DriverState::default()));
     let driver = ParticipantDriver {
         state: Arc::clone(&state),
-        entity: EntityId::from_ulid(Ulid::from(30_u128)),
-        ambient_subscription: ambient
-            .then(|| pos_runtime::ProjectionKey::new(EntityId::from_ulid(Ulid::from(31_u128)))),
+        entity: EntityId::new(),
+        ambient_subscription: ambient.then(|| pos_runtime::ProjectionKey::new(EntityId::new())),
     };
     let mut registry = PluginRegistry::new();
     registry
@@ -284,7 +282,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
     assert!(matches!(
         mismatched.stage_authorized_driver(
             fixture.plugin_id,
-            TimelineId::from_ulid(Ulid::from(99_u128)),
+            TimelineId::new(),
             fixture.snapshot.clone(),
         ),
         Err(RuntimeError::Authority(
