@@ -84,6 +84,38 @@ struct AuthorityFixture {
     plugin_id: PluginId,
 }
 
+fn consent_grant(
+    consent_id: Hash,
+    subject_id: EntityId,
+    actor_entity_id: EntityId,
+    authority_timeline: TimelineId,
+    policy_revision: Hash,
+    registry_digest: Hash,
+    issuer: PrincipalRefV1,
+) -> ConsentGrantRefV1 {
+    ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+        consent_id,
+        subject_id,
+        grantee_id: actor_entity_id,
+        data_categories: vec!["profile.preferences".to_owned()],
+        purposes: vec!["planning".to_owned()],
+        audiences: vec!["local-host".to_owned()],
+        action_classes: vec!["observe".to_owned()],
+        valid_from: WallTime::from_micros(1),
+        valid_until: WallTime::from_micros(100),
+        withdrawal_retention_policy: "erase-derived-data".to_owned(),
+        policy_revision,
+        issuer,
+        issuer_evidence: hash_from_repeated_byte(12),
+        consent_timeline: authority_timeline,
+        grant_position: Seq::from_u64(5),
+        status: ConsentGrantStatusV1::Active,
+        revocation_fence: None,
+        authority_registry_digest: registry_digest,
+    })
+    .test_ok()
+}
+
 fn authority_fixture() -> AuthorityFixture {
     let principal = PrincipalRefV1::try_new([1; 16], "host.test").test_ok();
     let actor = EntityId::new();
@@ -96,27 +128,15 @@ fn authority_fixture() -> AuthorityFixture {
     let registry_digest = hash_from_repeated_byte(4);
     let consent_id = hash_from_repeated_byte(5);
     let authenticated = authenticated_principal(principal.clone());
-    let consent = ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+    let consent = consent_grant(
         consent_id,
-        subject_id: subject,
-        grantee_id: actor,
-        data_categories: vec!["profile.preferences".to_owned()],
-        purposes: vec!["planning".to_owned()],
-        audiences: vec!["local-host".to_owned()],
-        action_classes: vec!["observe".to_owned()],
-        valid_from: WallTime::from_micros(1),
-        valid_until: WallTime::from_micros(100),
-        withdrawal_retention_policy: "erase-derived-data".to_owned(),
+        subject,
+        actor,
+        authority_timeline,
         policy_revision,
-        issuer: principal.clone(),
-        issuer_evidence: hash_from_repeated_byte(12),
-        consent_timeline: authority_timeline,
-        grant_position: Seq::from_u64(5),
-        status: ConsentGrantStatusV1::Active,
-        revocation_fence: None,
-        authority_registry_digest: registry_digest,
-    })
-    .test_ok();
+        registry_digest,
+        principal.clone(),
+    );
     let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
         resources: vec!["projection.profile".to_owned()],
         actions: vec!["observe".to_owned()],
