@@ -40,7 +40,8 @@ pub mod world_transform;
 pub use authority::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityCommitOutcomeV1, AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
+    AuthorityMutationPermitV1, AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1,
+    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1, AuthorizationOutcomeV1,
     AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1,
     CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,

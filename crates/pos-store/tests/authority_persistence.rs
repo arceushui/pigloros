@@ -2,8 +2,9 @@ use std::sync::{Arc, Barrier};
 
 use ciborium::Value;
 use pos_core::{
-    AuthorityCommitOutcomeV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
-    AuthorityPersistencePortV1, AuthorityPersistenceStateV1, AuthorityRoleV1,
+    AuthorityCommitOutcomeV1, AuthorityGranteeV1, AuthorityMutationPermitV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
+    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
     CapabilityScopeDraftV1, CapabilityScopeV1, DelegateClassV1, EntityId, Hash, PrincipalRefV1,
     Seq, TimelineId, DELEGATE_ACTION_V1,
@@ -32,6 +33,36 @@ fn timeline(value: u128) -> TimelineId {
 
 fn principal(value: u8) -> PrincipalRefV1 {
     ok(PrincipalRefV1::try_new([value; 16], "local.test"))
+}
+
+fn authority_host(
+    registry_digest: Hash,
+    grants: &[&CapabilityGrantV1],
+) -> AuthorityPersistenceHostV1 {
+    let mut capability_bindings = grants
+        .iter()
+        .map(|grant| ok(grant.binding_digest()))
+        .collect::<Vec<_>>();
+    capability_bindings.sort_unstable();
+    let registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        registry_digest,
+        vec![hash(200)],
+        capability_bindings,
+        vec![],
+    ));
+    AuthorityPersistenceHostV1::new(&registry)
+}
+
+fn grant_permit(grant: &CapabilityGrantV1) -> AuthorityMutationPermitV1 {
+    ok(authority_host(grant.authority_registry_digest(), &[grant]).authorize_grant(grant))
+}
+
+fn revocation_permit(
+    grant: &CapabilityGrantV1,
+    revocation: &CapabilityRevocationV1,
+) -> AuthorityMutationPermitV1 {
+    ok(authority_host(grant.authority_registry_digest(), &[grant])
+        .authorize_revocation(grant, revocation))
 }
 
 fn scope(actions: &[&str], actors: Vec<EntityId>) -> CapabilityScopeV1 {
@@ -124,12 +155,17 @@ fn exercise_port(
     let root = root_grant();
     let child = child_grant();
     let revocation = revocation();
+    let host = authority_host(hash(7), &[&root, &child]);
+    store.bind_authority_persistence(host.persistence_binding())?;
+    let root_permit = host.authorize_grant(&root)?;
+    let child_permit = host.authorize_grant(&child)?;
+    let revocation_permit = host.authorize_revocation(&root, &revocation)?;
     let outcomes = vec![
-        store.issue_capability_grant(&root)?,
-        store.issue_capability_grant(&root)?,
-        store.issue_capability_grant(&child)?,
-        store.revoke_capability_grant(&revocation)?,
-        store.revoke_capability_grant(&revocation)?,
+        store.issue_capability_grant(root_permit, &root)?,
+        store.issue_capability_grant(root_permit, &root)?,
+        store.issue_capability_grant(child_permit, &child)?,
+        store.revoke_capability_grant(revocation_permit, &revocation)?,
+        store.revoke_capability_grant(revocation_permit, &revocation)?,
     ];
     let resolved = store.load_authority(hash(2))?;
     assert_eq!(resolved.revocation_epoch(), 1);
@@ -159,18 +195,108 @@ fn memory_and_sqlite_have_identical_public_authority_contracts() {
 }
 
 #[test]
+fn authority_adapters_require_the_bound_host_mutation_permit() {
+    let root = root_grant();
+    let revocation = revocation();
+    let host = authority_host(hash(7), &[&root]);
+    let foreign_host = authority_host(hash(7), &[&root]);
+    let permit = ok(host.authorize_grant(&root));
+    let revocation_permit = ok(host.authorize_revocation(&root, &revocation));
+    let foreign = ok(foreign_host.authorize_grant(&root));
+    let foreign_revocation = ok(foreign_host.authorize_revocation(&root, &revocation));
+    let mut stores: [Box<dyn AuthorityPersistencePortV1>; 2] = [
+        Box::new(MemoryStore::new()),
+        Box::new(ok(SqliteStore::open_in_memory())),
+    ];
+
+    for store in &mut stores {
+        assert_eq!(
+            store.issue_capability_grant(permit, &root),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        ok(store.bind_authority_persistence(host.persistence_binding()));
+        ok(store.bind_authority_persistence(host.persistence_binding()));
+        assert_eq!(
+            store.bind_authority_persistence(foreign_host.persistence_binding()),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(
+            store.issue_capability_grant(foreign, &root),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(
+            store.issue_capability_grant(revocation_permit, &root),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(
+            store.issue_capability_grant(permit, &child_grant()),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        ok(store.issue_capability_grant(permit, &root));
+        assert_eq!(
+            store.revoke_capability_grant(foreign_revocation, &revocation),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(
+            store.revoke_capability_grant(permit, &revocation),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(
+            store.revoke_capability_grant(revocation_permit, &revocation_at(4)),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+    }
+
+    let untrusted_host = authority_host(hash(7), &[]);
+    assert_eq!(
+        untrusted_host.authorize_grant(&root),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
+    assert_eq!(
+        untrusted_host.authorize_revocation(&root, &revocation),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
+    let wrong_registry = authority_host(hash(99), &[&root]);
+    assert_eq!(
+        wrong_registry.authorize_grant(&root),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
+    assert_eq!(
+        wrong_registry.authorize_revocation(&root, &revocation),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
+    let mismatched_provenance = ok(CapabilityRevocationV1::try_from_draft(
+        CapabilityRevocationDraftV1 {
+            grant_id: root.grant_id(),
+            authority_timeline: root.issuance_timeline(),
+            fence_position: Seq::from_u64(3),
+            revocation_epoch: 1,
+            policy_revision: hash(88),
+            authority_registry_digest: root.authority_registry_digest(),
+        },
+    ));
+    assert_eq!(
+        host.authorize_revocation(&root, &mismatched_provenance),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
+}
+
+#[test]
 fn authority_state_round_trip_preserves_versions_links_and_fences() {
     let mut state = AuthorityPersistenceStateV1::new();
+    let root = root_grant();
+    let child = child_grant();
+    let revocation = revocation();
     assert_eq!(
-        ok(state.issue_grant(root_grant())),
+        ok(state.issue_grant(grant_permit(&root), root.clone())),
         AuthorityCommitOutcomeV1::Committed
     );
     assert_eq!(
-        ok(state.issue_grant(child_grant())),
+        ok(state.issue_grant(grant_permit(&child), child)),
         AuthorityCommitOutcomeV1::Committed
     );
     assert_eq!(
-        ok(state.revoke_grant(revocation())),
+        ok(state.revoke_grant(revocation_permit(&root, &revocation), revocation)),
         AuthorityCommitOutcomeV1::Committed
     );
     let bytes = ok(state.to_persistence_bytes());
@@ -183,13 +309,15 @@ fn authority_state_round_trip_preserves_versions_links_and_fences() {
 #[test]
 fn conflicts_stale_epochs_and_timeline_reordering_fail_closed() {
     let mut state = AuthorityPersistenceStateV1::new();
+    let root = root_grant();
+    let child = child_grant();
     assert_eq!(
-        state.issue_grant(child_grant()),
+        state.issue_grant(grant_permit(&child), child.clone()),
         Err(AuthorityPersistenceErrorV1::Conflict)
     );
-    ok(state.issue_grant(root_grant()));
+    ok(state.issue_grant(grant_permit(&root), root.clone()));
 
-    let mut conflict = child_grant();
+    let mut conflict = child.clone();
     let mut draft = CapabilityGrantDraftV1 {
         grant_id: conflict.grant_id(),
         grantor: conflict.grantor().clone(),
@@ -211,19 +339,25 @@ fn conflicts_stale_epochs_and_timeline_reordering_fail_closed() {
         authority_registry_digest: conflict.authority_registry_digest(),
     };
     conflict = ok(CapabilityGrantV1::try_from_draft(draft.clone()));
+    let conflict_permit = grant_permit(&conflict);
     assert_eq!(
-        state.issue_grant(conflict),
+        state.issue_grant(conflict_permit, conflict),
         Err(AuthorityPersistenceErrorV1::TimelineOrder)
     );
     draft.issuance_seq = Seq::from_u64(2);
     draft.revocation_epoch = 1;
+    let stale = ok(CapabilityGrantV1::try_from_draft(draft));
     assert_eq!(
-        state.issue_grant(ok(CapabilityGrantV1::try_from_draft(draft))),
+        state.issue_grant(grant_permit(&stale), stale),
         Err(AuthorityPersistenceErrorV1::StaleEpoch)
     );
 
-    ok(state.issue_grant(child_grant()));
-    ok(state.revoke_grant(revocation()));
+    ok(state.issue_grant(grant_permit(&child), child.clone()));
+    let first_revocation = revocation();
+    ok(state.revoke_grant(
+        revocation_permit(&root, &first_revocation),
+        first_revocation,
+    ));
     let mut conflicting_revocation = CapabilityRevocationDraftV1 {
         grant_id: hash(1),
         authority_timeline: timeline(30),
@@ -232,18 +366,20 @@ fn conflicts_stale_epochs_and_timeline_reordering_fail_closed() {
         policy_revision: hash(9),
         authority_registry_digest: hash(7),
     };
+    let conflict = ok(CapabilityRevocationV1::try_from_draft(
+        conflicting_revocation,
+    ));
     assert_eq!(
-        state.revoke_grant(ok(CapabilityRevocationV1::try_from_draft(
-            conflicting_revocation
-        ))),
+        state.revoke_grant(revocation_permit(&root, &conflict), conflict),
         Err(AuthorityPersistenceErrorV1::Conflict)
     );
     conflicting_revocation.grant_id = hash(2);
     conflicting_revocation.revocation_epoch = 1;
+    let stale = ok(CapabilityRevocationV1::try_from_draft(
+        conflicting_revocation,
+    ));
     assert_eq!(
-        state.revoke_grant(ok(CapabilityRevocationV1::try_from_draft(
-            conflicting_revocation
-        ))),
+        state.revoke_grant(revocation_permit(&child, &stale), stale),
         Err(AuthorityPersistenceErrorV1::StaleEpoch)
     );
 }
@@ -273,18 +409,27 @@ fn sqlite_reopen_cannot_reactivate_revoked_authority() {
 fn concurrent_sqlite_revocation_is_serialized_and_idempotent() {
     let directory = ok(tempdir());
     let path = directory.path().join("concurrent.db");
+    let root = root_grant();
+    let revocation = revocation();
+    let host = authority_host(hash(7), &[&root]);
+    let binding = host.persistence_binding();
+    let issue_permit = ok(host.authorize_grant(&root));
+    let revocation_permit = ok(host.authorize_revocation(&root, &revocation));
     {
         let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
-        ok(store.issue_capability_grant(&root_grant()));
+        ok(store.bind_authority_persistence(binding));
+        ok(store.issue_capability_grant(issue_permit, &root));
     }
     let barrier = Arc::new(Barrier::new(2));
     let handles = [(), ()].map(|()| {
         let barrier = Arc::clone(&barrier);
         let path = path.clone();
+        let revocation = revocation.clone();
         std::thread::spawn(move || {
             let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+            ok(store.bind_authority_persistence(binding));
             barrier.wait();
-            store.revoke_capability_grant(&revocation())
+            store.revoke_capability_grant(revocation_permit, &revocation)
         })
     });
     let mut outcomes = handles
@@ -333,7 +478,10 @@ fn malformed_persisted_authority_fails_reopen() {
     let path = directory.path().join("malformed.db");
     {
         let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
-        ok(store.issue_capability_grant(&root_grant()));
+        let root = root_grant();
+        let host = authority_host(hash(7), &[&root]);
+        ok(store.bind_authority_persistence(host.persistence_binding()));
+        ok(store.issue_capability_grant(ok(host.authorize_grant(&root)), &root));
     }
     {
         let connection = ok(rusqlite::Connection::open(&path));
@@ -363,8 +511,11 @@ fn failed_sqlite_authority_write_rolls_back_without_partial_state() {
     }
     {
         let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+        let root = root_grant();
+        let host = authority_host(hash(7), &[&root]);
+        ok(store.bind_authority_persistence(host.persistence_binding()));
         assert_eq!(
-            store.issue_capability_grant(&root_grant()),
+            store.issue_capability_grant(ok(host.authorize_grant(&root)), &root),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
     }
@@ -410,8 +561,10 @@ fn revocation_codec_is_canonical_and_rejects_zero_fields() {
 #[test]
 fn authority_state_rejects_a_backdated_persisted_revocation() {
     let mut state = AuthorityPersistenceStateV1::new();
-    ok(state.issue_grant(root_grant_at(5)));
-    ok(state.revoke_grant(revocation_at(6)));
+    let root = root_grant_at(5);
+    let revocation = revocation_at(6);
+    ok(state.issue_grant(grant_permit(&root), root.clone()));
+    ok(state.revoke_grant(revocation_permit(&root, &revocation), revocation));
     let encoded = ok(state.to_persistence_bytes());
     let mut outer: Value = ok(ciborium::de::from_reader(encoded.as_slice()));
     let Value::Array(outer_fields) = &mut outer else {

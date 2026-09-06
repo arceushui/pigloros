@@ -1,13 +1,15 @@
 //! Durable authority-grant and revocation state owned by the trusted host.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ciborium::Value;
 
 use super::{
     bytes, decode_bounded_array, decode_hash, decode_timeline, decode_u64, encode_value,
     expect_header, hash_value, timeline_bytes, uint, validate_hash, validate_timeline_id,
-    AuthorityErrorV1, CapabilityGrantV1, DelegationChainV1, Hash, Seq, TimelineId,
+    AuthorityErrorV1, AuthorityRegistrySnapshotV1, CapabilityGrantV1, DelegationChainV1, Hash, Seq,
+    TimelineId,
 };
 use crate::CanonicalBytes;
 
@@ -46,6 +48,153 @@ impl From<AuthorityErrorV1> for AuthorityPersistenceErrorV1 {
 pub enum AuthorityCommitOutcomeV1 {
     Committed,
     Unchanged,
+}
+
+/// Opaque identity that binds an adapter to one trusted authority host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorityPersistenceBindingV1 {
+    host_id: u64,
+    authority_registry_digest: Hash,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorityMutationEvidenceV1 {
+    Issue {
+        grant_binding: Hash,
+    },
+    Revoke {
+        grant_binding: Hash,
+        revocation_binding: Hash,
+    },
+}
+
+/// Opaque capability for one exact trusted authority mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorityMutationPermitV1 {
+    persistence_binding: AuthorityPersistenceBindingV1,
+    evidence: AuthorityMutationEvidenceV1,
+}
+
+/// Host-composition owner of the authority-persistence mutation capability.
+///
+/// This value is constructed at the trusted host composition root; it is not an
+/// external credential or attestation. The host must not expose this owner, its
+/// permits, or a mutable persistence adapter to Plugin code.
+#[derive(Clone, Debug)]
+pub struct AuthorityPersistenceHostV1 {
+    binding: AuthorityPersistenceBindingV1,
+    registry: AuthorityRegistrySnapshotV1,
+}
+
+static NEXT_AUTHORITY_PERSISTENCE_HOST_ID: AtomicU64 = AtomicU64::new(1);
+
+impl AuthorityPersistenceHostV1 {
+    /// Bind a host-owned persistence capability to one resolved authority registry.
+    ///
+    /// Constructing this value declares that the caller is the composition root
+    /// for the adapter it will bind.
+    #[must_use]
+    pub fn new(registry: &AuthorityRegistrySnapshotV1) -> Self {
+        Self {
+            binding: AuthorityPersistenceBindingV1 {
+                host_id: NEXT_AUTHORITY_PERSISTENCE_HOST_ID.fetch_add(1, Ordering::Relaxed),
+                authority_registry_digest: registry.registry_digest(),
+            },
+            registry: registry.clone(),
+        }
+    }
+
+    /// Return the opaque identity that an adapter binds for its lifetime.
+    #[must_use]
+    pub const fn persistence_binding(&self) -> AuthorityPersistenceBindingV1 {
+        self.binding
+    }
+
+    /// Authorize persistence of one exact registry-attested capability grant.
+    ///
+    /// # Errors
+    /// Returns a closed unavailable error when the exact grant binding is not in
+    /// this host's authoritative registry snapshot.
+    pub fn authorize_grant(
+        &self,
+        grant: &CapabilityGrantV1,
+    ) -> Result<AuthorityMutationPermitV1, AuthorityPersistenceErrorV1> {
+        let Some(grant_binding) = self.registry.capability_binding(grant) else {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        };
+        Ok(AuthorityMutationPermitV1 {
+            persistence_binding: self.binding,
+            evidence: AuthorityMutationEvidenceV1::Issue { grant_binding },
+        })
+    }
+
+    /// Authorize one exact revocation of a registry-attested persisted grant.
+    ///
+    /// # Errors
+    /// Returns a closed unavailable error when the grant is not trusted or the
+    /// revocation is not bound to that grant and this registry revision.
+    pub fn authorize_revocation(
+        &self,
+        grant: &CapabilityGrantV1,
+        revocation: &CapabilityRevocationV1,
+    ) -> Result<AuthorityMutationPermitV1, AuthorityPersistenceErrorV1> {
+        let provenance_matches = revocation.grant_id() == grant.grant_id()
+            && revocation.authority_timeline() == grant.issuance_timeline()
+            && revocation.policy_revision() == grant.policy_revision()
+            && revocation.authority_registry_digest() == self.binding.authority_registry_digest;
+        let Some(grant_binding) = self.registry.capability_binding(grant) else {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        };
+        if !provenance_matches {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        Ok(AuthorityMutationPermitV1 {
+            persistence_binding: self.binding,
+            evidence: AuthorityMutationEvidenceV1::Revoke {
+                grant_binding,
+                revocation_binding: revocation.binding_digest(),
+            },
+        })
+    }
+}
+
+impl AuthorityMutationPermitV1 {
+    /// Return the opaque host identity to which an adapter must already be bound.
+    #[must_use]
+    pub const fn persistence_binding(&self) -> AuthorityPersistenceBindingV1 {
+        self.persistence_binding
+    }
+
+    fn permits_grant(&self, grant: &CapabilityGrantV1) -> bool {
+        match self.evidence {
+            AuthorityMutationEvidenceV1::Issue { grant_binding } => {
+                self.persistence_binding.authority_registry_digest
+                    == grant.authority_registry_digest()
+                    && grant
+                        .binding_digest()
+                        .is_ok_and(|binding| binding == grant_binding)
+            }
+            AuthorityMutationEvidenceV1::Revoke { .. } => false,
+        }
+    }
+
+    fn permits_revocation_record(&self, revocation: &CapabilityRevocationV1) -> bool {
+        match self.evidence {
+            AuthorityMutationEvidenceV1::Revoke {
+                revocation_binding, ..
+            } => revocation.binding_digest() == revocation_binding,
+            AuthorityMutationEvidenceV1::Issue { .. } => false,
+        }
+    }
+
+    fn permits_revoked_grant(&self, grant: &CapabilityGrantV1) -> bool {
+        match self.evidence {
+            AuthorityMutationEvidenceV1::Revoke { grant_binding, .. } => grant
+                .binding_digest()
+                .is_ok_and(|binding| binding == grant_binding),
+            AuthorityMutationEvidenceV1::Issue { .. } => false,
+        }
+    }
 }
 
 /// Unvalidated fields for one immutable capability-revocation fence.
@@ -127,6 +276,19 @@ impl CapabilityRevocationV1 {
     #[must_use]
     pub const fn authority_registry_digest(&self) -> Hash {
         self.authority_registry_digest
+    }
+
+    fn binding_digest(&self) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&REVOCATION_MAGIC);
+        hasher.update(&[VERSION]);
+        hasher.update(self.grant_id.as_bytes());
+        hasher.update(&timeline_bytes(self.authority_timeline));
+        hasher.update(&self.fence_position.as_u64().to_be_bytes());
+        hasher.update(&self.revocation_epoch.to_be_bytes());
+        hasher.update(self.policy_revision.as_bytes());
+        hasher.update(self.authority_registry_digest.as_bytes());
+        Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 
     /// Encode the exact deterministic-CBOR CRF1 record.
@@ -251,8 +413,12 @@ impl AuthorityPersistenceStateV1 {
     /// invalid delegation, or non-monotonic Timeline position.
     pub fn issue_grant(
         &mut self,
+        permit: AuthorityMutationPermitV1,
         grant: CapabilityGrantV1,
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        if !permit.permits_grant(&grant) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
         if let Some(existing) = self.grants.get(&grant.grant_id()) {
             return if existing == &grant {
                 Ok(AuthorityCommitOutcomeV1::Unchanged)
@@ -319,8 +485,18 @@ impl AuthorityPersistenceStateV1 {
     /// policy provenance, or non-monotonic Timeline position.
     pub fn revoke_grant(
         &mut self,
+        permit: AuthorityMutationPermitV1,
         revocation: CapabilityRevocationV1,
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        if !permit.permits_revocation_record(&revocation) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        let Some(grant) = self.grants.get(&revocation.grant_id()) else {
+            return Err(AuthorityPersistenceErrorV1::Conflict);
+        };
+        if !permit.permits_revoked_grant(grant) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
         if let Some(existing) = self.revocations.get(&revocation.grant_id()) {
             return if existing == &revocation {
                 Ok(AuthorityCommitOutcomeV1::Unchanged)
@@ -328,9 +504,6 @@ impl AuthorityPersistenceStateV1 {
                 Err(AuthorityPersistenceErrorV1::Conflict)
             };
         }
-        let Some(grant) = self.grants.get(&revocation.grant_id()) else {
-            return Err(AuthorityPersistenceErrorV1::Conflict);
-        };
         let timeline_matches = revocation.authority_timeline() == grant.issuance_timeline();
         let policy_matches = revocation.policy_revision() == grant.policy_revision();
         let registry_matches =
@@ -652,6 +825,20 @@ impl AuthorityPersistenceStateV1 {
 
 /// Storage seam implemented by durable and in-memory adapters.
 pub trait AuthorityPersistencePortV1 {
+    /// Bind this adapter to the trusted host that owns authority mutations.
+    ///
+    /// Rebinding the same host identity is idempotent. A missing or foreign
+    /// mutation permit must fail closed before a mutation can reveal whether a
+    /// protected record exists.
+    ///
+    /// # Errors
+    /// Returns a closed unavailable error when the adapter is already bound to a
+    /// different trusted host.
+    fn bind_authority_persistence(
+        &mut self,
+        binding: AuthorityPersistenceBindingV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1>;
+
     /// Atomically persist one immutable capability grant.
     ///
     /// # Errors
@@ -659,6 +846,7 @@ pub trait AuthorityPersistencePortV1 {
     /// validation, or adapter unavailability.
     fn issue_capability_grant(
         &mut self,
+        permit: AuthorityMutationPermitV1,
         grant: &CapabilityGrantV1,
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1>;
 
@@ -669,6 +857,7 @@ pub trait AuthorityPersistencePortV1 {
     /// validation, or adapter unavailability.
     fn revoke_capability_grant(
         &mut self,
+        permit: AuthorityMutationPermitV1,
         revocation: &CapabilityRevocationV1,
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1>;
 

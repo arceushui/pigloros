@@ -14,7 +14,8 @@ use crate::{CanonicalBytes, EntityId, Hash, PluginId, Seq, TimelineId, WallTime}
 mod persistence;
 
 pub use persistence::{
-    AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityPersistenceStateV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
     PersistedAuthorityV1, MAX_PERSISTED_AUTHORITY_GRANTS, MAX_PERSISTED_AUTHORITY_STATE_BYTES,
 };
@@ -425,12 +426,20 @@ impl AuthorityRegistrySnapshotV1 {
     }
 
     fn trusts_capabilities(&self, grant_chain: &DelegationChainV1) -> bool {
-        grant_chain.grants.iter().all(|grant| {
-            grant.authority_registry_digest == self.registry_digest
-                && grant
-                    .binding_digest()
-                    .is_ok_and(|binding| self.capability_bindings.binary_search(&binding).is_ok())
-        })
+        grant_chain
+            .grants
+            .iter()
+            .all(|grant| self.capability_binding(grant).is_some())
+    }
+
+    fn capability_binding(&self, grant: &CapabilityGrantV1) -> Option<Hash> {
+        if grant.authority_registry_digest != self.registry_digest {
+            return None;
+        }
+        grant
+            .binding_digest()
+            .ok()
+            .filter(|binding| self.capability_bindings.binary_search(binding).is_ok())
     }
 }
 

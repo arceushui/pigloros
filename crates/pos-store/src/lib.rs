@@ -51,7 +51,8 @@ pub use pos_core::store::{
     APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use pos_core::{
-    AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,
     ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event, EventDraft, EventId,
     GeographicAdmissionAdmin, GeographicAdmissionOutcome, GeographicAdmissionStore,

@@ -42,13 +42,14 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit,
-    CoreError, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1, ErasurePersistencePortV1,
-    ErasureReferenceV1, ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
+    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
+    ErasureErrorV1, ErasureIndexInsertV1, ErasurePersistencePortV1, ErasureReferenceV1,
+    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -139,6 +140,7 @@ pub struct SqliteStore {
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
+    authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -647,6 +649,7 @@ impl SqliteStore {
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
+            authority_persistence_binding: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
@@ -5064,18 +5067,37 @@ fn write_authority_state(
 }
 
 impl AuthorityPersistencePortV1 for SqliteStore {
+    fn bind_authority_persistence(
+        &mut self,
+        binding: AuthorityPersistenceBindingV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        match self.authority_persistence_binding {
+            Some(bound) if bound != binding => Err(AuthorityPersistenceErrorV1::Unavailable),
+            _ => {
+                self.authority_persistence_binding = Some(binding);
+                Ok(())
+            }
+        }
+    }
+
     fn issue_capability_grant(
         &mut self,
+        permit: AuthorityMutationPermitV1,
         grant: &CapabilityGrantV1,
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
         self.conn
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
             .and_then(|()| {
                 let result = read_authority_state(&self.conn).and_then(|mut state| {
-                    state.issue_grant(grant.clone()).and_then(|outcome| {
-                        write_authority_state(&self.conn, &state).map(|()| outcome)
-                    })
+                    state
+                        .issue_grant(permit, grant.clone())
+                        .and_then(|outcome| {
+                            write_authority_state(&self.conn, &state).map(|()| outcome)
+                        })
                 });
                 finish_transaction(
                     &self.conn,
@@ -5088,16 +5110,22 @@ impl AuthorityPersistencePortV1 for SqliteStore {
 
     fn revoke_capability_grant(
         &mut self,
+        permit: AuthorityMutationPermitV1,
         revocation: &CapabilityRevocationV1,
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
         self.conn
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
             .and_then(|()| {
                 let result = read_authority_state(&self.conn).and_then(|mut state| {
-                    state.revoke_grant(revocation.clone()).and_then(|outcome| {
-                        write_authority_state(&self.conn, &state).map(|()| outcome)
-                    })
+                    state
+                        .revoke_grant(permit, revocation.clone())
+                        .and_then(|outcome| {
+                            write_authority_state(&self.conn, &state).map(|()| outcome)
+                        })
                 });
                 finish_transaction(
                     &self.conn,

@@ -536,10 +536,11 @@ mod tests {
         event::{CanonicalBytes, Kind, SchemaVersion},
         ids::EventId,
         AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-        AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceStateV1,
-        AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
-        AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
-        CapabilityScopeV1, ConsentEvidenceV1, DelegationChainV1, PrincipalRefV1,
+        AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+        AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+        AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1,
+        CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+        DelegateClassV1, DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
     };
     use proptest::prelude::*;
 
@@ -582,7 +583,7 @@ mod tests {
         decision: AuthorizationDecisionV1,
         request: AuthorizationRequestV1,
         authority: PersistedAuthorityV1,
-        grant_id: Hash,
+        parent_grant_id: Hash,
         consent_reference: Hash,
     }
 
@@ -592,15 +593,19 @@ mod tests {
 
     fn authority_registry(
         request: &AuthorizationRequestV1,
-        grant: &CapabilityGrantV1,
+        grants: &[CapabilityGrantV1],
         registry_digest: Hash,
         trust_capability: bool,
     ) -> AuthorityRegistrySnapshotV1 {
-        let capability_bindings = if trust_capability {
-            vec![test_ok(grant.binding_digest())]
+        let mut capability_bindings = if trust_capability {
+            grants
+                .iter()
+                .map(|grant| test_ok(grant.binding_digest()))
+                .collect()
         } else {
             vec![]
         };
+        capability_bindings.sort_unstable();
         test_ok(AuthorityRegistrySnapshotV1::try_new(
             registry_digest,
             vec![request.authenticated().registry_binding_digest()],
@@ -614,11 +619,13 @@ mod tests {
         grant_id: Hash,
         trust_capability: bool,
     ) -> CacheFixture {
-        let principal = test_ok(PrincipalRefV1::try_new([1; 16], "local.test"));
+        let root_principal = test_ok(PrincipalRefV1::try_new([1; 16], "local.test"));
+        let delegate = test_ok(PrincipalRefV1::try_new([2; 16], "local.test"));
+        let leaf_principal = test_ok(PrincipalRefV1::try_new([3; 16], "local.test"));
         let actor = EntityId::new();
         let authenticated = test_ok(AuthenticatedPrincipalResultV1::try_from_draft(
             AuthenticatedPrincipalDraftV1 {
-                principal: principal.clone(),
+                principal: leaf_principal.clone(),
                 adapter_id: "test-adapter".to_owned(),
                 assurance: test_ok(AssuranceLevelV1::try_new(1)),
                 issued_at: WallTime::from_micros(1),
@@ -629,7 +636,21 @@ mod tests {
         let policy = test_hash(4);
         let consent_reference = test_hash(6);
         let registry_digest = test_hash(7);
-        let scope = test_ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        let root_scope = test_ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+            resources: vec!["profile".to_owned()],
+            actions: vec![DELEGATE_ACTION_V1.to_owned(), "read".to_owned()],
+            purposes: vec!["planning".to_owned()],
+            audiences: vec!["local-host".to_owned()],
+            actor_entity_ids: vec![actor],
+            subject_ids: vec![],
+            participant_ids: vec![],
+            plugin_id: None,
+            principal_roles: vec![AuthorityRoleV1::Actor],
+            max_uses: 2,
+            budget: 10,
+            environment_constraints: vec!["local-only".to_owned()],
+        }));
+        let child_scope = test_ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
             resources: vec!["profile".to_owned()],
             actions: vec!["read".to_owned()],
             purposes: vec!["planning".to_owned()],
@@ -643,22 +664,43 @@ mod tests {
             budget: 10,
             environment_constraints: vec!["local-only".to_owned()],
         }));
-        let grant = test_ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-            grant_id,
-            grantor: principal.clone(),
-            grantee: AuthorityGranteeV1::Principal(principal),
+        let parent_grant_id = test_hash(16);
+        let parent = test_ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+            grant_id: parent_grant_id,
+            grantor: root_principal,
+            grantee: AuthorityGranteeV1::Principal(delegate.clone()),
             trust_domain: "local.test".to_owned(),
-            scope,
+            scope: root_scope,
             valid_from_position: Seq::from_u64(1),
             valid_until_position: Seq::from_u64(80),
             parent_grant_id: None,
             delegation_depth: 0,
-            max_delegation_depth: 0,
-            permitted_delegate_classes: vec![],
+            max_delegation_depth: 1,
+            permitted_delegate_classes: vec![DelegateClassV1::Principal],
             consent_references: vec![consent_reference],
             policy_revision: policy,
             issuance_timeline: authority_timeline,
             issuance_seq: Seq::from_u64(1),
+            revocation_epoch: 0,
+            revocation_fence: None,
+            authority_registry_digest: registry_digest,
+        }));
+        let child = test_ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+            grant_id,
+            grantor: delegate,
+            grantee: AuthorityGranteeV1::Principal(leaf_principal),
+            trust_domain: "local.test".to_owned(),
+            scope: child_scope,
+            valid_from_position: Seq::from_u64(2),
+            valid_until_position: Seq::from_u64(80),
+            parent_grant_id: Some(parent_grant_id),
+            delegation_depth: 1,
+            max_delegation_depth: 1,
+            permitted_delegate_classes: vec![],
+            consent_references: vec![consent_reference],
+            policy_revision: policy,
+            issuance_timeline: authority_timeline,
+            issuance_seq: Seq::from_u64(2),
             revocation_epoch: 0,
             revocation_fence: None,
             authority_registry_digest: registry_digest,
@@ -693,16 +735,25 @@ mod tests {
                 environment_constraints: vec!["local-only".to_owned()],
             },
         ));
-        let registry = authority_registry(&request, &grant, registry_digest, trust_capability);
-        let chain = test_ok(DelegationChainV1::try_from_grants(vec![grant.clone()]));
+        let grants = vec![parent.clone(), child.clone()];
+        let registry = authority_registry(&request, &grants, registry_digest, trust_capability);
+        let chain = test_ok(DelegationChainV1::try_from_grants(grants));
         let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &registry);
+        let persistence_registry = authority_registry(
+            &request,
+            &[parent.clone(), child.clone()],
+            registry_digest,
+            true,
+        );
+        let host = AuthorityPersistenceHostV1::new(&persistence_registry);
         let mut state = AuthorityPersistenceStateV1::new();
-        test_ok(state.issue_grant(grant));
+        test_ok(state.issue_grant(test_ok(host.authorize_grant(&parent)), parent));
+        test_ok(state.issue_grant(test_ok(host.authorize_grant(&child)), child));
         CacheFixture {
             decision,
             request,
             authority: test_ok(state.resolve(grant_id)),
-            grant_id,
+            parent_grant_id,
             consent_reference,
         }
     }
@@ -912,7 +963,7 @@ mod tests {
                 &fixture.authority,
             )
             .is_some());
-        assert_eq!(grant_cache.invalidate_grant(fixture.grant_id), 1);
+        assert_eq!(grant_cache.invalidate_grant(fixture.parent_grant_id), 1);
         assert!(grant_cache.is_empty());
 
         let mut consent_cache = AuthorizationCacheV1::new();
