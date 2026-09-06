@@ -379,11 +379,17 @@ impl ProjectionRegistry {
         authority_position: Seq,
         context: ProjectionObservationContextV1,
     ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
-        if let Err(error) =
-            authority.validate_observation_authorization(request, decision, authority_position)
-        {
-            return Err(error);
-        }
+        authority
+            .validate_observation_authorization(request, decision, authority_position)
+            .and_then(|()| self.materialize_authorized_projection(request, decision, context))
+    }
+
+    fn materialize_authorized_projection(
+        &self,
+        request: &AuthorizationRequestV1,
+        decision: &AuthorizationDecisionV1,
+        context: ProjectionObservationContextV1,
+    ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
         if context.reducer.is_empty() || context.reducer.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES
         {
             return Err(AuthorityErrorV1::FieldOutOfBounds);
@@ -403,65 +409,62 @@ impl ProjectionRegistry {
         let Some(installation_id) = request.installation_id() else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
-        let artifact = self
-            .state_for_reducer(&context.reducer, &subject_id)
+        self.state_for_reducer(&context.reducer, &subject_id)
             .map(canonical_state_artifact)
-            .transpose();
-        let artifact = match artifact {
-            Ok(artifact) => artifact,
-            Err(error) => return Err(error),
-        };
-        let (status, artifact_digest, projection_digest, artifacts) = artifact.map_or(
-            (ObservationStatusV1::NotObserved, None, None, Vec::new()),
-            |artifact| {
-                let digest = artifact.digest();
-                (
-                    ObservationStatusV1::Present,
-                    Some(digest),
-                    Some(digest),
-                    vec![artifact],
-                )
-            },
-        );
-        ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
-            participant_id,
-            resource: request.resource().to_owned(),
-            data_category: request.data_category().to_owned(),
-            status,
-            artifact_digest,
-            source_timeline: context.timeline_id,
-            source_position: context.observed_through,
-            schema: context.schema,
-            source_digest: context.source_digest,
-            projection_digest,
-            provenance_digest: context.provenance_digest,
-            minimization_revision: context.minimization_revision,
-        })
-        .and_then(|record| {
-            ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
-                principal: decision.principal().clone(),
-                participant_id,
-                plugin_id,
-                installation_id,
-                timeline_id: context.timeline_id,
-                observed_through: context.observed_through,
-                authority_timeline: decision.authority_timeline(),
-                authority_position: decision.at_position(),
-                authorization_request_digest: request.binding_digest(),
-                authorization_decision_digest: decision.decision_digest(),
-                grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
-                consent_policy_revision: decision.consent_policy_revision(),
-                capability_policy_revision: decision.capability_policy_revision(),
-                revocation_epoch: request.revocation_epoch(),
-                visibility_policy_revision: context.visibility_policy_revision,
-                schema_revision: context.schema_revision,
-                minimization_revision: context.minimization_revision,
-                records: vec![record],
-                artifacts,
-                prior_snapshot_digest: context.prior_snapshot_digest,
-                provenance_digest: context.provenance_digest,
+            .transpose()
+            .and_then(|artifact| {
+                let (status, artifact_digest, projection_digest, artifacts) = artifact.map_or(
+                    (ObservationStatusV1::NotObserved, None, None, Vec::new()),
+                    |artifact| {
+                        let digest = artifact.digest();
+                        (
+                            ObservationStatusV1::Present,
+                            Some(digest),
+                            Some(digest),
+                            vec![artifact],
+                        )
+                    },
+                );
+                ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
+                    participant_id,
+                    resource: request.resource().to_owned(),
+                    data_category: request.data_category().to_owned(),
+                    status,
+                    artifact_digest,
+                    source_timeline: context.timeline_id,
+                    source_position: context.observed_through,
+                    schema: context.schema.clone(),
+                    source_digest: context.source_digest,
+                    projection_digest,
+                    provenance_digest: context.provenance_digest,
+                    minimization_revision: context.minimization_revision,
+                })
+                .and_then(|record| {
+                    ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
+                        principal: decision.principal().clone(),
+                        participant_id,
+                        plugin_id,
+                        installation_id,
+                        timeline_id: context.timeline_id,
+                        observed_through: context.observed_through,
+                        authority_timeline: decision.authority_timeline(),
+                        authority_position: decision.at_position(),
+                        authorization_request_digest: request.binding_digest(),
+                        authorization_decision_digest: decision.decision_digest(),
+                        grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
+                        consent_policy_revision: decision.consent_policy_revision(),
+                        capability_policy_revision: decision.capability_policy_revision(),
+                        revocation_epoch: request.revocation_epoch(),
+                        visibility_policy_revision: context.visibility_policy_revision,
+                        schema_revision: context.schema_revision,
+                        minimization_revision: context.minimization_revision,
+                        records: vec![record],
+                        artifacts,
+                        prior_snapshot_digest: context.prior_snapshot_digest,
+                        provenance_digest: context.provenance_digest,
+                    })
+                })
             })
-        })
     }
 
     /// Return the names of all registered reducers in insertion order.

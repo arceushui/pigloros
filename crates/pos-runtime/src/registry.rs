@@ -1269,12 +1269,21 @@ impl PluginRegistry {
         authority: &PersistedAuthorityV1,
         authority_position: Seq,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        if let Err(error) = self.ensure_no_pending_step() {
-            return Err(error);
-        }
-        if let Err(error) = snapshot.validate_authority_fence(authority, authority_position) {
-            return Err(RuntimeError::Authority(error));
-        }
+        self.ensure_no_pending_step()
+            .and_then(|()| {
+                snapshot
+                    .validate_authority_fence(authority, authority_position)
+                    .map_err(RuntimeError::Authority)
+            })
+            .and_then(|()| self.stage_authorized_driver_after_fence(plugin_id, timeline, snapshot))
+    }
+
+    fn stage_authorized_driver_after_fence(
+        &mut self,
+        plugin_id: PluginId,
+        timeline: pos_core::ids::TimelineId,
+        snapshot: ObservationSnapshotV1,
+    ) -> Result<Vec<EventDraft>, RuntimeError> {
         if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
             return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
         }
