@@ -729,7 +729,7 @@ fn observation_snapshot_validation_rejects_identity_provenance_and_size_drift() 
         Err(AuthorityErrorV1::UnauthorizedSource)
     );
     let invalid = observation_snapshot_draft(
-        vec![record.clone(); pos_core::MAX_OBSERVATION_SNAPSHOT_RECORDS + 1],
+        vec![record; pos_core::MAX_OBSERVATION_SNAPSHOT_RECORDS + 1],
         Vec::new(),
     );
     assert_eq!(
@@ -774,10 +774,10 @@ fn observation_snapshot_codec_rejects_nested_and_digest_tampering() {
 
     for changed in [
         changed_array(&encoded, |fields| {
-            fields[19] = Value::Text("records".to_owned())
+            fields[19] = Value::Text("records".to_owned());
         }),
         changed_array(&encoded, |fields| {
-            fields[20] = Value::Text("artifacts".to_owned())
+            fields[20] = Value::Text("artifacts".to_owned());
         }),
         changed_array(&encoded, |fields| fields[5] = Value::Bytes(vec![1; 15])),
     ] {
@@ -905,10 +905,10 @@ fn knowledge_snapshot_codec_rejects_nested_confidence_and_digest_tampering() {
 
     for changed in [
         changed_array(&encoded, |fields| {
-            fields[7] = Value::Text("observations".to_owned())
+            fields[7] = Value::Text("observations".to_owned());
         }),
         changed_array(&encoded, |fields| {
-            fields[8] = Value::Text("beliefs".to_owned())
+            fields[8] = Value::Text("beliefs".to_owned());
         }),
     ] {
         assert_eq!(
