@@ -1,0 +1,78 @@
+{
+  "ociVersion": "1.2.0",
+  "process": {
+    "terminal": false,
+    "user": {
+      "uid": 0,
+      "gid": 0
+    },
+    "args": [
+      "/usr/bin/sleep",
+      "30"
+    ],
+    "env": [
+      "PATH=/usr/bin:/bin"
+    ],
+    "cwd": "/",
+    "capabilities": {
+      "bounding": [],
+      "effective": [],
+      "inheritable": [],
+      "permitted": [],
+      "ambient": []
+    },
+    "noNewPrivileges": true
+  },
+  "root": {
+    "path": "rootfs",
+    "readonly": true
+  },
+  "hostname": "pigloros-youki-comparator",
+  "mounts": [
+    {
+      "destination": "/proc",
+      "type": "proc",
+      "source": "proc",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev"
+      ]
+    }
+  ],
+  "linux": {
+    "cgroupsPath": "pigloros/youki-comparator",
+    "resources": {
+      "memory": {
+        "limit": 67108864
+      },
+      "cpu": {
+        "quota": 10000,
+        "period": 100000
+      },
+      "pids": {
+        "limit": 16
+      }
+    },
+    "namespaces": [
+      {
+        "type": "pid"
+      },
+      {
+        "type": "network"
+      },
+      {
+        "type": "ipc"
+      },
+      {
+        "type": "uts"
+      },
+      {
+        "type": "mount"
+      },
+      {
+        "type": "cgroup"
+      }
+    ]
+  }
+}

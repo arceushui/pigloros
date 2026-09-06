@@ -24,8 +24,12 @@ jobs:
         include:
           - architecture: x86_64
             runner: ubuntu-26.04
+            youki_architecture: x86_64
+            youki_archive_sha256: fb4013e16592b257038bfdeb4ddcddc0f05e258b324c1bac283c97ee39b8cd68
           - architecture: aarch64
             runner: ubuntu-26.04-arm
+            youki_architecture: aarch64
+            youki_archive_sha256: 38f4ec9b4e7df442a55513144282f27a07f5474c1cdb777cedda18ba0cf63e6d
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -118,6 +122,16 @@ jobs:
             grep -q 'net:entered-post-exit-fd-ok-post-drop-process-absent' \
               namespace-entry-lifecycle.txt
           fi
+
+      - name: Execute the youki lifecycle comparator
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          bash run-youki-comparator.sh \
+            '${{ matrix.youki_architecture }}' \
+            '${{ matrix.youki_archive_sha256 }}'
+          grep -q '^youki_comparator=executed-cleanup-ok$' youki-comparator.txt
+          grep -q '^network_policy=external-not-proved$' youki-comparator.txt
+          grep -q '^signed_image_admission=external-not-proved$' youki-comparator.txt
 
       - name: Exercise eight concurrent attempts
         working-directory: prototypes/sandbox-provider-feasibility
@@ -356,6 +370,8 @@ jobs:
             prototypes/sandbox-provider-feasibility/lockfile-digest.txt
             prototypes/sandbox-provider-feasibility/lifecycle-p95.txt
             prototypes/sandbox-provider-feasibility/namespace-entry-lifecycle.txt
+            prototypes/sandbox-provider-feasibility/youki-comparator.txt
+            prototypes/sandbox-provider-feasibility/youki-comparator-evidence
             prototypes/sandbox-provider-feasibility/privileged-initial.txt
             prototypes/sandbox-provider-feasibility/restart-reconciliation.txt
             prototypes/sandbox-provider-feasibility/rust-toolchain-evidence.txt
