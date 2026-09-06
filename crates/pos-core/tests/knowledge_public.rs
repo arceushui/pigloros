@@ -10,7 +10,20 @@ use pos_core::{
 };
 use ulid::Ulid;
 
-fn hash_from_repeated_byte(byte: u8) -> Hash {
+trait TestOk<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestOk<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        match self {
+            Ok(value) => value,
+            Err(error) => panic!("expected Ok, got {error:?}"),
+        }
+    }
+}
+
+const fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
@@ -22,7 +35,7 @@ fn belief_draft(
     BeliefRecordDraftV1 {
         entity_id,
         predicate: predicate.to_owned(),
-        confidence: ConfidenceV1::try_new(750_000).expect("bounded confidence"),
+        confidence: ConfidenceV1::try_new(750_000).test_ok(),
         provenance_digest: hash_from_repeated_byte(23),
         observation_record_digests: vec![observation_digest],
     }
@@ -33,15 +46,15 @@ fn knowledge_snapshot_preserves_epistemic_and_revision_meanings() {
     let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
     let observation =
         ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
-            .expect("observation reference");
+            .test_ok();
     let belief = BeliefRecordV1::try_from_draft(belief_draft(
         participant_id,
         "prefers.tea",
         observation.digest(),
     ))
-    .expect("belief");
+    .test_ok();
     let snapshot = KnowledgeSnapshotV1::try_from_draft(KnowledgeSnapshotDraftV1 {
-        principal: PrincipalRefV1::try_new([7; 16], "host.test").expect("principal"),
+        principal: PrincipalRefV1::try_new([7; 16], "host.test").test_ok(),
         participant_id,
         timeline_id: TimelineId::from_ulid(Ulid::from(2_u128)),
         observed_through: Seq::from_u64(7),
@@ -49,20 +62,18 @@ fn knowledge_snapshot_preserves_epistemic_and_revision_meanings() {
         observations: vec![observation],
         beliefs: vec![belief.clone()],
         preference_value_revision: Some(
-            PreferenceValueRevisionV1::try_new(hash_from_repeated_byte(26))
-                .expect("preference revision"),
+            PreferenceValueRevisionV1::try_new(hash_from_repeated_byte(26)).test_ok(),
         ),
         ai_goal_policy_revision: Some(
-            AiGoalPolicyRevisionV1::try_new(hash_from_repeated_byte(27))
-                .expect("AI policy revision"),
+            AiGoalPolicyRevisionV1::try_new(hash_from_repeated_byte(27)).test_ok(),
         ),
         memory_policy_revision: MemoryPolicyRevisionV1::try_new(hash_from_repeated_byte(28))
-            .expect("memory policy revision"),
+            .test_ok(),
         prior_snapshot_digest: Some(hash_from_repeated_byte(29)),
         external_provenance: vec![hash_from_repeated_byte(30)],
         provenance_digest: hash_from_repeated_byte(31),
     })
-    .expect("knowledge snapshot");
+    .test_ok();
 
     assert_eq!(snapshot.beliefs(), &[belief]);
     assert_eq!(
@@ -82,7 +93,7 @@ fn knowledge_snapshot_preserves_epistemic_and_revision_meanings() {
         hash_from_repeated_byte(28)
     );
     assert_eq!(
-        KnowledgeSnapshotV1::decode(&snapshot.encode().expect("canonical KNS1")),
+        KnowledgeSnapshotV1::decode(&snapshot.encode().test_ok()),
         Ok(snapshot)
     );
 }
@@ -92,21 +103,21 @@ fn knowledge_snapshot_rejects_noncanonical_belief_order() {
     let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
     let observation =
         ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
-            .expect("observation reference");
+            .test_ok();
     let later = BeliefRecordV1::try_from_draft(belief_draft(
         participant_id,
         "z.last",
         observation.digest(),
     ))
-    .expect("later belief");
+    .test_ok();
     let earlier = BeliefRecordV1::try_from_draft(belief_draft(
         participant_id,
         "a.first",
         observation.digest(),
     ))
-    .expect("earlier belief");
+    .test_ok();
     let mut draft = KnowledgeSnapshotDraftV1 {
-        principal: PrincipalRefV1::try_new([7; 16], "host.test").expect("principal"),
+        principal: PrincipalRefV1::try_new([7; 16], "host.test").test_ok(),
         participant_id,
         timeline_id: TimelineId::from_ulid(Ulid::from(2_u128)),
         observed_through: Seq::from_u64(7),
@@ -116,7 +127,7 @@ fn knowledge_snapshot_rejects_noncanonical_belief_order() {
         preference_value_revision: None,
         ai_goal_policy_revision: None,
         memory_policy_revision: MemoryPolicyRevisionV1::try_new(hash_from_repeated_byte(28))
-            .expect("memory policy revision"),
+            .test_ok(),
         prior_snapshot_digest: None,
         external_provenance: Vec::new(),
         provenance_digest: hash_from_repeated_byte(31),
@@ -135,7 +146,7 @@ fn observation_snapshot_draft(
     artifacts: Vec<ObservationArtifactV1>,
 ) -> ObservationSnapshotDraftV1 {
     ObservationSnapshotDraftV1 {
-        principal: PrincipalRefV1::try_new([7; 16], "host.test").expect("principal"),
+        principal: PrincipalRefV1::try_new([7; 16], "host.test").test_ok(),
         participant_id: EntityId::from_ulid(Ulid::from(1_u128)),
         plugin_id: PluginId::from_ulid(Ulid::from(11_u128)),
         installation_id: [12; 16],
@@ -187,7 +198,7 @@ struct AuthorityFenceFixture {
 }
 
 fn authority_fence_fixture(snapshot_epoch: u64) -> AuthorityFenceFixture {
-    let principal = PrincipalRefV1::try_new([7; 16], "host.test").expect("principal");
+    let principal = PrincipalRefV1::try_new([7; 16], "host.test").test_ok();
     let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
     let plugin_id = PluginId::from_ulid(Ulid::from(11_u128));
     let authority_timeline = TimelineId::from_ulid(Ulid::from(13_u128));
@@ -207,7 +218,7 @@ fn authority_fence_fixture(snapshot_epoch: u64) -> AuthorityFenceFixture {
         budget: 10,
         environment_constraints: vec!["local-only".to_owned()],
     })
-    .expect("scope");
+    .test_ok();
     let grant = CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
         grant_id: hash_from_repeated_byte(44),
         grantor: principal.clone(),
@@ -232,29 +243,26 @@ fn authority_fence_fixture(snapshot_epoch: u64) -> AuthorityFenceFixture {
         revocation_fence: None,
         authority_registry_digest: registry_digest,
     })
-    .expect("grant");
-    let grant_binding = grant.binding_digest().expect("grant binding");
+    .test_ok();
+    let grant_binding = grant.binding_digest().test_ok();
     let registry = AuthorityRegistrySnapshotV1::try_new(
         registry_digest,
         Vec::new(),
         vec![grant_binding],
         Vec::new(),
     )
-    .expect("registry");
+    .test_ok();
     let host = AuthorityPersistenceHostV1::new(&registry);
     let mut state = AuthorityPersistenceStateV1::new();
     state
-        .issue_grant(
-            host.authorize_grant(&grant).expect("issue permit"),
-            grant.clone(),
-        )
-        .expect("persist grant");
+        .issue_grant(host.authorize_grant(&grant).test_ok(), grant.clone())
+        .test_ok();
     let mut snapshot_draft = observation_snapshot_draft(
         vec![ObservationRecordV1::try_from_draft(record_draft(
             ObservationStatusV1::NotObserved,
             None,
         ))
-        .expect("absence record")],
+        .test_ok()],
         Vec::new(),
     );
     snapshot_draft.principal = principal;
@@ -266,7 +274,7 @@ fn authority_fence_fixture(snapshot_epoch: u64) -> AuthorityFenceFixture {
     snapshot_draft.capability_policy_revision = policy_revision;
     snapshot_draft.revocation_epoch = snapshot_epoch;
     AuthorityFenceFixture {
-        snapshot: ObservationSnapshotV1::try_from_draft(snapshot_draft).expect("snapshot"),
+        snapshot: ObservationSnapshotV1::try_from_draft(snapshot_draft).test_ok(),
         state,
         host,
         grant,
@@ -276,10 +284,7 @@ fn authority_fence_fixture(snapshot_epoch: u64) -> AuthorityFenceFixture {
 #[test]
 fn observation_snapshot_revalidates_current_authority_at_commit_fence() {
     let fixture = authority_fence_fixture(0);
-    let authority = fixture
-        .state
-        .resolve(fixture.grant.grant_id())
-        .expect("resolved authority");
+    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
 
     assert_eq!(
         fixture
@@ -304,10 +309,7 @@ fn observation_snapshot_revalidates_current_authority_at_commit_fence() {
 #[test]
 fn observation_snapshot_rejects_stale_or_newly_revoked_authority() {
     let stale = authority_fence_fixture(1);
-    let stale_authority = stale
-        .state
-        .resolve(stale.grant.grant_id())
-        .expect("resolved stale authority");
+    let stale_authority = stale.state.resolve(stale.grant.grant_id()).test_ok();
     assert_eq!(
         stale
             .snapshot
@@ -324,21 +326,18 @@ fn observation_snapshot_rejects_stale_or_newly_revoked_authority() {
         policy_revision: revoked.grant.policy_revision(),
         authority_registry_digest: revoked.grant.authority_registry_digest(),
     })
-    .expect("revocation");
+    .test_ok();
     revoked
         .state
         .revoke_grant(
             revoked
                 .host
                 .authorize_revocation(&revoked.grant, &revocation)
-                .expect("revocation permit"),
+                .test_ok(),
             revocation,
         )
-        .expect("persist revocation");
-    let revoked_authority = revoked
-        .state
-        .resolve(revoked.grant.grant_id())
-        .expect("resolved revoked authority");
+        .test_ok();
+    let revoked_authority = revoked.state.resolve(revoked.grant.grant_id()).test_ok();
     assert_eq!(
         revoked
             .snapshot
@@ -349,19 +348,18 @@ fn observation_snapshot_rejects_stale_or_newly_revoked_authority() {
 
 #[test]
 fn observation_record_round_trip_binds_participant_source_and_minimization() {
-    let artifact = ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed"))
-        .expect("bounded observation artifact");
+    let artifact =
+        ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed")).test_ok();
     let draft = record_draft(ObservationStatusV1::Present, Some(artifact.digest()));
     let participant_id = draft.participant_id;
-    let record =
-        ObservationRecordV1::try_from_draft(draft.clone()).expect("valid observation record");
+    let record = ObservationRecordV1::try_from_draft(draft.clone()).test_ok();
 
     assert_eq!(record.participant_id(), participant_id);
     assert_eq!(record.status(), ObservationStatusV1::Present);
     assert_eq!(record.artifact_digest(), Some(artifact.digest()));
     assert_ne!(record.digest(), Hash::zero());
     assert_eq!(
-        ObservationRecordV1::decode(&record.encode().expect("canonical OBR1")),
+        ObservationRecordV1::decode(&record.encode().test_ok()),
         Ok(record.clone())
     );
 
@@ -381,7 +379,7 @@ fn observation_record_round_trip_binds_participant_source_and_minimization() {
     ] {
         assert_ne!(
             ObservationRecordV1::try_from_draft(changed)
-                .expect("independently varied valid record")
+                .test_ok()
                 .digest(),
             record.digest()
         );
@@ -400,41 +398,41 @@ fn typed_absence_cannot_carry_observation_value_bytes() {
 
 #[test]
 fn observation_snapshot_is_authorization_bound_and_content_addressed() {
-    let artifact = ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed"))
-        .expect("bounded observation artifact");
+    let artifact =
+        ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed")).test_ok();
     let record = ObservationRecordV1::try_from_draft(record_draft(
         ObservationStatusV1::Present,
         Some(artifact.digest()),
     ))
-    .expect("observation record");
+    .test_ok();
     let snapshot = ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
         vec![record.clone()],
         vec![artifact.clone()],
     ))
-    .expect("authorized snapshot");
+    .test_ok();
 
     assert_eq!(snapshot.records(), &[record]);
     assert_eq!(snapshot.artifact(artifact.digest()), Some(&artifact));
     assert_eq!(snapshot.revocation_epoch(), 3);
     assert_ne!(snapshot.digest(), Hash::zero());
     assert_eq!(
-        ObservationSnapshotV1::decode(&snapshot.encode().expect("canonical OBS1")),
+        ObservationSnapshotV1::decode(&snapshot.encode().test_ok()),
         Ok(snapshot)
     );
 }
 
 #[test]
 fn observation_snapshot_rejects_noncanonical_records_and_unbound_artifacts() {
-    let artifact = ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed"))
-        .expect("bounded observation artifact");
+    let artifact =
+        ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed")).test_ok();
     let mut later = record_draft(ObservationStatusV1::Present, Some(artifact.digest()));
     later.source_position = Seq::from_u64(8);
-    let later = ObservationRecordV1::try_from_draft(later).expect("later record");
+    let later = ObservationRecordV1::try_from_draft(later).test_ok();
     let earlier = ObservationRecordV1::try_from_draft(record_draft(
         ObservationStatusV1::Present,
         Some(artifact.digest()),
     ))
-    .expect("earlier record");
+    .test_ok();
 
     assert_eq!(
         ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
