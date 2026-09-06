@@ -124,9 +124,10 @@ async fn probe_transient_slice(attempt_id: &str) -> &'static str {
     {
         return "create-rejected";
     }
-    match proxy.stop_unit(name, "fail".to_owned()).await {
+    match proxy.stop_unit(name.clone(), "fail".to_owned()).await {
         Ok(_) => "typed-create-stop-ok",
-        Err(_) => "stop-rejected",
+        Err(_) if proxy.get_unit(name).await.is_err() => "typed-create-auto-cleanup-ok",
+        Err(_) => "stop-rejected-unit-still-loaded",
     }
 }
 
@@ -303,7 +304,7 @@ fn nftables_request(
     sequence_number: u32,
 ) -> Result<NetlinkMessage<NetfilterMessage>, ()> {
     let mut header = NetlinkHeader::default();
-    header.flags = NLM_F_REQUEST | NLM_F_ACK | operation_flags;
+    header.flags = NLM_F_REQUEST | operation_flags;
     header.sequence_number = sequence_number;
     let mut message = NetlinkMessage::new(
         header,

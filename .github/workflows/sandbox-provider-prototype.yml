@@ -102,7 +102,7 @@ jobs:
           done
           grep -h '^attempt=' concurrent-*.txt | sort | tee concurrent-summary.txt
           test "$(wc -l <concurrent-summary.txt)" -eq 8
-          test "$(grep -c 'typed-create-stop-ok' concurrent-summary.txt)" -eq 8
+          test "$(grep -Ec 'typed-create-(stop|auto-cleanup)-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-create-read-delete-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-read-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-install-read-back-delete-ok' concurrent-summary.txt)" -eq 8
