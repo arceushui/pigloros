@@ -668,7 +668,6 @@ struct PendingStep {
 
 struct AuthorizedPendingStep {
     snapshot: ObservationSnapshotV1,
-    knowledge: KnowledgeSnapshotV1,
     drafts: Vec<EventDraft>,
 }
 
@@ -1349,7 +1348,6 @@ impl PluginRegistry {
             operation: OperationContext::Public,
             authorized: Some(AuthorizedPendingStep {
                 snapshot,
-                knowledge,
                 drafts: drafts.clone(),
             }),
         });
@@ -1542,12 +1540,6 @@ impl PluginRegistry {
             .snapshot
             .validate_authority_fence(authority, authority_position)
             .map_err(RuntimeError::Authority)
-            .and_then(|()| {
-                authorized
-                    .knowledge
-                    .validate_observation_snapshot(&authorized.snapshot)
-                    .map_err(RuntimeError::Authority)
-            })
             .and_then(|()| {
                 if drafts == authorized.drafts.as_slice() {
                     Ok(())

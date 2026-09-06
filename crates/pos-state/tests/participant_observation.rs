@@ -7,7 +7,7 @@ use pos_core::{
     ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1,
     DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationStatusV1,
     PersistedAuthorityV1, PluginId, PrincipalRefV1, Reducer, SchemaVersion, Seq, State, TimelineId,
-    WallTime,
+    WallTime, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 use pos_state::{
     ProjectionObservationContextV1, ProjectionObservationPolicyV1, ProjectionRegistry,
@@ -526,6 +526,33 @@ fn observation_policy_is_validated_once_and_required_for_materialization() {
         ),
         Err(pos_core::AuthorityErrorV1::FieldOutOfBounds)
     );
+    for (fields, schema) in [
+        (vec!["count".to_owned()], String::new()),
+        (
+            vec!["count".to_owned()],
+            "s".repeat(pos_core::MAX_AUTHORITY_TEXT_BYTES + 1),
+        ),
+        (
+            vec!["count".to_owned(); MAX_OBSERVATION_SNAPSHOT_RECORDS + 1],
+            "profile.v1".to_owned(),
+        ),
+        (vec![String::new()], "profile.v1".to_owned()),
+        (
+            vec!["f".repeat(pos_core::MAX_AUTHORITY_TEXT_BYTES + 1)],
+            "profile.v1".to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            ProjectionObservationPolicyV1::try_new(
+                fields,
+                schema,
+                revisions.0,
+                revisions.1,
+                revisions.2,
+            ),
+            Err(pos_core::AuthorityErrorV1::FieldOutOfBounds)
+        );
+    }
     assert_eq!(
         ProjectionObservationPolicyV1::try_new(
             vec!["secret".to_owned(), "count".to_owned()],
@@ -548,6 +575,36 @@ fn observation_policy_is_validated_once_and_required_for_materialization() {
     );
 
     let fixture = authority_fixture();
+    let observable_policy = policy(vec!["count".to_owned()]);
+    let mut invalid_registration = ProjectionRegistry::new();
+    assert_eq!(
+        invalid_registration.register_observable(
+            "",
+            Box::new(CountReducer),
+            observable_policy.clone(),
+        ),
+        Err(pos_core::AuthorityErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        invalid_registration.register_observable(
+            &"r".repeat(pos_core::MAX_AUTHORITY_TEXT_BYTES + 1),
+            Box::new(CountReducer),
+            observable_policy,
+        ),
+        Err(pos_core::AuthorityErrorV1::FieldOutOfBounds)
+    );
+
+    assert_eq!(
+        ProjectionRegistry::new().materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            &fixture.registry,
+            Seq::from_u64(10),
+            &context(TimelineId::new()),
+        ),
+        Err(pos_core::AuthorityErrorV1::SourceUnavailable)
+    );
     let mut registry = ProjectionRegistry::new();
     registry.register("profile", Box::new(CountReducer));
     assert_eq!(
