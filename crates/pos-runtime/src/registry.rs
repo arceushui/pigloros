@@ -1262,7 +1262,7 @@ impl PluginRegistry {
         plugin_id: PluginId,
         timeline: pos_core::ids::TimelineId,
         snapshot: ObservationSnapshotV1,
-        knowledge: KnowledgeSnapshotV1,
+        knowledge: &KnowledgeSnapshotV1,
         authority: &PersistedAuthorityV1,
         authority_position: Seq,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
@@ -1287,7 +1287,7 @@ impl PluginRegistry {
         plugin_id: PluginId,
         timeline: pos_core::ids::TimelineId,
         snapshot: ObservationSnapshotV1,
-        knowledge: KnowledgeSnapshotV1,
+        knowledge: &KnowledgeSnapshotV1,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
         if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
             return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());

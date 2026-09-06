@@ -392,7 +392,7 @@ fn stage_current(
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
-        fixture.knowledge.clone(),
+        &fixture.knowledge,
         &current_authority(fixture),
         Seq::from_u64(10),
     )
@@ -433,7 +433,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         fixture.plugin_id,
         TimelineId::new(),
         fixture.snapshot.clone(),
-        fixture.knowledge.clone(),
+        &fixture.knowledge,
         &authority,
         Seq::from_u64(10),
     ))
@@ -451,7 +451,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
-        fixture_with_timeline(fixture.timeline_id).knowledge,
+        &fixture_with_timeline(fixture.timeline_id).knowledge,
         &authority,
         Seq::from_u64(10),
     ))
@@ -469,7 +469,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot,
-        fixture.knowledge,
+        &fixture.knowledge,
         &authority,
         Seq::from_u64(10),
     ))
@@ -556,7 +556,7 @@ fn revoked_authority_is_rejected_before_driver_invocation() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot,
-        fixture.knowledge,
+        &fixture.knowledge,
         &authority,
         Seq::from_u64(11),
     ))
@@ -649,7 +649,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
-        fixture.knowledge.clone(),
+        &fixture.knowledge,
         &authority,
         Seq::from_u64(10),
     ))
@@ -669,7 +669,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
-        fixture.knowledge.clone(),
+        &fixture.knowledge,
         &authority,
         Seq::from_u64(10),
     ))
@@ -681,7 +681,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.snapshot.clone(),
-        fixture.knowledge.clone(),
+        &fixture.knowledge,
         &authority,
         Seq::from_u64(10),
     ));
@@ -750,7 +750,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
             fixture.plugin_id,
             fixture.timeline_id,
             fixture.snapshot.clone(),
-            fixture.knowledge.clone(),
+            &fixture.knowledge,
             &authority,
             Seq::from_u64(10),
         ));
