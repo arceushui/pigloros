@@ -1497,7 +1497,7 @@ fn namespace_process_reference_absent(name: &str, inode: u64) -> bool {
             return true;
         }
         let namespace = process.path().join("ns").join(name);
-        namespace_inode(namespace.to_string_lossy().into_owned()).is_err_or(|seen| seen != inode)
+        !namespace_inode(namespace.to_string_lossy().into_owned()).is_ok_and(|seen| seen == inode)
     })
 }
 
