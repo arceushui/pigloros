@@ -1,11 +1,41 @@
 use pos_core::{
     CanonicalBytes, EntityId, Hash, ObservationArtifactV1, ObservationRecordDraftV1,
-    ObservationRecordV1, ObservationStatusV1, Seq, TimelineId,
+    ObservationRecordV1, ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
+    PluginId, PrincipalRefV1, Seq, TimelineId,
 };
 use ulid::Ulid;
 
 fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
+}
+
+fn observation_snapshot_draft(
+    records: Vec<ObservationRecordV1>,
+    artifacts: Vec<ObservationArtifactV1>,
+) -> ObservationSnapshotDraftV1 {
+    ObservationSnapshotDraftV1 {
+        principal: PrincipalRefV1::try_new([7; 16], "host.test").expect("principal"),
+        participant_id: EntityId::from_ulid(Ulid::from(1_u128)),
+        plugin_id: PluginId::from_ulid(Ulid::from(11_u128)),
+        installation_id: [12; 16],
+        timeline_id: TimelineId::from_ulid(Ulid::from(2_u128)),
+        observed_through: Seq::from_u64(7),
+        authority_timeline: TimelineId::from_ulid(Ulid::from(13_u128)),
+        authority_position: Seq::from_u64(6),
+        authorization_request_digest: hash_from_repeated_byte(14),
+        authorization_decision_digest: hash_from_repeated_byte(15),
+        grant_chain_bindings: vec![hash_from_repeated_byte(16)],
+        consent_policy_revision: hash_from_repeated_byte(17),
+        capability_policy_revision: hash_from_repeated_byte(18),
+        revocation_epoch: 3,
+        visibility_policy_revision: hash_from_repeated_byte(19),
+        schema_revision: hash_from_repeated_byte(20),
+        minimization_revision: hash_from_repeated_byte(6),
+        records,
+        artifacts,
+        prior_snapshot_digest: Some(hash_from_repeated_byte(21)),
+        provenance_digest: hash_from_repeated_byte(22),
+    }
 }
 
 fn record_draft(
@@ -77,4 +107,58 @@ fn typed_absence_cannot_carry_observation_value_bytes() {
     ));
 
     assert_eq!(result, Err(pos_core::AuthorityErrorV1::UnauthorizedSource));
+}
+
+#[test]
+fn observation_snapshot_is_authorization_bound_and_content_addressed() {
+    let artifact = ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed"))
+        .expect("bounded observation artifact");
+    let record = ObservationRecordV1::try_from_draft(record_draft(
+        ObservationStatusV1::Present,
+        Some(artifact.digest()),
+    ))
+    .expect("observation record");
+    let snapshot = ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
+        vec![record.clone()],
+        vec![artifact.clone()],
+    ))
+    .expect("authorized snapshot");
+
+    assert_eq!(snapshot.records(), &[record]);
+    assert_eq!(snapshot.artifact(artifact.digest()), Some(&artifact));
+    assert_eq!(snapshot.revocation_epoch(), 3);
+    assert_ne!(snapshot.digest(), Hash::zero());
+    assert_eq!(
+        ObservationSnapshotV1::decode(&snapshot.encode().expect("canonical OBS1")),
+        Ok(snapshot)
+    );
+}
+
+#[test]
+fn observation_snapshot_rejects_noncanonical_records_and_unbound_artifacts() {
+    let artifact = ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed"))
+        .expect("bounded observation artifact");
+    let mut later = record_draft(ObservationStatusV1::Present, Some(artifact.digest()));
+    later.source_position = Seq::from_u64(8);
+    let later = ObservationRecordV1::try_from_draft(later).expect("later record");
+    let earlier = ObservationRecordV1::try_from_draft(record_draft(
+        ObservationStatusV1::Present,
+        Some(artifact.digest()),
+    ))
+    .expect("earlier record");
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
+            vec![later, earlier],
+            vec![artifact.clone()],
+        )),
+        Err(pos_core::AuthorityErrorV1::NonCanonicalOrder)
+    );
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
+            Vec::new(),
+            vec![artifact,]
+        )),
+        Err(pos_core::AuthorityErrorV1::ProvenanceMissing)
+    );
 }
