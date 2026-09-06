@@ -57,11 +57,13 @@ jobs:
           grep -q 'kernel=6.12.' pinned-host-profile.txt
           grep -q 'dm_verity=present' pinned-host-profile.txt
           grep -q 'vm_external_egress=blocked' pinned-host-profile.txt
-          grep -q 'PINNED_NAMESPACE_PROBE;namespace_entry_lifecycle=retained-fd-full-set-entered-' \
+          grep -q 'PINNED_NAMESPACE_PROBE;namespace_entry_lifecycle=retained-fd-full-set-each-entered-separately-' \
             pinned-host-profile.txt
           grep -q 'PINNED_LIMIT_READBACK;.*cgroup-kill-exercised-ok' \
             pinned-host-profile.txt
           test "$(grep -c 'PINNED_CLEANUP_P95;.*samples=30' pinned-host-profile.txt)" -eq 3
+          test "$(grep -c 'PINNED_CLEANUP_SAMPLE;' pinned-host-profile.txt)" -eq 90
+          test "$(grep -c 'PINNED_LIFECYCLE_SAMPLE;' pinned-host-profile.txt)" -eq 30
           grep -q 'PINNED_LIFECYCLE_P95;samples=30' pinned-host-profile.txt
       - name: Record pinned VM build closure
         working-directory: prototypes/sandbox-provider-feasibility
@@ -175,7 +177,7 @@ jobs:
         run: |
           sudo ./target/debug/sandbox-provider-feasibility \
             --namespace-entry-lifecycle | tee namespace-entry-lifecycle.txt
-          if ! grep -q '^namespace_entry_lifecycle=retained-fd-full-set-entered-' \
+          if ! grep -q '^namespace_entry_lifecycle=retained-fd-full-set-each-entered-separately-' \
             namespace-entry-lifecycle.txt; then
             grep -q '^namespace_entry_lifecycle=required-full-set-unsupported;' \
               namespace-entry-lifecycle.txt
