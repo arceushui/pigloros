@@ -232,12 +232,11 @@ fn nftables_request(
     operation_flags: u16,
     sequence_number: u32,
 ) -> Result<NetlinkMessage<NetfilterMessage>, ()> {
+    let mut header = NetlinkHeader::default();
+    header.flags = NLM_F_REQUEST | NLM_F_ACK | operation_flags;
+    header.sequence_number = sequence_number;
     let mut message = NetlinkMessage::new(
-        NetlinkHeader {
-            flags: NLM_F_REQUEST | NLM_F_ACK | operation_flags,
-            sequence_number,
-            ..NetlinkHeader::default()
-        },
+        header,
         NetlinkPayload::from(NetfilterMessage::new(
             NetfilterHeader::new(NetfilterProtoFamily::Inet, 0, 0),
             payload,
