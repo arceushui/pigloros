@@ -127,8 +127,8 @@ jobs:
           cargo metadata --locked --format-version 1 >dependency-metadata.json
           jq '[.packages[] | {name, version, source, license, rust_version}]' \
             dependency-metadata.json >dependency-packages.json
-          b3sum Cargo.lock >lockfile-digest.txt
-          find src -type f -print0 | sort -z | xargs -0 b3sum >source-digests.txt
+          sha256sum Cargo.lock >lockfile-digest.txt
+          find src -type f -print0 | sort -z | xargs -0 sha256sum >source-digests.txt
           rustc --version --verbose >rust-toolchain-evidence.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
