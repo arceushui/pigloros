@@ -21,12 +21,20 @@ use std::{fs::File, os::unix::fs::MetadataExt as _, thread, time::Instant};
 
 #[tokio::main]
 async fn main() {
+    let arguments: Vec<String> = std::env::args().collect();
+    let privileged = arguments.iter().any(|argument| argument == "--privileged");
+    let network_isolation =
+        if privileged && arguments.iter().any(|argument| argument == "--offline") {
+            isolate_network()
+        } else {
+            "not-requested"
+        };
     let dbus = probe_systemd().await;
     let route = probe_route_netlink().await;
     let nftables_packet_bytes = encode_nftables_probe();
     println!("systemd={dbus};route_netlink={route};nftables_packet_bytes={nftables_packet_bytes}");
-    if std::env::args().any(|argument| argument == "--privileged") {
-        let attempt_id = attempt_id();
+    if privileged {
+        let attempt_id = attempt_id(&arguments);
         let started = Instant::now();
         let systemd_started = Instant::now();
         let systemd_lifecycle = probe_transient_slice(&attempt_id).await;
@@ -45,14 +53,14 @@ async fn main() {
         let namespace_elapsed_us = namespace_started.elapsed().as_micros();
         let dm_verity = probe_dm_verity_capability();
         println!(
-            "attempt={attempt_id};transient_slice={systemd_lifecycle};transient_slice_us={systemd_elapsed_us};dummy_link={route_lifecycle};dummy_link_us={route_elapsed_us};nftables_read={nftables_read};nftables_read_us={nftables_read_elapsed_us};nftables_atomic={nftables_atomic};nftables_atomic_us={nftables_atomic_elapsed_us};namespace_descriptor={namespace};namespace_us={namespace_elapsed_us};dm_verity={dm_verity};total_us={}",
+            "attempt={attempt_id};network_isolation={network_isolation};transient_slice={systemd_lifecycle};transient_slice_us={systemd_elapsed_us};dummy_link={route_lifecycle};dummy_link_us={route_elapsed_us};nftables_read={nftables_read};nftables_read_us={nftables_read_elapsed_us};nftables_atomic={nftables_atomic};nftables_atomic_us={nftables_atomic_elapsed_us};namespace_descriptor={namespace};namespace_us={namespace_elapsed_us};dm_verity={dm_verity};total_us={}",
             started.elapsed().as_micros()
         );
     }
 }
 
-fn attempt_id() -> String {
-    let mut arguments = std::env::args();
+fn attempt_id(arguments: &[String]) -> String {
+    let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         if argument == "--attempt-id" {
             if let Some(value) = arguments.next() {
@@ -68,6 +76,25 @@ fn attempt_id() -> String {
         }
     }
     std::process::id().to_string()
+}
+
+fn isolate_network() -> &'static str {
+    let Ok(host_inode) = File::open("/proc/1/ns/net")
+        .and_then(|namespace| namespace.metadata())
+        .map(|metadata| metadata.ino())
+    else {
+        return "host-namespace-unreadable";
+    };
+    if unshare(CloneFlags::CLONE_NEWNET).is_err() {
+        return "unshare-rejected";
+    }
+    match File::open("/proc/thread-self/ns/net")
+        .and_then(|namespace| namespace.metadata())
+        .map(|metadata| metadata.ino())
+    {
+        Ok(current_inode) if current_inode != host_inode => "isolated-no-host-net",
+        _ => "isolation-unproven",
+    }
 }
 
 async fn probe_systemd() -> &'static str {

@@ -59,6 +59,12 @@ jobs:
           cargo clippy --locked -- -D warnings
           cargo deny --locked check 2>&1 | tee cargo-deny.txt
 
+      - name: Verify effective MSRV
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          rustup toolchain install 1.87.0 --profile minimal
+          cargo +1.87.0 check --locked
+
       - name: Run unprivileged typed-interface probe
         working-directory: prototypes/sandbox-provider-feasibility
         run: cargo run --locked
@@ -73,7 +79,7 @@ jobs:
             printf 'expected_architecture=%s\n' "$EXPECTED_ARCHITECTURE"
             printf 'observed_architecture=%s\n' "$(uname -m)"
             printf 'kernel_release=%s\n' "$(uname -r)"
-            printf 'systemd_version=%s\n' "$(systemd --version | head -1)"
+            printf 'systemd_version=%s\n' "$(systemctl --version | head -1)"
             printf 'runner_image_os=%s\n' "${ImageOS:-unknown}"
             printf 'runner_image_version=%s\n' "${ImageVersion:-unknown}"
             printf 'cgroup_filesystem=%s\n' "$(stat -fc %T /sys/fs/cgroup)"
@@ -85,7 +91,8 @@ jobs:
         working-directory: prototypes/sandbox-provider-feasibility
         run: |
           sudo ./target/debug/sandbox-provider-feasibility \
-            --privileged --attempt-id initial | tee privileged-initial.txt
+            --privileged --offline --attempt-id initial | tee privileged-initial.txt
+          grep -q 'network_isolation=isolated-no-host-net' privileged-initial.txt
 
       - name: Exercise eight concurrent attempts
         working-directory: prototypes/sandbox-provider-feasibility
@@ -94,7 +101,7 @@ jobs:
           pids=()
           for attempt in $(seq 1 8); do
             sudo ./target/debug/sandbox-provider-feasibility --privileged \
-              --attempt-id "concurrent${attempt}" >"concurrent-${attempt}.txt" &
+              --offline --attempt-id "concurrent${attempt}" >"concurrent-${attempt}.txt" &
             pids+=("$!")
           done
           for pid in "${pids[@]}"; do
@@ -102,6 +109,7 @@ jobs:
           done
           grep -h '^attempt=' concurrent-*.txt | sort | tee concurrent-summary.txt
           test "$(wc -l <concurrent-summary.txt)" -eq 8
+          test "$(grep -c 'network_isolation=isolated-no-host-net' concurrent-summary.txt)" -eq 8
           test "$(grep -Ec 'typed-create-(stop|auto-cleanup)-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-create-read-delete-ok' concurrent-summary.txt)" -eq 8
           test "$(grep -c 'typed-read-ok' concurrent-summary.txt)" -eq 8
@@ -115,9 +123,26 @@ jobs:
           : >lifecycle-samples.txt
           for attempt in $(seq 1 30); do
             sudo ./target/debug/sandbox-provider-feasibility --privileged \
-              --attempt-id "sample${attempt}" | grep '^attempt=' >>lifecycle-samples.txt
+              --offline --attempt-id "sample${attempt}" | grep '^attempt=' >>lifecycle-samples.txt
           done
           test "$(wc -l <lifecycle-samples.txt)" -eq 30
+          test "$(grep -c 'network_isolation=isolated-no-host-net' lifecycle-samples.txt)" -eq 30
+          test "$(grep -Ec 'typed-create-(stop|auto-cleanup)-ok' lifecycle-samples.txt)" -eq 30
+          test "$(grep -c 'typed-create-read-delete-ok' lifecycle-samples.txt)" -eq 30
+          test "$(grep -c 'typed-install-read-back-delete-ok' lifecycle-samples.txt)" -eq 30
+          test "$(grep -c 'retained-fd-create-restore-drop-ok' lifecycle-samples.txt)" -eq 30
+          percentile_95() {
+            field="$1"
+            tr ';' '\n' <lifecycle-samples.txt |
+              awk -F= -v field="$field" '$1 == field { print $2 }' |
+              sort -n | sed -n '29p'
+          }
+          {
+            for field in transient_slice_us dummy_link_us nftables_atomic_us namespace_us total_us; do
+              printf '%s_p95=%s\n' "$field" "$(percentile_95 "$field")"
+            done
+          } | tee lifecycle-p95.txt
+          test "$(percentile_95 total_us)" -le 2000000
 
       - name: Record dependency and source evidence inputs
         working-directory: prototypes/sandbox-provider-feasibility
@@ -144,6 +169,7 @@ jobs:
             prototypes/sandbox-provider-feasibility/host-capabilities.txt
             prototypes/sandbox-provider-feasibility/lifecycle-samples.txt
             prototypes/sandbox-provider-feasibility/lockfile-digest.txt
+            prototypes/sandbox-provider-feasibility/lifecycle-p95.txt
             prototypes/sandbox-provider-feasibility/privileged-initial.txt
             prototypes/sandbox-provider-feasibility/rust-toolchain-evidence.txt
             prototypes/sandbox-provider-feasibility/source-digests.txt
