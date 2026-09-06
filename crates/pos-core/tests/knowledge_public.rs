@@ -16,6 +16,7 @@ trait TestOk<T> {
 
 impl<T, E: std::fmt::Debug> TestOk<T> for Result<T, E> {
     fn test_ok(self) -> T {
+        assert!(self.is_ok(), "unexpected fixture error: {self:?}");
         self.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
         })
