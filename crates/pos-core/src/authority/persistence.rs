@@ -157,15 +157,40 @@ impl CapabilityRevocationV1 {
             .map_err(AuthorityPersistenceErrorV1::from)
             .and_then(|fields| {
                 expect_header(&fields, REVOCATION_MAGIC)
-                    .map_err(AuthorityPersistenceErrorV1::from)?;
-                Self::try_from_draft(CapabilityRevocationDraftV1 {
-                    grant_id: decode_hash(&fields[2])?,
-                    authority_timeline: decode_timeline(&fields[3])?,
-                    fence_position: Seq::from_u64(decode_u64(&fields[4])?),
-                    revocation_epoch: decode_u64(&fields[5])?,
-                    policy_revision: decode_hash(&fields[6])?,
-                    authority_registry_digest: decode_hash(&fields[7])?,
-                })
+                    .and_then(|()| decode_hash(&fields[2]))
+                    .and_then(|grant_id| {
+                        decode_timeline(&fields[3]).map(|authority_timeline| {
+                            (grant_id, authority_timeline)
+                        })
+                    })
+                    .and_then(|(grant_id, authority_timeline)| {
+                        decode_u64(&fields[4]).map(|fence_position| {
+                            (grant_id, authority_timeline, Seq::from_u64(fence_position))
+                        })
+                    })
+                    .and_then(|(grant_id, authority_timeline, fence_position)| {
+                        decode_u64(&fields[5]).map(|revocation_epoch| {
+                            (grant_id, authority_timeline, fence_position, revocation_epoch)
+                        })
+                    })
+                    .and_then(|values| decode_hash(&fields[6]).map(|policy| (values, policy)))
+                    .and_then(|(values, policy_revision)| {
+                        decode_hash(&fields[7])
+                            .map(|registry_digest| (values, policy_revision, registry_digest))
+                    })
+                    .map_err(AuthorityPersistenceErrorV1::from)
+                    .and_then(|(values, policy_revision, authority_registry_digest)| {
+                        let (grant_id, authority_timeline, fence_position, revocation_epoch) =
+                            values;
+                        Self::try_from_draft(CapabilityRevocationDraftV1 {
+                            grant_id,
+                            authority_timeline,
+                            fence_position,
+                            revocation_epoch,
+                            policy_revision,
+                            authority_registry_digest,
+                        })
+                    })
             })
     }
 }
@@ -365,15 +390,12 @@ impl AuthorityPersistenceStateV1 {
             next = grant.parent_grant_id();
         }
         chain.reverse();
-        let timeline = chain
-            .last()
-            .map(CapabilityGrantV1::issuance_timeline)
-            .ok_or(AuthorityPersistenceErrorV1::Conflict)?;
-        let current = self
-            .timelines
-            .get(&timeline)
-            .copied()
-            .ok_or(AuthorityPersistenceErrorV1::InvalidRecord)?;
+        let Some(timeline) = chain.last().map(CapabilityGrantV1::issuance_timeline) else {
+            return Err(AuthorityPersistenceErrorV1::Conflict);
+        };
+        let Some(current) = self.timelines.get(&timeline).copied() else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        };
         let resolved = chain
             .iter()
             .map(|grant| {
@@ -412,16 +434,24 @@ impl AuthorityPersistenceStateV1 {
         {
             return Err(AuthorityPersistenceErrorV1::InvalidRecord);
         }
-        let grants = self
+        let grants = match self
             .grants
             .values()
             .map(|grant| grant.encode().map(|encoded| bytes(encoded.as_slice())))
-            .collect::<Result<Vec<_>, _>>()?;
-        let revocations = self
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(grants) => grants,
+            Err(error) => return Err(error.into()),
+        };
+        let revocations = match self
             .revocations
             .values()
             .map(|revocation| revocation.encode().map(|encoded| bytes(encoded.as_slice())))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(revocations) => revocations,
+            Err(error) => return Err(error),
+        };
         let timelines = self
             .timelines
             .iter()
@@ -456,26 +486,48 @@ impl AuthorityPersistenceStateV1 {
     /// Returns a closed error without accepting missing, malformed, reordered, or
     /// conflicting authority evidence.
     pub fn from_persistence_bytes(bytes: &[u8]) -> Result<Self, AuthorityPersistenceErrorV1> {
-        let fields = decode_bounded_array(bytes, MAX_PERSISTED_AUTHORITY_STATE_BYTES, 5)
-            .map_err(AuthorityPersistenceErrorV1::from)?;
-        expect_header(&fields, PERSISTENCE_MAGIC).map_err(AuthorityPersistenceErrorV1::from)?;
-        let grant_values = bounded_values(&fields[2])?;
-        let revocation_values = bounded_values(&fields[3])?;
-        let timeline_values = bounded_values(&fields[4])?;
+        let fields = match decode_bounded_array(bytes, MAX_PERSISTED_AUTHORITY_STATE_BYTES, 5) {
+            Ok(fields) => fields,
+            Err(error) => return Err(error.into()),
+        };
+        if expect_header(&fields, PERSISTENCE_MAGIC).is_err() {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        }
+        let Ok(grant_values) = bounded_values(&fields[2]) else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        };
+        let Ok(revocation_values) = bounded_values(&fields[3]) else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        };
+        let Ok(timeline_values) = bounded_values(&fields[4]) else {
+            return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+        };
         let mut state = Self::new();
         let mut previous_grant = None;
         for value in grant_values {
-            let encoded = canonical_bytes(value)?;
-            let grant = CapabilityGrantV1::decode(&encoded)?;
-            require_strict_order(previous_grant, grant.grant_id())?;
+            let Ok(encoded) = canonical_bytes(value) else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
+            let Ok(grant) = CapabilityGrantV1::decode(&encoded) else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
+            if require_strict_order(previous_grant, grant.grant_id()).is_err() {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            }
             previous_grant = Some(grant.grant_id());
             state.grants.insert(grant.grant_id(), grant);
         }
         let mut previous_revocation = None;
         for value in revocation_values {
-            let encoded = canonical_bytes(value)?;
-            let revocation = CapabilityRevocationV1::decode(&encoded)?;
-            require_strict_order(previous_revocation, revocation.grant_id())?;
+            let Ok(encoded) = canonical_bytes(value) else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
+            let Ok(revocation) = CapabilityRevocationV1::decode(&encoded) else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
+            if require_strict_order(previous_revocation, revocation.grant_id()).is_err() {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            }
             previous_revocation = Some(revocation.grant_id());
             state.revocations.insert(revocation.grant_id(), revocation);
         }
@@ -487,18 +539,23 @@ impl AuthorityPersistenceStateV1 {
             if row.len() != 3 {
                 return Err(AuthorityPersistenceErrorV1::InvalidRecord);
             }
-            let timeline = decode_timeline(&row[0])?;
+            let Ok(timeline) = decode_timeline(&row[0]) else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
             if previous_timeline.is_some_and(|previous| previous >= timeline) {
                 return Err(AuthorityPersistenceErrorV1::InvalidRecord);
             }
             previous_timeline = Some(timeline);
-            state.timelines.insert(
-                timeline,
-                TimelineAuthorityStateV1 {
-                    revocation_epoch: decode_u64(&row[1])?,
-                    head_position: Seq::from_u64(decode_u64(&row[2])?),
-                },
-            );
+            let decoded_state = decode_u64(&row[1]).and_then(|revocation_epoch| {
+                decode_u64(&row[2]).map(|head_position| TimelineAuthorityStateV1 {
+                    revocation_epoch,
+                    head_position: Seq::from_u64(head_position),
+                })
+            });
+            let Ok(timeline_state) = decoded_state else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
+            state.timelines.insert(timeline, timeline_state);
         }
         state.validate().map(|()| state)
     }
@@ -506,10 +563,9 @@ impl AuthorityPersistenceStateV1 {
     fn validate(&self) -> Result<(), AuthorityPersistenceErrorV1> {
         let mut coordinates = BTreeSet::new();
         for grant in self.grants.values() {
-            let timeline = self
-                .timelines
-                .get(&grant.issuance_timeline())
-                .ok_or(AuthorityPersistenceErrorV1::InvalidRecord)?;
+            let Some(timeline) = self.timelines.get(&grant.issuance_timeline()) else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
             if grant.revocation_fence().is_some()
                 || grant.revocation_epoch() > timeline.revocation_epoch
                 || grant.issuance_seq() > timeline.head_position
@@ -517,17 +573,17 @@ impl AuthorityPersistenceStateV1 {
             {
                 return Err(AuthorityPersistenceErrorV1::InvalidRecord);
             }
-            self.resolve(grant.grant_id())?;
+            if self.resolve(grant.grant_id()).is_err() {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            }
         }
         for revocation in self.revocations.values() {
-            let grant = self
-                .grants
-                .get(&revocation.grant_id())
-                .ok_or(AuthorityPersistenceErrorV1::InvalidRecord)?;
-            let timeline = self
-                .timelines
-                .get(&revocation.authority_timeline())
-                .ok_or(AuthorityPersistenceErrorV1::InvalidRecord)?;
+            let Some(grant) = self.grants.get(&revocation.grant_id()) else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
+            let Some(timeline) = self.timelines.get(&revocation.authority_timeline()) else {
+                return Err(AuthorityPersistenceErrorV1::InvalidRecord);
+            };
             let revocation_timeline = revocation.authority_timeline();
             let grant_timeline = grant.issuance_timeline();
             let provenance_matches = revocation_timeline == grant_timeline
