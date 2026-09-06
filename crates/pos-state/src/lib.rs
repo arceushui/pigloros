@@ -15,9 +15,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use pos_core::{
-    AuthorityErrorV1, AuthorizationDecisionV1, AuthorizationRequestV1, CanonicalBytes,
-    ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId, Event, Hash,
-    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
+    CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
+    Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
     Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
     EVENT_TYPE_CONSENT_REVOKED_V1,
@@ -404,11 +404,17 @@ impl ProjectionRegistry {
         request: &AuthorizationRequestV1,
         decision: &AuthorizationDecisionV1,
         authority: &PersistedAuthorityV1,
+        authority_registry: &AuthorityRegistrySnapshotV1,
         authority_position: Seq,
         context: &ProjectionObservationContextV1,
     ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
         authority
-            .validate_observation_authorization(request, decision, authority_position)
+            .validate_observation_authorization(
+                request,
+                decision,
+                authority_registry,
+                authority_position,
+            )
             .and_then(|()| self.materialize_authorized_projection(request, decision, context))
     }
 

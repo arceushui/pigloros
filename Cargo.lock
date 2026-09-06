@@ -4518,6 +4518,7 @@ dependencies = [
 name = "pos-state"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "pos-core",
  "proptest",
  "serde_json",

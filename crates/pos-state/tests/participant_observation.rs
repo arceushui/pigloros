@@ -102,6 +102,7 @@ struct AuthorityFixture {
     decision: AuthorizationDecisionV1,
     chain: DelegationChainV1,
     authority: PersistedAuthorityV1,
+    registry: AuthorityRegistrySnapshotV1,
     participant_id: EntityId,
     plugin_id: PluginId,
 }
@@ -267,6 +268,7 @@ fn authority_fixture() -> AuthorityFixture {
         decision,
         chain,
         authority,
+        registry,
         participant_id,
         plugin_id,
     }
@@ -316,6 +318,7 @@ fn authorized_materialization_ignores_every_other_subject() {
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(10),
             &context(timeline_id),
         )
@@ -325,6 +328,7 @@ fn authorized_materialization_ignores_every_other_subject() {
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(10),
             &context(timeline_id),
         )
@@ -357,10 +361,33 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
             &unrelated.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(10),
             &context(TimelineId::new()),
         ),
         Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
+    );
+
+    let stripped_registry = AuthorityRegistrySnapshotV1::try_new(
+        fixture.request.authority_registry_digest(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .test_ok();
+    let current =
+        AuthorityEvaluatorV1::authorize(&fixture.request, &fixture.chain, &stripped_registry);
+    assert!(!current.is_allowed());
+    assert_eq!(
+        registry.materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            &stripped_registry,
+            Seq::from_u64(10),
+            &context(TimelineId::new()),
+        ),
+        Err(current.error().test_ok())
     );
 }
 
@@ -375,6 +402,7 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(10),
             &context(TimelineId::new()),
         )
@@ -403,6 +431,7 @@ fn materialization_canonicalizes_nested_projection_values() {
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(10),
             &context(TimelineId::new()),
         )
@@ -433,6 +462,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &fixture.request,
             &denied,
             &fixture.authority,
+            &untrusted_registry,
             Seq::from_u64(10),
             &context(TimelineId::new()),
         ),
@@ -446,6 +476,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(10),
             &observation_context,
         ),
@@ -459,6 +490,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(10),
             &unrelated_reducer,
         ),
@@ -469,6 +501,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(9),
             &context(TimelineId::new()),
         ),
@@ -522,6 +555,7 @@ fn observation_policy_is_validated_once_and_required_for_materialization() {
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
+            &fixture.registry,
             Seq::from_u64(10),
             &context(TimelineId::new()),
         ),

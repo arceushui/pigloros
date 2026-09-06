@@ -734,10 +734,17 @@ impl PersistedAuthorityV1 {
         &self,
         request: &super::AuthorizationRequestV1,
         decision: &super::AuthorizationDecisionV1,
+        registry: &super::AuthorityRegistrySnapshotV1,
         at_position: Seq,
     ) -> Result<(), AuthorityErrorV1> {
         if !observation_decision_matches_request(request, decision) {
             return Err(decision
+                .error()
+                .unwrap_or(AuthorityErrorV1::UnauthorizedSource));
+        }
+        let current = super::AuthorityEvaluatorV1::authorize(request, self.chain(), registry);
+        if &current != decision {
+            return Err(current
                 .error()
                 .unwrap_or(AuthorityErrorV1::UnauthorizedSource));
         }
