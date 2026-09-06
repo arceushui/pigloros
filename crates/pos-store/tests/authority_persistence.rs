@@ -96,21 +96,21 @@ fn maximal_authority_strings(prefix: &str) -> Vec<String> {
         .collect()
 }
 
+fn maximal_entity_ids(start: usize) -> Vec<EntityId> {
+    (start..start + MAX_AUTHORITY_SCOPE_MEMBERS)
+        .map(|ordinal| entity(ok(u128::try_from(ordinal))))
+        .collect()
+}
+
 fn maximal_scope() -> CapabilityScopeV1 {
     ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
         resources: maximal_authority_strings("resource"),
         actions: maximal_authority_strings("action"),
         purposes: maximal_authority_strings("purpose"),
         audiences: maximal_authority_strings("audience"),
-        actor_entity_ids: (1..=MAX_AUTHORITY_SCOPE_MEMBERS)
-            .map(|ordinal| entity(ok(u128::try_from(ordinal))))
-            .collect(),
-        subject_ids: (101..101 + MAX_AUTHORITY_SCOPE_MEMBERS)
-            .map(|ordinal| entity(ok(u128::try_from(ordinal))))
-            .collect(),
-        participant_ids: (201..201 + MAX_AUTHORITY_SCOPE_MEMBERS)
-            .map(|ordinal| entity(ok(u128::try_from(ordinal))))
-            .collect(),
+        actor_entity_ids: maximal_entity_ids(1),
+        subject_ids: maximal_entity_ids(101),
+        participant_ids: maximal_entity_ids(201),
         plugin_id: None,
         principal_roles: vec![AuthorityRoleV1::Actor],
         max_uses: 10,
