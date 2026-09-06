@@ -116,6 +116,29 @@ fn consent_grant(
     .test_ok()
 }
 
+fn observation_scope(
+    actor: EntityId,
+    subject: EntityId,
+    participant_id: EntityId,
+    plugin_id: PluginId,
+) -> CapabilityScopeV1 {
+    CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        resources: vec!["projection.profile".to_owned()],
+        actions: vec!["observe".to_owned()],
+        purposes: vec!["planning".to_owned()],
+        audiences: vec!["local-host".to_owned()],
+        actor_entity_ids: vec![actor],
+        subject_ids: vec![subject],
+        participant_ids: vec![participant_id],
+        plugin_id: Some(plugin_id),
+        principal_roles: vec![AuthorityRoleV1::Actor],
+        max_uses: 2,
+        budget: 10,
+        environment_constraints: vec!["local-only".to_owned()],
+    })
+    .test_ok()
+}
+
 fn authority_fixture() -> AuthorityFixture {
     let principal = PrincipalRefV1::try_new([1; 16], "host.test").test_ok();
     let actor = EntityId::new();
@@ -137,21 +160,7 @@ fn authority_fixture() -> AuthorityFixture {
         registry_digest,
         principal.clone(),
     );
-    let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-        resources: vec!["projection.profile".to_owned()],
-        actions: vec!["observe".to_owned()],
-        purposes: vec!["planning".to_owned()],
-        audiences: vec!["local-host".to_owned()],
-        actor_entity_ids: vec![actor],
-        subject_ids: vec![subject],
-        participant_ids: vec![participant_id],
-        plugin_id: Some(plugin_id),
-        principal_roles: vec![AuthorityRoleV1::Actor],
-        max_uses: 2,
-        budget: 10,
-        environment_constraints: vec!["local-only".to_owned()],
-    })
-    .test_ok();
+    let scope = observation_scope(actor, subject, participant_id, plugin_id);
     let grant = CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
         grant_id: hash_from_repeated_byte(6),
         grantor: principal.clone(),
