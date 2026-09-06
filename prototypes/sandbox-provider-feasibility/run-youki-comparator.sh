@@ -27,7 +27,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$evidence_dir" "$runtime_root" "$bundle/rootfs"
+mkdir -p "$evidence_dir" "$runtime_root" \
+  "$bundle/rootfs/dev/pts" "$bundle/rootfs/dev/shm" "$bundle/rootfs/etc" \
+  "$bundle/rootfs/proc" "$bundle/rootfs/sys" "$bundle/rootfs/tmp"
 curl --fail --location --silent --show-error "$download_url" --output "$scratch/$archive"
 printf '%s  %s\n' "$expected_archive_sha256" "$scratch/$archive" | sha256sum --check
 tar -xzf "$scratch/$archive" -C "$scratch"
