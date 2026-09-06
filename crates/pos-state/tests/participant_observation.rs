@@ -7,9 +7,40 @@ use pos_core::{
     SchemaVersion, Seq, State, TimelineId, WallTime,
 };
 use pos_state::{ProjectionObservationContextV1, ProjectionRegistry};
+use std::fmt::Debug;
 
-fn hash_from_repeated_byte(byte: u8) -> Hash {
+trait TestOk<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: Debug> TestOk<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
+        })
+    }
+}
+
+impl<T> TestOk<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+    }
+}
+
+const fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
+}
+
+fn authenticated_principal(principal: PrincipalRefV1) -> AuthenticatedPrincipalResultV1 {
+    AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+        principal,
+        adapter_id: "test-adapter".to_owned(),
+        assurance: AssuranceLevelV1::try_new(1).test_ok(),
+        issued_at: WallTime::from_micros(1),
+        expires_at: WallTime::from_micros(100),
+        binding_digest: hash_from_repeated_byte(5),
+    })
+    .test_ok()
 }
 
 struct CountReducer;
@@ -53,7 +84,7 @@ struct AuthorityFixture {
 }
 
 fn authority_fixture() -> AuthorityFixture {
-    let principal = PrincipalRefV1::try_new([1; 16], "host.test").expect("principal");
+    let principal = PrincipalRefV1::try_new([1; 16], "host.test").test_ok();
     let actor = EntityId::new();
     let subject = EntityId::new();
     let participant_id = EntityId::new();
@@ -62,16 +93,7 @@ fn authority_fixture() -> AuthorityFixture {
     let authority_timeline = TimelineId::new();
     let policy_revision = hash_from_repeated_byte(3);
     let registry_digest = hash_from_repeated_byte(4);
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-            principal: principal.clone(),
-            adapter_id: "test-adapter".to_owned(),
-            assurance: AssuranceLevelV1::try_new(1).expect("assurance"),
-            issued_at: WallTime::from_micros(1),
-            expires_at: WallTime::from_micros(100),
-            binding_digest: hash_from_repeated_byte(5),
-        })
-        .expect("authenticated principal");
+    let authenticated = authenticated_principal(principal.clone());
     let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
         resources: vec!["projection.profile".to_owned()],
         actions: vec!["observe".to_owned()],
@@ -86,7 +108,7 @@ fn authority_fixture() -> AuthorityFixture {
         budget: 10,
         environment_constraints: vec!["local-only".to_owned()],
     })
-    .expect("capability scope");
+    .test_ok();
     let grant = CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
         grant_id: hash_from_repeated_byte(6),
         grantor: principal.clone(),
@@ -111,7 +133,7 @@ fn authority_fixture() -> AuthorityFixture {
         revocation_fence: None,
         authority_registry_digest: registry_digest,
     })
-    .expect("capability grant");
+    .test_ok();
     let request = AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
         authenticated,
         actor_entity_id: actor,
@@ -140,15 +162,15 @@ fn authority_fixture() -> AuthorityFixture {
         consent: ConsentEvidenceV1::NotRequired,
         environment_constraints: vec!["local-only".to_owned()],
     })
-    .expect("authorization request");
+    .test_ok();
     let registry = AuthorityRegistrySnapshotV1::try_new(
         registry_digest,
         vec![request.authenticated().registry_binding_digest()],
-        vec![grant.binding_digest().expect("grant binding")],
+        vec![grant.binding_digest().test_ok()],
         Vec::new(),
     )
-    .expect("authority registry");
-    let chain = pos_core::DelegationChainV1::try_from_grants(vec![grant]).expect("grant chain");
+    .test_ok();
+    let chain = pos_core::DelegationChainV1::try_from_grants(vec![grant]).test_ok();
     let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &registry);
     assert!(decision.is_allowed());
     AuthorityFixture {
@@ -177,7 +199,7 @@ fn context(timeline_id: TimelineId) -> ProjectionObservationContextV1 {
 #[test]
 fn authorized_materialization_ignores_every_other_subject() {
     let fixture = authority_fixture();
-    let subject = fixture.request.subject_id().expect("subject");
+    let subject = fixture.request.subject_id().test_ok();
     let other = EntityId::new();
     let timeline_id = TimelineId::new();
     let mut first = ProjectionRegistry::new();
@@ -193,22 +215,22 @@ fn authorized_materialization_ignores_every_other_subject() {
             &fixture.decision,
             context(timeline_id),
         )
-        .expect("first snapshot");
+        .test_ok();
     let second_snapshot = second
         .materialize_authorized_observation(
             &fixture.request,
             &fixture.decision,
             context(timeline_id),
         )
-        .expect("second snapshot");
+        .test_ok();
 
     assert_eq!(first_snapshot.participant_id(), fixture.participant_id);
     assert_eq!(first_snapshot.plugin_id(), fixture.plugin_id);
     assert_eq!(first_snapshot.encode(), second_snapshot.encode());
     let record = &first_snapshot.records()[0];
     let artifact = first_snapshot
-        .artifact(record.artifact_digest().expect("present artifact"))
-        .expect("bound artifact");
+        .artifact(record.artifact_digest().test_ok())
+        .test_ok();
     assert_eq!(artifact.bytes().as_slice(), br#"{"count":1}"#);
 }
 
@@ -218,7 +240,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
     let unrelated = authority_fixture();
     let mut registry = ProjectionRegistry::new();
     registry.register("profile", Box::new(CountReducer));
-    registry.fold_events(&[event(fixture.request.subject_id().expect("subject"), 1)]);
+    registry.fold_events(&[event(fixture.request.subject_id().test_ok(), 1)]);
     assert_eq!(
         registry.materialize_authorized_observation(
             &unrelated.request,
