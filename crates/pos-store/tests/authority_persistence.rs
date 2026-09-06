@@ -809,13 +809,14 @@ fn authority_state_validation_rejects_incoherent_public_fixtures() {
 
     let mut over_depth_chain = fixture.clone();
     let mut encoded_grants = Vec::new();
-    for value in 1_u8..=18 {
+    for grant_ordinal in 1_u8..=18 {
         let mut draft = grant_draft(&root_grant());
-        draft.grant_id = hash(value);
-        draft.valid_from_position = Seq::from_u64(u64::from(value));
-        draft.issuance_seq = Seq::from_u64(u64::from(value));
-        draft.parent_grant_id = (value < 18).then_some(hash(value.saturating_add(1)));
-        draft.delegation_depth = u8::from(value < 18);
+        draft.grant_id = hash(grant_ordinal);
+        draft.valid_from_position = Seq::from_u64(u64::from(grant_ordinal));
+        draft.issuance_seq = Seq::from_u64(u64::from(grant_ordinal));
+        draft.parent_grant_id =
+            (grant_ordinal < 18).then_some(hash(grant_ordinal.saturating_add(1)));
+        draft.delegation_depth = u8::from(grant_ordinal < 18);
         draft.max_delegation_depth = 16;
         let grant = ok(CapabilityGrantV1::try_from_draft(draft));
         encoded_grants.push(Value::Bytes(ok(grant.encode()).as_slice().to_vec()));
