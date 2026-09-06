@@ -7,7 +7,7 @@
       "gid": 0
     },
     "args": [
-      "/usr/bin/sleep",
+      "/payload",
       "30"
     ],
     "env": [

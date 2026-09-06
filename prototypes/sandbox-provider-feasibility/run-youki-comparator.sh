@@ -39,18 +39,8 @@ if test "$youki_binary" != "$scratch/youki"; then
   mv "$youki_binary" "$scratch/youki"
 fi
 
-copy_binary_and_libraries() {
-  local binary=$1
-  cp --parents "$binary" "$bundle/rootfs"
-  ldd "$binary" |
-    awk '/=> \// { print $3 } /^\// { print $1 }' |
-    while IFS= read -r library; do
-      cp --parents "$library" "$bundle/rootfs"
-    done
-}
-
-copy_binary_and_libraries /usr/bin/sleep
-copy_binary_and_libraries /usr/bin/true
+cc -static -Os -Wall -Wextra -Werror youki-comparator-payload.c \
+  -o "$bundle/rootfs/payload"
 
 cp youki-comparator-config.json "$bundle/config.json"
 
@@ -132,7 +122,7 @@ if sudo "$scratch/youki" --root "$runtime_root" state "$container_id" \
 fi
 lifecycle_us=$((($(date +%s%N) - lifecycle_started) / 1000))
 
-jq '.process.args = ["/usr/bin/true"]' "$bundle/config.json" >"$scratch/sample-config.json"
+jq '.process.args = ["/payload"]' "$bundle/config.json" >"$scratch/sample-config.json"
 mv "$scratch/sample-config.json" "$bundle/config.json"
 : >"$evidence_dir/launch-cleanup-samples-us.txt"
 for sample in $(seq 1 30); do
