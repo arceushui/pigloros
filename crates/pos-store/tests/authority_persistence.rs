@@ -425,6 +425,20 @@ fn invalid_delegation_rolls_back_grant_and_timeline_atomically() {
         Err(AuthorityPersistenceErrorV1::InvalidRecord)
     );
     assert_eq!(state.grants().count(), 1);
+
+    let mut foreign_timeline_draft = grant_draft(&child);
+    foreign_timeline_draft.grantor = principal(4);
+    foreign_timeline_draft.issuance_timeline = timeline(31);
+    let foreign_timeline_child = ok(CapabilityGrantV1::try_from_draft(foreign_timeline_draft));
+    let foreign_timeline_host = authority_host(hash(7), &[&foreign_timeline_child]);
+    assert_eq!(
+        state.issue_grant(
+            ok(foreign_timeline_host.authorize_grant(&foreign_timeline_child)),
+            foreign_timeline_child
+        ),
+        Err(AuthorityPersistenceErrorV1::InvalidRecord)
+    );
+
     assert_eq!(
         ok(state.issue_grant(ok(host.authorize_grant(&child)), child)),
         AuthorityCommitOutcomeV1::Committed
@@ -500,6 +514,14 @@ fn conflicts_stale_epochs_and_timeline_reordering_fail_closed() {
     );
 
     ok(state.issue_grant(grant_permit(&child), child.clone()));
+    let backdated_revocation = revocation_at(2);
+    assert_eq!(
+        state.revoke_grant(
+            revocation_permit(&root, &backdated_revocation),
+            backdated_revocation
+        ),
+        Err(AuthorityPersistenceErrorV1::TimelineOrder)
+    );
     let first_revocation = revocation();
     ok(state.revoke_grant(
         revocation_permit(&root, &first_revocation),
@@ -706,6 +728,17 @@ fn revocation_codec_is_canonical_and_rejects_zero_fields() {
         }),
         Err(AuthorityPersistenceErrorV1::InvalidRecord)
     );
+    assert_eq!(
+        CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+            grant_id: hash(1),
+            authority_timeline: timeline(30),
+            fence_position: Seq::ZERO,
+            revocation_epoch: 1,
+            policy_revision: hash(9),
+            authority_registry_digest: hash(7),
+        }),
+        Err(AuthorityPersistenceErrorV1::InvalidRecord)
+    );
 }
 
 #[test]
@@ -757,6 +790,56 @@ fn authority_state_codec_rejects_malformed_collections_and_rows() {
     value_array(&mut value_array(&mut value_array(&mut malformed_timeline_state)[4])[0])[1] =
         Value::Text("not-an-epoch".to_owned());
     assert_invalid_persistence_value(&malformed_timeline_state);
+}
+
+#[test]
+fn authority_state_validation_rejects_incoherent_public_fixtures() {
+    let fixture = authority_fixture_value();
+
+    let mut wrong_header = fixture.clone();
+    value_array(&mut wrong_header)[0] = Value::Bytes(b"BAD!".to_vec());
+    assert_invalid_persistence_value(&wrong_header);
+
+    let mut missing_timeline = fixture.clone();
+    value_array(&mut value_array(&mut missing_timeline)[4]).clear();
+    assert_invalid_persistence_value(&missing_timeline);
+
+    let mut invalid_grant_state = fixture.clone();
+    value_array(&mut value_array(&mut value_array(&mut invalid_grant_state)[4])[0])[2] =
+        Value::Integer(1_u64.into());
+    assert_invalid_persistence_value(&invalid_grant_state);
+
+    let mut broken_parent = fixture.clone();
+    let mut broken_child_draft = grant_draft(&child_grant());
+    broken_child_draft.parent_grant_id = Some(hash(99));
+    let broken_child = ok(CapabilityGrantV1::try_from_draft(broken_child_draft));
+    value_array(&mut value_array(&mut broken_parent)[2])[1] =
+        Value::Bytes(ok(broken_child.encode()).as_slice().to_vec());
+    assert_invalid_persistence_value(&broken_parent);
+
+    let mut revocation_without_grant = fixture.clone();
+    value_array(&mut value_array(&mut revocation_without_grant)[2]).clear();
+    assert_invalid_persistence_value(&revocation_without_grant);
+
+    let mut revocation_without_timeline = fixture.clone();
+    let Value::Bytes(revocation_bytes) =
+        &mut value_array(&mut value_array(&mut revocation_without_timeline)[3])[0]
+    else {
+        std::panic::resume_unwind(Box::new("revocation fixture must contain canonical bytes"));
+    };
+    let mut revocation_value: Value = ok(ciborium::de::from_reader(revocation_bytes.as_slice()));
+    value_array(&mut revocation_value)[3] = Value::Bytes(Ulid::from(31_u128).to_bytes().to_vec());
+    revocation_bytes.clear();
+    ok(ciborium::ser::into_writer(
+        &revocation_value,
+        &mut *revocation_bytes,
+    ));
+    assert_invalid_persistence_value(&revocation_without_timeline);
+
+    let mut incoherent_head = fixture;
+    value_array(&mut value_array(&mut value_array(&mut incoherent_head)[4])[0])[2] =
+        Value::Integer(4_u64.into());
+    assert_invalid_persistence_value(&incoherent_head);
 }
 
 #[test]
