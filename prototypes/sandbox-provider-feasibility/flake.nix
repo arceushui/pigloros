@@ -68,9 +68,6 @@
                       self.end_headers()
                       self.wfile.write(b"host-reachable")
 
-                  def log_message(self, _format, *args):
-                      pass
-
               if os.fork() == 0:
                   HTTPServer(("", 8000), IsolationEndpoint).serve_forever()
 
