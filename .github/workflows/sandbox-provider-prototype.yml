@@ -3,43 +3,149 @@ name: sandbox-provider-prototype
 on:
   push:
     branches:
-      - ticket-191-sandbox-provider-research
+      - codex/ticket-211-sandbox-provider-prototype-v2
     paths:
       - "prototypes/sandbox-provider-feasibility/**"
       - ".github/workflows/sandbox-provider-prototype.yml"
+      - "docs/research/sandbox-provider-*.md"
+  pull_request:
+    paths:
+      - "prototypes/sandbox-provider-feasibility/**"
+      - ".github/workflows/sandbox-provider-prototype.yml"
+      - "docs/research/sandbox-provider-*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: sandbox-provider-prototype-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   typed-control-plane:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    name: typed-control-plane (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-26.04
+          - architecture: aarch64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+          components: clippy,rustfmt
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
+        with:
+          tool: cargo-deny
+
       - name: Generate isolated prototype lockfile
         working-directory: prototypes/sandbox-provider-feasibility
         run: cargo generate-lockfile
+
       - name: Check exact dependency composition
         working-directory: prototypes/sandbox-provider-feasibility
-        run: cargo check --locked
+        run: |
+          cargo fmt --check
+          cargo check --locked
+          cargo clippy --locked -- -D warnings
+          cargo deny --locked check 2>&1 | tee cargo-deny.txt
+
       - name: Run unprivileged typed-interface probe
         working-directory: prototypes/sandbox-provider-feasibility
         run: cargo run --locked
-      - name: Run ephemeral-host privileged lifecycle probe
+
+      - name: Capture host capability identity
         working-directory: prototypes/sandbox-provider-feasibility
-        run: sudo ./target/debug/sandbox-provider-feasibility --privileged
-      - name: Record dependency tree
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'expected_architecture=%s\n' "$EXPECTED_ARCHITECTURE"
+            printf 'observed_architecture=%s\n' "$(uname -m)"
+            printf 'kernel_release=%s\n' "$(uname -r)"
+            printf 'systemd_version=%s\n' "$(systemd --version | head -1)"
+            printf 'runner_image_os=%s\n' "${ImageOS:-unknown}"
+            printf 'runner_image_version=%s\n' "${ImageVersion:-unknown}"
+            printf 'cgroup_filesystem=%s\n' "$(stat -fc %T /sys/fs/cgroup)"
+            printf 'cgroup_controllers=%s\n' "$(tr '\n' ' ' </sys/fs/cgroup/cgroup.controllers)"
+            printf 'cgroup_kill=%s\n' "$(test -e /sys/fs/cgroup/cgroup.kill && printf present || printf absent)"
+          } | tee host-capabilities.txt
+
+      - name: Run one privileged lifecycle probe
         working-directory: prototypes/sandbox-provider-feasibility
-        run: cargo tree --locked | tee dependency-tree.txt
-      - uses: actions/upload-artifact@v4
+        run: |
+          sudo ./target/debug/sandbox-provider-feasibility \
+            --privileged --attempt-id initial | tee privileged-initial.txt
+
+      - name: Exercise eight concurrent attempts
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          set -euo pipefail
+          pids=()
+          for attempt in $(seq 1 8); do
+            sudo ./target/debug/sandbox-provider-feasibility --privileged \
+              --attempt-id "concurrent${attempt}" >"concurrent-${attempt}.txt" &
+            pids+=("$!")
+          done
+          for pid in "${pids[@]}"; do
+            wait "$pid"
+          done
+          grep -h '^attempt=' concurrent-*.txt | sort | tee concurrent-summary.txt
+          test "$(wc -l <concurrent-summary.txt)" -eq 8
+          test "$(grep -c 'typed-create-stop-ok' concurrent-summary.txt)" -eq 8
+          test "$(grep -c 'typed-create-read-delete-ok' concurrent-summary.txt)" -eq 8
+          test "$(grep -c 'typed-read-ok' concurrent-summary.txt)" -eq 8
+          test "$(grep -c 'typed-install-read-back-delete-ok' concurrent-summary.txt)" -eq 8
+          test "$(grep -c 'retained-fd-create-restore-drop-ok' concurrent-summary.txt)" -eq 8
+
+      - name: Record thirty sequential lifecycle samples
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          set -euo pipefail
+          : >lifecycle-samples.txt
+          for attempt in $(seq 1 30); do
+            sudo ./target/debug/sandbox-provider-feasibility --privileged \
+              --attempt-id "sample${attempt}" | grep '^attempt=' >>lifecycle-samples.txt
+          done
+          test "$(wc -l <lifecycle-samples.txt)" -eq 30
+
+      - name: Record dependency and source evidence inputs
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: |
+          set -euo pipefail
+          cargo tree --locked | tee dependency-tree.txt
+          cargo metadata --locked --format-version 1 >dependency-metadata.json
+          jq '[.packages[] | {name, version, source, license, rust_version}]' \
+            dependency-metadata.json >dependency-packages.json
+          b3sum Cargo.lock >lockfile-digest.txt
+          find src -type f -print0 | sort -z | xargs -0 b3sum >source-digests.txt
+          rustc --version --verbose >rust-toolchain-evidence.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7.0.1
         with:
-          name: sandbox-provider-prototype-evidence
+          name: sandbox-provider-prototype-evidence-${{ matrix.architecture }}
           path: |
             prototypes/sandbox-provider-feasibility/Cargo.lock
+            prototypes/sandbox-provider-feasibility/cargo-deny.txt
+            prototypes/sandbox-provider-feasibility/concurrent-*.txt
+            prototypes/sandbox-provider-feasibility/dependency-metadata.json
+            prototypes/sandbox-provider-feasibility/dependency-packages.json
             prototypes/sandbox-provider-feasibility/dependency-tree.txt
+            prototypes/sandbox-provider-feasibility/host-capabilities.txt
+            prototypes/sandbox-provider-feasibility/lifecycle-samples.txt
+            prototypes/sandbox-provider-feasibility/lockfile-digest.txt
+            prototypes/sandbox-provider-feasibility/privileged-initial.txt
+            prototypes/sandbox-provider-feasibility/rust-toolchain-evidence.txt
+            prototypes/sandbox-provider-feasibility/source-digests.txt
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
