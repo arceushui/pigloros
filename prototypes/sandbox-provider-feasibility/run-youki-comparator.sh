@@ -33,7 +33,9 @@ printf '%s  %s\n' "$expected_archive_sha256" "$scratch/$archive" | sha256sum --c
 tar -xzf "$scratch/$archive" -C "$scratch"
 youki_binary=$(find "$scratch" -type f -name youki -perm -u+x -print -quit)
 test -n "$youki_binary"
-mv "$youki_binary" "$scratch/youki"
+if test "$youki_binary" != "$scratch/youki"; then
+  mv "$youki_binary" "$scratch/youki"
+fi
 
 copy_binary_and_libraries() {
   local binary=$1
