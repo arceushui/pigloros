@@ -136,9 +136,64 @@
               ).strip()
               print(f"PINNED_LIMIT_READBACK;{limits}")
               assert (
-                  "memory-swap-cpu-pids-io-cgroup-kill-read-back-ok" in limits
+                  "memory-swap-cpu-pids-io-cgroup-kill-exercised-ok" in limits
               ), limits
+              assert "io_weight=default 200" in limits, limits
+              assert "cgroup_kill_exercised=true" in limits, limits
               assert "unit_absent=true" in limits, limits
+
+              def record_fields(record):
+                  return dict(
+                      field.split("=", 1)
+                      for field in record.split(";")
+                      if "=" in field
+                  )
+
+              def percentile_95(records, field):
+                  values = sorted(int(record_fields(record)[field]) for record in records)
+                  return values[28]
+
+              for mode in ["normal", "cancel", "forced"]:
+                  cleanup_samples = []
+                  for sample in range(1, 31):
+                      cleanup = machine.succeed(
+                          "sandbox-provider-feasibility --privileged --offline "
+                          f"--cleanup-sample --cleanup-mode {mode} "
+                          f"--attempt-id p{mode}{sample}"
+                      ).strip()
+                      assert f"cleanup_sample={mode}" in cleanup, cleanup
+                      assert "unit_absent=true" in cleanup, cleanup
+                      cleanup_samples.append(cleanup)
+                  launch_p95 = percentile_95(cleanup_samples, "launch_us")
+                  cleanup_p95 = percentile_95(cleanup_samples, "cleanup_us")
+                  assert launch_p95 <= 2_000_000, launch_p95
+                  cleanup_limit = 5_000_000 if mode == "forced" else 2_000_000
+                  assert cleanup_p95 <= cleanup_limit, cleanup_p95
+                  print(
+                      "PINNED_CLEANUP_P95;"
+                      f"mode={mode};samples=30;launch_us_p95={launch_p95};"
+                      f"cleanup_us_p95={cleanup_p95}"
+                  )
+
+              lifecycle_samples = []
+              for sample in range(1, 31):
+                  lifecycle_output = machine.succeed(
+                      "sandbox-provider-feasibility --privileged --offline "
+                      f"--attempt-id plife{sample}"
+                  )
+                  attempt_lines = [
+                      line
+                      for line in lifecycle_output.splitlines()
+                      if line.startswith("attempt=")
+                  ]
+                  assert len(attempt_lines) == 1, lifecycle_output
+                  lifecycle_samples.append(attempt_lines[0])
+              total_p95 = percentile_95(lifecycle_samples, "total_us")
+              assert total_p95 <= 2_000_000, total_p95
+              print(
+                  "PINNED_LIFECYCLE_P95;"
+                  f"samples=30;total_us_p95={total_p95}"
+              )
             '';
           };
         }

@@ -59,17 +59,25 @@ jobs:
           grep -q 'vm_external_egress=blocked' pinned-host-profile.txt
           grep -q 'PINNED_NAMESPACE_PROBE;namespace_entry_lifecycle=retained-fd-full-set-entered-' \
             pinned-host-profile.txt
-          grep -q 'PINNED_LIMIT_READBACK;.*cgroup-kill-read-back-ok' \
+          grep -q 'PINNED_LIMIT_READBACK;.*cgroup-kill-exercised-ok' \
             pinned-host-profile.txt
-      - name: Record pinned VM closure
+          test "$(grep -c 'PINNED_CLEANUP_P95;.*samples=30' pinned-host-profile.txt)" -eq 3
+          grep -q 'PINNED_LIFECYCLE_P95;samples=30' pinned-host-profile.txt
+      - name: Record pinned VM build closure
         working-directory: prototypes/sandbox-provider-feasibility
-        run: nix path-info --json --recursive ./result >pinned-host-closure.json
+        run: |
+          set -euo pipefail
+          result_derivation=$(nix-store --query --deriver ./result)
+          test "$result_derivation" != unknown-deriver
+          nix-store --query --requisites "$result_derivation" \
+            | LC_ALL=C sort >pinned-host-build-closure.txt
+          test "$(wc -l <pinned-host-build-closure.txt)" -gt 100
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sandbox-provider-pinned-host-${{ matrix.architecture }}
           path: |
             prototypes/sandbox-provider-feasibility/pinned-flake-metadata.json
-            prototypes/sandbox-provider-feasibility/pinned-host-closure.json
+            prototypes/sandbox-provider-feasibility/pinned-host-build-closure.txt
             prototypes/sandbox-provider-feasibility/pinned-host-profile.txt
           if-no-files-found: error
           retention-days: 14
@@ -156,8 +164,10 @@ jobs:
           sudo ./target/debug/sandbox-provider-feasibility \
             --privileged --offline --cgroup-limits --attempt-id limits \
             | tee cgroup-limits.txt
-          grep -q 'cgroup_limits=memory-swap-cpu-pids-io-cgroup-kill-read-back-ok' \
+          grep -q 'cgroup_limits=memory-swap-cpu-pids-io-cgroup-kill-exercised-ok' \
             cgroup-limits.txt
+          grep -q 'io_weight=default 200' cgroup-limits.txt
+          grep -q 'cgroup_kill_exercised=true' cgroup-limits.txt
           grep -q 'stop_requested=true;worker_reaped=true;unit_absent=true' cgroup-limits.txt
 
       - name: Enter retained namespace descriptors and prove controlled teardown

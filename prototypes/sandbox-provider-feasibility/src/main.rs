@@ -35,7 +35,7 @@ const PROBE_MEMORY_MAX: u64 = 128 * 1024 * 1024;
 const PROBE_MEMORY_SWAP_MAX: u64 = 0;
 const PROBE_TASKS_MAX: u64 = 16;
 const PROBE_CPU_QUOTA_PER_SECOND_US: u64 = 500_000;
-const PROBE_IO_WEIGHT: u64 = 100;
+const PROBE_IO_WEIGHT: u64 = 200;
 
 fn main() {
     let arguments: Vec<String> = std::env::args().collect();
@@ -591,49 +591,89 @@ async fn probe_cgroup_limits(attempt_id: &str, network_isolation: &str) {
         println!("cgroup-limits-rejected;reason=worker-launch");
         return;
     };
-    let applied = cgroup_limits_match(worker.id());
-    let stop_requested = proxy
-        .stop_unit(unit.clone(), "replace".to_owned())
-        .await
-        .is_ok();
+    let readback = cgroup_limit_readback(worker.id());
+    let applied = readback.as_ref().is_some_and(CgroupLimitReadback::matches);
+    let cgroup_kill_exercised = readback
+        .as_ref()
+        .is_some_and(CgroupLimitReadback::exercise_cgroup_kill);
+    let stop_requested = match proxy.stop_unit(unit.clone(), "replace".to_owned()).await {
+        Ok(_) => true,
+        Err(_) => proxy.get_unit(unit.clone()).await.is_err(),
+    };
     let worker_reaped = worker.wait().is_ok();
     let unit_absent = wait_for_unit_absent(&proxy, &unit).await;
+    let raw_readback = readback.map_or_else(|| "unavailable".to_owned(), |value| value.summary());
     println!(
-        "cgroup_limits={};network_isolation={network_isolation};stop_requested={stop_requested};worker_reaped={worker_reaped};unit_absent={unit_absent}",
-        if applied {
-            "memory-swap-cpu-pids-io-cgroup-kill-read-back-ok"
+        "cgroup_limits={};network_isolation={network_isolation};{raw_readback};cgroup_kill_exercised={cgroup_kill_exercised};stop_requested={stop_requested};worker_reaped={worker_reaped};unit_absent={unit_absent}",
+        if applied && cgroup_kill_exercised {
+            "memory-swap-cpu-pids-io-cgroup-kill-exercised-ok"
         } else {
             "read-back-mismatch"
         }
     );
 }
 
-fn cgroup_limits_match(pid: u32) -> bool {
-    let Some(relative_path) = process_cgroup_path(pid) else {
-        return false;
-    };
+struct CgroupLimitReadback {
+    cgroup: std::path::PathBuf,
+    memory_max: String,
+    memory_swap_max: String,
+    pids_max: String,
+    io_weight: String,
+    cpu_max: String,
+    cgroup_kill_exists: bool,
+}
+
+impl CgroupLimitReadback {
+    fn matches(&self) -> bool {
+        let mut cpu_fields = self.cpu_max.split_whitespace();
+        let quota = cpu_fields
+            .next()
+            .and_then(|field| field.parse::<u64>().ok());
+        let period = cpu_fields
+            .next()
+            .and_then(|field| field.parse::<u64>().ok());
+        self.memory_max == PROBE_MEMORY_MAX.to_string()
+            && self.memory_swap_max == PROBE_MEMORY_SWAP_MAX.to_string()
+            && self.pids_max == PROBE_TASKS_MAX.to_string()
+            && self.io_weight == format!("default {PROBE_IO_WEIGHT}")
+            && matches!((quota, period), (Some(quota), Some(period)) if quota * 2 == period)
+            && self.cgroup_kill_exists
+    }
+
+    fn exercise_cgroup_kill(&self) -> bool {
+        std::fs::write(self.cgroup.join("cgroup.kill"), "1").is_ok()
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "memory_max={};memory_swap_max={};pids_max={};io_weight={};cpu_max={};cgroup_kill={}",
+            self.memory_max,
+            self.memory_swap_max,
+            self.pids_max,
+            self.io_weight,
+            self.cpu_max,
+            if self.cgroup_kill_exists {
+                "present"
+            } else {
+                "absent"
+            }
+        )
+    }
+}
+
+fn cgroup_limit_readback(pid: u32) -> Option<CgroupLimitReadback> {
+    let relative_path = process_cgroup_path(pid)?;
     let cgroup = std::path::Path::new("/sys/fs/cgroup").join(relative_path);
-    let memory_matches = read_trimmed(cgroup.join("memory.max"))
-        .is_some_and(|value| value == PROBE_MEMORY_MAX.to_string());
-    let memory_swap_matches = read_trimmed(cgroup.join("memory.swap.max"))
-        .is_some_and(|value| value == PROBE_MEMORY_SWAP_MAX.to_string());
-    let tasks_match = read_trimmed(cgroup.join("pids.max"))
-        .is_some_and(|value| value == PROBE_TASKS_MAX.to_string());
-    let io_matches = read_trimmed(cgroup.join("io.weight"))
-        .is_some_and(|value| value == format!("default {PROBE_IO_WEIGHT}"));
-    let cpu_matches = read_trimmed(cgroup.join("cpu.max")).is_some_and(|value| {
-        let mut fields = value.split_whitespace();
-        let quota = fields.next().and_then(|field| field.parse::<u64>().ok());
-        let period = fields.next().and_then(|field| field.parse::<u64>().ok());
-        matches!((quota, period), (Some(quota), Some(period)) if quota * 2 == period)
-    });
     let cgroup_kill_exists = cgroup.join("cgroup.kill").is_file();
-    memory_matches
-        && memory_swap_matches
-        && tasks_match
-        && io_matches
-        && cpu_matches
-        && cgroup_kill_exists
+    Some(CgroupLimitReadback {
+        memory_max: read_trimmed(cgroup.join("memory.max"))?,
+        memory_swap_max: read_trimmed(cgroup.join("memory.swap.max"))?,
+        pids_max: read_trimmed(cgroup.join("pids.max"))?,
+        io_weight: read_trimmed(cgroup.join("io.weight"))?,
+        cpu_max: read_trimmed(cgroup.join("cpu.max"))?,
+        cgroup,
+        cgroup_kill_exists,
+    })
 }
 
 fn process_cgroup_path(pid: u32) -> Option<String> {
