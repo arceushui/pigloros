@@ -443,7 +443,7 @@ fn named_directory_identity(
 ) -> Result<DirectoryIdentity, MaterializationError> {
     fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(map_open_error)
-        .and_then(directory_entry_identity)
+        .and_then(private_directory_identity)
 }
 
 #[cfg(target_os = "linux")]
@@ -452,7 +452,18 @@ fn descriptor_directory_identity(
 ) -> Result<DirectoryIdentity, MaterializationError> {
     fs::fstat(directory)
         .map_err(map_open_error)
-        .and_then(directory_entry_identity)
+        .and_then(private_directory_identity)
+}
+
+#[cfg(target_os = "linux")]
+fn private_directory_identity(
+    metadata: rustix::fs::Stat,
+) -> Result<DirectoryIdentity, MaterializationError> {
+    let mode = Mode::from_raw_mode(metadata.st_mode);
+    if metadata.st_uid != effective_uid() || mode != Mode::RWXU {
+        return Err(MaterializationError::UntrustedOutputDirectory);
+    }
+    directory_entry_identity(metadata)
 }
 
 #[cfg(target_os = "linux")]
