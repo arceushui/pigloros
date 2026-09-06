@@ -32,6 +32,7 @@ use zbus::zvariant::{OwnedValue, Type, Value};
 
 const CONTROL_PLANE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_MEMORY_MAX: u64 = 128 * 1024 * 1024;
+const PROBE_MEMORY_SWAP_MAX: u64 = 0;
 const PROBE_TASKS_MAX: u64 = 16;
 const PROBE_CPU_QUOTA_PER_SECOND_US: u64 = 500_000;
 const PROBE_IO_WEIGHT: u64 = 100;
@@ -600,7 +601,7 @@ async fn probe_cgroup_limits(attempt_id: &str, network_isolation: &str) {
     println!(
         "cgroup_limits={};network_isolation={network_isolation};stop_requested={stop_requested};worker_reaped={worker_reaped};unit_absent={unit_absent}",
         if applied {
-            "memory-cpu-pids-io-read-back-ok"
+            "memory-swap-cpu-pids-io-cgroup-kill-read-back-ok"
         } else {
             "read-back-mismatch"
         }
@@ -614,6 +615,8 @@ fn cgroup_limits_match(pid: u32) -> bool {
     let cgroup = std::path::Path::new("/sys/fs/cgroup").join(relative_path);
     let memory_matches = read_trimmed(cgroup.join("memory.max"))
         .is_some_and(|value| value == PROBE_MEMORY_MAX.to_string());
+    let memory_swap_matches = read_trimmed(cgroup.join("memory.swap.max"))
+        .is_some_and(|value| value == PROBE_MEMORY_SWAP_MAX.to_string());
     let tasks_match = read_trimmed(cgroup.join("pids.max"))
         .is_some_and(|value| value == PROBE_TASKS_MAX.to_string());
     let io_matches = read_trimmed(cgroup.join("io.weight"))
@@ -624,7 +627,13 @@ fn cgroup_limits_match(pid: u32) -> bool {
         let period = fields.next().and_then(|field| field.parse::<u64>().ok());
         matches!((quota, period), (Some(quota), Some(period)) if quota * 2 == period)
     });
-    memory_matches && tasks_match && io_matches && cpu_matches
+    let cgroup_kill_exists = cgroup.join("cgroup.kill").is_file();
+    memory_matches
+        && memory_swap_matches
+        && tasks_match
+        && io_matches
+        && cpu_matches
+        && cgroup_kill_exists
 }
 
 fn process_cgroup_path(pid: u32) -> Option<String> {
@@ -693,6 +702,10 @@ async fn start_transient_scope(
             OwnedValue::from(1_000_000_u64),
         ),
         ("MemoryMax".to_owned(), OwnedValue::from(PROBE_MEMORY_MAX)),
+        (
+            "MemorySwapMax".to_owned(),
+            OwnedValue::from(PROBE_MEMORY_SWAP_MAX),
+        ),
         ("TasksMax".to_owned(), OwnedValue::from(PROBE_TASKS_MAX)),
         (
             "CPUQuotaPerSecUSec".to_owned(),

@@ -91,7 +91,6 @@
               assert systemd_version.startswith("systemd 260 "), systemd_version
               assert kernel_release.startswith("6.12."), kernel_release
               assert {"cpu", "memory", "pids"}.issubset(set(controllers.split())), controllers
-              machine.succeed("test -e /sys/fs/cgroup/cgroup.kill")
               machine.succeed("test -e /sys/module/dm_verity")
               machine.succeed("test -e /dev/mapper/control")
               machine.fail(
@@ -105,7 +104,7 @@
                   f"kernel={kernel_release};"
                   f"systemd={systemd_version};"
                   f"controllers={controllers};"
-                  "cgroup_kill=present;dm_verity=present;mapper_control=present;"
+                  "dm_verity=present;mapper_control=present;"
                   "vm_external_egress=blocked"
               )
 
@@ -136,7 +135,9 @@
                   "--cgroup-limits --attempt-id pinnedlimits"
               ).strip()
               print(f"PINNED_LIMIT_READBACK;{limits}")
-              assert "memory-cpu-pids-io-read-back-ok" in limits, limits
+              assert (
+                  "memory-swap-cpu-pids-io-cgroup-kill-read-back-ok" in limits
+              ), limits
               assert "unit_absent=true" in limits, limits
             '';
           };
