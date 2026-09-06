@@ -464,14 +464,16 @@ impl ProjectionRegistry {
             .transpose()
             .and_then(|artifact| {
                 let (status, artifact_digest, projection_digest, source_digest, artifacts) =
-                    artifact.map_or(
-                        (
-                            ObservationStatusV1::NotObserved,
-                            None,
-                            None,
-                            absence_source_digest(context, subject_id),
-                            Vec::new(),
-                        ),
+                    artifact.map_or_else(
+                        || {
+                            (
+                                ObservationStatusV1::NotObserved,
+                                None,
+                                None,
+                                absence_source_digest(context, subject_id),
+                                Vec::new(),
+                            )
+                        },
                         |artifact| {
                             let digest = artifact.digest();
                             (
