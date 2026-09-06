@@ -100,7 +100,7 @@ impl AuthorizationCacheV1 {
         let grants = authority.chain().grants();
         let grant_ids = grants
             .iter()
-            .map(|grant| grant.grant_id())
+            .map(pos_core::CapabilityGrantV1::grant_id)
             .collect::<BTreeSet<_>>();
         let consent_references = grants
             .iter()
@@ -108,19 +108,21 @@ impl AuthorizationCacheV1 {
             .collect::<BTreeSet<_>>();
         let valid_until_position = grants
             .iter()
-            .map(|grant| grant.valid_until_position())
+            .map(pos_core::CapabilityGrantV1::valid_until_position)
             .min()?;
+        let authentication_expiry = request.authenticated().expires_at();
         let expires_at = match request.consent() {
             ConsentEvidenceV1::Resolved { grants } => grants
                 .iter()
-                .map(|grant| grant.valid_until())
+                .map(pos_core::ConsentGrantRefV1::valid_until)
                 .min()
-                .map_or(request.authenticated().expires_at(), |consent_expiry| {
-                    consent_expiry.min(request.authenticated().expires_at())
+                .map_or(authentication_expiry, |consent_expiry| {
+                    consent_expiry.min(authentication_expiry)
                 }),
-            _ => request.authenticated().expires_at(),
+            _ => authentication_expiry,
         };
-        let request_matches = decision.request_digest() == request.binding_digest()
+        let digest_matches = decision.request_digest() == request.binding_digest();
+        let request_matches = digest_matches
             && decision.authority_timeline() == request.authority_timeline()
             && decision.at_position() == request.at_position()
             && decision.capability_policy_revision() == request.capability_policy_revision()
@@ -525,9 +527,9 @@ mod tests {
         ids::EventId,
         AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
         AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-        AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1,
-        CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
-        DelegationChainV1, PrincipalRefV1,
+        AuthorityPersistenceStateV1, AuthorizationRequestDraftV1, AuthorizationRequestV1,
+        CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+        ConsentEvidenceV1, DelegationChainV1, PrincipalRefV1,
     };
     use proptest::prelude::*;
 
