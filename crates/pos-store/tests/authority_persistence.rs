@@ -415,17 +415,19 @@ fn authority_state_rejects_a_backdated_persisted_revocation() {
     let encoded = ok(state.to_persistence_bytes());
     let mut outer: Value = ok(ciborium::de::from_reader(encoded.as_slice()));
     let Value::Array(outer_fields) = &mut outer else {
-        panic!("APS1 fixture must be an array");
+        std::panic::resume_unwind(Box::new("APS1 fixture must be an array"));
     };
     let Value::Array(revocations) = &mut outer_fields[3] else {
-        panic!("APS1 revocations must be an array");
+        std::panic::resume_unwind(Box::new("APS1 revocations must be an array"));
     };
     let Value::Bytes(revocation_bytes) = &mut revocations[0] else {
-        panic!("APS1 revocation must contain canonical bytes");
+        std::panic::resume_unwind(Box::new(
+            "APS1 revocation must contain canonical bytes",
+        ));
     };
     let mut revocation_value: Value = ok(ciborium::de::from_reader(revocation_bytes.as_slice()));
     let Value::Array(revocation_fields) = &mut revocation_value else {
-        panic!("CRF1 fixture must be an array");
+        std::panic::resume_unwind(Box::new("CRF1 fixture must be an array"));
     };
     revocation_fields[4] = Value::Integer(2_u64.into());
     revocation_bytes.clear();
