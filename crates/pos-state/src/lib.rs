@@ -1786,24 +1786,46 @@ mod tests {
             prop_assert_eq!(count1, n_events as u64);
         }
     }
-}
-
-#[cfg(test)]
-mod erasure_fence_coverage {
-    use super::*;
 
     #[test]
-    fn erasure_fence_covers_bound_and_unbound_paths() {
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn public_observation_path_enters_the_erasure_fence() {
         let timeline = TimelineId::new();
         let registry = ProjectionRegistry::new();
-        assert_eq!(
-            registry.with_erasure_fence(timeline, |_| Ok::<_, AuthorityErrorV1>(())),
-            Ok(())
-        );
+        let fixture = active_decision(timeline);
+        let authority_registry = test_ok(AuthorityRegistrySnapshotV1::try_new(
+            test_hash(7),
+            vec![fixture.request.authenticated().registry_binding_digest()],
+            Vec::new(),
+            Vec::new(),
+        ));
+        let context = ProjectionObservationContextV1 {
+            timeline_id: timeline,
+            observed_through: Seq::ZERO,
+            reducer: "missing-reducer".to_owned(),
+            prior_snapshot_digest: None,
+        };
+        assert!(registry
+            .materialize_authorized_observation(
+                &fixture.request,
+                &fixture.decision,
+                &fixture.authority,
+                &authority_registry,
+                Seq::ZERO,
+                &context,
+            )
+            .is_err());
 
         let unbound = ProjectionRegistry::new().without_erasure_gate();
         assert_eq!(
-            unbound.with_erasure_fence(timeline, |_| Ok::<_, AuthorityErrorV1>(())),
+            unbound.materialize_authorized_observation(
+                &fixture.request,
+                &fixture.decision,
+                &fixture.authority,
+                &authority_registry,
+                Seq::ZERO,
+                &context,
+            ),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
     }
