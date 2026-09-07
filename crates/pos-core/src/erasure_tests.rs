@@ -49,6 +49,14 @@ impl ErasureVerifiedStateQueryV1 for ErrorStateQuery {
     ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
+
+    fn verified_state_with_topology(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>, ErasureErrorV1>
+    {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
 }
 
 #[test]

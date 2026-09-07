@@ -76,6 +76,17 @@ impl ErasureVerifiedStateQueryV1 for LegacyVerifiedRecoveryQuery {
     }
 }
 
+struct StateOnlyRecoveryQuery;
+
+impl ErasureVerifiedStateQueryV1 for StateOnlyRecoveryQuery {
+    fn verified_state(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
+        Ok(None)
+    }
+}
+
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     fixture_request(RequestFixtureInput {
         request: reference(1),
@@ -478,6 +489,9 @@ fn legacy_recovery_query_denies_combined_default() -> Result<(), ErasureErrorV1>
     assert!(successful
         .verified_state_with_topology(request.reference())?
         .is_none());
+
+    let mut state_only = StateOnlyRecoveryQuery;
+    assert!(state_only.verified_topology(request.reference())?.is_none());
 
     let mut absent = LegacyVerifiedRecoveryQuery {
         state: None,
