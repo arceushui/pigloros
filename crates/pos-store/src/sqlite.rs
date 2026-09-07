@@ -2208,42 +2208,31 @@ impl SqliteStore {
         .map(|visible| visible == Some(true))
     }
 
-    fn count_visible_root_timeline_ids(
-        &self,
-        maximum: usize,
-        timelines: impl IntoIterator<Item = TimelineId>,
-    ) -> Result<usize, CoreError> {
+    fn count_visible_root_timeline_ids(&self, maximum: usize) -> Result<usize, CoreError> {
         let stop_after = maximum.saturating_add(1);
         let mut count = 0;
-        for timeline in timelines {
-            if count >= stop_after {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM timelines WHERE parent_id IS NULL")
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut rows = Self::query_prepared(&mut statement, &[])
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        while count < stop_after {
+            let Some(row) = rows
+                .next()
+                .map_err(|error| CoreError::Storage(error.to_string()))?
+            else {
                 break;
-            }
+            };
+            let id: String = row
+                .get(0)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let timeline = parse_timeline_id(&id)?;
             if self.timeline_visible_for_read(timeline)? {
                 count += 1;
             }
         }
         Ok(count)
-    }
-
-    fn root_timeline_ids(&self) -> Result<Vec<TimelineId>, CoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM timelines WHERE parent_id IS NULL")
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let mut rows = Self::query_prepared(&mut stmt, &[])
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let mut ids = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|error| CoreError::Storage(error.to_string()))?
-        {
-            let id: String = row
-                .get(0)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            ids.push(parse_timeline_id(&id)?);
-        }
-        Ok(ids)
     }
 
     fn append_visible(
@@ -4140,7 +4129,7 @@ impl EventStore for SqliteStore {
     }
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
-        self.count_visible_root_timeline_ids(maximum, self.root_timeline_ids()?)
+        self.count_visible_root_timeline_ids(maximum)
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
