@@ -2807,13 +2807,6 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
     )?;
     let retry_state = api.dispatch_destruction(request.reference(), retry)?;
     assert_eq!(retry_state.lifecycle(), ErasureLifecycleV1::PartialFailure);
-    let mut stronger_replay = coordinator_receipt_input(target, 30);
-    stronger_replay.replay_claim = ErasureReplayClaimV1::Exact;
-    let derived_partial = api.finalize(request.reference(), stronger_replay)?;
-    assert_eq!(
-        derived_partial.replay_claim(),
-        ErasureReplayClaimV1::StructuralOnly
-    );
     api.acknowledge(
         request.reference(),
         coordinator_acknowledgement(
@@ -2823,8 +2816,14 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
             ErasureAcknowledgementOutcomeV1::Acknowledged,
         )?,
     )?;
-    let complete = api.finalize(request.reference(), coordinator_receipt_input(target, 30))?;
+    let mut stronger_replay = coordinator_receipt_input(target, 30);
+    stronger_replay.replay_claim = ErasureReplayClaimV1::Exact;
+    let complete = api.finalize(request.reference(), stronger_replay)?;
     assert_eq!(complete.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(
+        complete.replay_claim(),
+        ErasureReplayClaimV1::StructuralOnly
+    );
 
     let scope = coordinator_scope(request.reference(), target, lineage_rule)?;
     let extension = coordinator_extension(request.reference(), &scope, lineage_rule, None)?;
