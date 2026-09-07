@@ -573,24 +573,25 @@ fn mount_verified_image(
     }
     let root_device = mount_fields[0].to_owned();
     let root_major_minor = mount_fields[3].to_owned();
-    let mapper_name = if let Some(name) = root_device.strip_prefix("/dev/mapper/") {
-        name.to_owned()
-    } else if root_device.starts_with("/dev/dm-") {
-        command_output(
-            Command::new("dmsetup").args([
-                "info",
-                "--noheadings",
-                "--columns",
-                "--output=name",
-                root_device.as_str(),
-            ]),
-            "resolve mounted device-mapper name",
-        )?
-    } else {
-        return Err(format!(
-            "provider root is not a device-mapper source: {root_device}"
-        ));
-    };
+    let (major, minor) = root_major_minor
+        .split_once(':')
+        .ok_or_else(|| format!("invalid mounted device identity: {root_major_minor}"))?;
+    // findmnt may preserve systemd-dissect's /proc/self/fd/N source spelling.
+    // Resolve the exact mounted block device by its kernel major:minor identity
+    // instead of trusting that presentation path.
+    let mapper_name = command_output(
+        Command::new("dmsetup").args([
+            "info",
+            "--noheadings",
+            "--columns",
+            "--output=name",
+            "--major",
+            major,
+            "--minor",
+            minor,
+        ]),
+        "resolve mounted device-mapper identity",
+    )?;
     let mapper_table = command_output(
         Command::new("dmsetup").args(["table", "--showkeys", mapper_name.as_str()]),
         "read exact dm-verity mapping",
