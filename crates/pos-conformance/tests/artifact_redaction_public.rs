@@ -8,6 +8,20 @@ use pos_core::{
     ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
 };
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected artifact redaction fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
 fn evaluation(
     current: ErasureReplayClaimV1,
     rule: ArtifactTransitionRuleV1,
@@ -29,7 +43,7 @@ fn evaluation(
             state,
         }],
     )
-    .expect("a unique registered artifact should evaluate")
+    .test_ok()
 }
 
 #[test]
@@ -105,7 +119,7 @@ fn structural_causal_trace_retains_only_minimized_node_and_edge_identity() {
             dependency_class: DependencyClassV1::EndogenousRecomputed,
         }
     );
-    let serialized = serde_json::to_string(&structural).expect("structural trace should serialize");
+    let serialized = serde_json::to_string(&structural).test_ok();
     assert!(!serialized.contains("subject-secret-relation"));
     assert!(!serialized.contains("subject-secret-label"));
     assert!(!serialized.contains("relation"));
