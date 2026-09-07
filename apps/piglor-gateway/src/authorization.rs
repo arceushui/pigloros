@@ -130,6 +130,28 @@ pub enum GatewayAuthorizationError {
     AuthorizationDenied,
 }
 
+/// Exact Timeline target bound into one protected Gateway operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GatewayAuthorizationTarget {
+    /// One proposed action on a Timeline.
+    Action { timeline_id: TimelineId },
+    /// One bounded read range on a Timeline.
+    Read {
+        timeline_id: TimelineId,
+        from_position: Seq,
+        limit: usize,
+    },
+}
+
+impl GatewayAuthorizationTarget {
+    #[must_use]
+    pub const fn timeline_id(self) -> TimelineId {
+        match self {
+            Self::Action { timeline_id } | Self::Read { timeline_id, .. } => timeline_id,
+        }
+    }
+}
+
 /// Public operation inputs resolved by the Gateway before authority evaluation.
 ///
 /// `actor_entity_id` is the simulation actor.  It is intentionally separate
@@ -141,11 +163,7 @@ pub struct GatewayAuthorizationRequest {
     /// The Timeline targeted by this protected operation, when applicable.
     /// Target coordinates are part of the host operation binding and are not
     /// inferred from the Principal or capability strings.
-    pub target_timeline: Option<TimelineId>,
-    /// First Timeline position targeted by a protected read, when applicable.
-    pub target_from_position: Option<Seq>,
-    /// Number of Timeline records targeted by a protected read, when applicable.
-    pub target_limit: Option<usize>,
+    pub target: GatewayAuthorizationTarget,
     pub actor_entity_id: EntityId,
     pub subject_id: Option<EntityId>,
     pub participant_id: Option<EntityId>,
@@ -180,9 +198,16 @@ impl GatewayAuthorizationRequest {
         from_position: u64,
         limit: usize,
     ) -> bool {
-        self.target_timeline == Some(target_timeline)
-            && self.target_from_position == Some(Seq::from_u64(from_position))
-            && self.target_limit == Some(limit)
+        matches!(
+            self.target,
+            GatewayAuthorizationTarget::Read {
+                timeline_id,
+                from_position: target_from_position,
+                limit: target_limit,
+            } if timeline_id == target_timeline
+                && target_from_position == Seq::from_u64(from_position)
+                && target_limit == limit
+        )
     }
 
     /// Build an action request whose resource is the event type and whose action
@@ -197,9 +222,9 @@ impl GatewayAuthorizationRequest {
     ) -> Self {
         let event_type = event_type.into();
         Self {
-            target_timeline: Some(target_timeline),
-            target_from_position: None,
-            target_limit: None,
+            target: GatewayAuthorizationTarget::Action {
+                timeline_id: target_timeline,
+            },
             actor_entity_id,
             subject_id: None,
             participant_id: None,
@@ -236,9 +261,11 @@ impl GatewayAuthorizationRequest {
         at_time: WallTime,
     ) -> Self {
         Self {
-            target_timeline: Some(target_timeline),
-            target_from_position: Some(Seq::from_u64(from_position)),
-            target_limit: Some(limit),
+            target: GatewayAuthorizationTarget::Read {
+                timeline_id: target_timeline,
+                from_position: Seq::from_u64(from_position),
+                limit,
+            },
             actor_entity_id,
             subject_id: None,
             participant_id: None,
@@ -566,9 +593,22 @@ fn nonzero_or(value: Hash, fallback: Hash) -> Hash {
 fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.GatewayAuthorizationRequest.v1\0");
-    digest_optional_timeline(&mut hasher, request.target_timeline);
-    digest_optional_seq(&mut hasher, request.target_from_position);
-    digest_optional_usize(&mut hasher, request.target_limit);
+    match request.target {
+        GatewayAuthorizationTarget::Action { timeline_id } => {
+            hasher.update(&[0]);
+            hasher.update(&timeline_id.inner().to_bytes());
+        }
+        GatewayAuthorizationTarget::Read {
+            timeline_id,
+            from_position,
+            limit,
+        } => {
+            hasher.update(&[1]);
+            hasher.update(&timeline_id.inner().to_bytes());
+            hasher.update(&from_position.as_u64().to_be_bytes());
+            hasher.update(&u64::try_from(limit).unwrap_or(u64::MAX).to_be_bytes());
+        }
+    }
     hasher.update(request.actor_entity_id.to_string().as_bytes());
     for value in [
         request.resource.as_str(),
@@ -581,42 +621,6 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
         hasher.update(value.as_bytes());
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
-}
-
-fn digest_optional_timeline(hasher: &mut blake3::Hasher, value: Option<TimelineId>) {
-    match value {
-        Some(value) => {
-            hasher.update(&[1]);
-            hasher.update(&value.inner().to_bytes());
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-}
-
-fn digest_optional_seq(hasher: &mut blake3::Hasher, value: Option<Seq>) {
-    match value {
-        Some(value) => {
-            hasher.update(&[1]);
-            hasher.update(&value.as_u64().to_be_bytes());
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-}
-
-fn digest_optional_usize(hasher: &mut blake3::Hasher, value: Option<usize>) {
-    match value {
-        Some(value) => {
-            hasher.update(&[1]);
-            hasher.update(&u64::try_from(value).unwrap_or(u64::MAX).to_be_bytes());
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -877,7 +881,9 @@ mod tests {
         let fixture = fixture();
         let first = fixture.authorization.evaluate(action(&fixture)).test_ok();
         let mut second_request = action(&fixture);
-        second_request.target_timeline = Some(TimelineId::new());
+        second_request.target = GatewayAuthorizationTarget::Action {
+            timeline_id: TimelineId::new(),
+        };
         let second = fixture.authorization.evaluate(second_request).test_ok();
         assert_ne!(
             first.operation_binding(),

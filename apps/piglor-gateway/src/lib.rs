@@ -18,7 +18,7 @@ pub use authorization::{
     AirGappedAuthenticationAdapter, GatewayAuthenticationAdapter, GatewayAuthenticationError,
     GatewayAuthenticationRequest, GatewayAuthorization, GatewayAuthorizationAudit,
     GatewayAuthorizationDecision, GatewayAuthorizationError, GatewayAuthorizationRequest,
-    LocalAuthenticationAdapter,
+    GatewayAuthorizationTarget, LocalAuthenticationAdapter,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
@@ -2927,6 +2927,27 @@ mod tests {
             .await
             .test_err();
         assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        for (from_position, limit) in [(1, 1), (0, 2)] {
+            let mismatched_range = gateway
+                .read_events_page_authorized(
+                    &timeline.id().to_string(),
+                    0,
+                    1,
+                    GatewayAuthorizationRequest::read(
+                        actor,
+                        timeline.id(),
+                        from_position,
+                        limit,
+                        WallTime::now(),
+                    ),
+                )
+                .await
+                .test_err();
+            assert!(matches!(
+                mismatched_range,
+                GatewayError::AuthorizationDenied
+            ));
+        }
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
