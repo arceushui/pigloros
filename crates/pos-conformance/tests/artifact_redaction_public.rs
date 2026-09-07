@@ -1,5 +1,6 @@
 use pos_conformance::{
-    CausalTraceEntryV1, DependencyClassV1, ReplayClaimV1, StructuralCausalTraceEntryV1,
+    CausalTraceEntryV1, DependencyClassV1, RedactionStateV1, ReplayClaimV1,
+    StructuralCausalTraceEntryV1,
 };
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
@@ -109,4 +110,41 @@ fn structural_causal_trace_retains_only_minimized_node_and_edge_identity() {
     assert!(!serialized.contains("subject-secret-label"));
     assert!(!serialized.contains("relation"));
     assert!(!serialized.contains("visibility"));
+}
+
+#[test]
+fn public_redaction_state_tracks_erasure_independently_of_profile_support() {
+    let cases = [
+        (
+            ArtifactTransitionRuleV1::PreserveExact,
+            ArtifactStateV1::Retained,
+            RedactionStateV1::None,
+        ),
+        (
+            ArtifactTransitionRuleV1::RedactViews,
+            ArtifactStateV1::TransitionApplied,
+            RedactionStateV1::RedactedViews,
+        ),
+        (
+            ArtifactTransitionRuleV1::RetainStructure,
+            ArtifactStateV1::TransitionApplied,
+            RedactionStateV1::StructuralOnly,
+        ),
+        (
+            ArtifactTransitionRuleV1::Remove,
+            ArtifactStateV1::Erased,
+            RedactionStateV1::EvidenceMissing,
+        ),
+    ];
+    for (rule, state, expected) in cases {
+        let evaluated = evaluation(ErasureReplayClaimV1::IncompatibleProfile, rule, state);
+        assert_eq!(
+            RedactionStateV1::None.after_artifact_evaluation(&evaluated),
+            expected
+        );
+        assert_eq!(
+            RedactionStateV1::EvidenceMissing.after_artifact_evaluation(&evaluated),
+            RedactionStateV1::EvidenceMissing
+        );
+    }
 }
