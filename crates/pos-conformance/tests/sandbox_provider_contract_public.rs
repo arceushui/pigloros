@@ -311,6 +311,76 @@ fn signed_receipt(key: &SigningKey) -> Result<SandboxProviderReceiptV1, SandboxC
     .sign(key)
 }
 
+#[derive(Clone, Copy)]
+enum ReceiptStage {
+    BeforeReady,
+    Ready,
+    Released,
+}
+
+fn signed_receipt_at_stage(
+    key: &SigningKey,
+    stage: ReceiptStage,
+) -> Result<SandboxProviderReceiptV1, SandboxContractErrorV1> {
+    let mut receipt = signed_receipt(key)?;
+    match stage {
+        ReceiptStage::BeforeReady => {
+            receipt.ready1_digest = None;
+            receipt.release1_digest = None;
+        }
+        ReceiptStage::Ready => receipt.release1_digest = None,
+        ReceiptStage::Released => {}
+    }
+    receipt.sign(key)
+}
+
+fn signed_result_for_receipt(
+    key: &SigningKey,
+    receipt: &SandboxProviderReceiptV1,
+    outcome: SandboxTerminalOutcomeV1,
+    operational_events: Vec<u64>,
+) -> Result<SandboxProviderResultV1, SandboxContractErrorV1> {
+    let mut result = result_for_outcome(outcome)?;
+    result.attempt_id = receipt.attempt_id;
+    result.agr1_digest = Some(receipt.authority.agr1_digest);
+    result.spr1_digest = Some(receipt.receipt_digest);
+    result.operational_events = operational_events;
+    result.runtime_attestation_key_id = receipt.runtime_attestation_key_id.clone();
+    result.sign(key)
+}
+
+fn assert_pair_valid(
+    result: &SandboxProviderResultV1,
+    receipt: &SandboxProviderReceiptV1,
+) -> TestResult {
+    result.validate_receipt_lifecycle(receipt)?;
+    let decoded_result =
+        independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?;
+    let decoded_receipt =
+        independent::SandboxProviderReceipt::from_canonical_cbor(&receipt.to_canonical_cbor()?)?;
+    decoded_result.validate_receipt_lifecycle(&decoded_receipt)?;
+    Ok(())
+}
+
+fn assert_pair_rejected(
+    result: &SandboxProviderResultV1,
+    receipt: &SandboxProviderReceiptV1,
+) -> TestResult {
+    assert_eq!(
+        result.validate_receipt_lifecycle(receipt),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+    let decoded_result =
+        independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?;
+    let decoded_receipt =
+        independent::SandboxProviderReceipt::from_canonical_cbor(&receipt.to_canonical_cbor()?)?;
+    assert_eq!(
+        decoded_result.validate_receipt_lifecycle(&decoded_receipt),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    Ok(())
+}
+
 const fn operation_authority() -> RequestAuthorityV1 {
     RequestAuthorityV1 {
         request_id: [1; 16],
@@ -645,6 +715,112 @@ fn spr1_preserves_each_valid_lifecycle_stage_and_rejects_false_evidence() -> Tes
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
 
+    Ok(())
+}
+
+#[test]
+fn result_receipt_pairs_accept_each_reachable_lifecycle_stage() -> TestResult {
+    let key = signing_key();
+    for (stage, outcome, events) in [
+        (
+            ReceiptStage::BeforeReady,
+            SandboxTerminalOutcomeV1::Cancelled,
+            vec![],
+        ),
+        (
+            ReceiptStage::Ready,
+            SandboxTerminalOutcomeV1::Cancelled,
+            vec![11],
+        ),
+        (
+            ReceiptStage::Ready,
+            SandboxTerminalOutcomeV1::Cancelled,
+            vec![11, 13],
+        ),
+        (
+            ReceiptStage::Released,
+            SandboxTerminalOutcomeV1::Cancelled,
+            vec![11, 12],
+        ),
+        (
+            ReceiptStage::Released,
+            SandboxTerminalOutcomeV1::Completed,
+            vec![0, 11, 12],
+        ),
+    ] {
+        let receipt = signed_receipt_at_stage(&key, stage)?;
+        let result = signed_result_for_receipt(&key, &receipt, outcome, events)?;
+        assert_pair_valid(&result, &receipt)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn result_receipt_pairs_reject_identity_and_authority_mismatches() -> TestResult {
+    type ResultMutation = fn(&mut SandboxProviderResultV1);
+    let key = signing_key();
+    let receipt = signed_receipt_at_stage(&key, ReceiptStage::Released)?;
+    let result = signed_result_for_receipt(
+        &key,
+        &receipt,
+        SandboxTerminalOutcomeV1::Completed,
+        vec![11, 12],
+    )?;
+    let mutations: [ResultMutation; 4] = [
+        |value| value.attempt_id = [9; 16],
+        |value| value.agr1_digest = Some(digest(41)),
+        |value| value.spr1_digest = Some(digest(42)),
+        |value| value.runtime_attestation_key_id = "other-runtime-key".to_owned(),
+    ];
+    for mutate in mutations {
+        let mut changed = result.clone();
+        mutate(&mut changed);
+        let changed = changed.sign(&key)?;
+        assert_pair_rejected(&changed, &receipt)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn result_receipt_pairs_reject_impossible_lifecycle_evidence() -> TestResult {
+    let key = signing_key();
+    let cases = [
+        (ReceiptStage::BeforeReady, vec![11]),
+        (ReceiptStage::BeforeReady, vec![12]),
+        (ReceiptStage::BeforeReady, vec![13]),
+        (ReceiptStage::Ready, vec![]),
+        (ReceiptStage::Ready, vec![11, 11]),
+        (ReceiptStage::Ready, vec![11, 12]),
+        (ReceiptStage::Ready, vec![13, 11]),
+        (ReceiptStage::Ready, vec![11, 13, 13]),
+        (ReceiptStage::Released, vec![11]),
+        (ReceiptStage::Released, vec![12]),
+        (ReceiptStage::Released, vec![12, 11]),
+        (ReceiptStage::Released, vec![11, 12, 12]),
+        (ReceiptStage::Released, vec![11, 12, 13]),
+    ];
+    for (stage, events) in cases {
+        let receipt = signed_receipt_at_stage(&key, stage)?;
+        let result =
+            signed_result_for_receipt(&key, &receipt, SandboxTerminalOutcomeV1::Cancelled, events)?;
+        assert_pair_rejected(&result, &receipt)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn completed_result_requires_released_receipt_evidence() -> TestResult {
+    let key = signing_key();
+    for (stage, events) in [
+        (ReceiptStage::BeforeReady, vec![]),
+        (ReceiptStage::Ready, vec![11]),
+        (ReceiptStage::Ready, vec![11, 13]),
+    ] {
+        let receipt = signed_receipt_at_stage(&key, stage)?;
+        let result =
+            signed_result_for_receipt(&key, &receipt, SandboxTerminalOutcomeV1::Completed, events)?;
+        assert_pair_rejected(&result, &receipt)?;
+    }
     Ok(())
 }
 

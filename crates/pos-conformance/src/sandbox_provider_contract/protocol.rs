@@ -24,6 +24,9 @@ const NXP1_DIGEST_DOMAIN: &[u8] = b"PiglorOS.NetworkExchangePlan.v1\0";
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_INPUT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SAFE_DETAIL_BYTES: usize = 256;
+const LAUNCHER_READY_EVENT: u64 = 11;
+const EXECUTION_RELEASED_EVENT: u64 = 12;
+const EXECUTION_RELEASE_DENIED_EVENT: u64 = 13;
 
 /// Authority repeated by every Sandbox Provider request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1102,6 +1105,51 @@ impl SandboxTerminalOutcomeV1 {
     }
 }
 
+fn unique_event_position(
+    events: &[u64],
+    event: u64,
+) -> Result<Option<usize>, SandboxContractErrorV1> {
+    let mut positions = events
+        .iter()
+        .enumerate()
+        .filter_map(|(position, candidate)| (*candidate == event).then_some(position));
+    let position = positions.next();
+    if positions.next().is_some() {
+        Err(SandboxContractErrorV1::InconsistentFields)
+    } else {
+        Ok(position)
+    }
+}
+
+fn validate_lifecycle_events(
+    outcome: SandboxTerminalOutcomeV1,
+    events: &[u64],
+    receipt: &SandboxProviderReceiptV1,
+) -> Result<(), SandboxContractErrorV1> {
+    let ready = unique_event_position(events, LAUNCHER_READY_EVENT)?;
+    let released = unique_event_position(events, EXECUTION_RELEASED_EVENT)?;
+    let denied = unique_event_position(events, EXECUTION_RELEASE_DENIED_EVENT)?;
+    let stage_matches = if receipt.release1_digest.is_some() {
+        denied.is_none()
+            && ready
+                .zip(released)
+                .is_some_and(|(ready, released)| ready < released)
+    } else if receipt.ready1_digest.is_some() {
+        ready.is_some()
+            && released.is_none()
+            && denied.is_none_or(|denied| ready.is_some_and(|ready| ready < denied))
+    } else {
+        ready.is_none() && released.is_none() && denied.is_none()
+    };
+    let outcome_matches = outcome != SandboxTerminalOutcomeV1::Completed
+        || (receipt.ready1_digest.is_some()
+            && receipt.release1_digest.is_some()
+            && denied.is_none());
+    (stage_matches && outcome_matches)
+        .then_some(())
+        .ok_or(SandboxContractErrorV1::InconsistentFields)
+}
+
 impl SandboxProviderResultV1 {
     /// Seal this terminal result with the supplied runtime-attestation key.
     ///
@@ -1136,6 +1184,26 @@ impl SandboxProviderResultV1 {
     ) -> Result<(), SandboxContractErrorV1> {
         self.validate()?;
         verify(SPY1, &self.result_digest, &self.signature, key)
+    }
+
+    /// Validate this result against the exact referenced SPR1 lifecycle evidence.
+    ///
+    /// # Errors
+    /// Returns a closed error when identities, authority, or lifecycle events disagree.
+    pub fn validate_receipt_lifecycle(
+        &self,
+        receipt: &SandboxProviderReceiptV1,
+    ) -> Result<(), SandboxContractErrorV1> {
+        self.validate()?;
+        receipt.validate()?;
+        if self.attempt_id != receipt.attempt_id
+            || self.agr1_digest != Some(receipt.authority.agr1_digest)
+            || self.spr1_digest != Some(receipt.receipt_digest)
+            || self.runtime_attestation_key_id != receipt.runtime_attestation_key_id
+        {
+            return Err(SandboxContractErrorV1::InconsistentFields);
+        }
+        validate_lifecycle_events(self.outcome, &self.operational_events, receipt)
     }
 
     /// Encode exact deterministic-CBOR SPY1 bytes.

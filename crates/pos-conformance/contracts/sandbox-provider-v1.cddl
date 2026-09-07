@@ -11,14 +11,23 @@ epoch = uint
 
 provider-capability = [identifier, uint, uint]
 architecture = 0 / 1
+provider-capabilities = [1*256 provider-capability]
+architectures = [1*2 architecture]
 partition-descriptor = [0..2, bytes .size 16, bytes .size 16,
   uint, 1..17179869184, digest32]
 network-capability = [identifier, 0, 0 / 1,
   (bytes .size 4) / (bytes .size 16), 1..65535, 1..134217728, 1..134217728]
 limit-record = [0..16, uint]
+arguments = [*256 text .size (1..256)]
+limits = [1*17 limit-record]
+network-capabilities = [*256 network-capability]
+identifiers = [*256 identifier]
+network-plans = [*256 network-plan]
+digests = [*256 digest32]
+operational-events = [*256 0..13]
 
 spm1-u = ["SPM1",1,identifier,digest32,digest32,digest32,digest32,key-id,
-  [1* provider-capability],[1* architecture],digest32,digest32,digest32,digest32,
+  provider-capabilities,architectures,digest32,digest32,digest32,digest32,
   epoch,digest32,digest32,key-id]
 spm1 = [spm1-u,digest32,bytes .size 64]
 
@@ -26,11 +35,11 @@ sim1-u = ["SIM1",1,identifier,architecture,uint,digest32,
   [partition-descriptor,partition-descriptor,partition-descriptor],
   sha256,4096,4096,1,bytes .size 0,
   [uint,sha256,bytes .size (1..1048576)],sha256,uint,
-  text .size (1..512),digest32,[* text .size (1..256)],epoch,key-id]
+  text .size (1..512),digest32,arguments,epoch,key-id]
 sim1 = [sim1-u,digest32,bytes .size 64]
 
 lps1-u = ["LPS1",1,identifier,0..3,digest32,
-  [1* limit-record],[* network-capability]]
+  limits,network-capabilities]
 lps1 = [lps1-u,digest32]
 
 sandbox-requirement = [digest32,digest32,provider-capability,digest32,epoch]
@@ -64,21 +73,21 @@ sbc1 = [sbc1-u,digest32]
 spx1-u = ["SPX1",1,request-common,id16,
   digest32,digest32,digest32,digest32,digest32,digest32,
   digest32,digest32,digest32,digest32,digest32,digest32,digest32,digest32,digest32,
-  [* identifier],payload-descriptor,[* network-plan]]
+  identifiers,payload-descriptor,network-plans]
 spx1 = [spx1-u,digest32]
 
 agr1-u = ["AGR1",1,id16,id16,digest32,digest32,digest32,digest32,digest32,
   digest32,digest32,digest32,digest32,digest32,digest32,digest32,digest32,
-  epoch,epoch,epoch,digest32,digest32,[* digest32],digest32,digest32,key-id]
+  epoch,epoch,epoch,digest32,digest32,digests,digest32,digest32,key-id]
 agr1 = [agr1-u,digest32,bytes .size 64]
 
 spr1-u = ["SPR1",1,id16,digest32,digest32,digest32,digest32,digest32,digest32,
-  digest32,digest32,epoch,epoch,epoch,digest32,digest32,[* digest32],digest32 / null,
+  digest32,digest32,epoch,epoch,epoch,digest32,digest32,digests,digest32 / null,
   digest32 / null,digest32,digest32,digest32,digest32,digest32,key-id]
 spr1 = [spr1-u,digest32,bytes .size 64]
 
 spy1-u = ["SPY1",1,id16,id16,0..4,
-  payload-descriptor / null,digest32 / null,digest32 / null,[* 0..13],key-id]
+  payload-descriptor / null,digest32 / null,digest32 / null,operational-events,key-id]
 spy1 = [spy1-u,digest32,bytes .size 64]
 
 spe1-u = ["SPE1",1,(0..3) / null,id16 / null,digest32 / null,id16 / null,0..17,

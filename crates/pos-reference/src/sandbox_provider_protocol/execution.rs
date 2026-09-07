@@ -15,6 +15,9 @@ const MAX_SAFE_DETAIL_BYTES: usize = 256;
 const MAX_INPUT_BYTES_U64: u64 = 128 * 1024 * 1024;
 const PAYLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_PAYLOAD_CHUNKS: u64 = 128;
+const LAUNCHER_READY_EVENT: u8 = 11;
+const EXECUTION_RELEASED_EVENT: u8 = 12;
+const EXECUTION_RELEASE_DENIED_EVENT: u8 = 13;
 
 /// Direction of one provider payload transfer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,6 +459,51 @@ impl SandboxTerminalOutcome {
     }
 }
 
+fn unique_event_position(
+    events: &[u8],
+    event: u8,
+) -> Result<Option<usize>, SandboxProviderProtocolError> {
+    let mut positions = events
+        .iter()
+        .enumerate()
+        .filter_map(|(position, candidate)| (*candidate == event).then_some(position));
+    let position = positions.next();
+    if positions.next().is_some() {
+        Err(SandboxProviderProtocolError::InconsistentFields)
+    } else {
+        Ok(position)
+    }
+}
+
+fn validate_lifecycle_events(
+    outcome: SandboxTerminalOutcome,
+    events: &[u8],
+    receipt: &SandboxProviderReceipt,
+) -> Result<(), SandboxProviderProtocolError> {
+    let ready = unique_event_position(events, LAUNCHER_READY_EVENT)?;
+    let released = unique_event_position(events, EXECUTION_RELEASED_EVENT)?;
+    let denied = unique_event_position(events, EXECUTION_RELEASE_DENIED_EVENT)?;
+    let stage_matches = if receipt.release1_digest.is_some() {
+        denied.is_none()
+            && ready
+                .zip(released)
+                .is_some_and(|(ready, released)| ready < released)
+    } else if receipt.ready1_digest.is_some() {
+        ready.is_some()
+            && released.is_none()
+            && denied.is_none_or(|denied| ready.is_some_and(|ready| ready < denied))
+    } else {
+        ready.is_none() && released.is_none() && denied.is_none()
+    };
+    let outcome_matches = outcome != SandboxTerminalOutcome::Completed
+        || (receipt.ready1_digest.is_some()
+            && receipt.release1_digest.is_some()
+            && denied.is_none());
+    (stage_matches && outcome_matches)
+        .then_some(())
+        .ok_or(SandboxProviderProtocolError::InconsistentFields)
+}
+
 /// Independently decoded signed SPY1 terminal result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxProviderResult {
@@ -505,6 +553,26 @@ impl SandboxProviderResult {
         let unsigned = self.unsigned_value();
         self.validate(&unsigned)?;
         verify_signature("SPY1", &self.result_digest, &self.signature, key)
+    }
+
+    /// Validate this result against the exact referenced SPR1 lifecycle evidence.
+    ///
+    /// # Errors
+    /// Returns a closed error when identities, authority, or lifecycle events disagree.
+    pub fn validate_receipt_lifecycle(
+        &self,
+        receipt: &SandboxProviderReceipt,
+    ) -> Result<(), SandboxProviderProtocolError> {
+        self.validate(&self.unsigned_value())?;
+        receipt.validate(&receipt.unsigned_value())?;
+        if self.attempt_id != receipt.attempt_id
+            || self.agr1_digest != Some(receipt.authority.agr1_digest)
+            || self.spr1_digest != Some(receipt.receipt_digest)
+            || self.runtime_attestation_key_id != receipt.runtime_attestation_key_id
+        {
+            return Err(SandboxProviderProtocolError::InconsistentFields);
+        }
+        validate_lifecycle_events(self.outcome, &self.operational_events, receipt)
     }
 
     fn validate(&self, unsigned: &[Value; 10]) -> Result<(), SandboxProviderProtocolError> {
