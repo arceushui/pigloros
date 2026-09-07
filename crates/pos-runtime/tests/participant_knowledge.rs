@@ -13,7 +13,9 @@ use pos_core::{
     RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange, State,
     TimelineId, WallTime,
 };
-use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
+use pos_runtime::{
+    AuthorizedDriverTargetV1, Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput,
+};
 use pos_state::{
     AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
     ProjectionRegistry,
@@ -611,8 +613,7 @@ fn stage_current(
     fixture: &Fixture,
 ) -> Result<Vec<EventDraft>, RuntimeError> {
     registry.stage_authorized_driver(
-        fixture.plugin_id,
-        fixture.timeline_id,
+        AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
         fixture.observation.clone(),
         &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
@@ -680,8 +681,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
     let (mut mismatched, mismatch_state) = registry(&fixture, false);
     let authority = current_authority(&fixture);
     assert!(error_text(mismatched.stage_authorized_driver(
-        fixture.plugin_id,
-        TimelineId::new(),
+        AuthorizedDriverTargetV1::new(fixture.plugin_id, TimelineId::new()),
         fixture.observation.clone(),
         &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
@@ -700,8 +700,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
 
     let (mut wrong_knowledge, knowledge_state) = registry(&fixture, false);
     assert!(error_text(wrong_knowledge.stage_authorized_driver(
-        fixture.plugin_id,
-        fixture.timeline_id,
+        AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
         fixture.observation.clone(),
         &observation_evaluation(&fixture.observation),
         &fixture_with_timeline(fixture.timeline_id).knowledge,
@@ -720,8 +719,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
 
     let (mut ambient, ambient_state) = registry(&fixture, true);
     assert!(error_text(ambient.stage_authorized_driver(
-        fixture.plugin_id,
-        fixture.timeline_id,
+        AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
         fixture.observation.clone(),
         &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
@@ -795,8 +793,7 @@ fn current_consent_is_required_before_driver_invocation() {
 
     assert_eq!(
         authority_error(registry.stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
+            AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
             fixture.observation.clone(),
             &observation_evaluation(&fixture.observation),
             &fixture.knowledge,
@@ -905,8 +902,7 @@ fn revoked_authority_is_rejected_before_driver_invocation() {
 
     assert_eq!(
         authority_error(registry.stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
+            AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
             fixture.observation.clone(),
             &observation_evaluation(&fixture.observation),
             &fixture.knowledge,
@@ -1042,8 +1038,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     let authority = current_authority(&fixture);
     let mut missing = PluginRegistry::new();
     assert!(error_text(missing.stage_authorized_driver(
-        fixture.plugin_id,
-        fixture.timeline_id,
+        AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
         fixture.observation.clone(),
         &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
@@ -1064,8 +1059,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         )
         .test_ok();
     assert!(error_text(driverless.stage_authorized_driver(
-        fixture.plugin_id,
-        fixture.timeline_id,
+        AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
         fixture.observation.clone(),
         &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
@@ -1078,8 +1072,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     let (limited, limited_state) = registry(&fixture, false);
     let mut limited = limited.with_resource_limit(0);
     let exhausted = error_text(limited.stage_authorized_driver(
-        fixture.plugin_id,
-        fixture.timeline_id,
+        AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
         fixture.observation.clone(),
         &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
@@ -1153,8 +1146,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
             .test_ok();
 
         let error = error_text(registry.stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
+            AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
             fixture.observation.clone(),
             &observation_evaluation(&fixture.observation),
             &fixture.knowledge,
@@ -1205,8 +1197,7 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
 
     assert_eq!(
         authority_error(registry.stage_authorized_driver(
-            fixture.plugin_id,
-            fixture.timeline_id,
+            AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
             fixture.observation.clone(),
             &observation_evaluation(&fixture.observation),
             &fixture.knowledge,

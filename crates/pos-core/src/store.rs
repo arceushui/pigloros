@@ -957,19 +957,22 @@ pub fn export_timeline(
 ) -> Result<TimelineExport, CoreError> {
     evaluation
         .require_authoritative_use(crate::ErasureArtifactClassV1::Export, artifact_digest)
-        .map_err(|_| CoreError::ArtifactUnavailable)?;
-    let mut export =
-        export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)?;
-    let was_fork = export.timeline.meta.fork_point.take().is_some();
-    if was_fork {
-        materialize_fork_export_as_root(&mut export);
-    }
-    export.parent_fork_hash = None;
-    export.timeline.head = export
-        .events
-        .last()
-        .map_or(crate::clock::Seq::ZERO, |e| e.seq);
-    Ok(export)
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|()| {
+            export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)
+        })
+        .map(|mut export| {
+            let was_fork = export.timeline.meta.fork_point.take().is_some();
+            if was_fork {
+                materialize_fork_export_as_root(&mut export);
+            }
+            export.parent_fork_hash = None;
+            export.timeline.head = export
+                .events
+                .last()
+                .map_or(crate::clock::Seq::ZERO, |event| event.seq);
+            export
+        })
 }
 
 /// Export only events stored on this timeline (no stitch / renumber) — preferred `CoW` name.
@@ -1016,21 +1019,25 @@ pub fn export_timeline_raw(
 ) -> Result<TimelineExport, CoreError> {
     evaluation
         .require_authoritative_use(crate::ErasureArtifactClassV1::Export, artifact_digest)
-        .map_err(|_| CoreError::ArtifactUnavailable)?;
-    let mut export = export_timeline_using(
-        store.get_timeline(id),
-        store.read_own(id, SeqRange::all()),
-        id,
-    )?;
-    match export.timeline.meta.fork_point {
-        Some((parent, at_seq)) => {
-            export.parent_fork_hash = Some(store.chain_hash_at(parent, at_seq)?);
-        }
-        None => {
-            export.parent_fork_hash = None;
-        }
-    }
-    Ok(export)
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|()| {
+            export_timeline_using(
+                store.get_timeline(id),
+                store.read_own(id, SeqRange::all()),
+                id,
+            )
+        })
+        .and_then(|mut export| {
+            export.timeline.meta.fork_point.map_or_else(
+                || Ok(export),
+                |(parent, at_seq)| {
+                    store.chain_hash_at(parent, at_seq).map(|parent_hash| {
+                        export.parent_fork_hash = Some(parent_hash);
+                        export
+                    })
+                },
+            )
+        })
 }
 
 /// Import a previously exported timeline as a **new** logical clone.

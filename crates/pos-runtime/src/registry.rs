@@ -715,6 +715,24 @@ enum AnchoredSelection {
 
 type AnchoredSelectionResult = (Vec<PluginId>, Vec<(PluginId, u128)>, Vec<ProjectionKey>);
 
+/// Exact Plugin and Timeline selected for one authorized Driver invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizedDriverTargetV1 {
+    plugin_id: PluginId,
+    timeline: pos_core::ids::TimelineId,
+}
+
+impl AuthorizedDriverTargetV1 {
+    /// Bind the Driver identity to its authorized Timeline.
+    #[must_use]
+    pub const fn new(plugin_id: PluginId, timeline: pos_core::ids::TimelineId) -> Self {
+        Self {
+            plugin_id,
+            timeline,
+        }
+    }
+}
+
 /// The central plugin registry.
 ///
 /// Plugins register here; the registry wires their components into the
@@ -1402,8 +1420,7 @@ impl PluginRegistry {
     /// Driver/resource error when staging fails.
     pub fn stage_authorized_driver(
         &mut self,
-        plugin_id: PluginId,
-        timeline: pos_core::ids::TimelineId,
+        target: AuthorizedDriverTargetV1,
         observation: AuthorizedObservationV1,
         artifact_evaluation: &pos_core::ReplayClaimEvaluationV1,
         knowledge: &KnowledgeSnapshotV1,
@@ -1411,6 +1428,10 @@ impl PluginRegistry {
         authority_registry: &AuthorityRegistrySnapshotV1,
         authority_position: Seq,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
+        let AuthorizedDriverTargetV1 {
+            plugin_id,
+            timeline,
+        } = target;
         self.ensure_live_execution()
             .and_then(|()| self.ensure_no_pending_step())
             .and_then(|()| {

@@ -44,6 +44,6 @@ pub use driver::{
 };
 pub use error::RuntimeError;
 pub use recorder::{RecordedOutput, Recorder, RunMode};
-pub use registry::{OperationContext, PluginRegistry};
+pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
