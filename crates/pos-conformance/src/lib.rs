@@ -1277,6 +1277,7 @@ impl ConformanceReportV1 {
         &mut self,
         evaluation: &pos_core::ReplayClaimEvaluationV1,
     ) -> Result<(), EvidenceError> {
+        self.validate()?;
         for case in &mut self.cases {
             case.replay_claim = case
                 .replay_claim

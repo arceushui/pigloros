@@ -95,6 +95,27 @@ pub enum ArtifactRedactionStateV1 {
     EvidenceMissing,
 }
 
+impl ArtifactRedactionStateV1 {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::RedactedViews => 1,
+            Self::StructuralOnly => 2,
+            Self::EvidenceMissing => 3,
+        }
+    }
+
+    /// Apply a redaction state without restoring previously unavailable evidence.
+    #[must_use]
+    pub const fn weakened_to(self, candidate: Self) -> Self {
+        if self.rank() >= candidate.rank() {
+            self
+        } else {
+            candidate
+        }
+    }
+}
+
 /// Immutable policy facts registered by the adapter that owns artifact bytes.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RegisteredArtifactV1 {
@@ -318,7 +339,7 @@ impl ReplayClaimEvaluatorV1 {
                 let to = weaker(input.current_claim, disposition_claim);
                 if input.registration.optionality == ArtifactOptionalityV1::Required {
                     replay_claim = weaker(replay_claim, to);
-                    redaction_state = redaction_state.max(artifact_redaction);
+                    redaction_state = redaction_state.weakened_to(artifact_redaction);
                 }
                 EvaluatedArtifactClaimV1 {
                     artifact_class: input.registration.artifact_class,

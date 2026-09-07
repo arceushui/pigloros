@@ -148,6 +148,8 @@ pub struct ReliabilityBin {
 pub struct CalibrationReport {
     /// Replay evidence retained for the report and its required inputs.
     pub replay_claim: pos_core::ErasureReplayClaimV1,
+    /// Redaction state retained independently of profile compatibility.
+    pub redaction_state: pos_core::ArtifactRedactionStateV1,
     /// Brier score: mean squared error of probabilistic predictions.
     pub brier_score: f64,
     pub crps: f64,
@@ -177,6 +179,7 @@ impl CalibrationReport {
         evaluation: &pos_core::ReplayClaimEvaluationV1,
     ) {
         self.replay_claim = self.replay_claim.weakened_to(evaluation.replay_claim);
+        self.redaction_state = self.redaction_state.weakened_to(evaluation.redaction_state);
     }
 }
 
@@ -433,6 +436,7 @@ pub fn compute_report(
         let empty_bins = build_bins(&[]);
         return Ok(CalibrationReport {
             replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            redaction_state: pos_core::ArtifactRedactionStateV1::None,
             brier_score: 0.0,
             crps: 0.0,
             lift_vs_personal_base_rate: 0.0,
@@ -500,6 +504,7 @@ pub fn compute_report(
 
     Ok(CalibrationReport {
         replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+        redaction_state: pos_core::ArtifactRedactionStateV1::None,
         brier_score,
         crps,
         lift_vs_personal_base_rate,
@@ -843,6 +848,10 @@ mod tests {
 
         let report = compute_report(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.replay_claim, pos_core::ErasureReplayClaimV1::Exact);
+        assert_eq!(
+            report.redaction_state,
+            pos_core::ArtifactRedactionStateV1::None
+        );
         assert_eq!(report.n_predictions, 0);
         assert_eq!(report.n_resolved, 0);
         assert!((report.brier_score).abs() < f64::EPSILON);
@@ -887,6 +896,10 @@ mod tests {
             report.replay_claim,
             pos_core::ErasureReplayClaimV1::StructuralOnly
         );
+        assert_eq!(
+            report.redaction_state,
+            pos_core::ArtifactRedactionStateV1::StructuralOnly
+        );
 
         let exact =
             ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &[]).test_ok();
@@ -894,6 +907,10 @@ mod tests {
         assert_eq!(
             report.replay_claim,
             pos_core::ErasureReplayClaimV1::StructuralOnly
+        );
+        assert_eq!(
+            report.redaction_state,
+            pos_core::ArtifactRedactionStateV1::StructuralOnly
         );
     }
 

@@ -288,6 +288,18 @@ fn public_claim_weakener_rejects_an_upgrade() {
 }
 
 #[test]
+fn public_redaction_weakener_rejects_restoration() {
+    assert_eq!(
+        ArtifactRedactionStateV1::StructuralOnly.weakened_to(ArtifactRedactionStateV1::None),
+        ArtifactRedactionStateV1::StructuralOnly
+    );
+    assert_eq!(
+        ArtifactRedactionStateV1::None.weakened_to(ArtifactRedactionStateV1::RedactedViews),
+        ArtifactRedactionStateV1::RedactedViews
+    );
+}
+
+#[test]
 fn registrations_record_every_pre_erasure_policy_fact() {
     let registration = input(
         ErasureArtifactClassV1::CalibrationReport,
