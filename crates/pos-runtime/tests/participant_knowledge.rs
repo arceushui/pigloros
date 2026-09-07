@@ -515,7 +515,11 @@ impl Driver for ParticipantDriver {
     }
 }
 
-fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
+fn registry_with_mode(
+    fixture: &Fixture,
+    ambient: bool,
+    mut registry: PluginRegistry,
+) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
     let state = Arc::new(Mutex::new(DriverState::default()));
     let driver = ParticipantDriver {
         state: Arc::clone(&state),
@@ -523,7 +527,6 @@ fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<Driv
         event_type: Kind::new("participant.planned"),
         ambient_subscription: ambient.then(|| pos_runtime::ProjectionKey::new(EntityId::new())),
     };
-    let mut registry = PluginRegistry::new();
     registry
         .register(
             &TestPlugin {
@@ -534,6 +537,10 @@ fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<Driv
         )
         .test_ok();
     (registry, state)
+}
+
+fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
+    registry_with_mode(fixture, ambient, PluginRegistry::new())
 }
 
 fn current_authority(fixture: &Fixture) -> PersistedAuthorityV1 {
@@ -599,6 +606,32 @@ fn authorized_driver_receives_only_the_bound_snapshot_and_requires_its_commit_fe
             .aborts,
         1
     );
+}
+
+#[test]
+fn replay_rejects_authorized_driver_before_invocation() {
+    let fixture = fixture();
+    let (mut replay, state) = registry_with_mode(&fixture, false, PluginRegistry::new_replay());
+
+    assert_eq!(
+        error_text(stage_current(&mut replay, &fixture)),
+        "recorder mode mismatch: expected Live, got Replay"
+    );
+    let (observed_digest, knowledge_digest, commits, aborts) = {
+        let observed = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            observed.observed_digest,
+            observed.knowledge_digest,
+            observed.commits,
+            observed.aborts,
+        )
+    };
+    assert_eq!(observed_digest, None);
+    assert_eq!(knowledge_digest, None);
+    assert_eq!(commits, 0);
+    assert_eq!(aborts, 0);
 }
 
 #[test]

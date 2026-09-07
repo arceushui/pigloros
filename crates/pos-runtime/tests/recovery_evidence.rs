@@ -10,7 +10,10 @@ use pos_runtime::{
     StepOutput, TimelineHistorySegment,
 };
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -77,6 +80,26 @@ impl Driver for DefaultRecoveryDriver {
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
         Ok(StepOutput::empty())
+    }
+}
+
+struct CountingRecoveryDriver(Arc<AtomicUsize>);
+
+impl Driver for CountingRecoveryDriver {
+    fn name(&self) -> &'static str {
+        "counting-recovery"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+
+    fn stage_restore_from_history(
+        &mut self,
+        _: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -185,6 +208,25 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
     rejected.register_driver(Box::new(DefaultRecoveryDriver));
     rejected.register_driver(Box::new(RejectingRecoveryDriver));
     assert!(rejected.restore_driver_state(&segments, &events).is_err());
+}
+
+#[test]
+fn replay_rejects_driver_recovery_before_invocation() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut replay = PluginRegistry::new_replay();
+    replay.register_driver(Box::new(CountingRecoveryDriver(Arc::clone(&calls))));
+
+    assert_eq!(
+        replay
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO)],
+                &[],
+            )
+            .test_err()
+            .to_string(),
+        "recorder mode mismatch: expected Live, got Replay"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

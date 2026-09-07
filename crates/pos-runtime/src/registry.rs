@@ -1408,7 +1408,8 @@ impl PluginRegistry {
         authority_registry: &AuthorityRegistrySnapshotV1,
         authority_position: Seq,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        self.ensure_no_pending_step()
+        self.ensure_live_execution()
+            .and_then(|()| self.ensure_no_pending_step())
             .and_then(|()| {
                 observation
                     .revalidate(authority, authority_registry, authority_position)
@@ -1756,6 +1757,7 @@ impl PluginRegistry {
         timeline_segments: &[TimelineHistorySegment],
         events: &[Event],
     ) -> Result<(), RuntimeError> {
+        self.ensure_live_execution()?;
         self.ensure_no_pending_step()?;
         validate_recovery_evidence(timeline_segments, events)?;
         // Consent is host control-plane history. Validate the full durable
