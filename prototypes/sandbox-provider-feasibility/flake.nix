@@ -24,6 +24,13 @@
             cargoLock.lockFile = ./Cargo.lock;
             doCheck = false;
           };
+          staticPrototype = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+            pname = "sandbox-provider-feasibility-static";
+            version = "0.0.0";
+            src = pkgs.lib.cleanSource ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            doCheck = false;
+          };
         in
         {
           sandbox-provider-host-profile = pkgs.testers.runNixOSTest {
@@ -41,6 +48,7 @@
 
               environment.systemPackages = [
                 prototype
+                staticPrototype
                 pkgs.b3sum
                 pkgs.cryptsetup
                 pkgs.curl
@@ -131,6 +139,7 @@
               sim1 = machine.succeed(
                   "chmod 0755 /tmp/prove-sim1-image.sh && "
                   "STATIC_TRUE=${pkgs.pkgsStatic.busybox}/bin/true "
+                  "STATIC_PROTOTYPE=${staticPrototype}/bin/sandbox-provider-feasibility "
                   "/tmp/prove-sim1-image.sh"
               ).strip()
               print(f"PINNED_SIM1_PROOF;{sim1}")

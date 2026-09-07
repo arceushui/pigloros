@@ -30,7 +30,9 @@ use std::{
     thread,
     time::Duration,
 };
-use zbus::zvariant::{OwnedFd as ZbusOwnedFd, OwnedValue};
+use zbus::zvariant::{
+    Array as ZbusArray, OwnedFd as ZbusOwnedFd, OwnedValue, StructureBuilder, Value as ZbusValue,
+};
 
 const RELEASE_LAUNCHER: &str = "/.pigloros/release-launcher";
 const ADAPTER_PATH: &str = "/usr/bin/sandbox-provider-feasibility";
@@ -222,7 +224,7 @@ fn transient_properties(
         property("KillMode", "control-group")?,
         property("SendSIGKILL", true)?,
         property("FileDescriptorStoreMax", 0_u32)?,
-        property("ExtraFileDescriptors", extra_descriptors)?,
+        descriptor_property("ExtraFileDescriptors", extra_descriptors)?,
     ])
 }
 
@@ -487,6 +489,7 @@ fn open_non_stdio_descriptors() -> Result<Vec<RawFd>, String> {
     Ok((3..upper).filter(|&fd| descriptor_is_open(fd)).collect())
 }
 
+#[allow(unsafe_code)]
 fn descriptor_is_open(descriptor: RawFd) -> bool {
     // SAFETY: the borrow lives only for this fcntl call. An arbitrary numeric
     // descriptor is permitted; EBADF is precisely how the complete scan marks
@@ -495,6 +498,7 @@ fn descriptor_is_open(descriptor: RawFd) -> bool {
     fcntl(borrowed, FcntlArg::F_GETFD).is_ok()
 }
 
+#[allow(unsafe_code)]
 fn take_inherited_fd(descriptor: RawFd) -> Result<OwnedFd, String> {
     if !descriptor_is_open(descriptor) {
         return Err(format!("inherited descriptor {descriptor} is closed"));
@@ -505,6 +509,7 @@ fn take_inherited_fd(descriptor: RawFd) -> Result<OwnedFd, String> {
     Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
 }
 
+#[allow(unsafe_code)]
 fn socket_type(descriptor: RawFd) -> Result<SockType, String> {
     // SAFETY: this non-owning borrow is bounded to getsockopt.
     let borrowed = unsafe { BorrowedFd::borrow_raw(descriptor) };
@@ -802,6 +807,37 @@ where
     T: zbus::zvariant::Type + Into<zbus::zvariant::Value<'static>>,
 {
     let value = zbus::zvariant::Value::new(value)
+        .try_into_owned()
+        .map_err(display_error)?;
+    Ok((name.to_owned(), value))
+}
+
+fn descriptor_property(
+    name: &str,
+    descriptors: Vec<(String, ZbusOwnedFd)>,
+) -> Result<(String, OwnedValue), String> {
+    let mut structures = descriptors
+        .into_iter()
+        .map(|(descriptor_name, descriptor)| {
+            StructureBuilder::new()
+                .add_field(descriptor_name)
+                .add_field(descriptor)
+                .build()
+                .map_err(display_error)
+        });
+    let first = structures
+        .next()
+        .ok_or_else(|| "ExtraFileDescriptors must not be empty".to_owned())??;
+    let mut array = ZbusArray::new(first.signature());
+    array
+        .append(ZbusValue::Structure(first))
+        .map_err(display_error)?;
+    for structure in structures {
+        array
+            .append(ZbusValue::Structure(structure?))
+            .map_err(display_error)?;
+    }
+    let value = ZbusValue::Array(array)
         .try_into_owned()
         .map_err(display_error)?;
     Ok((name.to_owned(), value))

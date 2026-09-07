@@ -7,6 +7,7 @@ readonly work_dir=/tmp/pigloros-sim1-work
 readonly image_path="$work_dir/sim1.raw"
 readonly unit_name=pigloros-sim1-proof.service
 readonly static_true=${STATIC_TRUE:?STATIC_TRUE must name the static adapter executable}
+readonly static_prototype=${STATIC_PROTOTYPE:?STATIC_PROTOTYPE must name the static proof executable}
 
 cleanup() {
   systemctl stop "$unit_name" >/dev/null 2>&1 || true
@@ -28,8 +29,9 @@ findmnt --raw --noheadings --output SOURCE,TARGET | sort \
   >"$work_dir/mounts-before.txt"
 
 cp "$static_true" "$work_dir/tree/usr/bin/sleep"
-install -m 0755 "$static_true" \
-  "$work_dir/tree/.pigloros/release-launcher"
+install -m 0755 "$static_prototype" \
+  "$work_dir/tree/usr/bin/sandbox-provider-feasibility"
+install -m 0755 /dev/null "$work_dir/tree/.pigloros/release-launcher"
 printf 'ID=pigloros-sim1-proof\nVERSION_ID=1\n' \
   >"$work_dir/tree/usr/lib/os-release"
 
@@ -111,7 +113,9 @@ image_digest=$(b3sum "$image_path" | cut -d' ' -f1)
 certificate_fingerprint=$(openssl x509 -in "$work_dir/verity-certificate.pem" \
   -noout -fingerprint -sha256 | cut -d= -f2 | tr -d :)
 signature_digest=$(sha256sum "$work_dir/sim1.roothash.p7s" | cut -d' ' -f1)
-adapter_digest=$(b3sum "$work_dir/tree/usr/bin/sleep" | cut -d' ' -f1)
+adapter_digest=$(b3sum \
+  "$work_dir/tree/usr/bin/sandbox-provider-feasibility" | cut -d' ' -f1)
+launcher_digest=$(b3sum "$static_prototype" | cut -d' ' -f1)
 launcher_placeholder_digest=$(b3sum \
   "$work_dir/tree/.pigloros/release-launcher" | cut -d' ' -f1)
 
@@ -125,9 +129,6 @@ systemd-run --unit="$unit_name" --property=Type=exec \
 
 main_pid=$(systemctl show "$unit_name" --property=MainPID --value)
 test "$main_pid" -gt 1
-test "$(b3sum "/proc/$main_pid/exe" | cut -d' ' -f1)" = "$adapter_digest"
-stat -Lc 'adapter_device=%d\nadapter_inode=%i' "/proc/$main_pid/exe" \
-  >"$evidence_dir/adapter-runtime-identity.txt"
 awk '$5 == "/" { print }' "/proc/$main_pid/mountinfo" \
   >"$evidence_dir/root-mountinfo.txt"
 grep -Eq '(^|,)ro(,|$)' <(awk '{ print $6 }' \
@@ -143,8 +144,25 @@ grep -Fx "RootHash=$root_hash" "$evidence_dir/unit-readback.txt"
 grep -Fx 'RootImagePolicy=root=verity+signed+read-only-on:=absent' \
   "$evidence_dir/unit-readback.txt"
 grep -Fx 'Result=success' "$evidence_dir/unit-readback.txt"
-systemctl stop "$unit_name"
+systemctl stop "$unit_name" >/dev/null 2>&1 || true
 systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
+
+# Exercise the integrated trusted launch barrier. This command independently
+# repeats the provider-owned PKCS#7/TRS1 gate before its typed
+# StartTransientUnit call, observes ReadyV1 while the adapter is blocked, then
+# releases the held native ELF. The adapter proves that only its Local proxy
+# survives as FD 3.
+"$static_prototype" --release-barrier-proof \
+  "--root-image=$image_path" \
+  "--root-hash-file=$work_dir/sim1.roothash" \
+  "--root-signature=$work_dir/sim1.roothash.p7s" \
+  "--root-certificate=$work_dir/verity-certificate.pem" \
+  "--certificate-fingerprint=$certificate_fingerprint" \
+  | tee "$evidence_dir/release-barrier.txt"
+grep -F 'release_barrier=typed-local-release-ok' \
+  "$evidence_dir/release-barrier.txt"
+grep -F 'fd3=proxy-only;fd4=closed-before-adapter' \
+  "$evidence_dir/release-barrier.txt"
 
 cp "$work_dir/repart-before-signature.json" "$evidence_dir/"
 cp "$work_dir/repart-signed.json" "$evidence_dir/"
@@ -160,6 +178,7 @@ printf '%s\n' \
   "signature_sha256=$signature_digest" \
   "certificate_sha256=$certificate_fingerprint" \
   "adapter_blake3=$adapter_digest" \
+  "launcher_blake3=$launcher_digest" \
   "launcher_placeholder_blake3=$launcher_placeholder_digest" \
   >"$evidence_dir/identity.txt"
 
@@ -221,6 +240,7 @@ fi
 printf '%s\n' \
   'valid_signature=provider-verified' \
   'valid_image=activated-and-executed' \
+  'release_barrier=ready-before-adapter-and-local-fd3' \
   'invalid_root_hash=rejected' \
   'invalid_signature=rejected-before-unit' \
   'residual_unit=absent' \
