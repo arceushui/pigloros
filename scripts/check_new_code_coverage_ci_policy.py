@@ -201,9 +201,27 @@ def check_workflow(workflow_path: pathlib.Path = ROOT / ".github/workflows/ci.ym
 
     gate = jobs.get("ci-gate")
     require(isinstance(gate, dict), "missing ci-gate")
+    gate_needs = gate.get("needs")
+    require(isinstance(gate_needs, list), "ci-gate dependencies must be a list")
     require(
-        "new-code-coverage-policy" in gate.get("needs", []),
+        "new-code-coverage-policy" in gate_needs,
         "new-code coverage policy must be required by ci-gate",
+    )
+    gate_steps = gate.get("steps")
+    require(isinstance(gate_steps, list), "ci-gate steps must be a list")
+    gate_step = named_step(gate_steps, "Require every blocking CI job to pass")
+    gate_environment = gate_step.get("env")
+    require(isinstance(gate_environment, dict), "ci-gate result environment missing")
+    require(
+        gate_environment.get("NEW_CODE_COVERAGE_POLICY_RESULT")
+        == "${{ needs.new-code-coverage-policy.result }}",
+        "ci-gate must bind the new-code coverage policy result",
+    )
+    gate_run = gate_step.get("run")
+    require(isinstance(gate_run, str), "ci-gate result check command missing")
+    require(
+        "COVERAGE_RESULT CARGO_CRAP_RESULT NEW_CODE_COVERAGE_POLICY_RESULT" in gate_run,
+        "ci-gate must check the new-code coverage policy result",
     )
 
 

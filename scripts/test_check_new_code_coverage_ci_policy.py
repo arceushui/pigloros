@@ -90,6 +90,24 @@ class NewCodeCoverageCiPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_rejects_unbound_policy_job_result(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["ci-gate"]["steps"][0]["env"].update(
+                {"NEW_CODE_COVERAGE_POLICY_RESULT": "success"}
+            )
+        )
+
+    def test_rejects_unchecked_policy_job_result(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["ci-gate"]["steps"][0].update(
+                {
+                    "run": workflow["jobs"]["ci-gate"]["steps"][0]["run"].replace(
+                        " NEW_CODE_COVERAGE_POLICY_RESULT", ""
+                    )
+                }
+            )
+        )
+
     def test_resolves_diverged_base_like_covgate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = pathlib.Path(directory)

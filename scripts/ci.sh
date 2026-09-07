@@ -34,6 +34,7 @@ echo "==> new-code coverage CI policy"
 python3 "$ROOT/scripts/check_new_code_coverage_ci_policy.py"
 python3 "$ROOT/scripts/test_check_new_code_coverage_ci_policy.py"
 python3 "$ROOT/scripts/test_check_covgate_policy.py"
+python3 "$ROOT/scripts/test_check_rust_coverage_report.py"
 python3 "$ROOT/scripts/test_check_cargo_crap_report.py"
 
 echo "==> cargo deny (dependency policy)"
