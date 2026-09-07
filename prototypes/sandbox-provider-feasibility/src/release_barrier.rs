@@ -1698,9 +1698,11 @@ fn descriptor_property(
     let mut structures = descriptors
         .into_iter()
         .map(|(descriptor_name, descriptor)| {
+            // systemd v260.2 consumes ExtraFileDescriptors as a(hs): the
+            // Unix descriptor precedes its activation name.
             StructureBuilder::new()
-                .add_field(descriptor_name)
-                .append_field(ZbusValue::Fd(descriptor.into()))
+                .add_field(ZbusValue::Fd(descriptor.into()))
+                .append_field(descriptor_name)
                 .build()
                 .map_err(display_error)
         });
