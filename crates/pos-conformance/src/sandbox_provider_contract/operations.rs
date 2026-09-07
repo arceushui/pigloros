@@ -250,7 +250,7 @@ fn validate_authority(authority: &RequestAuthorityV1) -> Result<(), SandboxContr
     }
 }
 
-fn valid_key_id(value: &str) -> bool {
+const fn valid_key_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_KEY_ID_BYTES
 }
 

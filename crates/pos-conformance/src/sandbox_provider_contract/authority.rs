@@ -67,10 +67,7 @@ impl SandboxProviderManifestV1 {
     ///
     /// # Errors
     /// Returns a closed contract error when an unsigned field is invalid.
-    pub fn sign(
-        mut self,
-        key: &ed25519_dalek::SigningKey,
-    ) -> Result<Self, SandboxContractErrorV1> {
+    pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
         self.manifest_digest = digest(SPM1, &self.unsigned_value())?;
         self.signature = sign(SPM1, &self.manifest_digest, key);
@@ -177,9 +174,11 @@ impl SandboxProviderManifestV1 {
             .iter()
             .map(capability_value)
             .collect::<Vec<_>>();
-        if self.capabilities.iter().any(|capability| {
-            !identifier(&capability.capability_id, MAX_IDENTIFIER_BYTES)
-        }) || !canonically_ordered(&capability_values)?
+        if self
+            .capabilities
+            .iter()
+            .any(|capability| !identifier(&capability.capability_id, MAX_IDENTIFIER_BYTES))
+            || !canonically_ordered(&capability_values)?
             || !self.architectures.windows(2).all(|pair| pair[0] < pair[1])
         {
             return Err(SandboxContractErrorV1::NonCanonicalOrder);
@@ -308,9 +307,9 @@ impl LaunchPolicyV1 {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
         if !self
-                .effective_limits
-                .windows(2)
-                .all(|pair| pair[0].limit_id < pair[1].limit_id)
+            .effective_limits
+            .windows(2)
+            .all(|pair| pair[0].limit_id < pair[1].limit_id)
         {
             return Err(SandboxContractErrorV1::NonCanonicalOrder);
         }
@@ -322,9 +321,7 @@ impl LaunchPolicyV1 {
         if !canonically_ordered(&network_values)? {
             return Err(SandboxContractErrorV1::NonCanonicalOrder);
         }
-        if self.execution_mode != ExecutionModeV1::Local
-            && !self.network_capabilities.is_empty()
-        {
+        if self.execution_mode != ExecutionModeV1::Local && !self.network_capabilities.is_empty() {
             return Err(SandboxContractErrorV1::InconsistentFields);
         }
         Ok(())
@@ -458,10 +455,7 @@ impl SignedImageManifestV1 {
     ///
     /// # Errors
     /// Returns a closed contract error when an unsigned field is invalid.
-    pub fn sign(
-        mut self,
-        key: &ed25519_dalek::SigningKey,
-    ) -> Result<Self, SandboxContractErrorV1> {
+    pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
         self.manifest_digest = digest(SIM1, &self.unsigned_value())?;
         self.signature = sign(SIM1, &self.manifest_digest, key);
@@ -555,9 +549,10 @@ impl SignedImageManifestV1 {
             || self.executable_blake3_digest == [0; 32]
             || !normalized_absolute_path(&self.executable_path)
             || self.arguments.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
-            || self.arguments.iter().any(|argument| {
-                argument.is_empty() || argument.len() > MAX_ARGUMENT_BYTES
-            })
+            || self
+                .arguments
+                .iter()
+                .any(|argument| argument.is_empty() || argument.len() > MAX_ARGUMENT_BYTES)
             || !bounded_text(&self.image_project_key_id, MAX_IDENTIFIER_BYTES)
             || !valid_pkcs7(&self.root_hash_signature)
         {
@@ -585,7 +580,12 @@ impl SignedImageManifestV1 {
             value_uint(self.kernel_keyring_serial),
             value_text(&self.executable_path),
             value_bytes(&self.executable_blake3_digest),
-            Value::Array(self.arguments.iter().map(|value| value_text(value)).collect()),
+            Value::Array(
+                self.arguments
+                    .iter()
+                    .map(|value| value_text(value))
+                    .collect(),
+            ),
             value_uint(self.image_trust_epoch),
             value_text(&self.image_project_key_id),
         ])
@@ -633,7 +633,7 @@ fn network_capability_value(value: &NetworkCapabilityV1) -> Value {
     Value::Array(vec![
         value_text(&value.capability_id),
         value_uint(0),
-        value_uint(if value.address.len() == 4 { 0 } else { 1 }),
+        value_uint(u64::from(value.address.len() != 4)),
         value_bytes(&value.address),
         value_uint(u64::from(value.destination_port)),
         value_uint(value.request_maximum),
@@ -661,9 +661,7 @@ fn decode_network_capabilities(
             let fields = array::<7>(value)?;
             let address = bytes(&fields[3])?.to_vec();
             let family = uint(&fields[2])?;
-            if uint(&fields[1])? != 0
-                || !matches!((family, address.len()), (0, 4) | (1, 16))
-            {
+            if uint(&fields[1])? != 0 || !matches!((family, address.len()), (0, 4) | (1, 16)) {
                 return Err(SandboxContractErrorV1::InvalidEncoding);
             }
             Ok(NetworkCapabilityV1 {
@@ -725,9 +723,7 @@ fn partition_value(value: &PartitionDescriptorV1) -> Value {
     ])
 }
 
-fn decode_partitions(
-    value: &Value,
-) -> Result<[PartitionDescriptorV1; 3], SandboxContractErrorV1> {
+fn decode_partitions(value: &Value) -> Result<[PartitionDescriptorV1; 3], SandboxContractErrorV1> {
     let values = array::<3>(value)?;
     values
         .iter()
@@ -778,7 +774,7 @@ fn validate_partitions(
     Ok(())
 }
 
-fn ranges_overlap(left: &PartitionDescriptorV1, right: &PartitionDescriptorV1) -> bool {
+const fn ranges_overlap(left: &PartitionDescriptorV1, right: &PartitionDescriptorV1) -> bool {
     let Some(left_end) = left.start_bytes.checked_add(left.length_bytes) else {
         return true;
     };
@@ -788,34 +784,31 @@ fn ranges_overlap(left: &PartitionDescriptorV1, right: &PartitionDescriptorV1) -
     left.start_bytes < right_end && right.start_bytes < left_end
 }
 
-const fn dps_type_uuid(
-    architecture: SandboxArchitectureV1,
-    role: PartitionRoleV1,
-) -> [u8; 16] {
+const fn dps_type_uuid(architecture: SandboxArchitectureV1, role: PartitionRoleV1) -> [u8; 16] {
     match (architecture, role) {
         (SandboxArchitectureV1::X86_64, PartitionRoleV1::RootData) => [
-            0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9,
-            0x84, 0xb7, 0x09,
+            0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84,
+            0xb7, 0x09,
         ],
         (SandboxArchitectureV1::X86_64, PartitionRoleV1::RootVerity) => [
-            0x2c, 0x73, 0x57, 0xed, 0xeb, 0xd2, 0x46, 0xd9, 0xae, 0xc1, 0x23, 0xd4, 0x37,
-            0xec, 0x2b, 0xf5,
+            0x2c, 0x73, 0x57, 0xed, 0xeb, 0xd2, 0x46, 0xd9, 0xae, 0xc1, 0x23, 0xd4, 0x37, 0xec,
+            0x2b, 0xf5,
         ],
         (SandboxArchitectureV1::X86_64, PartitionRoleV1::RootVeritySignature) => [
-            0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04,
-            0x08, 0xb1, 0x76,
+            0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08,
+            0xb1, 0x76,
         ],
         (SandboxArchitectureV1::Aarch64, PartitionRoleV1::RootData) => [
-            0xb9, 0x21, 0xb0, 0x45, 0x1d, 0xf0, 0x41, 0xc3, 0xaf, 0x44, 0x4c, 0x6f, 0x28,
-            0x0d, 0x3f, 0xae,
+            0xb9, 0x21, 0xb0, 0x45, 0x1d, 0xf0, 0x41, 0xc3, 0xaf, 0x44, 0x4c, 0x6f, 0x28, 0x0d,
+            0x3f, 0xae,
         ],
         (SandboxArchitectureV1::Aarch64, PartitionRoleV1::RootVerity) => [
-            0xdf, 0x33, 0x00, 0xce, 0xd6, 0x9f, 0x4c, 0x92, 0x97, 0x8c, 0x9b, 0xfb, 0x0f,
-            0x38, 0xd8, 0x20,
+            0xdf, 0x33, 0x00, 0xce, 0xd6, 0x9f, 0x4c, 0x92, 0x97, 0x8c, 0x9b, 0xfb, 0x0f, 0x38,
+            0xd8, 0x20,
         ],
         (SandboxArchitectureV1::Aarch64, PartitionRoleV1::RootVeritySignature) => [
-            0x6d, 0xb6, 0x9d, 0xe6, 0x29, 0xf4, 0x47, 0x58, 0xa7, 0xa5, 0x96, 0x21, 0x90,
-            0xf0, 0x0c, 0xe3,
+            0x6d, 0xb6, 0x9d, 0xe6, 0x29, 0xf4, 0x47, 0x58, 0xa7, 0xa5, 0x96, 0x21, 0x90, 0xf0,
+            0x0c, 0xe3,
         ],
     }
 }
@@ -855,7 +848,7 @@ fn decode_texts(value: &Value) -> Result<Vec<String>, SandboxContractErrorV1> {
         .collect()
 }
 
-fn bounded_text(value: &str, maximum: usize) -> bool {
+const fn bounded_text(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum
 }
 

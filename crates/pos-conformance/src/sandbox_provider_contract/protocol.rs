@@ -98,8 +98,8 @@ impl NetworkExchangePlanV1 {
         }
     }
 
-    fn unsigned_value(&self) -> Value {
-        Value::Array(vec![
+    fn unsigned_fields(&self) -> Vec<Value> {
+        vec![
             value_text(NXP1),
             value_uint(1),
             value_bytes(&self.exchange_id),
@@ -110,14 +110,15 @@ impl NetworkExchangePlanV1 {
             value_uint(self.response_maximum),
             value_bytes(&self.expected_response_digest),
             value_bytes(&self.retention_policy_digest),
-        ])
+        ]
+    }
+
+    fn unsigned_value(&self) -> Value {
+        Value::Array(self.unsigned_fields())
     }
 
     fn value(&self) -> Value {
-        let mut fields = match self.unsigned_value() {
-            Value::Array(fields) => fields,
-            _ => unreachable!("NXP1 encoder always constructs an array"),
-        };
+        let mut fields = self.unsigned_fields();
         fields.push(value_bytes(&self.plan_digest));
         Value::Array(fields)
     }
@@ -365,9 +366,9 @@ pub struct SandboxProviderReceiptV1 {
     pub elm1_digest: [u8; 32],
     /// Ordered NXT1 transcript digests.
     pub network_transcript_digests: Vec<[u8; 32]>,
-    /// ReadyV1 digest, once a valid ready message existed.
+    /// `ReadyV1` digest, once a valid ready message existed.
     pub ready1_digest: Option<[u8; 32]>,
-    /// ReleaseV1 digest, once a valid release was issued.
+    /// `ReleaseV1` digest, once a valid release was issued.
     pub release1_digest: Option<[u8; 32]>,
     /// Final requested-configuration evidence digest.
     pub requested_configuration_evidence: [u8; 32],
@@ -494,12 +495,14 @@ impl SandboxExecuteRequestV1 {
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
-        if self.capability_ids.iter().any(|value| {
-            !identifier(value, MAX_IDENTIFIER_BYTES)
-        }) || !self
+        if self
             .capability_ids
-            .windows(2)
-            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+            .iter()
+            .any(|value| !identifier(value, MAX_IDENTIFIER_BYTES))
+            || !self
+                .capability_ids
+                .windows(2)
+                .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
         {
             return Err(SandboxContractErrorV1::NonCanonicalOrder);
         }
@@ -517,7 +520,7 @@ impl SandboxExecuteRequestV1 {
         Ok(())
     }
 
-    fn bound_digests(&self) -> [[u8; 32]; 15] {
+    const fn bound_digests(&self) -> [[u8; 32]; 15] {
         [
             self.evr1_digest,
             self.cpf1_digest,
@@ -638,10 +641,7 @@ impl AdmissionGrantV1 {
     ///
     /// # Errors
     /// Returns a closed contract error when an unsigned field is invalid.
-    pub fn sign(
-        mut self,
-        key: &ed25519_dalek::SigningKey,
-    ) -> Result<Self, SandboxContractErrorV1> {
+    pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
         self.grant_digest = digest(AGR1, &self.unsigned_value())?;
         self.signature = sign(AGR1, &self.grant_digest, key);
@@ -800,7 +800,7 @@ impl AdmissionAuthorityV1 {
         })
     }
 
-    fn digests(&self) -> [[u8; 32]; 13] {
+    const fn digests(&self) -> [[u8; 32]; 13] {
         [
             self.evr1_digest,
             self.fixture_contract_digest,
@@ -822,8 +822,11 @@ impl AdmissionAuthorityV1 {
         self.digests().contains(&[0; 32])
     }
 
-    fn values(&self) -> impl Iterator<Item = Value> {
-        self.digests().into_iter().map(|value| value_bytes(&value))
+    fn values(&self) -> Vec<Value> {
+        self.digests()
+            .into_iter()
+            .map(|value| value_bytes(&value))
+            .collect()
     }
 }
 
@@ -834,7 +837,7 @@ fn decode_digest_list(value: &Value) -> Result<Vec<[u8; 32]>, SandboxContractErr
     values.iter().map(fixed).collect()
 }
 
-fn bounded_text(value: &str, maximum: usize) -> bool {
+const fn bounded_text(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum
 }
 
@@ -866,10 +869,7 @@ impl SandboxProviderResultV1 {
     ///
     /// # Errors
     /// Returns a closed contract error when an unsigned field is invalid.
-    pub fn sign(
-        mut self,
-        key: &ed25519_dalek::SigningKey,
-    ) -> Result<Self, SandboxContractErrorV1> {
+    pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
         self.result_digest = digest(SPY1, &self.unsigned_value())?;
         self.signature = sign(SPY1, &self.result_digest, key);
@@ -1020,10 +1020,7 @@ fn decode_uint_list(value: &Value) -> Result<Vec<u64>, SandboxContractErrorV1> {
     let Value::Array(values) = value else {
         return Err(SandboxContractErrorV1::InvalidEncoding);
     };
-    values
-        .iter()
-        .map(uint)
-        .collect()
+    values.iter().map(uint).collect()
 }
 
 fn nonzero_optional(value: Option<[u8; 32]>) -> bool {
@@ -1084,10 +1081,7 @@ impl SandboxProviderErrorV1 {
     ///
     /// # Errors
     /// Returns a closed contract error when an unsigned field is invalid.
-    pub fn sign(
-        mut self,
-        key: &ed25519_dalek::SigningKey,
-    ) -> Result<Self, SandboxContractErrorV1> {
+    pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
         self.error_digest = digest(SPE1, &self.unsigned_value())?;
         self.signature = sign(SPE1, &self.error_digest, key);
@@ -1155,9 +1149,10 @@ impl SandboxProviderErrorV1 {
             || self.request_id == Some([0; 16])
             || self.request_digest == Some([0; 32])
             || self.attempt_id == Some([0; 16])
-            || self.safe_detail.as_ref().is_some_and(|value| {
-                value.is_empty() || value.len() > MAX_SAFE_DETAIL_BYTES
-            })
+            || self
+                .safe_detail
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > MAX_SAFE_DETAIL_BYTES)
             || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
@@ -1175,7 +1170,8 @@ impl SandboxProviderErrorV1 {
         Value::Array(vec![
             value_text(SPE1),
             value_uint(1),
-            self.operation.map_or(Value::Null, |value| value_uint(u64::from(value))),
+            self.operation
+                .map_or(Value::Null, |value| value_uint(u64::from(value))),
             value_optional_bytes(self.request_id.as_ref()),
             value_optional_bytes(self.request_digest.as_ref()),
             value_optional_bytes(self.attempt_id.as_ref()),
@@ -1211,10 +1207,7 @@ impl SandboxProviderReceiptV1 {
     ///
     /// # Errors
     /// Returns a closed contract error when an unsigned field is invalid.
-    pub fn sign(
-        mut self,
-        key: &ed25519_dalek::SigningKey,
-    ) -> Result<Self, SandboxContractErrorV1> {
+    pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
         self.receipt_digest = digest(SPR1, &self.unsigned_value())?;
         self.signature = sign(SPR1, &self.receipt_digest, key);
@@ -1251,7 +1244,11 @@ impl SandboxProviderReceiptV1 {
     /// Returns a closed contract error when validation or encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxContractErrorV1> {
         self.validate()?;
-        encode_signed(&self.unsigned_value(), &self.receipt_digest, &self.signature)
+        encode_signed(
+            &self.unsigned_value(),
+            &self.receipt_digest,
+            &self.signature,
+        )
     }
 
     /// Decode exact deterministic-CBOR SPR1 bytes.
@@ -1362,7 +1359,7 @@ impl ReceiptAuthorityV1 {
         })
     }
 
-    fn digests(&self) -> [[u8; 32]; 8] {
+    const fn digests(&self) -> [[u8; 32]; 8] {
         [
             self.agr1_digest,
             self.spm1_digest,
@@ -1379,7 +1376,10 @@ impl ReceiptAuthorityV1 {
         self.digests().contains(&[0; 32])
     }
 
-    fn values(&self) -> impl Iterator<Item = Value> {
-        self.digests().into_iter().map(|value| value_bytes(&value))
+    fn values(&self) -> Vec<Value> {
+        self.digests()
+            .into_iter()
+            .map(|value| value_bytes(&value))
+            .collect()
     }
 }
