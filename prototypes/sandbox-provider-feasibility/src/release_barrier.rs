@@ -1708,7 +1708,7 @@ fn descriptor_property(
             // systemd v260.2 consumes ExtraFileDescriptors as a(hs): the
             // Unix descriptor precedes its activation name.
             StructureBuilder::new()
-                .add_field(ZbusValue::Fd(descriptor.into()))
+                .append_field(ZbusValue::Fd(descriptor.into()))
                 .append_field(descriptor_name.into())
                 .build()
                 .map_err(display_error)
@@ -1716,6 +1716,12 @@ fn descriptor_property(
     let first = structures
         .next()
         .ok_or_else(|| "ExtraFileDescriptors must not be empty".to_owned())??;
+    if first.signature().to_string() != "(hs)" {
+        return Err(format!(
+            "ExtraFileDescriptors item signature must be (hs), got {}",
+            first.signature()
+        ));
+    }
     let mut array = ZbusArray::new(first.signature());
     array
         .append(ZbusValue::Structure(first))
