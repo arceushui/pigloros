@@ -627,6 +627,21 @@ fn reject_host_owned_draft_slice(drafts: &[EventDraft]) -> Result<(), RuntimeErr
         })
 }
 
+fn reject_unowned_plugin_drafts(
+    output: &StepOutput,
+    owned_event_types: &[Kind],
+) -> Result<(), RuntimeError> {
+    if output
+        .drafts
+        .iter()
+        .all(|draft| owned_event_types.contains(&draft.event_type))
+    {
+        Ok(())
+    } else {
+        Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into())
+    }
+}
+
 fn invoke_driver(
     driver: &mut dyn Driver,
     timeline: pos_core::ids::TimelineId,
@@ -643,6 +658,7 @@ fn invoke_driver(
 struct PluginEntry {
     name: String,
     version: String,
+    owned_event_types: Vec<Kind>,
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
     last_tick: Option<u128>,
@@ -1299,7 +1315,7 @@ impl PluginRegistry {
         if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
             return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
         }
-        let (invocation, driver_name) = {
+        let (invocation, driver_name, owned_event_types) = {
             let Some(entry) = self.plugins.get_mut(&plugin_id) else {
                 return Err(RuntimeError::NoDriver {
                     name: plugin_id.to_string(),
@@ -1320,6 +1336,7 @@ impl PluginRegistry {
                     crate::driver::ObservationView::from_authorized_snapshot(snapshot, knowledge),
                 ),
                 entry.name.clone(),
+                entry.owned_event_types.clone(),
             )
         };
         let output = match invocation {
@@ -1330,6 +1347,7 @@ impl PluginRegistry {
             }
         };
         if let Err(error) = reject_host_owned_drafts(&output)
+            .and_then(|()| reject_unowned_plugin_drafts(&output, &owned_event_types))
             .and_then(|()| self.schemas.validate_batch(&output.drafts))
         {
             let _ = self.abort_drivers(&[plugin_id]);
@@ -1834,6 +1852,7 @@ impl PluginRegistry {
             PluginEntry {
                 name,
                 version: plugin.version().to_owned(),
+                owned_event_types: cap.owned_event_types,
                 driver,
                 approver,
                 last_tick: None,
@@ -1879,6 +1898,7 @@ impl PluginRegistry {
             PluginEntry {
                 name,
                 version: "0.1.0".to_owned(),
+                owned_event_types: Vec::new(),
                 driver: Some(driver),
                 approver: None,
                 last_tick: None,
@@ -3209,6 +3229,7 @@ mod tests {
             PluginEntry {
                 name: "event-filter".to_owned(),
                 version: "0.1.0".to_owned(),
+                owned_event_types: Vec::new(),
                 driver: Some(Box::new(EventDriver {
                     subscriptions: vec![
                         Kind::new("ordinary.event"),

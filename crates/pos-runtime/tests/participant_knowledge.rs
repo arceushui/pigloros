@@ -1089,11 +1089,14 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
         )),
         AuthorityErrorV1::UnauthorizedSource
     );
-    let state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(state.aborts, 1);
-    assert_eq!(state.commits, 0);
+    let (aborts, commits) = {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.aborts, state.commits)
+    };
+    assert_eq!(aborts, 1);
+    assert_eq!(commits, 0);
 }
 
 #[test]
