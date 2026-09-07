@@ -1849,7 +1849,19 @@ impl Gateway {
         payload: &serde_json::Value,
         capability: &str,
     ) -> Result<Event, GatewayError> {
-        let proposal = build_proposed_action(entity_id, event_type, payload, capability)?;
+        let entity = match parse_entity_id(entity_id) {
+            Ok(entity) => entity,
+            Err(error) => return Err(error),
+        };
+        let proposal = match ProposedAction::try_new(
+            Kind::new(event_type),
+            entity,
+            json_to_cbor(payload),
+            Kind::new(capability),
+        ) {
+            Ok(proposal) => proposal,
+            Err(error) => return Err(error.into()),
+        };
         self.submit_proposed_action(timeline_id, proposal).await
     }
 
@@ -1931,9 +1943,14 @@ impl Gateway {
         if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
             return Err(error);
         }
-        let proposal = match build_proposed_action(entity_id, event_type, payload, capability) {
+        let proposal = match ProposedAction::try_new(
+            Kind::new(event_type),
+            entity,
+            json_to_cbor(payload),
+            Kind::new(capability),
+        ) {
             Ok(proposal) => proposal,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         let draft = match self.submit_action_draft(&proposal) {
             Ok(draft) => draft,
@@ -1967,7 +1984,19 @@ impl Gateway {
     ) -> Result<IdentifiedAppend, GatewayError> {
         let timeline = parse_timeline_id(timeline_id)?;
         self.ensure_timeline_exists(timeline).await?;
-        let proposal = build_proposed_action(entity_id, event_type, payload, capability)?;
+        let entity = match parse_entity_id(entity_id) {
+            Ok(entity) => entity,
+            Err(error) => return Err(error),
+        };
+        let proposal = match ProposedAction::try_new(
+            Kind::new(event_type),
+            entity,
+            json_to_cbor(payload),
+            Kind::new(capability),
+        ) {
+            Ok(proposal) => proposal,
+            Err(error) => return Err(error.into()),
+        };
         principal.authorizes(&proposal)?;
         let draft = self.submit_action_draft(&proposal)?;
         drop(proposal);
@@ -2279,29 +2308,6 @@ fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
 
 const fn event_seq(event: &Event) -> u64 {
     event.seq.as_u64()
-}
-
-fn build_proposed_action(
-    entity_id: &str,
-    event_type: &str,
-    payload: &serde_json::Value,
-    capability: &str,
-) -> Result<ProposedAction, GatewayError> {
-    let entity = match parse_entity_id(entity_id) {
-        Ok(entity) => entity,
-        Err(error) => return Err(error),
-    };
-    match ProposedAction::try_new(
-        Kind::new(event_type),
-        entity,
-        json_to_cbor(payload),
-        Kind::new(capability),
-    )
-    .map_err(Into::into)
-    {
-        Ok(proposal) => Ok(proposal),
-        Err(error) => Err(error),
-    }
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {

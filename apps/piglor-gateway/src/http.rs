@@ -228,13 +228,12 @@ async fn read_authorized_events(
     query: &EventsQuery,
     headers: &HeaderMap,
 ) -> Result<EventPage, GatewayError> {
-    let actor = match headers
+    let Some(actor) = headers
         .get("x-piglor-actor-entity")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| crate::parse_entity_id(value).ok())
-    {
-        Some(actor) => actor,
-        None => return Err(GatewayError::AuthorizationUnavailable),
+    else {
+        return Err(GatewayError::AuthorizationUnavailable);
     };
     let target_timeline = match crate::parse_timeline_id(timeline_id) {
         Ok(timeline) => timeline,
