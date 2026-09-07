@@ -1331,6 +1331,10 @@ impl Gateway {
 
     /// Construct the authenticated local `OwnTracks` Gateway with a shared
     /// host-owned erasure containment gate.
+    ///
+    /// # Errors
+    /// Returns a store error when the host-owned erasure gate cannot be bound
+    /// to the supplied `SQLite` store.
     pub fn new_with_owntracks_ingress_and_erasure_gate(
         mut store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,
