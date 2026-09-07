@@ -49,10 +49,32 @@ use pos_core::{
     ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedStateQueryV1, TimelineId,
+    ErasureStateV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
+    ErasureVerifiedTopologyProofV1, TimelineId,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
+
+struct LegacyVerifiedRecoveryQuery {
+    state: Option<ErasureVerifiedStateV1>,
+    topology: Option<ErasureVerifiedTopologyProofV1>,
+}
+
+impl ErasureVerifiedStateQueryV1 for LegacyVerifiedRecoveryQuery {
+    fn verified_state(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
+        Ok(self.state.clone())
+    }
+
+    fn verified_topology(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyProofV1>, ErasureErrorV1> {
+        Ok(self.topology.clone())
+    }
+}
 
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     fixture_request(RequestFixtureInput {
@@ -433,6 +455,37 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
         frozen_gate.authorize(frozen_timeline, ErasureProtectedOperationV1::Read),
         Err(pos_core::ErasureContainmentErrorV1::AccessFrozen)
     );
+    Ok(())
+}
+
+#[test]
+fn legacy_recovery_query_uses_fail_closed_combined_default() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(port(Vec::new(), None), COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    let state = coordinator
+        .verified_state(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let topology = coordinator
+        .verified_topology(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+
+    let mut successful = LegacyVerifiedRecoveryQuery {
+        state: Some(state),
+        topology: Some(topology),
+    };
+    assert!(successful
+        .verified_state_with_topology(request.reference())?
+        .is_some());
+
+    let mut absent = LegacyVerifiedRecoveryQuery {
+        state: None,
+        topology: None,
+    };
+    assert!(absent
+        .verified_state_with_topology(request.reference())?
+        .is_none());
     Ok(())
 }
 
