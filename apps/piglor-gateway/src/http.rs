@@ -196,55 +196,47 @@ async fn list_events(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let q = match parse_events_query(raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(error) => return Err(error),
-    };
+    let q = parse_events_query(raw_query.as_deref())?;
     let page = if state.gateway.has_authorization() {
-        let Some(actor) = headers
-            .get("x-piglor-actor-entity")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| crate::parse_entity_id(value).ok())
-        else {
-            return Err(GatewayError::AuthorizationUnavailable);
-        };
-        let target_timeline = match crate::parse_timeline_id(&id) {
-            Ok(timeline) => timeline,
-            Err(error) => return Err(error),
-        };
-        match state
-            .gateway
-            .read_events_page_authorized(
-                &id,
-                q.from_seq,
-                q.limit,
-                crate::GatewayAuthorizationRequest::read(
-                    actor,
-                    target_timeline,
-                    q.from_seq,
-                    q.limit,
-                    WallTime::now(),
-                ),
-            )
-            .await
-        {
-            Ok(page) => page,
-            Err(error) => return Err(error),
-        }
+        read_authorized_events(&state.gateway, &id, &q, &headers).await?
     } else {
-        match state
+        state
             .gateway
             .read_events_page(&id, q.from_seq, q.limit)
-            .await
-        {
-            Ok(page) => page,
-            Err(error) => return Err(error),
-        }
+            .await?
     };
-    match bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES) {
-        Ok(response) => Ok(Json(response)),
-        Err(error) => Err(error),
-    }
+    Ok(Json(bounded_events_response(
+        page,
+        MAX_EVENTS_RESPONSE_BYTES,
+    )?))
+}
+
+async fn read_authorized_events(
+    gateway: &Gateway,
+    timeline_id: &str,
+    query: &EventsQuery,
+    headers: &HeaderMap,
+) -> Result<EventPage, GatewayError> {
+    let actor = headers
+        .get("x-piglor-actor-entity")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| crate::parse_entity_id(value).ok())
+        .ok_or(GatewayError::AuthorizationUnavailable)?;
+    let target_timeline = crate::parse_timeline_id(timeline_id)?;
+    gateway
+        .read_events_page_authorized(
+            timeline_id,
+            query.from_seq,
+            query.limit,
+            crate::GatewayAuthorizationRequest::read(
+                actor,
+                target_timeline,
+                query.from_seq,
+                query.limit,
+                WallTime::now(),
+            ),
+        )
+        .await
 }
 
 fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayError> {

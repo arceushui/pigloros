@@ -1768,58 +1768,58 @@ impl Gateway {
         proposal: ProposedAction,
     ) -> Result<Event, GatewayError> {
         if let Some(authorization) = self.authorization.clone() {
-            let timeline = match parse_timeline_id(timeline_id) {
-                Ok(timeline) => timeline,
-                Err(error) => return Err(error),
-            };
-            let fence = authorization.commit_fence().await;
-            let decision = match authorization
-                .authorize(GatewayAuthorizationRequest::action(
-                    proposal.actor_entity_id,
-                    timeline,
-                    proposal.event_type.as_str(),
-                    proposal.capability.as_str(),
-                    WallTime::now(),
-                ))
-                .map_err(map_authorization_error)
-            {
-                Ok(decision) => decision,
-                Err(error) => return Err(error),
-            };
-            if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
-                return Err(error);
-            }
-            let draft = match self.submit_action_draft(&proposal) {
-                Ok(draft) => draft,
-                Err(error) => return Err(error),
-            };
-            let event = match self.append_draft(timeline, draft).await {
-                Ok(event) => event,
-                Err(error) => return Err(error),
-            };
-            drop(fence);
-            authorization
-                .record_audit(decision.audit().with_event_id(event.id))
+            return self
+                .submit_authorized_proposed_action(timeline_id, proposal, authorization)
                 .await;
-            return Ok(event);
         }
         #[cfg(test)]
         if let Some(principal) = self.action_principal.as_ref() {
-            principal.authorizes(&proposal)?;
-            let timeline = match parse_timeline_id(timeline_id) {
-                Ok(timeline) => timeline,
-                Err(error) => return Err(error),
-            };
-            if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
-                return Err(error);
-            }
-            let draft = match self.submit_action_draft(&proposal) {
-                Ok(draft) => draft,
-                Err(error) => return Err(error),
-            };
-            return self.append_draft(timeline, draft).await;
+            return self
+                .submit_test_proposed_action(timeline_id, proposal, principal)
+                .await;
         }
         Err(GatewayError::ActionAuthorizationUnavailable)
+    }
+
+    async fn submit_authorized_proposed_action(
+        &self,
+        timeline_id: &str,
+        proposal: ProposedAction,
+        authorization: Arc<GatewayAuthorization>,
+    ) -> Result<Event, GatewayError> {
+        let timeline = parse_timeline_id(timeline_id)?;
+        let fence = authorization.commit_fence().await;
+        let decision = authorization
+            .authorize(GatewayAuthorizationRequest::action(
+                proposal.actor_entity_id,
+                timeline,
+                proposal.event_type.as_str(),
+                proposal.capability.as_str(),
+                WallTime::now(),
+            ))
+            .map_err(map_authorization_error)?;
+        self.ensure_timeline_exists(timeline).await?;
+        let draft = self.submit_action_draft(&proposal)?;
+        let event = self.append_draft(timeline, draft).await?;
+        drop(fence);
+        authorization
+            .record_audit(decision.audit().with_event_id(event.id))
+            .await;
+        Ok(event)
+    }
+
+    #[cfg(test)]
+    async fn submit_test_proposed_action(
+        &self,
+        timeline_id: &str,
+        proposal: ProposedAction,
+        principal: &ActionPrincipal,
+    ) -> Result<Event, GatewayError> {
+        principal.authorizes(&proposal)?;
+        let timeline = parse_timeline_id(timeline_id)?;
+        self.ensure_timeline_exists(timeline).await?;
+        let draft = self.submit_action_draft(&proposal)?;
+        self.append_draft(timeline, draft).await
     }
 
     /// Submit a JSON action through the Gateway-owned action registry.
@@ -1834,19 +1834,7 @@ impl Gateway {
         payload: &serde_json::Value,
         capability: &str,
     ) -> Result<Event, GatewayError> {
-        let entity = match parse_entity_id(entity_id) {
-            Ok(entity) => entity,
-            Err(error) => return Err(error),
-        };
-        let proposal = match ProposedAction::try_new(
-            Kind::new(event_type),
-            entity,
-            json_to_cbor(payload),
-            Kind::new(capability),
-        ) {
-            Ok(proposal) => proposal,
-            Err(error) => return Err(error.into()),
-        };
+        let proposal = build_proposed_action(entity_id, event_type, payload, capability)?;
         self.submit_proposed_action(timeline_id, proposal).await
     }
 
@@ -1864,93 +1852,90 @@ impl Gateway {
         ingress_id: &str,
     ) -> Result<IdentifiedAppend, GatewayError> {
         if let Some(authorization) = self.authorization.clone() {
-            let timeline = match parse_timeline_id(timeline_id) {
-                Ok(timeline) => timeline,
-                Err(error) => return Err(error),
-            };
-            let entity = match parse_entity_id(entity_id) {
-                Ok(entity) => entity,
-                Err(error) => return Err(error),
-            };
-            let fence = authorization.commit_fence().await;
-            let decision = match authorization
-                .authorize(GatewayAuthorizationRequest::action(
-                    entity,
-                    timeline,
+            return self
+                .submit_authorized_identified_json_action(
+                    timeline_id,
+                    entity_id,
                     event_type,
+                    payload,
                     capability,
-                    WallTime::now(),
-                ))
-                .map_err(map_authorization_error)
-            {
-                Ok(decision) => decision,
-                Err(error) => return Err(error),
-            };
-            if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
-                return Err(error);
-            }
-            let proposal = match ProposedAction::try_new(
-                Kind::new(event_type),
-                entity,
-                json_to_cbor(payload),
-                Kind::new(capability),
-            ) {
-                Ok(proposal) => proposal,
-                Err(error) => return Err(error.into()),
-            };
-            let draft = match self.submit_action_draft(&proposal) {
-                Ok(draft) => draft,
-                Err(error) => return Err(error),
-            };
-            drop(proposal);
-            let result = match self
-                .append_identified_draft(timeline, draft, ingress_id)
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => return Err(error),
-            };
-            drop(fence);
-            authorization
-                .record_audit(decision.audit().with_event_id(result.event.id))
+                    ingress_id,
+                    authorization,
+                )
                 .await;
-            return Ok(result);
         }
         #[cfg(test)]
         if let Some(principal) = self.action_principal.as_ref() {
-            let timeline = match parse_timeline_id(timeline_id) {
-                Ok(timeline) => timeline,
-                Err(error) => return Err(error),
-            };
-            if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
-                return Err(error);
-            }
-            let entity = match parse_entity_id(entity_id) {
-                Ok(entity) => entity,
-                Err(error) => return Err(error),
-            };
-            let proposal = match ProposedAction::try_new(
-                Kind::new(event_type),
-                entity,
-                json_to_cbor(payload),
-                Kind::new(capability),
-            ) {
-                Ok(proposal) => proposal,
-                Err(error) => return Err(error.into()),
-            };
-            if let Err(error) = principal.authorizes(&proposal) {
-                return Err(error.into());
-            }
-            let draft = match self.submit_action_draft(&proposal) {
-                Ok(draft) => draft,
-                Err(error) => return Err(error),
-            };
-            drop(proposal);
             return self
-                .append_identified_draft(timeline, draft, ingress_id)
+                .submit_test_identified_json_action(
+                    timeline_id,
+                    entity_id,
+                    event_type,
+                    payload,
+                    capability,
+                    ingress_id,
+                    principal,
+                )
                 .await;
         }
         Err(GatewayError::ActionAuthorizationUnavailable)
+    }
+
+    async fn submit_authorized_identified_json_action(
+        &self,
+        timeline_id: &str,
+        entity_id: &str,
+        event_type: &str,
+        payload: &serde_json::Value,
+        capability: &str,
+        ingress_id: &str,
+        authorization: Arc<GatewayAuthorization>,
+    ) -> Result<IdentifiedAppend, GatewayError> {
+        let timeline = parse_timeline_id(timeline_id)?;
+        let entity = parse_entity_id(entity_id)?;
+        let fence = authorization.commit_fence().await;
+        let decision = authorization
+            .authorize(GatewayAuthorizationRequest::action(
+                entity,
+                timeline,
+                event_type,
+                capability,
+                WallTime::now(),
+            ))
+            .map_err(map_authorization_error)?;
+        self.ensure_timeline_exists(timeline).await?;
+        let proposal = build_proposed_action(entity_id, event_type, payload, capability)?;
+        let draft = self.submit_action_draft(&proposal)?;
+        drop(proposal);
+        let result = self
+            .append_identified_draft(timeline, draft, ingress_id)
+            .await?;
+        drop(fence);
+        authorization
+            .record_audit(decision.audit().with_event_id(result.event.id))
+            .await;
+        Ok(result)
+    }
+
+    #[cfg(test)]
+    async fn submit_test_identified_json_action(
+        &self,
+        timeline_id: &str,
+        entity_id: &str,
+        event_type: &str,
+        payload: &serde_json::Value,
+        capability: &str,
+        ingress_id: &str,
+        principal: &ActionPrincipal,
+    ) -> Result<IdentifiedAppend, GatewayError> {
+        let timeline = parse_timeline_id(timeline_id)?;
+        self.ensure_timeline_exists(timeline).await?;
+        let proposal = build_proposed_action(entity_id, event_type, payload, capability)?;
+        principal.authorizes(&proposal)?;
+        let draft = self.submit_action_draft(&proposal)?;
+        drop(proposal);
+        self.append_identified_draft(timeline, draft, ingress_id)
+            .await
     }
 
     async fn ensure_timeline_exists(&self, timeline: TimelineId) -> Result<(), GatewayError> {
@@ -2257,6 +2242,22 @@ fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
 
 const fn event_seq(event: &Event) -> u64 {
     event.seq.as_u64()
+}
+
+fn build_proposed_action(
+    entity_id: &str,
+    event_type: &str,
+    payload: &serde_json::Value,
+    capability: &str,
+) -> Result<ProposedAction, GatewayError> {
+    let entity = parse_entity_id(entity_id)?;
+    ProposedAction::try_new(
+        Kind::new(event_type),
+        entity,
+        json_to_cbor(payload),
+        Kind::new(capability),
+    )
+    .map_err(Into::into)
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
