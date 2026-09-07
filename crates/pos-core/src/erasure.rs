@@ -247,6 +247,9 @@ pub trait ErasureGate: Send + Sync {
 /// authoritative topology resolver; no selector is re-evaluated by this gate.
 pub struct ErasureContainmentGateV1 {
     timeline_scopes: RwLock<BTreeMap<TimelineId, ErasureReferenceV1>>,
+    /// Explicit host topology proof for unaffected Timelines, keyed by the
+    /// verified recovery manifest which established the exclusion.
+    verified_unaffected: RwLock<BTreeMap<TimelineId, ErasureReferenceV1>>,
     states: RwLock<BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>>,
     blocked_timelines: RwLock<BTreeSet<TimelineId>>,
     fence_lock: std::sync::Mutex<()>,
@@ -281,6 +284,7 @@ impl ErasureContainmentGateV1 {
     pub const fn new() -> Self {
         Self {
             timeline_scopes: RwLock::new(BTreeMap::new()),
+            verified_unaffected: RwLock::new(BTreeMap::new()),
             states: RwLock::new(BTreeMap::new()),
             blocked_timelines: RwLock::new(BTreeSet::new()),
             fence_lock: std::sync::Mutex::new(()),
@@ -294,6 +298,7 @@ impl ErasureContainmentGateV1 {
     pub const fn new_fail_closed() -> Self {
         Self {
             timeline_scopes: RwLock::new(BTreeMap::new()),
+            verified_unaffected: RwLock::new(BTreeMap::new()),
             states: RwLock::new(BTreeMap::new()),
             blocked_timelines: RwLock::new(BTreeSet::new()),
             fence_lock: std::sync::Mutex::new(()),
@@ -321,6 +326,14 @@ impl ErasureContainmentGateV1 {
             .timeline_scopes
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self
+            .verified_unaffected
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&timeline)
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
         let result = match bindings.get(&timeline) {
             Some(existing) if *existing != scope => {
                 Err(ErasureContainmentErrorV1::RecoveryUnavailable)
@@ -376,6 +389,27 @@ impl ErasureContainmentGateV1 {
         state: ErasureVerifiedStateV1,
         bindings: &[(TimelineId, ErasureReferenceV1)],
     ) -> Result<(), ErasureContainmentErrorV1> {
+        self.install_verified_state_with_topology(&state, bindings, &[])
+    }
+
+    /// Atomically install verified state, affected bindings, and explicit
+    /// positive proof for unaffected Timelines.
+    ///
+    /// Each unaffected entry is `(timeline, manifest_digest)`. The digest must
+    /// equal the recovered manifest identity, binding the exclusion to the
+    /// exact verified recovery revision. A Timeline omitted from both binding
+    /// sets remains unavailable on a fail-closed gate; omission is not proof.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// evidence or topology proof is incomplete or conflicts with an
+    /// installed boundary.
+    pub fn install_verified_state_with_topology(
+        &self,
+        state: &ErasureVerifiedStateV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+        unaffected: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<(), ErasureContainmentErrorV1> {
         let _fence = self
             .fence_lock
             .lock()
@@ -383,6 +417,12 @@ impl ErasureContainmentGateV1 {
         if bindings
             .iter()
             .any(|(_, scope)| !state.scope_contains(*scope))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if unaffected
+            .iter()
+            .any(|(_, manifest)| *manifest != state.manifest_digest())
         {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
@@ -399,6 +439,12 @@ impl ErasureContainmentGateV1 {
         }
         let mut bound_timelines = BTreeSet::new();
         if bindings
+            .iter()
+            .any(|(timeline, _)| !bound_timelines.insert(*timeline))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if unaffected
             .iter()
             .any(|(timeline, _)| !bound_timelines.insert(*timeline))
         {
@@ -425,12 +471,27 @@ impl ErasureContainmentGateV1 {
         }) {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
-        states.insert(request, state);
+        let mut verified_unaffected = self
+            .verified_unaffected
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if unaffected.iter().any(|(timeline, manifest)| {
+            verified_unaffected
+                .get(timeline)
+                .is_some_and(|existing| *existing != *manifest)
+        }) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        states.insert(request, state.clone());
         drop(states);
         for (timeline, scope) in bindings {
             timeline_scopes.insert(*timeline, *scope);
         }
         drop(timeline_scopes);
+        for (timeline, manifest) in unaffected {
+            verified_unaffected.insert(*timeline, *manifest);
+        }
+        drop(verified_unaffected);
         Ok(())
     }
 
@@ -455,6 +516,25 @@ impl ErasureContainmentGateV1 {
             self.install_verified_state(state, bindings)
         } else {
             for (timeline, _) in bindings {
+                self.block_timeline(*timeline);
+            }
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        }
+    }
+
+    /// Recover and install verified state with explicit unaffected-scope
+    /// topology proof.
+    pub fn install_from_verified_query_with_topology<Q: ErasureVerifiedStateQueryV1>(
+        &self,
+        query: &mut Q,
+        request: ErasureReferenceV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+        unaffected: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if let Ok(Some(state)) = query.verified_state(request) {
+            self.install_verified_state_with_topology(&state, bindings, unaffected)
+        } else {
+            for (timeline, _) in bindings.iter().chain(unaffected.iter()) {
                 self.block_timeline(*timeline);
             }
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
@@ -507,6 +587,22 @@ impl ErasureContainmentGateV1 {
             .get(&timeline)
             .copied();
         let Some(scope) = scope else {
+            if let Some(manifest) = self
+                .verified_unaffected
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&timeline)
+                .copied()
+            {
+                return if states
+                    .values()
+                    .any(|state| state.manifest_digest() == manifest)
+                {
+                    Ok(())
+                } else {
+                    Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+                };
+            }
             return if self.fail_closed_unbound {
                 Err(ErasureContainmentErrorV1::RecoveryUnavailable)
             } else {
@@ -4956,6 +5052,99 @@ mod coverage_paths {
         assert_eq!(
             gate.authorize(timeline, ErasureProtectedOperationV1::Read),
             Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fail_closed_gate_requires_revision_bound_unaffected_proof() -> Result<(), ErasureErrorV1> {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let affected = TimelineId::new();
+        let unaffected = TimelineId::new();
+        let unknown = TimelineId::new();
+        let state = frozen_state()?;
+        let manifest = state.manifest_digest();
+        gate.install_verified_state_with_topology(
+            &state,
+            &[(affected, reference(7))],
+            &[(unaffected, manifest)],
+        )
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        assert_eq!(
+            gate.authorize(affected, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+        assert_eq!(
+            gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
+            Ok(())
+        );
+        let mut replaced = state.clone();
+        replaced.manifest_digest = reference(8);
+        gate.publish_verified_state(replaced);
+        assert_eq!(
+            gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            gate.authorize(unknown, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            gate.bind_timeline(unaffected, reference(7)),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn topology_install_rejects_stale_or_duplicate_unaffected_proof() -> Result<(), ErasureErrorV1>
+    {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let timeline = TimelineId::new();
+        let state = frozen_state()?;
+        assert_eq!(
+            gate.install_verified_state_with_topology(
+                &state,
+                &[(timeline, reference(7))],
+                &[(TimelineId::new(), reference(9))],
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            gate.install_verified_state_with_topology(
+                &state,
+                &[(timeline, reference(7))],
+                &[
+                    (timeline, state.manifest_digest()),
+                    (timeline, state.manifest_digest())
+                ],
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn topology_install_rejects_changed_proof() -> Result<(), ErasureErrorV1> {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let timeline = TimelineId::new();
+        let state = frozen_state()?;
+        let unaffected = TimelineId::new();
+        gate.install_verified_state_with_topology(
+            &state,
+            &[(timeline, reference(7))],
+            &[(unaffected, state.manifest_digest())],
+        )
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let mut changed_state = state.clone();
+        changed_state.manifest_digest = reference(8);
+        assert_eq!(
+            gate.install_verified_state_with_topology(
+                &changed_state,
+                &[(timeline, reference(7))],
+                &[(unaffected, changed_state.manifest_digest())],
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         Ok(())
     }
