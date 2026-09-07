@@ -5128,6 +5128,10 @@ mod coverage_paths {
         gate.install_verified_state_with_topology(&state, &proof)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         assert_eq!(
+            gate.bind_timeline(unaffected, reference(7)),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
             gate.authorize(affected, ErasureProtectedOperationV1::Read),
             Err(ErasureContainmentErrorV1::AccessFrozen)
         );
@@ -5137,6 +5141,45 @@ mod coverage_paths {
         );
         assert_eq!(
             gate.authorize(unknown, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let duplicate_gate = ErasureContainmentGateV1::new_fail_closed();
+        let duplicate_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![affected],
+        );
+        assert_eq!(
+            duplicate_gate.install_verified_state_with_topology(&state, &duplicate_proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let conflicting_gate = ErasureContainmentGateV1::new_fail_closed();
+        conflicting_gate
+            .install_verified_state_with_topology(&state, &proof)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let mut replacement_state = state.clone();
+        replacement_state.manifest_digest = reference(9);
+        let replacement_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            replacement_state.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![unaffected],
+        );
+        assert_eq!(
+            conflicting_gate
+                .install_verified_state_with_topology(&replacement_state, &replacement_proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let stale_gate = ErasureContainmentGateV1::new_fail_closed();
+        stale_gate
+            .verified_unaffected
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(unknown, reference(99));
+        assert_eq!(
+            stale_gate.authorize(unknown, ErasureProtectedOperationV1::Read),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         Ok(())

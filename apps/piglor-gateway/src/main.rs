@@ -1120,3 +1120,36 @@ mod coverage_entrypoints {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod erasure_gate_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn startup_gateway_constructors_cover_memory_and_sqlite_paths(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let memory = gateway_for_startup(
+            None,
+            StoreConfig::Memory,
+            None,
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+        )?;
+        drop(memory);
+
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let owner_key_path = directory.path().join("owner.key");
+        owntracks::create_or_load_owner_key(&owner_key_path)?;
+        let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
+        let sqlite = gateway_for_startup(
+            database.to_str(),
+            StoreConfig::Sqlite {
+                path: database.to_string_lossy().into_owned(),
+            },
+            Some(&owner_key),
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+        )?;
+        drop(sqlite);
+        Ok(())
+    }
+}

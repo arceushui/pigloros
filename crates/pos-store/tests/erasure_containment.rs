@@ -70,6 +70,17 @@ fn assert_blocked<S: EventStore>(mut store: S) -> Result<(), Box<dyn std::error:
         Some("erasure containment boundary is unavailable".to_owned())
     );
     assert_eq!(
+        store.list_timelines().err().map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
+    assert_eq!(
+        store
+            .root_timeline_count_bounded(usize::MAX)
+            .err()
+            .map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
+    assert_eq!(
         gate.authorize(timeline.id(), ErasureProtectedOperationV1::Export),
         Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
     );

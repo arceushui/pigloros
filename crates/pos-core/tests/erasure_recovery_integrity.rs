@@ -40,16 +40,16 @@ use pos_core::erasure::{
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureCoordinator,
-    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureContainmentGateV1,
+    ErasureCoordinator, ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
     ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureInventoryCategoryV1,
     ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryErrorQueryV1,
-    ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureRecoveryErrorQueryV1, ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedStateQueryV1,
+    ErasureStateV1, ErasureVerifiedStateQueryV1, TimelineId,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -408,7 +408,35 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
             .ok_or(ErasureErrorV1::ProvenanceMissing)?
             .digest()
     );
+    assert_eq!(
+        <ErasureCoordinatorStateMachineV1<PublicCoordinatorPort> as
+            ErasureVerifiedStateQueryV1>::verified_topology(&mut restarted, request.reference())?,
+        None
+    );
     assert!(restarted.verified_state(reference(240))?.is_none());
+    assert_eq!(restarted.verified_topology(reference(240))?, None);
+
+    let mut pre_freeze = ErasureCoordinatorStateMachineV1::new(port(Vec::new(), None), COORDINATOR);
+    pre_freeze.submit(request.clone(), request.provenance())?;
+    assert!(<ErasureCoordinatorStateMachineV1<PublicCoordinatorPort> as
+        ErasureVerifiedStateQueryV1>::verified_topology(&mut pre_freeze, request.reference())?
+        .is_some());
+
+    let pre_freeze_gate = ErasureContainmentGateV1::new_fail_closed();
+    pre_freeze_gate
+        .install_from_verified_query_with_topology(&mut pre_freeze, request.reference())?;
+    assert_eq!(
+        pre_freeze_gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::Read),
+        Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+
+    let frozen_gate = ErasureContainmentGateV1::new_fail_closed();
+    let frozen_timeline = TimelineId::new();
+    frozen_gate.install_verified_state(&verified, &[(frozen_timeline, reference(7))])?;
+    assert_eq!(
+        frozen_gate.authorize(frozen_timeline, ErasureProtectedOperationV1::Read),
+        Err(pos_core::ErasureContainmentErrorV1::AccessFrozen)
+    );
     Ok(())
 }
 
