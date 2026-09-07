@@ -66,13 +66,14 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
     let timeline = store.create_timeline("artifact-snapshot").test_ok();
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
         let mut rejected_registry = registry();
-        match snapshot(
+        let result = snapshot(
             store.as_ref(),
             timeline.id(),
             &mut rejected_registry,
             SNAPSHOT_DIGEST,
             &evaluation(state),
-        ) {
+        );
+        match result {
             Err(pos_core::CoreError::ArtifactUnavailable) => {}
             other => std::panic::resume_unwind(Box::new(format!(
                 "expected unavailable snapshot, got {other:?}"
@@ -101,13 +102,14 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
 
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
         let mut rejected_registry = registry();
-        match verify_snapshot_consistency(
+        let result = verify_snapshot_consistency(
             store.as_ref(),
             &snapshot,
             &mut rejected_registry,
             SNAPSHOT_DIGEST,
             &evaluation(state),
-        ) {
+        );
+        match result {
             Err(pos_time::SnapshotError::ArtifactUnavailable) => {}
             other => std::panic::resume_unwind(Box::new(format!(
                 "expected unavailable snapshot verification, got {other:?}"

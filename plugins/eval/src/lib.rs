@@ -912,12 +912,13 @@ mod tests {
             }],
         )
         .test_ok();
-        match compute_report(
+        let result = compute_report(
             store.as_ref(),
             timeline.id(),
             ErasureReferenceV1::from_digest([1; 32]),
             &evaluation,
-        ) {
+        );
+        match result {
             Err(EvalError::ArtifactUnavailable) => {}
             other => std::panic::resume_unwind(Box::new(format!(
                 "expected unavailable calibration report, got {other:?}"

@@ -1409,7 +1409,8 @@ mod tests {
             crate::ArtifactStateV1::Erased,
             crate::ArtifactTransitionRuleV1::Remove,
         );
-        match super::export_timeline(&store, TimelineId::new(), EXPORT_DIGEST, &evaluation) {
+        let result = super::export_timeline(&store, TimelineId::new(), EXPORT_DIGEST, &evaluation);
+        match result {
             Err(CoreError::ArtifactUnavailable) => {}
             other => std::panic::resume_unwind(Box::new(format!(
                 "expected unavailable export, got {other:?}"
