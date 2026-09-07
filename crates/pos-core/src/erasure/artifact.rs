@@ -157,7 +157,9 @@ impl ReplayClaimEvaluatorV1 {
             .map(|input| {
                 let disposition_claim = match input.state {
                     ArtifactStateV1::Retained => input.current_claim,
-                    ArtifactStateV1::TransitionApplied => input.registration.transition_rule.claim(),
+                    ArtifactStateV1::TransitionApplied => {
+                        input.registration.transition_rule.claim()
+                    }
                     ArtifactStateV1::Missing | ArtifactStateV1::Invalidated => {
                         ErasureReplayClaimV1::UnverifiableArtifactsMissing
                     }
@@ -192,9 +194,5 @@ const fn weaker(
     current: ErasureReplayClaimV1,
     candidate: ErasureReplayClaimV1,
 ) -> ErasureReplayClaimV1 {
-    if current.preserves_or_weakens(candidate) {
-        candidate
-    } else {
-        current
-    }
+    current.weakened_to(candidate)
 }

@@ -146,6 +146,8 @@ pub struct ReliabilityBin {
 /// Calibration report produced by [`compute_report`].
 #[derive(Clone, Debug)]
 pub struct CalibrationReport {
+    /// Replay evidence retained for the report and its required inputs.
+    pub replay_claim: pos_core::ErasureReplayClaimV1,
     /// Brier score: mean squared error of probabilistic predictions.
     pub brier_score: f64,
     pub crps: f64,
@@ -166,6 +168,13 @@ pub struct CalibrationReport {
     pub n_resolved: u64,
     /// The 10 reliability bins used to compute ECE.
     pub reliability_bins: Vec<ReliabilityBin>,
+}
+
+impl CalibrationReport {
+    /// Consume the host-owned artifact evaluation without strengthening this report.
+    pub fn apply_artifact_evaluation(&mut self, evaluation: &pos_core::ReplayClaimEvaluationV1) {
+        self.replay_claim = self.replay_claim.weakened_to(evaluation.replay_claim);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +429,7 @@ pub fn compute_report(
     if resolved.is_empty() {
         let empty_bins = build_bins(&[]);
         return Ok(CalibrationReport {
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
             brier_score: 0.0,
             crps: 0.0,
             lift_vs_personal_base_rate: 0.0,
@@ -486,6 +496,7 @@ pub fn compute_report(
     let ece = compute_ece(&reliability_bins, n_resolved);
 
     Ok(CalibrationReport {
+        replay_claim: pos_core::ErasureReplayClaimV1::Exact,
         brier_score,
         crps,
         lift_vs_personal_base_rate,
@@ -828,6 +839,10 @@ mod tests {
         let tl = store.create_timeline("eval-zero").test_ok();
 
         let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        assert_eq!(
+            report.replay_claim,
+            pos_core::ErasureReplayClaimV1::Exact
+        );
         assert_eq!(report.n_predictions, 0);
         assert_eq!(report.n_resolved, 0);
         assert!((report.brier_score).abs() < f64::EPSILON);
@@ -837,6 +852,52 @@ mod tests {
         assert!((report.crps).abs() < f64::EPSILON);
         assert!((report.lift_vs_personal_base_rate).abs() < f64::EPSILON);
         assert_eq!(report.reliability_bins.len(), NUM_BINS);
+    }
+
+    #[test]
+    fn calibration_report_consumes_host_claim_and_never_strengthens() {
+        use pos_core::{
+            ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+            ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1,
+            ErasureReferenceV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+        };
+
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("claim-degradation").test_ok();
+        let mut report = compute_report(store.as_ref(), timeline.id()).test_ok();
+        let evaluation = ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1 {
+                    artifact_class: ErasureArtifactClassV1::CalibrationReport,
+                    artifact_digest: ErasureReferenceV1::from_digest([1; 32]),
+                    data_class: ArtifactDataClassV1::AggregateData,
+                    key_role: Some(ErasureKeyRoleV1::DataEncryption),
+                    owner: ErasureReferenceV1::from_digest([2; 32]),
+                    optionality: ArtifactOptionalityV1::Required,
+                    transition_rule: ArtifactTransitionRuleV1::RetainStructure,
+                },
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state: ArtifactStateV1::TransitionApplied,
+            }],
+        )
+        .test_ok();
+        report.apply_artifact_evaluation(&evaluation);
+        assert_eq!(
+            report.replay_claim,
+            pos_core::ErasureReplayClaimV1::StructuralOnly
+        );
+
+        let exact = ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[],
+        )
+        .test_ok();
+        report.apply_artifact_evaluation(&exact);
+        assert_eq!(
+            report.replay_claim,
+            pos_core::ErasureReplayClaimV1::StructuralOnly
+        );
     }
 
     #[test]

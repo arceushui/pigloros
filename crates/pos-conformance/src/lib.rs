@@ -192,6 +192,33 @@ impl ReplayClaimV1 {
     pub const fn is_no_stronger_than(self, declared: Self) -> bool {
         self.rank() >= declared.rank()
     }
+
+    /// Apply the host-owned ADR-060 artifact evaluation to this public claim.
+    ///
+    /// The conformance crate consumes the core decision; it does not derive a
+    /// competing disposition from artifact bytes.
+    #[must_use]
+    pub const fn after_artifact_evaluation(
+        self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) -> Self {
+        let evaluated = match evaluation.replay_claim {
+            pos_core::ErasureReplayClaimV1::Exact => Self::Exact,
+            pos_core::ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews => {
+                Self::ExactAuthoritativeWithRedactedViews
+            }
+            pos_core::ErasureReplayClaimV1::StructuralOnly => Self::StructuralOnly,
+            pos_core::ErasureReplayClaimV1::UnverifiableArtifactsMissing => {
+                Self::UnverifiableArtifactsMissing
+            }
+            pos_core::ErasureReplayClaimV1::IncompatibleProfile => Self::IncompatibleProfile,
+        };
+        if self.rank() >= evaluated.rank() {
+            self
+        } else {
+            evaluated
+        }
+    }
 }
 
 /// Execution profile used by a proof run.
@@ -435,6 +462,30 @@ pub struct CausalTraceEntryV1 {
     pub relation: String,
     pub visibility: String,
     pub dependency_class: DependencyClassV1,
+}
+
+/// Payload-free causal identity retained by a `StructuralOnly` export.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuralCausalTraceEntryV1 {
+    /// Structural identity of the cause Event.
+    pub cause_seq: u64,
+    /// Structural identity of the effect Event.
+    pub effect_seq: u64,
+    /// Closed dependency class; never a subject label or payload.
+    pub dependency_class: DependencyClassV1,
+}
+
+impl CausalTraceEntryV1 {
+    /// Remove labels and visibility payload while preserving node/edge identity.
+    #[must_use]
+    pub const fn structural(&self) -> StructuralCausalTraceEntryV1 {
+        StructuralCausalTraceEntryV1 {
+            cause_seq: self.cause_seq,
+            effect_seq: self.effect_seq,
+            dependency_class: self.dependency_class,
+        }
+    }
 }
 
 /// An uncertainty claim attached to a result rather than hidden in prose.

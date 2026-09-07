@@ -1,7 +1,7 @@
 //! ADR-060's payload-free ERQ1, ERS1, and ERC1 public contracts.
 //!
 //! Storage and byte destruction remain adapter concerns. This facade also
-//! exposes the host-owned artifact-registration and ReplayClaim policy seam.
+//! exposes the host-owned artifact-registration and `ReplayClaim` policy seam.
 
 use std::{
     cmp::Ordering,
@@ -2432,6 +2432,16 @@ impl ErasureReplayClaimV1 {
     }
     const fn preserves_or_weakens(self, next: Self) -> bool {
         self.rank() <= next.rank()
+    }
+
+    /// Apply a candidate claim while preserving the one-way degradation rule.
+    #[must_use]
+    pub const fn weakened_to(self, candidate: Self) -> Self {
+        if self.preserves_or_weakens(candidate) {
+            candidate
+        } else {
+            self
+        }
     }
 }
 

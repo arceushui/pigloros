@@ -180,11 +180,9 @@ fn retained_artifact_preserves_an_existing_weaker_claim() {
         ArtifactStateV1::Retained,
     );
     artifact.current_claim = ErasureReplayClaimV1::StructuralOnly;
-    let evaluation = ReplayClaimEvaluatorV1::evaluate(
-        ErasureReplayClaimV1::StructuralOnly,
-        &[artifact],
-    )
-    .expect("retained evidence should evaluate");
+    let evaluation =
+        ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::StructuralOnly, &[artifact])
+            .expect("retained evidence should evaluate");
     assert_eq!(
         evaluation.replay_claim,
         ErasureReplayClaimV1::StructuralOnly
@@ -205,11 +203,9 @@ fn incompatible_profile_remains_orthogonal_to_erasure() {
         ArtifactStateV1::TransitionApplied,
     );
     artifact.current_claim = ErasureReplayClaimV1::IncompatibleProfile;
-    let evaluation = ReplayClaimEvaluatorV1::evaluate(
-        ErasureReplayClaimV1::IncompatibleProfile,
-        &[artifact],
-    )
-    .expect("orthogonal profile state should evaluate");
+    let evaluation =
+        ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::IncompatibleProfile, &[artifact])
+            .expect("orthogonal profile state should evaluate");
     assert_eq!(
         evaluation.replay_claim,
         ErasureReplayClaimV1::IncompatibleProfile
@@ -250,6 +246,18 @@ fn empty_required_closure_preserves_the_enclosing_claim() {
 }
 
 #[test]
+fn public_claim_weakener_rejects_an_upgrade() {
+    assert_eq!(
+        ErasureReplayClaimV1::StructuralOnly.weakened_to(ErasureReplayClaimV1::Exact),
+        ErasureReplayClaimV1::StructuralOnly
+    );
+    assert_eq!(
+        ErasureReplayClaimV1::Exact.weakened_to(ErasureReplayClaimV1::StructuralOnly),
+        ErasureReplayClaimV1::StructuralOnly
+    );
+}
+
+#[test]
 fn registrations_record_every_pre_erasure_policy_fact() {
     let registration = input(
         ErasureArtifactClassV1::CalibrationReport,
@@ -260,22 +268,18 @@ fn registrations_record_every_pre_erasure_policy_fact() {
     )
     .registration;
     assert_eq!(registration.artifact_digest, reference(7));
-    assert_eq!(registration.data_class, ArtifactDataClassV1::PrivateSubjectData);
-    assert_eq!(registration.key_role, Some(ErasureKeyRoleV1::DataEncryption));
+    assert_eq!(
+        registration.data_class,
+        ArtifactDataClassV1::PrivateSubjectData
+    );
+    assert_eq!(
+        registration.key_role,
+        Some(ErasureKeyRoleV1::DataEncryption)
+    );
     assert_eq!(registration.owner, reference(71));
     assert_eq!(registration.optionality, ArtifactOptionalityV1::Required);
     assert_eq!(
         registration.transition_rule,
         ArtifactTransitionRuleV1::RedactViews
     );
-
-    for data_class in [
-        ArtifactDataClassV1::PrivateSubjectData,
-        ArtifactDataClassV1::ConsentedSharedData,
-        ArtifactDataClassV1::PublicRecord,
-        ArtifactDataClassV1::AggregateData,
-        ArtifactDataClassV1::StructuralAuditMetadata,
-    ] {
-        assert_eq!(data_class, data_class);
-    }
 }
