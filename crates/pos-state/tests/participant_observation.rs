@@ -175,6 +175,10 @@ fn persisted_authority(
 }
 
 fn authority_fixture() -> AuthorityFixture {
+    authority_fixture_with_identity_presence([true; 3])
+}
+
+fn authority_fixture_with_identity_presence(present: [bool; 3]) -> AuthorityFixture {
     let principal = PrincipalRefV1::try_new([1; 16], "host.test").test_ok();
     let actor = EntityId::new();
     let subject = EntityId::new();
@@ -224,10 +228,10 @@ fn authority_fixture() -> AuthorityFixture {
     let request = AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
         authenticated,
         actor_entity_id: actor,
-        subject_id: Some(subject),
-        participant_id: Some(participant_id),
-        plugin_id: Some(plugin_id),
-        installation_id: Some(installation_id),
+        subject_id: present[0].then_some(subject),
+        participant_id: present[1].then_some(participant_id),
+        plugin_id: present[2].then_some(plugin_id),
+        installation_id: present[2].then_some(installation_id),
         principal_role: AuthorityRoleV1::Actor,
         resource: "projection.profile".to_owned(),
         data_category: "profile.preferences".to_owned(),
@@ -237,8 +241,8 @@ fn authority_fixture() -> AuthorityFixture {
         at_time: WallTime::from_micros(10),
         authority_timeline,
         at_position: Seq::from_u64(10),
-        consent_timeline: Some(authority_timeline),
-        consent_at_position: Some(Seq::from_u64(10)),
+        consent_timeline: present[0].then_some(authority_timeline),
+        consent_at_position: present[0].then_some(Seq::from_u64(10)),
         use_count: 1,
         budget: 5,
         consent_policy_revision: policy_revision,
@@ -246,8 +250,12 @@ fn authority_fixture() -> AuthorityFixture {
         revocation_epoch: 0,
         revocation_state_current: true,
         authority_registry_digest: registry_digest,
-        consent: ConsentEvidenceV1::Resolved {
-            grants: vec![consent.clone()],
+        consent: if present[0] {
+            ConsentEvidenceV1::Resolved {
+                grants: vec![consent.clone()],
+            }
+        } else {
+            ConsentEvidenceV1::NotRequired
         },
         environment_constraints: vec!["local-only".to_owned()],
     })
@@ -261,7 +269,7 @@ fn authority_fixture() -> AuthorityFixture {
     .test_ok();
     let chain = DelegationChainV1::try_from_grants(vec![grant.clone()]).test_ok();
     let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &registry);
-    assert!(decision.is_allowed());
+    assert_eq!(decision.is_allowed(), present == [true; 3]);
     let authority = persisted_authority(&registry, &grant);
     AuthorityFixture {
         request,
@@ -271,6 +279,49 @@ fn authority_fixture() -> AuthorityFixture {
         registry,
         participant_id,
         plugin_id,
+    }
+}
+
+#[test]
+fn materialization_requires_each_observation_identity_before_projection_access() {
+    for (present, expected) in [
+        (
+            [false, true, true],
+            pos_core::AuthorityErrorV1::ConsentMissing,
+        ),
+        (
+            [true, false, true],
+            pos_core::AuthorityErrorV1::UnauthorizedSource,
+        ),
+        (
+            [true, true, false],
+            pos_core::AuthorityErrorV1::UnauthorizedSource,
+        ),
+    ] {
+        let fixture = authority_fixture_with_identity_presence(present);
+        assert_eq!(
+            fixture.authority.validate_observation_authorization(
+                &fixture.request,
+                &fixture.decision,
+                &fixture.registry,
+                Seq::from_u64(10),
+            ),
+            Err(expected)
+        );
+
+        let mut projections = ProjectionRegistry::new();
+        register_profile(&mut projections, Box::new(CountReducer));
+        assert_eq!(
+            projections.materialize_authorized_observation(
+                &fixture.request,
+                &fixture.decision,
+                &fixture.authority,
+                &fixture.registry,
+                Seq::from_u64(10),
+                &context(TimelineId::new()),
+            ),
+            Err(expected)
+        );
     }
 }
 

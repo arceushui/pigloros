@@ -19,7 +19,7 @@ use pos_core::{
     CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
     Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
-    Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
+    PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 
@@ -278,6 +278,14 @@ pub struct ProjectionRegistry {
     slots: Vec<(String, Slot)>,
 }
 
+#[derive(Clone, Copy)]
+struct ObservationIdentity {
+    subject_id: EntityId,
+    participant_id: EntityId,
+    plugin_id: PluginId,
+    installation_id: [u8; 16],
+}
+
 impl std::fmt::Debug for ProjectionRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut names = Vec::with_capacity(self.slots.len());
@@ -408,6 +416,23 @@ impl ProjectionRegistry {
         authority_position: Seq,
         context: &ProjectionObservationContextV1,
     ) -> Result<AuthorizedObservationV1, AuthorityErrorV1> {
+        let Some(subject_id) = request.subject_id() else {
+            return Err(AuthorityErrorV1::ConsentMissing);
+        };
+        let Some(participant_id) = request.participant_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let (Some(plugin_id), Some(installation_id)) =
+            (request.plugin_id(), request.installation_id())
+        else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let identity = ObservationIdentity {
+            subject_id,
+            participant_id,
+            plugin_id,
+            installation_id,
+        };
         authority
             .validate_observation_authorization(
                 request,
@@ -415,7 +440,9 @@ impl ProjectionRegistry {
                 authority_registry,
                 authority_position,
             )
-            .and_then(|()| self.materialize_authorized_projection(request, decision, context))
+            .and_then(|()| {
+                self.materialize_authorized_projection(request, decision, context, identity)
+            })
             .map(|snapshot| AuthorizedObservationV1 {
                 snapshot,
                 request: request.clone(),
@@ -428,6 +455,7 @@ impl ProjectionRegistry {
         request: &AuthorizationRequestV1,
         decision: &AuthorizationDecisionV1,
         context: &ProjectionObservationContextV1,
+        identity: ObservationIdentity,
     ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
         if context.reducer.is_empty() || context.reducer.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES
         {
@@ -436,18 +464,6 @@ impl ProjectionRegistry {
         if request.resource().strip_prefix("projection.") != Some(context.reducer.as_str()) {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         }
-        let Some(subject_id) = request.subject_id() else {
-            return Err(AuthorityErrorV1::ConsentMissing);
-        };
-        let Some(participant_id) = request.participant_id() else {
-            return Err(AuthorityErrorV1::UnauthorizedSource);
-        };
-        let Some(plugin_id) = request.plugin_id() else {
-            return Err(AuthorityErrorV1::UnauthorizedSource);
-        };
-        let Some(installation_id) = request.installation_id() else {
-            return Err(AuthorityErrorV1::UnauthorizedSource);
-        };
         let Some(slot) = self
             .slots
             .iter()
@@ -459,7 +475,7 @@ impl ProjectionRegistry {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
         slot.registry
-            .get(&subject_id)
+            .get(&identity.subject_id)
             .map(|state| canonical_state_artifact(state, policy.permitted_fields()))
             .transpose()
             .and_then(|artifact| {
@@ -470,7 +486,7 @@ impl ProjectionRegistry {
                                 ObservationStatusV1::NotObserved,
                                 None,
                                 None,
-                                absence_source_digest(context, subject_id),
+                                absence_source_digest(context, identity.subject_id),
                                 Vec::new(),
                             )
                         },
@@ -486,7 +502,7 @@ impl ProjectionRegistry {
                         },
                     );
                 ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
-                    participant_id,
+                    participant_id: identity.participant_id,
                     resource: request.resource().to_owned(),
                     data_category: request.data_category().to_owned(),
                     status,
@@ -502,9 +518,9 @@ impl ProjectionRegistry {
                 .and_then(|record| {
                     ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
                         principal: decision.principal().clone(),
-                        participant_id,
-                        plugin_id,
-                        installation_id,
+                        participant_id: identity.participant_id,
+                        plugin_id: identity.plugin_id,
+                        installation_id: identity.installation_id,
                         timeline_id: context.timeline_id,
                         observed_through: context.observed_through,
                         authority_timeline: decision.authority_timeline(),

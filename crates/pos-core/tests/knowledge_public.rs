@@ -450,6 +450,37 @@ fn observation_snapshot_rejects_stale_or_newly_revoked_authority() {
             .validate_authority_fence(&revoked_authority, Seq::from_u64(11)),
         Err(pos_core::AuthorityErrorV1::RevokedAtFence)
     );
+
+    let mut current_epoch = authority_fence_fixture(1);
+    let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+        grant_id: current_epoch.grant.grant_id(),
+        authority_timeline: current_epoch.grant.issuance_timeline(),
+        fence_position: Seq::from_u64(11),
+        revocation_epoch: 1,
+        policy_revision: current_epoch.grant.policy_revision(),
+        authority_registry_digest: current_epoch.grant.authority_registry_digest(),
+    })
+    .test_ok();
+    current_epoch
+        .state
+        .revoke_grant(
+            current_epoch
+                .host
+                .authorize_revocation(&current_epoch.grant, &revocation)
+                .test_ok(),
+            revocation,
+        )
+        .test_ok();
+    let revoked_authority = current_epoch
+        .state
+        .resolve(current_epoch.grant.grant_id())
+        .test_ok();
+    assert_eq!(
+        current_epoch
+            .snapshot
+            .validate_authority_fence(&revoked_authority, Seq::from_u64(11)),
+        Err(AuthorityErrorV1::RevokedAtFence)
+    );
 }
 
 #[test]
@@ -930,6 +961,45 @@ fn observation_snapshot_codec_rejects_nested_and_digest_tampering() {
 }
 
 #[test]
+fn observation_snapshot_decoder_rejects_invalid_nested_record_and_artifact_shapes() {
+    let artifact =
+        ObservationArtifactV1::try_new(CanonicalBytes::from_static(b"allowed")).test_ok();
+    let record = ObservationRecordV1::try_from_draft(record_draft(
+        ObservationStatusV1::Present,
+        Some(artifact.digest()),
+    ))
+    .test_ok();
+    let snapshot = ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(
+        vec![record],
+        vec![artifact],
+    ))
+    .test_ok();
+    let encoded = snapshot.encode().test_ok();
+
+    let invalid_record = changed_array(&encoded, |fields| {
+        fields[19] = Value::Array(vec![Value::Null]);
+    });
+    assert_eq!(
+        ObservationSnapshotV1::decode(&invalid_record),
+        Err(AuthorityErrorV1::InvalidEncoding)
+    );
+
+    let invalid_artifact = changed_array(&encoded, |fields| {
+        let Value::Array(artifacts) = &mut fields[20] else {
+            std::panic::resume_unwind(Box::new("expected artifact array"));
+        };
+        let Value::Array(artifact_fields) = &mut artifacts[0] else {
+            std::panic::resume_unwind(Box::new("expected artifact record"));
+        };
+        artifact_fields[1] = Value::Null;
+    });
+    assert_eq!(
+        ObservationSnapshotV1::decode(&invalid_artifact),
+        Err(AuthorityErrorV1::InvalidEncoding)
+    );
+}
+
+#[test]
 fn belief_and_knowledge_validation_reject_unbound_or_noncanonical_evidence() {
     let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
     let observation =
@@ -1057,6 +1127,91 @@ fn knowledge_snapshot_codec_rejects_nested_confidence_and_digest_tampering() {
         })),
         Err(AuthorityErrorV1::DigestMismatch)
     );
+}
+
+#[test]
+fn evidence_decoders_reject_well_typed_semantically_invalid_fields() {
+    let record =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .test_ok();
+    let invalid_record = changed_array(&record.encode().test_ok(), |fields| {
+        fields[13] = Value::Bytes(vec![0; 32]);
+    });
+    assert_eq!(
+        ObservationRecordV1::decode(&invalid_record),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+
+    let observation =
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(Vec::new(), Vec::new()))
+            .test_ok();
+    let invalid_observation = changed_array(&observation.encode().test_ok(), |fields| {
+        fields[22] = Value::Bytes(vec![0; 32]);
+    });
+    assert_eq!(
+        ObservationSnapshotV1::decode(&invalid_observation),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let knowledge = KnowledgeSnapshotV1::try_from_draft(knowledge_draft(
+        participant_id,
+        Vec::new(),
+        Vec::new(),
+    ))
+    .test_ok();
+    let invalid_knowledge = changed_array(&knowledge.encode().test_ok(), |fields| {
+        fields[14] = Value::Bytes(vec![0; 32]);
+    });
+    assert_eq!(
+        KnowledgeSnapshotV1::decode(&invalid_knowledge),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn knowledge_decoder_rejects_semantically_invalid_nested_beliefs() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let observation =
+        ObservationRecordV1::try_from_draft(record_draft(ObservationStatusV1::NotObserved, None))
+            .test_ok();
+    let belief = BeliefRecordV1::try_from_draft(belief_draft(
+        participant_id,
+        "prefers.tea",
+        observation.digest(),
+    ))
+    .test_ok();
+    let knowledge = KnowledgeSnapshotV1::try_from_draft(knowledge_draft(
+        participant_id,
+        vec![observation],
+        vec![belief],
+    ))
+    .test_ok();
+    let encoded = knowledge.encode().test_ok();
+
+    for (index, value, expected) in [
+        (
+            3,
+            Value::Bytes(vec![0; 32]),
+            AuthorityErrorV1::FieldOutOfBounds,
+        ),
+        (
+            5,
+            Value::Bytes(vec![99; 32]),
+            AuthorityErrorV1::DigestMismatch,
+        ),
+    ] {
+        let invalid = changed_array(&encoded, |fields| {
+            let Value::Array(beliefs) = &mut fields[8] else {
+                std::panic::resume_unwind(Box::new("expected belief array"));
+            };
+            let Value::Array(belief_fields) = &mut beliefs[0] else {
+                std::panic::resume_unwind(Box::new("expected belief record"));
+            };
+            belief_fields[index] = value;
+        });
+        assert_eq!(KnowledgeSnapshotV1::decode(&invalid), Err(expected));
+    }
 }
 
 #[test]
@@ -1278,6 +1433,22 @@ fn observation_snapshot_rejects_noncanonical_artifact_order() {
 }
 
 #[test]
+fn observation_snapshot_rejects_more_artifacts_than_the_public_limit() {
+    let mut artifacts = (0..=pos_core::MAX_OBSERVATION_SNAPSHOT_RECORDS)
+        .map(|index| {
+            ObservationArtifactV1::try_new(CanonicalBytes::from_vec(index.to_be_bytes().to_vec()))
+                .test_ok()
+        })
+        .collect::<Vec<_>>();
+    artifacts.sort_by_key(ObservationArtifactV1::digest);
+
+    assert_eq!(
+        ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(Vec::new(), artifacts)),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
 fn observation_snapshot_rejects_a_missing_artifact() {
     let record = ObservationRecordV1::try_from_draft(record_draft(
         ObservationStatusV1::Present,
@@ -1400,6 +1571,23 @@ fn knowledge_snapshot_rejects_a_zero_prior_snapshot_digest() {
     assert_eq!(
         KnowledgeSnapshotV1::try_from_draft(draft),
         Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_rejects_an_observation_for_another_participant() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let mut foreign = record_draft(ObservationStatusV1::NotObserved, None);
+    foreign.participant_id = EntityId::from_ulid(Ulid::from(99_u128));
+    let foreign = ObservationRecordV1::try_from_draft(foreign).test_ok();
+
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_draft(knowledge_draft(
+            participant_id,
+            vec![foreign],
+            Vec::new(),
+        )),
+        Err(AuthorityErrorV1::UnauthorizedSource)
     );
 }
 
