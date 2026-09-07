@@ -1625,7 +1625,34 @@ fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestR
     report.cases[0].replay_claim = ReplayClaimV1::IncompatibleProfile;
     report.replay_claim = ReplayClaimV1::IncompatibleProfile;
     report.report_digest = report.digest()?;
+    let mut retained_report = report.clone();
     let mut missing_report = report.clone();
+
+    let retained_evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::IncompatibleProfile,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([29; 32]),
+                ArtifactDataClassV1::Public,
+                None,
+                ErasureReferenceV1::from_digest([30; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: ErasureReplayClaimV1::IncompatibleProfile,
+            state: ArtifactStateV1::Retained,
+        }],
+    )?;
+    retained_report.apply_artifact_evaluation(&retained_evaluation)?;
+    assert_eq!(
+        retained_report.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(retained_report.redaction_state, RedactionStateV1::None);
+    assert_eq!(retained_report.cases[0].outcome, CaseOutcomeStatusV1::Pass);
+    retained_report.validate()?;
+
     let evaluation = ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::IncompatibleProfile,
         &[ArtifactClaimInputV1 {
@@ -1669,8 +1696,14 @@ fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestR
         missing_report.replay_claim,
         ReplayClaimV1::IncompatibleProfile
     );
-    assert_eq!(missing_report.redaction_state, RedactionStateV1::EvidenceMissing);
-    assert_eq!(missing_report.cases[0].outcome, CaseOutcomeStatusV1::Unavailable);
+    assert_eq!(
+        missing_report.redaction_state,
+        RedactionStateV1::EvidenceMissing
+    );
+    assert_eq!(
+        missing_report.cases[0].outcome,
+        CaseOutcomeStatusV1::Unavailable
+    );
     missing_report.validate()?;
     Ok(())
 }

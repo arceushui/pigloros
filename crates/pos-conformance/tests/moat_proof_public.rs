@@ -338,6 +338,20 @@ fn redacted_view_export_removes_protected_causal_labels() {
 fn incompatible_profile_remains_orthogonal_to_structural_and_view_redaction() {
     use pos_core::{ArtifactTransitionRuleV1, ErasureReplayClaimV1};
 
+    let mut retained = public_evidence_fixture();
+    let retained_evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::PreserveExact,
+        ErasureReplayClaimV1::IncompatibleProfile,
+    );
+    ok(retained.apply_artifact_evaluation(&retained_evaluation));
+    assert_eq!(
+        retained.manifest.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(retained.causal_trace.len(), 1);
+    assert!(retained.structural_causal_trace.is_empty());
+    assert_eq!(verify_evidence(&retained), Ok(()));
+
     let mut structural = public_evidence_fixture();
     let structural_evaluation = artifact_evaluation(
         ArtifactTransitionRuleV1::RetainStructure,
@@ -420,7 +434,19 @@ fn missing_artifacts_never_produce_an_exact_verification_outcome() {
         Some(SafeErrorCodeV1::ClosureIncomplete)
     );
     let encoded = ok(result.to_canonical_cbor());
-    assert_eq!(ok(VerificationResultV1::from_canonical_cbor(&encoded)), result);
+    assert_eq!(
+        ok(VerificationResultV1::from_canonical_cbor(&encoded)),
+        result
+    );
+
+    let mut structural_result = result;
+    structural_result.replay_claim = ReplayClaimV1::StructuralOnly;
+    structural_result.result_digest = ok(structural_result.digest());
+    let encoded = ok(structural_result.to_canonical_cbor());
+    assert_eq!(
+        ok(VerificationResultV1::from_canonical_cbor(&encoded)),
+        structural_result
+    );
 }
 
 #[test]
