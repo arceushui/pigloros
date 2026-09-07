@@ -6,7 +6,10 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
+    sync::RwLock,
 };
+
+use crate::ids::TimelineId;
 
 const VERSION: u64 = 1;
 const ERQ1: &str = "ERQ1";
@@ -151,6 +154,246 @@ pub enum ErasureErrorV1 {
     TrustSnapshotInvalid,
     /// Provenance is missing or invalid.
     ProvenanceMissing,
+}
+
+/// A protected host operation whose effect must serialize with `AccessFrozen`.
+///
+/// The operation class is deliberately payload-free. It is an enforcement
+/// input, not an audit record and never carries subject data or application
+/// values across the host boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureProtectedOperationV1 {
+    /// Append an authoritative Event or commit staged work.
+    Append,
+    /// Read authoritative Event data.
+    Read,
+    /// Export Event or projection data.
+    Export,
+    /// Materialize a snapshot or projection view.
+    Snapshot,
+    /// Admit a proposed action.
+    ProposedAction,
+    /// Hand data to a Plugin.
+    PluginInput,
+    /// Create a Fork whose lineage may extend an erasure scope.
+    Fork,
+}
+
+/// Payload-free containment failures returned by the #186 host gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureContainmentErrorV1 {
+    /// The operation intersects the persisted effective erasure scope after
+    /// the `AccessFrozen` Tick Boundary.
+    AccessFrozen,
+    /// The affected boundary could not be established from verified evidence.
+    RecoveryUnavailable,
+}
+
+impl ErasureContainmentErrorV1 {
+    /// Return the stable public error code.
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::AccessFrozen => 0,
+            Self::RecoveryUnavailable => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for ErasureContainmentErrorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "erasure containment error {}", self.code())
+    }
+}
+
+impl std::error::Error for ErasureContainmentErrorV1 {}
+
+/// Host-owned erasure containment seam used by stores and runtime consumers.
+///
+/// Implementations resolve a Timeline/Fork to the immutable scope reference
+/// committed by the erasure coordinator. The callback form lets an adapter
+/// keep the decision and its protected effect in one host-owned serialization
+/// boundary; callers must not preflight and then act outside this seam.
+pub trait ErasureGate: Send + Sync {
+    /// Authorize one protected operation at its current host boundary.
+    ///
+    /// # Errors
+    /// Returns a payload-free containment error when the effective scope is
+    /// frozen or the verified boundary is unavailable.
+    fn authorize(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), ErasureContainmentErrorV1>;
+
+    /// Serialize an operation decision with its protected effect.
+    ///
+    /// The default is safe for stateless gates. Mutable gates should override
+    /// it to hold their read/write lock across `effect`.
+    ///
+    /// # Errors
+    /// Returns the same payload-free containment error as [`Self::authorize`].
+    fn with_fence(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(),
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        self.authorize(timeline, operation)?;
+        effect();
+        Ok(())
+    }
+}
+
+/// In-process host gate backed only by verified payload-free ERS1 snapshots.
+///
+/// This is a containment adapter, not a persistence authority. #184 remains
+/// responsible for recovering and validating snapshots before they are
+/// published here. A Timeline is bound to an opaque scope reference by the
+/// authoritative topology resolver; no selector is re-evaluated by this gate.
+pub struct ErasureContainmentGateV1 {
+    timeline_scopes: RwLock<BTreeMap<TimelineId, ErasureReferenceV1>>,
+    states: RwLock<BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>>,
+    blocked_timelines: RwLock<BTreeSet<TimelineId>>,
+}
+
+impl Default for ErasureContainmentGateV1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ErasureContainmentGateV1 {
+    /// Construct an empty gate. Unbound Timelines have no erasure evidence and
+    /// remain available; a failed recovery can be made explicit with
+    /// [`Self::block_timeline`].
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            timeline_scopes: RwLock::new(BTreeMap::new()),
+            states: RwLock::new(BTreeMap::new()),
+            blocked_timelines: RwLock::new(BTreeSet::new()),
+        }
+    }
+
+    /// Bind one Timeline/Fork to its resolved immutable scope reference.
+    ///
+    /// Conflicting bindings fail closed and leave the original binding intact.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] for a
+    /// conflicting binding.
+    pub fn bind_timeline(
+        &self,
+        timeline: TimelineId,
+        scope: ErasureReferenceV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let mut bindings = self
+            .timeline_scopes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = match bindings.get(&timeline) {
+            Some(existing) if *existing != scope => {
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+            }
+            Some(_) => Ok(()),
+            None => {
+                bindings.insert(timeline, scope);
+                Ok(())
+            }
+        };
+        drop(bindings);
+        result
+    }
+
+    /// Publish a recovered verified state for subsequent containment checks.
+    ///
+    /// Publishing is replacement-only for one request identity. It never
+    /// clears a previously published frozen state: a caller must provide the
+    /// monotonic state recovered from the durable predecessor chain.
+    pub fn publish_verified_state(&self, state: ErasureVerifiedStateV1) {
+        let request = state.request().reference();
+        let mut states = self
+            .states
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        states.insert(request, state);
+    }
+
+    /// Mark the narrowest authenticated boundary unavailable after recovery
+    /// cannot establish its effective erasure scope.
+    pub fn block_timeline(&self, timeline: TimelineId) {
+        self.blocked_timelines
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(timeline);
+    }
+
+    fn authorize_locked(
+        &self,
+        timeline: TimelineId,
+        _operation: ErasureProtectedOperationV1,
+        states: &BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if self
+            .blocked_timelines
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&timeline)
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let scope = self
+            .timeline_scopes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&timeline)
+            .copied();
+        let Some(scope) = scope else {
+            return Ok(());
+        };
+        let mut matched = false;
+        for state in states.values() {
+            if state.scope_contains(scope) {
+                matched = true;
+                state.permit_protected_operation(scope)?;
+            }
+        }
+        if matched {
+            Ok(())
+        } else {
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        }
+    }
+}
+
+impl ErasureGate for ErasureContainmentGateV1 {
+    fn authorize(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let states = self
+            .states
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.authorize_locked(timeline, operation, &states)
+    }
+
+    fn with_fence(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(),
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let states = self
+            .states
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.authorize_locked(timeline, operation, &states)?;
+        effect();
+        Ok(())
+    }
 }
 impl ErasureErrorV1 {
     /// Return the stable V1 error code.
@@ -3097,6 +3340,49 @@ impl ErasureVerifiedStateV1 {
     #[must_use]
     pub const fn freeze_position(&self) -> Option<u64> {
         self.state.freeze_position()
+    }
+
+    /// Return whether a Timeline/Fork scope reference belongs to the
+    /// persisted effective scope, including admitted future-Fork extensions.
+    #[must_use]
+    pub fn scope_contains(&self, scope: ErasureReferenceV1) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|commitment| commitment.scope_members().contains(&scope))
+            || self.scope_forks().any(|fork| fork == scope)
+    }
+
+    /// Authorize one protected operation against this verified snapshot.
+    ///
+    /// Before `AccessFrozen` there is no erasure fence. After it, a matching
+    /// effective scope is rejected, including `Complete` and `PartialFailure`;
+    /// those terminal outcomes do not restore access. A frozen lifecycle with
+    /// no committed scope is invalid recovery evidence and therefore fails
+    /// closed.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::AccessFrozen`] for an affected
+    /// scope, or [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// lifecycle and scope evidence cannot establish a safe boundary.
+    pub fn permit_protected_operation(
+        &self,
+        scope: ErasureReferenceV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let lifecycle = self.lifecycle();
+        if lifecycle == ErasureLifecycleV1::Rejected
+            || lifecycle == ErasureLifecycleV1::Submitted
+            || lifecycle == ErasureLifecycleV1::Authorized
+        {
+            return Ok(());
+        }
+        if self.scope.is_none() || self.freeze_position().is_none() {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if self.scope_contains(scope) {
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        } else {
+            Ok(())
+        }
     }
 }
 

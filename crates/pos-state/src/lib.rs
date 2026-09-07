@@ -12,12 +12,16 @@
 //! No I/O, no async.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use pos_core::{
     AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
     CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
-    Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, Event, Hash,
+    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
     Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
@@ -272,10 +276,20 @@ struct Slot {
 ///
 /// Plugins register reducers during Wave 3 initialisation; the registry then
 /// applies every incoming event to every registered reducer in insertion order.
-#[derive(Default)]
 pub struct ProjectionRegistry {
     /// Ordered list so iteration is deterministic.
     slots: Vec<(String, Slot)>,
+    /// Host-owned erasure gate for protected projection materialization.
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
+}
+
+impl Default for ProjectionRegistry {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new())),
+        }
+    }
 }
 
 impl std::fmt::Debug for ProjectionRegistry {
@@ -286,7 +300,7 @@ impl std::fmt::Debug for ProjectionRegistry {
         }
         f.debug_struct("ProjectionRegistry")
             .field("reducers", &names)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -295,6 +309,50 @@ impl ProjectionRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Check the host-owned erasure fence before materializing a protected
+    /// projection observation. The registry never infers scope from cached
+    /// projection state; the gate must use verified durable evidence.
+    ///
+    /// # Errors
+    /// Returns the payload-free containment error when the Timeline is frozen
+    /// or its effective boundary cannot be established.
+    pub fn authorize_erasure_observation(
+        &self,
+        gate: &dyn ErasureGate,
+        timeline: TimelineId,
+    ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+        gate.authorize(timeline, ErasureProtectedOperationV1::Snapshot)
+    }
+
+    /// Bind the host-owned erasure gate used by protected observations.
+    #[must_use]
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
+        self.bind_erasure_gate(gate);
+        self
+    }
+
+    /// Bind the host-owned erasure gate in place.
+    pub fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) {
+        self.erasure_gate = Some(gate);
+    }
+
+    /// Remove the erasure gate so protected observations fail closed.
+    #[must_use]
+    pub fn without_erasure_gate(mut self) -> Self {
+        self.erasure_gate = None;
+        self
+    }
+
+    fn authorize_bound_erasure(&self, timeline: TimelineId) -> Result<(), AuthorityErrorV1> {
+        self.erasure_gate
+            .as_ref()
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
+            .and_then(|gate| {
+                gate.authorize(timeline, ErasureProtectedOperationV1::Snapshot)
+                    .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+            })
     }
 
     /// Register a named reducer.
@@ -408,6 +466,7 @@ impl ProjectionRegistry {
         authority_position: Seq,
         context: &ProjectionObservationContextV1,
     ) -> Result<AuthorizedObservationV1, AuthorityErrorV1> {
+        self.authorize_bound_erasure(context.timeline_id)?;
         authority
             .validate_observation_authorization(
                 request,
@@ -1833,5 +1892,23 @@ mod wave3_tests {
         let empty_snap = std::collections::HashMap::new();
         let diff = reg.diff_against_snapshot(&empty_snap, &[entity]);
         assert!(diff.is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn projection_erasure_observation_gate_is_fail_closed() {
+        let gate = Arc::new(ErasureContainmentGateV1::new());
+        let timeline = TimelineId::new();
+        gate.block_timeline(timeline);
+        let registry = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        assert_eq!(
+            registry.authorize_erasure_observation(gate.as_ref(), timeline),
+            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        let disabled = registry.without_erasure_gate();
+        assert_eq!(
+            disabled.authorize_bound_erasure(timeline),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
     }
 }

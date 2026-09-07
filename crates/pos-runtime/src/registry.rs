@@ -12,8 +12,9 @@ use pos_core::{
     event::{Event, EventDraft, Kind},
     ids::PluginId,
     ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
-    ConsentCapabilityToken, ConsentError, ConsentGate, KnowledgeSnapshotV1, PersistedAuthorityV1,
-    Plugin, ProposedAction, Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentGateV1, ErasureGate,
+    ErasureProtectedOperationV1, KnowledgeSnapshotV1, PersistedAuthorityV1, Plugin, ProposedAction,
+    Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
@@ -750,6 +751,7 @@ pub struct PluginRegistry {
     resource_limit: Option<u64>,
     poisoned_driver: Option<String>,
     consent_gate: Option<Arc<dyn ConsentGate>>,
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
 }
 
 impl PluginRegistry {
@@ -907,6 +909,7 @@ impl PluginRegistry {
             operation,
             subscriptions.iter(),
         )?;
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Snapshot)?;
         Ok(self.snapshot_for_subscriptions(&subscriptions))
     }
 
@@ -987,6 +990,7 @@ impl PluginRegistry {
             // caller binds a durable authority. This default fails closed for
             // protected drafts instead of exposing an unguarded public path.
             consent_gate: Some(Arc::new(ConsentAuthority::new())),
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new())),
         }
     }
 
@@ -1027,6 +1031,50 @@ impl PluginRegistry {
     #[must_use]
     pub fn clone_consent_gate(&self) -> Option<Arc<dyn ConsentGate>> {
         self.consent_gate.clone()
+    }
+
+    /// Bind the host-owned erasure containment gate used for snapshots,
+    /// Plugin input, proposed actions, and staged Event commits.
+    #[must_use]
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
+        self.bind_erasure_gate(gate);
+        self
+    }
+
+    /// Bind the host-owned erasure gate in place for a shared Gateway/runtime
+    /// composition.
+    pub fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) {
+        self.projections.bind_erasure_gate(Arc::clone(&gate));
+        self.erasure_gate = Some(gate);
+    }
+
+    /// Remove the erasure gate so protected runtime operations fail closed.
+    #[must_use]
+    pub fn without_erasure_gate(mut self) -> Self {
+        self.projections = self.projections.without_erasure_gate();
+        self.erasure_gate = None;
+        self
+    }
+
+    /// Return the host-bound erasure gate for consumers that share the same
+    /// Tick Boundary fence as this registry.
+    #[must_use]
+    pub fn clone_erasure_gate(&self) -> Option<Arc<dyn ErasureGate>> {
+        self.erasure_gate.clone()
+    }
+
+    fn authorize_erasure(
+        &self,
+        timeline: pos_core::ids::TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), RuntimeError> {
+        self.erasure_gate
+            .as_ref()
+            .ok_or(RuntimeError::ErasureOperationUnavailable)
+            .and_then(|gate| {
+                gate.authorize(timeline, operation)
+                    .map_err(RuntimeError::ErasureContainment)
+            })
     }
 
     /// Fold a host-captured Event range into the registered reducers.
@@ -1339,6 +1387,7 @@ impl PluginRegistry {
         operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::PluginInput)?;
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
             self.collect_anchored_selection(selection)?;
@@ -1434,6 +1483,9 @@ impl PluginRegistry {
         } = target;
         self.ensure_live_execution()
             .and_then(|()| self.ensure_no_pending_step())
+            .and_then(|()| {
+                self.authorize_erasure(timeline, ErasureProtectedOperationV1::PluginInput)
+            })
             .and_then(|()| {
                 observation
                     .revalidate(authority, authority_registry, authority_position)
@@ -1617,8 +1669,30 @@ impl PluginRegistry {
     /// aborts the staged Drivers before any draft reaches durable storage.
     ///
     /// # Errors
-    /// Returns the consent or store error and aborts the staged step when the
-    /// fence or append fails.
+    /// Returns the consent, erasure-containment, or store error and aborts the
+    /// staged step when the fence or append fails.
+    fn append_with_erasure_fence(
+        &self,
+        store: &mut dyn pos_core::store::EventStore,
+        timeline: pos_core::ids::TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, RuntimeError> {
+        let gate = self
+            .erasure_gate
+            .as_ref()
+            .ok_or(RuntimeError::ErasureOperationUnavailable)?;
+        let mut append_result = Ok(Vec::new());
+        let mut append = || {
+            append_result = store.append(timeline, drafts);
+        };
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Append, &mut append)
+            .map_err(RuntimeError::ErasureContainment)?;
+        append_result.map_err(RuntimeError::from)
+    }
+
+    /// # Errors
+    /// Returns a consent, erasure-containment, pending-step, or store error
+    /// when the Tick Boundary cannot be committed.
     pub fn append_and_commit_step_at(
         &mut self,
         store: &mut dyn pos_core::store::EventStore,
@@ -1663,7 +1737,7 @@ impl PluginRegistry {
                 }
                 let mut append_result = Ok(Vec::new());
                 let mut append = || {
-                    append_result = store.append(pending_timeline, drafts);
+                    append_result = self.append_with_erasure_fence(store, pending_timeline, drafts);
                 };
                 if let Err(error) = gate.with_token_fence(
                     pending_timeline,
@@ -1679,7 +1753,7 @@ impl PluginRegistry {
                     Ok(events) => events,
                     Err(error) => {
                         let _ = self.abort_drivers(&pending.driver_ids);
-                        return Err(error.into());
+                        return Err(error);
                     }
                 }
             }
@@ -1704,11 +1778,11 @@ impl PluginRegistry {
                     let _ = self.abort_drivers(&pending.driver_ids);
                     return Err(error);
                 }
-                match store.append(pending_timeline, drafts) {
+                match self.append_with_erasure_fence(store, pending_timeline, drafts) {
                     Ok(events) => events,
                     Err(error) => {
                         let _ = self.abort_drivers(&pending.driver_ids);
-                        return Err(error.into());
+                        return Err(error);
                     }
                 }
             }
@@ -1766,11 +1840,11 @@ impl PluginRegistry {
             let _ = self.abort_drivers(&pending.driver_ids);
             return Err(error);
         }
-        let events = match store.append(pending.timeline, drafts) {
+        let events = match self.append_with_erasure_fence(store, pending.timeline, drafts) {
             Ok(events) => events,
             Err(error) => {
                 let _ = self.abort_drivers(&pending.driver_ids);
-                return Err(error.into());
+                return Err(error);
             }
         };
         self.commit_pending_step(pending);

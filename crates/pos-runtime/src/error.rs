@@ -1,5 +1,5 @@
 use pos_core::ids::{PluginId, TimelineId};
-use pos_core::ConsentError;
+use pos_core::{ConsentError, ErasureContainmentErrorV1};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -58,8 +58,14 @@ pub enum RuntimeError {
     #[error("protected operation requires a host-bound consent authority")]
     ConsentOperationUnavailable,
 
+    #[error("protected operation requires a host-bound erasure containment gate")]
+    ErasureOperationUnavailable,
+
     #[error("protected operation failed its consent fence: {0}")]
     Consent(ConsentError),
+
+    #[error("protected operation failed its erasure containment fence: {0}")]
+    ErasureContainment(ErasureContainmentErrorV1),
 
     #[error("participant observation authority failed closed: {0}")]
     Authority(#[from] pos_core::AuthorityErrorV1),

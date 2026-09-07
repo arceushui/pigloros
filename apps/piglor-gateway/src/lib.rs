@@ -36,7 +36,8 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin, ProposedAction,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, Plugin,
+    ProposedAction,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
@@ -1099,6 +1100,24 @@ impl Gateway {
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
+    }
+
+    /// Wrap a store after binding the host-owned erasure containment gate.
+    ///
+    /// Binding happens before the bounded `StoreExecutor` starts, so every
+    /// Gateway append/read/export command observes the same gate as direct
+    /// `EventStore` consumers.
+    #[must_use]
+    pub fn new_with_erasure_gate(
+        mut store: Box<dyn EventStore>,
+        gate: Arc<dyn ErasureGate>,
+    ) -> Self {
+        drop(store.bind_erasure_gate(Arc::clone(&gate)));
+        let mut gateway = Self::new(store);
+        if let Some(registry) = Arc::get_mut(&mut gateway.action_registry) {
+            registry.bind_erasure_gate(gate);
+        }
+        gateway
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.

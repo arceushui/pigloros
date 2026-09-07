@@ -438,9 +438,10 @@ impl IntoResponse for GatewayError {
                 | ActionRejected::DomainValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             },
-            Self::Consent(_) | Self::LedgerWriteDisabled | Self::AuthorizationDenied => {
-                StatusCode::FORBIDDEN
-            }
+            Self::Consent(_)
+            | Self::LedgerWriteDisabled
+            | Self::AuthorizationDenied
+            | Self::Store(CoreError::ErasureAccessFrozen) => StatusCode::FORBIDDEN,
             Self::TimelineLimitReached { .. }
             | Self::EventLimitReached { .. }
             | Self::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
@@ -452,6 +453,9 @@ impl IntoResponse for GatewayError {
             Self::CompatibilityReadTruncated { .. } | Self::IngressConflict => StatusCode::CONFLICT,
             Self::ResourceUnavailable | Self::Store(CoreError::TimelineNotFound(_)) => {
                 StatusCode::NOT_FOUND
+            }
+            Self::Store(CoreError::ErasureContainmentUnavailable) => {
+                StatusCode::SERVICE_UNAVAILABLE
             }
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ActionAuthorizationUnavailable | Self::AuthorizationUnavailable => {

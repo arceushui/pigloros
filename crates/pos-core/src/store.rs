@@ -29,7 +29,9 @@ use crate::{
     hasher::Hasher,
     ids::{EventId, TimelineId},
     timeline::{Timeline, TimelineMeta},
+    ErasureContainmentErrorV1, ErasureGate,
 };
+use std::sync::Arc;
 
 /// Opaque, fixed-size identity for a retried external append.
 ///
@@ -326,6 +328,20 @@ pub struct TimelineExport {
 /// Export/import helpers live as free functions alongside the trait so callers can
 /// hold `Box<dyn EventStore>` and swap backends without changing call sites.
 pub trait EventStore: Send {
+    /// Bind the host-owned erasure containment gate used by protected store
+    /// operations. Adapters retain the gate for their lifetime and must check
+    /// it inside the same logical boundary as the protected effect.
+    ///
+    /// The default is source-compatible for third-party adapters. Production
+    /// adapters that expose protected data should override it and fail closed
+    /// when a gate is not available.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter rejects the binding.
+    fn bind_erasure_gate(&mut self, _gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+        Ok(())
+    }
+
     /// Bind this adapter to the Gateway consent authority that owns protected
     /// appends for its lifetime.
     ///
@@ -918,6 +934,15 @@ pub trait EventStore: Send {
             .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
         self.save_key_registry(&registry)?;
         Ok((outcome, registry))
+    }
+}
+
+/// Map the payload-free erasure decision into the `EventStore` error domain.
+#[must_use]
+pub const fn erasure_containment_error(error: ErasureContainmentErrorV1) -> CoreError {
+    match error {
+        ErasureContainmentErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
+        ErasureContainmentErrorV1::RecoveryUnavailable => CoreError::ErasureContainmentUnavailable,
     }
 }
 

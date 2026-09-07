@@ -10,6 +10,7 @@ use rusqlite::{
 };
 use std::{
     collections::HashSet,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -45,11 +46,11 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
-    ErasureErrorV1, ErasureIndexInsertV1, ErasurePersistencePortV1, ErasureReferenceV1,
-    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    ErasureErrorV1, ErasureGate, ErasureIndexInsertV1, ErasurePersistencePortV1,
+    ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -140,6 +141,7 @@ pub struct SqliteStore {
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     #[cfg(test)]
     destruction_transaction_hook:
@@ -649,6 +651,7 @@ impl SqliteStore {
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
+            erasure_gate: None,
             authority_persistence_binding: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
@@ -2134,6 +2137,17 @@ impl SqliteStore {
         )
     }
 
+    fn authorize_erasure(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), CoreError> {
+        self.erasure_gate.as_ref().map_or(Ok(()), |gate| {
+            gate.authorize(timeline, operation)
+                .map_err(pos_core::store::erasure_containment_error)
+        })
+    }
+
     fn append_visible(
         &mut self,
         timeline: TimelineId,
@@ -3358,6 +3372,16 @@ impl SqliteStore {
 }
 
 impl EventStore for SqliteStore {
+    fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+        if self.erasure_gate.is_some() {
+            return Err(CoreError::Storage(
+                "erasure containment gate is already bound".to_owned(),
+            ));
+        }
+        self.erasure_gate = Some(gate);
+        Ok(())
+    }
+
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
         match self.consent_authority_permit {
             Some(existing) if existing != permit => Err(CoreError::Storage(
@@ -3395,7 +3419,8 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
-        crate::ensure_non_geographic_drafts(drafts, timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| crate::ensure_non_geographic_drafts(drafts, timeline))
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.append_visible(timeline, drafts))
     }
@@ -3521,7 +3546,8 @@ impl EventStore for SqliteStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_non_geographic_drafts(drafts, timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| crate::ensure_non_geographic_drafts(drafts, timeline))
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
                 self.append_bounded_visible(timeline, drafts, max_owned_events, false, None, None)
@@ -3535,16 +3561,18 @@ impl EventStore for SqliteStore {
         permit: ConsentAppendPermit,
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_gateway_consent_types(drafts, timeline).and_then(|()| {
-            self.append_bounded_visible(
-                timeline,
-                drafts,
-                max_owned_events,
-                true,
-                Some(permit),
-                None,
-            )
-        })
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| crate::ensure_gateway_consent_types(drafts, timeline))
+            .and_then(|()| {
+                self.append_bounded_visible(
+                    timeline,
+                    drafts,
+                    max_owned_events,
+                    true,
+                    Some(permit),
+                    None,
+                )
+            })
     }
 
     fn append_consent_revocation_bounded(
@@ -3555,7 +3583,8 @@ impl EventStore for SqliteStore {
         max_owned_events: u64,
         cleanup_scope: AppendDedupScope,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_gateway_consent_revocation(drafts, timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| crate::ensure_gateway_consent_revocation(drafts, timeline))
             .and_then(|()| crate::ensure_gateway_consent_types(drafts, timeline))
             .and_then(|()| {
                 self.append_bounded_visible(
@@ -3576,7 +3605,10 @@ impl EventStore for SqliteStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
-        self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| {
+                self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
+            })
             .and_then(crate::unbounded_append_outcome)
     }
 
@@ -3612,13 +3644,16 @@ impl EventStore for SqliteStore {
         let admitted_at = self.clock.now()?;
         let mut draft = intent.into_draft();
         draft.wall_time = Some(admitted_at);
-        self.append_or_duplicate_with_limit(
-            timeline,
-            identity,
-            admitted_at,
-            &draft,
-            Some(max_owned_events),
-        )
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| {
+                self.append_or_duplicate_with_limit(
+                    timeline,
+                    identity,
+                    admitted_at,
+                    &draft,
+                    Some(max_owned_events),
+                )
+            })
     }
 
     fn read_event_by_id(
@@ -3626,6 +3661,7 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         event_id: EventId,
     ) -> Result<Option<Event>, CoreError> {
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)?;
         self.ensure_generic_timeline_visibility(timeline)?;
         let chain = self.fork_chain(timeline)?;
         let located = self
@@ -3809,7 +3845,8 @@ impl EventStore for SqliteStore {
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        self.ensure_generic_timeline_visibility(timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
                 let chain = self.fork_chain(timeline)?;
                 let mut all: Vec<Event> = Vec::new();
@@ -3861,13 +3898,15 @@ impl EventStore for SqliteStore {
         if bounds.max_elapsed_micros() == 0 {
             return Err(CoreError::ReadTimeTooLarge { elapsed_micros: 0 });
         }
-        self.ensure_generic_timeline_visibility(timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.read_logical_bounded(timeline, range, bounds, started))
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         // Ensure timeline exists (and surface TimelineNotFound for missing ids).
-        self.ensure_generic_timeline_visibility(timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
                 let _ = self
                     .get_timeline(timeline)?
@@ -3877,7 +3916,8 @@ impl EventStore for SqliteStore {
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
-        self.ensure_generic_timeline_visibility(parent)
+        self.authorize_erasure(parent, ErasureProtectedOperationV1::Fork)
+            .and_then(|()| self.ensure_generic_timeline_visibility(parent))
             .and_then(|()| {
                 let head = self.logical_head(parent)?;
                 if at_seq > head {
@@ -4049,6 +4089,7 @@ impl EventStore for SqliteStore {
         // parent lookup are exercised (and fail closed before INSERT).
         let chain_head = match meta.fork_point {
             Some((parent, at_seq)) => {
+                self.authorize_erasure(parent, ErasureProtectedOperationV1::Fork)?;
                 let parent_head = self.logical_head(parent)?;
                 if at_seq > parent_head {
                     return Err(CoreError::ForkBeyondHead {
@@ -4110,6 +4151,7 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         events: &[Event],
     ) -> Result<(), CoreError> {
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)?;
         if events.is_empty() {
             let _ = self
                 .get_timeline(timeline)?

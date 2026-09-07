@@ -63,6 +63,12 @@ pub enum CoreError {
 
     #[error("geographic admission outcome unknown")]
     GeographicAdmissionOutcomeUnknown,
+
+    #[error("erasure access is frozen at the Tick Boundary")]
+    ErasureAccessFrozen,
+
+    #[error("erasure containment boundary is unavailable")]
+    ErasureContainmentUnavailable,
 }
 
 #[cfg(test)]
@@ -184,5 +190,16 @@ mod tests {
     fn hash_chain_broken_displays() {
         let e = CoreError::HashChainBroken { seq: 7 };
         assert!(e.to_string().contains('7'));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn erasure_containment_errors_display() {
+        assert!(CoreError::ErasureAccessFrozen
+            .to_string()
+            .contains("erasure access"));
+        assert!(CoreError::ErasureContainmentUnavailable
+            .to_string()
+            .contains("containment"));
     }
 }

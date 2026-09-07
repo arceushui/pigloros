@@ -6,6 +6,7 @@
 
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
+    sync::Arc,
     time::Instant,
 };
 
@@ -45,10 +46,11 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureErrorV1, ErasureIndexInsertV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
-    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureErrorV1, ErasureGate, ErasureIndexInsertV1, ErasurePersistedStateV1,
+    ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
+    ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -154,6 +156,8 @@ pub struct MemoryStore {
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
     /// Trusted Gateway authority bound to this adapter's protected append port.
     consent_authority_permit: Option<ConsentAppendPermit>,
+    /// Host-owned erasure containment gate for protected Timeline operations.
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
@@ -464,6 +468,7 @@ impl MemoryStore {
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
             consent_authority_permit: None,
+            erasure_gate: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
             authority_persistence_binding: None,
@@ -1077,6 +1082,17 @@ impl MemoryStore {
             self.timeline_contains_geographic_evidence(timeline),
             timeline,
         )
+    }
+
+    fn authorize_erasure(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), CoreError> {
+        self.erasure_gate.as_ref().map_or(Ok(()), |gate| {
+            gate.authorize(timeline, operation)
+                .map_err(pos_core::store::erasure_containment_error)
+        })
     }
 
     fn append_visible(
@@ -2226,6 +2242,16 @@ impl MemoryStore {
 }
 
 impl EventStore for MemoryStore {
+    fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+        if self.erasure_gate.is_some() {
+            return Err(CoreError::Storage(
+                "erasure containment gate is already bound".to_owned(),
+            ));
+        }
+        self.erasure_gate = Some(gate);
+        Ok(())
+    }
+
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
         match self.consent_authority_permit {
             Some(existing) if existing != permit => Err(CoreError::Storage(
@@ -2254,7 +2280,8 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
-        crate::ensure_non_geographic_drafts(drafts, timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| crate::ensure_non_geographic_drafts(drafts, timeline))
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.append_visible(timeline, drafts))
     }
@@ -2290,7 +2317,17 @@ impl EventStore for MemoryStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, false, None, None)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| {
+                self.append_bounded_with_boundary(
+                    timeline,
+                    drafts,
+                    max_owned_events,
+                    false,
+                    None,
+                    None,
+                )
+            })
     }
 
     fn append_consent_bounded(
@@ -2300,14 +2337,17 @@ impl EventStore for MemoryStore {
         permit: ConsentAppendPermit,
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded_with_boundary(
-            timeline,
-            drafts,
-            max_owned_events,
-            true,
-            Some(permit),
-            None,
-        )
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| {
+                self.append_bounded_with_boundary(
+                    timeline,
+                    drafts,
+                    max_owned_events,
+                    true,
+                    Some(permit),
+                    None,
+                )
+            })
     }
 
     fn append_consent_revocation_bounded(
@@ -2318,15 +2358,18 @@ impl EventStore for MemoryStore {
         max_owned_events: u64,
         cleanup_scope: AppendDedupScope,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_gateway_consent_revocation(drafts, timeline)?;
-        self.append_bounded_with_boundary(
-            timeline,
-            drafts,
-            max_owned_events,
-            true,
-            Some(permit),
-            Some(cleanup_scope),
-        )
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| crate::ensure_gateway_consent_revocation(drafts, timeline))
+            .and_then(|()| {
+                self.append_bounded_with_boundary(
+                    timeline,
+                    drafts,
+                    max_owned_events,
+                    true,
+                    Some(permit),
+                    Some(cleanup_scope),
+                )
+            })
     }
 
     fn append_or_duplicate(
@@ -2336,7 +2379,10 @@ impl EventStore for MemoryStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
-        self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| {
+                self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
+            })
             .and_then(crate::unbounded_append_outcome)
     }
 
@@ -2369,13 +2415,16 @@ impl EventStore for MemoryStore {
         let admitted_at = self.clock.now()?;
         let mut draft = intent.into_draft();
         draft.wall_time = Some(admitted_at);
-        self.append_or_duplicate_with_limit(
-            timeline,
-            identity,
-            admitted_at,
-            &draft,
-            Some(max_owned_events),
-        )
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| {
+                self.append_or_duplicate_with_limit(
+                    timeline,
+                    identity,
+                    admitted_at,
+                    &draft,
+                    Some(max_owned_events),
+                )
+            })
     }
 
     fn read_event_by_id(
@@ -2383,7 +2432,8 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         event_id: EventId,
     ) -> Result<Option<Event>, CoreError> {
-        read_event_by_id(self, timeline, event_id)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
+            .and_then(|()| read_event_by_id(self, timeline, event_id))
     }
 
     fn purge_expired_append_identities_bounded(
@@ -2454,7 +2504,8 @@ impl EventStore for MemoryStore {
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        self.ensure_generic_timeline_visibility(timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.collect_events_in_range(timeline, range))
     }
 
@@ -2464,16 +2515,19 @@ impl EventStore for MemoryStore {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        self.ensure_generic_timeline_visibility(timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.collect_events_in_range_bounded(timeline, range, bounds))
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        read_own(self, timeline, range)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
+            .and_then(|()| read_own(self, timeline, range))
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
-        self.ensure_generic_timeline_visibility(parent)
+        self.authorize_erasure(parent, ErasureProtectedOperationV1::Fork)
+            .and_then(|()| self.ensure_generic_timeline_visibility(parent))
             .and_then(|()| self.fork_visible_timeline(parent, at_seq, name))
     }
 
@@ -2522,7 +2576,8 @@ impl EventStore for MemoryStore {
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
         // Resolve fork parent before duplicate-id check (parity with SqliteStore).
         let chain = if let Some((parent, at_seq)) = meta.fork_point {
-            self.ensure_generic_timeline_visibility(parent)
+            self.authorize_erasure(parent, ErasureProtectedOperationV1::Fork)
+                .and_then(|()| self.ensure_generic_timeline_visibility(parent))
                 .and_then(|()| {
                     let parent_head = self.logical_head(parent)?;
                     if at_seq > parent_head {
@@ -2557,7 +2612,8 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         events: &[Event],
     ) -> Result<(), CoreError> {
-        crate::ensure_non_geographic_events(events, timeline)
+        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
+            .and_then(|()| crate::ensure_non_geographic_events(events, timeline))
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
                 if events.is_empty() {
