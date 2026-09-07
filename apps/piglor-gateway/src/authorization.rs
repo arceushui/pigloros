@@ -174,7 +174,7 @@ pub struct GatewayAuthorizationRequest {
 impl GatewayAuthorizationRequest {
     /// Return whether this request is bound to the exact protected read target.
     #[must_use]
-    pub const fn targets_read(
+    pub fn targets_read(
         &self,
         target_timeline: TimelineId,
         from_position: u64,
@@ -589,7 +589,9 @@ fn digest_optional_timeline(hasher: &mut blake3::Hasher, value: Option<TimelineI
             hasher.update(&[1]);
             hasher.update(&value.inner().to_bytes());
         }
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
     }
 }
 
@@ -599,7 +601,9 @@ fn digest_optional_seq(hasher: &mut blake3::Hasher, value: Option<Seq>) {
             hasher.update(&[1]);
             hasher.update(&value.as_u64().to_be_bytes());
         }
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
     }
 }
 
@@ -609,7 +613,9 @@ fn digest_optional_usize(hasher: &mut blake3::Hasher, value: Option<usize>) {
             hasher.update(&[1]);
             hasher.update(&u64::try_from(value).unwrap_or(u64::MAX).to_be_bytes());
         }
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
     }
 }
 
