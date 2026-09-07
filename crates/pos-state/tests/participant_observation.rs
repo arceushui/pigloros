@@ -334,7 +334,7 @@ fn unresolved_principal_precedes_missing_observation_identity() {
     let fixture = authority_fixture_with_identity_presence([true, false, true]);
     let untrusted_registry = AuthorityRegistrySnapshotV1::try_new(
         fixture.request.authority_registry_digest(),
-        Vec::new(),
+        vec![hash_from_repeated_byte(99)],
         Vec::new(),
         Vec::new(),
     )
