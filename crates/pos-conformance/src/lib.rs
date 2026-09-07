@@ -2172,7 +2172,7 @@ pub mod strict_codec {
         Ok(())
     }
 
-    const fn verification_outcome_matches_claim(result: &VerificationResultV1) -> bool {
+    fn verification_outcome_matches_claim(result: &VerificationResultV1) -> bool {
         match result.verification_outcome {
             VerificationOutcomeV1::VerifiedExact | VerificationOutcomeV1::Diverged => matches!(
                 result.replay_claim,
