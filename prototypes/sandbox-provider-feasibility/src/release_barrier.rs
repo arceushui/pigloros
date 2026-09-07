@@ -10,9 +10,10 @@ use nix::{
     sys::{
         resource::{getrlimit, Resource, RLIM_INFINITY},
         socket::{
-            getsockopt, recv, recvmsg, send, setsockopt, socketpair, sockopt, AddressFamily,
-            ControlMessageOwned, MsgFlags, SockFlag, SockType,
+            getsockopt, recv, recvmsg, send, setsockopt, shutdown, socketpair, sockopt,
+            AddressFamily, ControlMessageOwned, MsgFlags, Shutdown, SockFlag, SockType,
         },
+        time::{TimeVal, TimeValLike as _},
     },
     time::{clock_gettime, ClockId},
     unistd::execveat,
@@ -20,7 +21,7 @@ use nix::{
 use std::{
     ffi::CString,
     fs::{File, OpenOptions},
-    io::{IoSliceMut, Read as _, Seek as _, SeekFrom},
+    io::{IoSliceMut, Read as _, Seek as _, SeekFrom, Write as _},
     os::{
         fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd},
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
@@ -39,6 +40,86 @@ const ADAPTER_PATH: &str = "/usr/bin/sandbox-provider-feasibility";
 const RELEASE_NAME: &str = "piglor-release-v1";
 const PROXY_NAME: &str = "piglor-host-service-v1";
 const MAX_PACKET: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProofCase {
+    Positive,
+    MalformedRelease,
+    MismatchedRelease,
+    ReplayedRelease,
+    ExpiredRelease,
+    ReadbackMismatch,
+    Cancellation,
+    ProviderEof,
+    ProviderDeathHold,
+    MissingDescriptor,
+    ExtraDescriptor,
+    ReorderedDescriptors,
+    WrongDescriptorName,
+    WrongDescriptorType,
+    HigherDescriptor,
+}
+
+impl ProofCase {
+    fn parse(arguments: &[String]) -> Result<Self, String> {
+        let Some(value) = arguments
+            .iter()
+            .find_map(|argument| argument.strip_prefix("--barrier-case="))
+        else {
+            return Ok(Self::Positive);
+        };
+        match value {
+            "positive" => Ok(Self::Positive),
+            "malformed-release" => Ok(Self::MalformedRelease),
+            "mismatched-release" => Ok(Self::MismatchedRelease),
+            "replayed-release" => Ok(Self::ReplayedRelease),
+            "expired-release" => Ok(Self::ExpiredRelease),
+            "readback-mismatch" => Ok(Self::ReadbackMismatch),
+            "cancellation" => Ok(Self::Cancellation),
+            "provider-eof" => Ok(Self::ProviderEof),
+            "provider-death-hold" => Ok(Self::ProviderDeathHold),
+            "missing-descriptor" => Ok(Self::MissingDescriptor),
+            "extra-descriptor" => Ok(Self::ExtraDescriptor),
+            "reordered-descriptors" => Ok(Self::ReorderedDescriptors),
+            "wrong-descriptor-name" => Ok(Self::WrongDescriptorName),
+            "wrong-descriptor-type" => Ok(Self::WrongDescriptorType),
+            "higher-descriptor" => Ok(Self::HigherDescriptor),
+            _ => Err(format!("unknown barrier case {value}")),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Positive => "positive",
+            Self::MalformedRelease => "malformed-release",
+            Self::MismatchedRelease => "mismatched-release",
+            Self::ReplayedRelease => "replayed-release",
+            Self::ExpiredRelease => "expired-release",
+            Self::ReadbackMismatch => "readback-mismatch",
+            Self::Cancellation => "cancellation",
+            Self::ProviderEof => "provider-eof",
+            Self::ProviderDeathHold => "provider-death-hold",
+            Self::MissingDescriptor => "missing-descriptor",
+            Self::ExtraDescriptor => "extra-descriptor",
+            Self::ReorderedDescriptors => "reordered-descriptors",
+            Self::WrongDescriptorName => "wrong-descriptor-name",
+            Self::WrongDescriptorType => "wrong-descriptor-type",
+            Self::HigherDescriptor => "higher-descriptor",
+        }
+    }
+
+    const fn is_descriptor_defect(self) -> bool {
+        matches!(
+            self,
+            Self::MissingDescriptor
+                | Self::ExtraDescriptor
+                | Self::ReorderedDescriptors
+                | Self::WrongDescriptorName
+                | Self::WrongDescriptorType
+                | Self::HigherDescriptor
+        )
+    }
+}
 
 pub fn dispatch(arguments: &[String]) -> Option<Result<(), String>> {
     if arguments
@@ -67,6 +148,7 @@ pub fn dispatch(arguments: &[String]) -> Option<Result<(), String>> {
 }
 
 async fn run_provider(arguments: &[String]) -> Result<(), String> {
+    let proof_case = ProofCase::parse(arguments)?;
     let root_image = required_argument(arguments, "--root-image")?;
     let root_hash_path = required_argument(arguments, "--root-hash-file")?;
     let signature_path = required_argument(arguments, "--root-signature")?;
@@ -119,6 +201,11 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
     )
     .map_err(display_error)?;
     setsockopt(&provider_release, sockopt::PassCred, &true).map_err(display_error)?;
+    let receive_timeout = TimeVal::seconds(5);
+    setsockopt(&provider_release, sockopt::ReceiveTimeout, &receive_timeout)
+        .map_err(display_error)?;
+    setsockopt(&provider_proxy, sockopt::ReceiveTimeout, &receive_timeout)
+        .map_err(display_error)?;
 
     let executable = std::env::current_exe().map_err(display_error)?;
     ensure_static_native_elf(&executable)?;
@@ -127,10 +214,56 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
     let manager = zbus_systemd::systemd1::ManagerProxy::new(&connection)
         .await
         .map_err(display_error)?;
-    let extra_descriptors = vec![
-        (PROXY_NAME.to_owned(), ZbusOwnedFd::from(launcher_proxy)),
-        (RELEASE_NAME.to_owned(), ZbusOwnedFd::from(launcher_release)),
+    let mut raw_descriptors = vec![
+        (PROXY_NAME.to_owned(), launcher_proxy),
+        (RELEASE_NAME.to_owned(), launcher_release),
     ];
+    let mut _retained_defect_peers = Vec::new();
+    match proof_case {
+        ProofCase::MissingDescriptor => {
+            raw_descriptors.pop();
+        }
+        ProofCase::ExtraDescriptor | ProofCase::HigherDescriptor => {
+            let (provider_extra, launcher_extra) = socketpair(
+                AddressFamily::Unix,
+                SockType::Stream,
+                None,
+                SockFlag::SOCK_CLOEXEC,
+            )
+            .map_err(display_error)?;
+            _retained_defect_peers.push(provider_extra);
+            raw_descriptors.push(("unexpected-extra".to_owned(), launcher_extra));
+        }
+        ProofCase::ReorderedDescriptors => raw_descriptors.swap(0, 1),
+        ProofCase::WrongDescriptorName => {
+            raw_descriptors[0].0 = "wrong-host-service-name".to_owned();
+        }
+        ProofCase::WrongDescriptorType => {
+            raw_descriptors.pop();
+            let (provider_wrong_type, launcher_wrong_type) = socketpair(
+                AddressFamily::Unix,
+                SockType::Stream,
+                None,
+                SockFlag::SOCK_CLOEXEC,
+            )
+            .map_err(display_error)?;
+            _retained_defect_peers.push(provider_wrong_type);
+            raw_descriptors.push((RELEASE_NAME.to_owned(), launcher_wrong_type));
+        }
+        ProofCase::Positive
+        | ProofCase::MalformedRelease
+        | ProofCase::MismatchedRelease
+        | ProofCase::ReplayedRelease
+        | ProofCase::ExpiredRelease
+        | ProofCase::ReadbackMismatch
+        | ProofCase::Cancellation
+        | ProofCase::ProviderEof
+        | ProofCase::ProviderDeathHold => {}
+    }
+    let extra_descriptors = raw_descriptors
+        .into_iter()
+        .map(|(name, descriptor)| (name, ZbusOwnedFd::from(descriptor)))
+        .collect();
     let properties = transient_properties(
         &executable,
         root_image,
@@ -151,15 +284,45 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         &encoded_parameters,
         &provider_release,
         &provider_proxy,
+        proof_case,
     )
     .await;
     let _ = manager.stop_unit(unit.clone(), "replace".to_owned()).await;
     let _ = manager.reset_failed_unit(unit.clone()).await;
-    result?;
-    println!(
-        "release_barrier=typed-local-release-ok;unit={unit};fd3=proxy-only;fd4=closed-before-adapter"
-    );
+    if proof_case.is_descriptor_defect() {
+        if result.is_ok() {
+            return Err("descriptor defect unexpectedly reached release".to_owned());
+        }
+        ensure_no_adapter_marker(&provider_proxy)?;
+    } else {
+        result?;
+    }
+    if proof_case == ProofCase::Positive {
+        println!(
+            "release_barrier=typed-local-release-ok;unit={unit};fd3=proxy-only;fd4=closed-before-adapter"
+        );
+    } else {
+        println!(
+            "release_barrier_negative={};adapter=unexecuted;unit=terminated",
+            proof_case.name()
+        );
+    }
     Ok(())
+}
+
+fn ensure_no_adapter_marker(proxy_socket: &OwnedFd) -> Result<(), String> {
+    let mut marker = [0_u8; 64];
+    match recv(
+        proxy_socket.as_raw_fd(),
+        &mut marker,
+        MsgFlags::MSG_DONTWAIT,
+    ) {
+        Ok(0) | Err(nix::errno::Errno::EAGAIN) => Ok(()),
+        Ok(_) => Err("descriptor defect executed adapter bytes".to_owned()),
+        Err(error) => Err(format!(
+            "descriptor defect proxy observation failed: {error}"
+        )),
+    }
 }
 
 fn transient_properties(
@@ -235,6 +398,7 @@ async fn complete_release(
     encoded_parameters: &[u8],
     release_socket: &OwnedFd,
     proxy_socket: &OwnedFd,
+    proof_case: ProofCase,
 ) -> Result<(), String> {
     let (ready_bytes, credential_pid) = receive_ready(release_socket)?;
     let ready = crate::release_wire::decode_ready(&ready_bytes)?;
@@ -268,9 +432,33 @@ async fn complete_release(
         Err(error) => return Err(format!("Local proxy pre-release probe failed: {error}")),
     }
 
+    if proof_case == ProofCase::ProviderDeathHold {
+        println!("release_barrier_provider_ready;unit={unit};adapter=unexecuted");
+        std::io::stdout().flush().map_err(display_error)?;
+        loop {
+            thread::park();
+        }
+    }
+
+    if proof_case == ProofCase::Cancellation {
+        manager
+            .stop_unit(unit.to_owned(), "replace".to_owned())
+            .await
+            .map_err(display_error)?;
+        return confirm_negative_termination(unit, proxy_socket);
+    }
+    if proof_case == ProofCase::ProviderEof {
+        shutdown(release_socket.as_raw_fd(), Shutdown::Both).map_err(display_error)?;
+        return confirm_negative_termination(unit, proxy_socket);
+    }
+    if proof_case == ProofCase::MalformedRelease {
+        send_packet(release_socket.as_raw_fd(), b"not-canonical-release-v1")?;
+        return confirm_negative_termination(unit, proxy_socket);
+    }
+
     let ready_digest = ready_digest(&ready_bytes)?;
     let observed = proof_digest("release-proof-observed-readback-v1");
-    let release = Release {
+    let mut release = Release {
         attempt_id: parameters.attempt_id,
         nonce: parameters.nonce,
         ready_digest,
@@ -285,6 +473,25 @@ async fn complete_release(
         deadline_monotonic_ns: monotonic_ns()?.saturating_add(5_000_000_000),
         runtime_key_id: "adr069-proof-runtime-key".to_owned(),
     };
+    match proof_case {
+        ProofCase::MismatchedRelease => release.nonce[0] ^= 1,
+        ProofCase::ReplayedRelease => release.attempt_id = [0xa5; 16],
+        ProofCase::ExpiredRelease => {
+            release.deadline_monotonic_ns = monotonic_ns()?.saturating_sub(1);
+        }
+        ProofCase::ReadbackMismatch => release.observed_readback_digest[0] ^= 1,
+        ProofCase::Positive
+        | ProofCase::MalformedRelease
+        | ProofCase::Cancellation
+        | ProofCase::ProviderEof
+        | ProofCase::ProviderDeathHold
+        | ProofCase::MissingDescriptor
+        | ProofCase::ExtraDescriptor
+        | ProofCase::ReorderedDescriptors
+        | ProofCase::WrongDescriptorName
+        | ProofCase::WrongDescriptorType
+        | ProofCase::HigherDescriptor => {}
+    }
     let release_bytes = crate::release_wire::encode_release(&release, &proof_signing_key())?;
     let (_, release_digest, release_signature) = decode_release(&release_bytes)?;
     verify_release_signature(
@@ -294,6 +501,10 @@ async fn complete_release(
     )?;
     send_packet(release_socket.as_raw_fd(), &release_bytes)?;
 
+    if proof_case != ProofCase::Positive {
+        return confirm_negative_termination(unit, proxy_socket);
+    }
+
     let mut marker = [0_u8; 64];
     let count =
         recv(proxy_socket.as_raw_fd(), &mut marker, MsgFlags::empty()).map_err(display_error)?;
@@ -301,6 +512,20 @@ async fn complete_release(
         return Err("adapter did not retain exactly the Local proxy on FD 3".to_owned());
     }
     wait_for_unit_terminal(manager, unit).await
+}
+
+fn confirm_negative_termination(unit: &str, proxy_socket: &OwnedFd) -> Result<(), String> {
+    let mut marker = [0_u8; 64];
+    match recv(proxy_socket.as_raw_fd(), &mut marker, MsgFlags::empty()) {
+        Ok(0) | Err(nix::errno::Errno::EAGAIN) => {}
+        Ok(_) => return Err("negative case executed adapter bytes".to_owned()),
+        Err(error) => return Err(format!("negative proxy observation failed: {error}")),
+    }
+    let status = wait_for_terminal_status(unit)?;
+    if status == 0 {
+        return Err("negative release case exited successfully".to_owned());
+    }
+    Ok(())
 }
 
 fn run_launcher(arguments: &[String]) -> Result<(), String> {
@@ -611,7 +836,6 @@ fn send_packet(descriptor: RawFd, packet: &[u8]) -> Result<(), String> {
 
 fn descriptor_identity(file: &File) -> Result<FdIdentity, String> {
     let metadata = file.metadata().map_err(display_error)?;
-    use std::os::unix::fs::MetadataExt as _;
     let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()))
         .map_err(display_error)?;
     let mount_id = fdinfo
@@ -800,20 +1024,29 @@ async fn wait_for_unit_terminal(
     manager: &zbus_systemd::systemd1::ManagerProxy<'_>,
     unit: &str,
 ) -> Result<(), String> {
-    for _ in 0..100 {
+    match wait_for_terminal_status(unit) {
+        Ok(0) => Ok(()),
+        Ok(status) => Err(format!("adapter exited with status {status}")),
+        Err(error) => {
+            let _ = manager
+                .stop_unit(unit.to_owned(), "replace".to_owned())
+                .await;
+            Err(error)
+        }
+    }
+}
+
+fn wait_for_terminal_status(unit: &str) -> Result<i32, String> {
+    for _ in 0..250 {
         let active = unit_property(unit, "ActiveState")?;
         if matches!(active.trim(), "inactive" | "failed") {
-            let status = unit_property(unit, "ExecMainStatus")?;
-            if status.trim() == "0" {
-                return Ok(());
-            }
-            return Err(format!("adapter exited with status {}", status.trim()));
+            return unit_property(unit, "ExecMainStatus")?
+                .trim()
+                .parse()
+                .map_err(display_error);
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let _ = manager
-        .stop_unit(unit.to_owned(), "replace".to_owned())
-        .await;
     Err("transient unit did not terminate".to_owned())
 }
 

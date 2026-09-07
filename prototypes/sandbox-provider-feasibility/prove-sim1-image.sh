@@ -39,6 +39,7 @@ cat >"$work_dir/definitions/10-root.conf" <<'EOF'
 [Partition]
 Type=root
 Format=erofs
+CopyFiles=/
 Verity=data
 VerityMatchKey=root
 Minimize=guess
@@ -164,6 +165,67 @@ grep -F 'release_barrier=typed-local-release-ok' \
 grep -F 'fd3=proxy-only;fd4=closed-before-adapter' \
   "$evidence_dir/release-barrier.txt"
 
+: >"$evidence_dir/release-barrier-negative.txt"
+for barrier_case in malformed-release mismatched-release replayed-release \
+  expired-release readback-mismatch cancellation provider-eof \
+  missing-descriptor extra-descriptor reordered-descriptors \
+  wrong-descriptor-name wrong-descriptor-type higher-descriptor; do
+  "$static_prototype" --release-barrier-proof \
+    "--barrier-case=$barrier_case" \
+    "--root-image=$image_path" \
+    "--root-hash-file=$work_dir/sim1.roothash" \
+    "--root-signature=$work_dir/sim1.roothash.p7s" \
+    "--root-certificate=$work_dir/verity-certificate.pem" \
+    "--certificate-fingerprint=$certificate_fingerprint" \
+    | tee -a "$evidence_dir/release-barrier-negative.txt"
+done
+test "$(grep -c '^release_barrier_negative=' \
+  "$evidence_dir/release-barrier-negative.txt")" -eq 13
+test "$(grep -c 'adapter=unexecuted;unit=terminated$' \
+  "$evidence_dir/release-barrier-negative.txt")" -eq 13
+
+: >"$evidence_dir/provider-death.txt"
+"$static_prototype" --release-barrier-proof \
+  --barrier-case=provider-death-hold \
+  "--root-image=$image_path" \
+  "--root-hash-file=$work_dir/sim1.roothash" \
+  "--root-signature=$work_dir/sim1.roothash.p7s" \
+  "--root-certificate=$work_dir/verity-certificate.pem" \
+  "--certificate-fingerprint=$certificate_fingerprint" \
+  >"$evidence_dir/provider-death.txt" 2>&1 &
+provider_pid=$!
+for _ in $(seq 1 100); do
+  grep -q '^release_barrier_provider_ready;' \
+    "$evidence_dir/provider-death.txt" && break
+  sleep 0.05
+done
+grep -q '^release_barrier_provider_ready;.*adapter=unexecuted$' \
+  "$evidence_dir/provider-death.txt"
+provider_death_unit=$(sed -n \
+  's/^release_barrier_provider_ready;unit=\([^;]*\);.*/\1/p' \
+  "$evidence_dir/provider-death.txt")
+test -n "$provider_death_unit"
+kill -KILL "$provider_pid"
+wait "$provider_pid" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  provider_death_state=$(systemctl show "$provider_death_unit" \
+    --property=ActiveState --value)
+  case "$provider_death_state" in
+    inactive|failed) break ;;
+  esac
+  sleep 0.05
+done
+test "$provider_death_state" = failed
+test "$(systemctl show "$provider_death_unit" \
+  --property=ExecMainStatus --value)" -ne 0
+systemctl stop "$provider_death_unit" >/dev/null 2>&1 || true
+systemctl reset-failed "$provider_death_unit" >/dev/null 2>&1 || true
+printf '%s\n' \
+  'provider_death=release-endpoint-closed' \
+  'adapter=unexecuted' \
+  'unit=terminated-and-cleaned' \
+  >>"$evidence_dir/provider-death.txt"
+
 cp "$work_dir/repart-before-signature.json" "$evidence_dir/"
 cp "$work_dir/repart-signed.json" "$evidence_dir/"
 cp "$work_dir/sim1.roothash.p7s" "$evidence_dir/"
@@ -211,8 +273,24 @@ if openssl smime -verify -binary -inform DER \
   printf 'invalid signature unexpectedly verified\n' >&2
   exit 1
 fi
-test "$(systemctl show pigloros-sim1-invalid-signature.service \
-  --property=LoadState --value 2>/dev/null || true)" != loaded
+systemctl list-units --all 'pigloros-release-*' --no-legend \
+  >"$work_dir/release-units-before-invalid-signature.txt"
+if "$static_prototype" --release-barrier-proof \
+  "--root-image=$image_path" \
+  "--root-hash-file=$work_dir/sim1.roothash" \
+  "--root-signature=$work_dir/invalid-signature.p7s" \
+  "--root-certificate=$work_dir/verity-certificate.pem" \
+  "--certificate-fingerprint=$certificate_fingerprint" \
+  >"$evidence_dir/provider-invalid-signature.txt" 2>&1; then
+  printf 'provider accepted invalid signature\n' >&2
+  exit 1
+fi
+grep -F 'PKCS#7 verification failed before StartTransientUnit' \
+  "$evidence_dir/provider-invalid-signature.txt"
+systemctl list-units --all 'pigloros-release-*' --no-legend \
+  >"$work_dir/release-units-after-invalid-signature.txt"
+cmp "$work_dir/release-units-before-invalid-signature.txt" \
+  "$work_dir/release-units-after-invalid-signature.txt"
 
 udevadm settle
 losetup --list --noheadings --output NAME,BACK-FILE | sort \
@@ -236,6 +314,7 @@ if findmnt --raw --noheadings --output SOURCE,TARGET | grep -F "$image_path"; th
   printf 'residual SIM1 mount\n' >&2
   exit 1
 fi
+test -z "$(systemctl list-units --all 'pigloros-release-*' --no-legend)"
 
 printf '%s\n' \
   'valid_signature=provider-verified' \
