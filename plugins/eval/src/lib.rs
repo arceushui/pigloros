@@ -181,8 +181,10 @@ impl CalibrationReport {
         &mut self,
         evaluation: &pos_core::ReplayClaimEvaluationV1,
     ) {
-        self.replay_claim = self.replay_claim.weakened_to(evaluation.replay_claim);
-        self.redaction_state = self.redaction_state.weakened_to(evaluation.redaction_state);
+        self.replay_claim = self.replay_claim.weakened_to(evaluation.replay_claim());
+        self.redaction_state = self
+            .redaction_state
+            .weakened_to(evaluation.redaction_state());
     }
 }
 
@@ -910,15 +912,17 @@ mod tests {
             }],
         )
         .test_ok();
-        assert!(matches!(
-            compute_report(
-                store.as_ref(),
-                timeline.id(),
-                ErasureReferenceV1::from_digest([1; 32]),
-                &evaluation,
-            ),
-            Err(EvalError::ArtifactUnavailable)
-        ));
+        match compute_report(
+            store.as_ref(),
+            timeline.id(),
+            ErasureReferenceV1::from_digest([1; 32]),
+            &evaluation,
+        ) {
+            Err(EvalError::ArtifactUnavailable) => {}
+            other => std::panic::resume_unwind(Box::new(format!(
+                "expected unavailable calibration report, got {other:?}"
+            ))),
+        }
         report.apply_artifact_evaluation(&evaluation);
         assert_eq!(
             report.replay_claim,
@@ -929,8 +933,23 @@ mod tests {
             pos_core::ArtifactRedactionStateV1::StructuralOnly
         );
 
-        let exact =
-            ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &[]).test_ok();
+        let exact = ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::CalibrationReport,
+                    ErasureReferenceV1::from_digest([1; 32]),
+                    ArtifactDataClassV1::AggregateData,
+                    Some(ErasureKeyRoleV1::DataEncryption),
+                    ErasureReferenceV1::from_digest([2; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state: ArtifactStateV1::Retained,
+            }],
+        )
+        .test_ok();
         report.apply_artifact_evaluation(&exact);
         assert_eq!(
             report.replay_claim,

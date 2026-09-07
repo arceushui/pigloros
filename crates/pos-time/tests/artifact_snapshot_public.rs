@@ -6,7 +6,7 @@ use pos_core::{
 };
 use pos_state::ProjectionRegistry;
 use pos_store::{open_store, StoreConfig};
-use pos_time::{snapshot, verify_snapshot_consistency, SnapshotError};
+use pos_time::{snapshot, verify_snapshot_consistency};
 
 trait TestValueExt<T> {
     fn test_ok(self) -> T;
@@ -66,16 +66,18 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
     let timeline = store.create_timeline("artifact-snapshot").test_ok();
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
         let mut rejected_registry = registry();
-        assert!(matches!(
-            snapshot(
-                store.as_ref(),
-                timeline.id(),
-                &mut rejected_registry,
-                SNAPSHOT_DIGEST,
-                &evaluation(state),
-            ),
-            Err(pos_core::CoreError::ArtifactUnavailable)
-        ));
+        match snapshot(
+            store.as_ref(),
+            timeline.id(),
+            &mut rejected_registry,
+            SNAPSHOT_DIGEST,
+            &evaluation(state),
+        ) {
+            Err(pos_core::CoreError::ArtifactUnavailable) => {}
+            other => std::panic::resume_unwind(Box::new(format!(
+                "expected unavailable snapshot, got {other:?}"
+            ))),
+        }
     }
     let mut capture_registry = registry();
     let snapshot = snapshot(
@@ -99,15 +101,17 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
 
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
         let mut rejected_registry = registry();
-        assert!(matches!(
-            verify_snapshot_consistency(
-                store.as_ref(),
-                &snapshot,
-                &mut rejected_registry,
-                SNAPSHOT_DIGEST,
-                &evaluation(state),
-            ),
-            Err(SnapshotError::ArtifactUnavailable)
-        ));
+        match verify_snapshot_consistency(
+            store.as_ref(),
+            &snapshot,
+            &mut rejected_registry,
+            SNAPSHOT_DIGEST,
+            &evaluation(state),
+        ) {
+            Err(pos_time::SnapshotError::ArtifactUnavailable) => {}
+            other => std::panic::resume_unwind(Box::new(format!(
+                "expected unavailable snapshot verification, got {other:?}"
+            ))),
+        }
     }
 }

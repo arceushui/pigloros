@@ -13,8 +13,10 @@
 //!
 //! # `CoW` sync order
 //!
-//! 1. `export_timeline_own(src, root)` → `import_timeline_with_id(dst, …)`
-//! 2. `export_timeline_own(src, child)` → `import_timeline_with_id(dst, …)`
+//! 1. `export_timeline_own(src, root, root_artifact, &root_evaluation)`
+//!    → `import_timeline_with_id(dst, …)`
+//! 2. `export_timeline_own(src, child, child_artifact, &child_evaluation)`
+//!    → `import_timeline_with_id(dst, …)`
 //!
 //! Importing a forked child before its parent fails (`TimelineNotFound`).
 
@@ -1407,10 +1409,12 @@ mod tests {
             crate::ArtifactStateV1::Erased,
             crate::ArtifactTransitionRuleV1::Remove,
         );
-        assert!(matches!(
-            super::export_timeline(&store, TimelineId::new(), EXPORT_DIGEST, &evaluation,),
-            Err(CoreError::ArtifactUnavailable)
-        ));
+        match super::export_timeline(&store, TimelineId::new(), EXPORT_DIGEST, &evaluation) {
+            Err(CoreError::ArtifactUnavailable) => {}
+            other => std::panic::resume_unwind(Box::new(format!(
+                "expected unavailable export, got {other:?}"
+            ))),
+        }
     }
 
     fn export_timeline(

@@ -516,10 +516,12 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
         ArtifactTransitionRuleV1::Remove,
         ArtifactStateV1::Erased,
     );
-    assert!(matches!(
-        observation.authoritative_snapshot(&erased_snapshot_evaluation),
-        Err(pos_core::AuthorityErrorV1::SourceUnavailable)
-    ));
+    assert_eq!(
+        observation
+            .authoritative_snapshot(&erased_snapshot_evaluation)
+            .err(),
+        Some(pos_core::AuthorityErrorV1::SourceUnavailable)
+    );
     let digest = observation
         .authoritative_snapshot(&snapshot_evaluation)
         .test_ok()
@@ -556,17 +558,19 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
         br#"{"count":1}"#
     );
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
-        assert!(matches!(
-            observation.authoritative_artifact(digest, &evaluate(state)),
-            Err(pos_core::AuthorityErrorV1::SourceUnavailable)
-        ));
+        assert_eq!(
+            observation
+                .authoritative_artifact(digest, &evaluate(state))
+                .err(),
+            Some(pos_core::AuthorityErrorV1::SourceUnavailable)
+        );
     }
 
     let unknown = hash_from_repeated_byte(99);
-    assert!(matches!(
-        observation.authoritative_artifact(unknown, &retained),
-        Err(pos_core::AuthorityErrorV1::SourceUnavailable)
-    ));
+    assert_eq!(
+        observation.authoritative_artifact(unknown, &retained).err(),
+        Some(pos_core::AuthorityErrorV1::SourceUnavailable)
+    );
 }
 
 #[test]

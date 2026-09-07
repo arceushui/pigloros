@@ -202,7 +202,7 @@ impl ReplayClaimV1 {
         self,
         evaluation: &pos_core::ReplayClaimEvaluationV1,
     ) -> Self {
-        let evaluated = match evaluation.replay_claim {
+        let evaluated = match evaluation.replay_claim() {
             pos_core::ErasureReplayClaimV1::Exact => Self::Exact,
             pos_core::ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews => {
                 Self::ExactAuthoritativeWithRedactedViews
@@ -237,7 +237,7 @@ impl RedactionStateV1 {
         self,
         evaluation: &pos_core::ReplayClaimEvaluationV1,
     ) -> Self {
-        let evaluated = match evaluation.redaction_state {
+        let evaluated = match evaluation.redaction_state() {
             pos_core::ArtifactRedactionStateV1::None => Self::None,
             pos_core::ArtifactRedactionStateV1::RedactedViews => Self::RedactedViews,
             pos_core::ArtifactRedactionStateV1::StructuralOnly => Self::StructuralOnly,
@@ -1002,11 +1002,26 @@ pub struct CounterfactualContractV1 {
 
 impl CounterfactualContractV1 {
     /// Apply artifact loss to the counterfactual closure without strengthening.
-    pub const fn apply_artifact_evaluation(
+    pub fn apply_artifact_evaluation(
         &mut self,
         evaluation: &pos_core::ReplayClaimEvaluationV1,
     ) {
         self.replay_claim = self.replay_claim.after_artifact_evaluation(evaluation);
+        self.refresh_digest();
+    }
+
+    /// Recompute the contract identity after a host-owned claim transition.
+    pub fn refresh_digest(&mut self) {
+        self.contract_digest = [0; 32];
+        self.contract_digest = self.calculated_digest();
+    }
+
+    /// Return the identity derived from the contract with its digest field zeroed.
+    #[must_use]
+    pub fn calculated_digest(&self) -> [u8; 32] {
+        let mut canonical = self.clone();
+        canonical.contract_digest = [0; 32];
+        typed_digest(b"PiglorOS.Wave8.ContractValue.v1", &canonical).unwrap_or([0; 32])
     }
 }
 
@@ -1559,13 +1574,17 @@ impl MoatProofEvidenceV1 {
         self.contract
             .counterfactual
             .apply_artifact_evaluation(evaluation);
-        if matches!(
+        let redaction = RedactionStateV1::None.after_artifact_evaluation(evaluation);
+        if redaction == RedactionStateV1::RedactedViews {
+            for edge in &mut self.causal_trace {
+                edge.relation = "redacted".to_owned();
+                edge.visibility = "redacted".to_owned();
+            }
+        } else if matches!(
             self.manifest.replay_claim,
             ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
-        ) || matches!(
-            RedactionStateV1::None.after_artifact_evaluation(evaluation),
-            RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
-        ) {
+        ) || matches!(redaction, RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing)
+        {
             self.structural_causal_trace = self
                 .causal_trace
                 .iter()
@@ -1578,9 +1597,12 @@ impl MoatProofEvidenceV1 {
     /// Serialize to the portable evidence envelope.
     ///
     /// # Errors
-    /// Returns a JSON serialization error if the envelope cannot be encoded.
+    /// Returns a JSON serialization error if the envelope is contradictory or
+    /// cannot be encoded.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
+        verify_evidence(self)
+            .map_err(<serde_json::Error as serde::ser::Error>::custom)
+            .and_then(|()| serde_json::to_string(self))
     }
 
     /// Deserialize the portable evidence envelope.
@@ -1598,11 +1620,17 @@ impl MoatProofEvidenceV1 {
     /// consumption by an evaluator that does not link the experiment host.
     ///
     /// # Errors
-    /// Returns a canonical-CBOR serialization error when the envelope cannot
-    /// be represented by the shared crypto codec.
+    /// Returns a canonical-CBOR serialization error when the envelope is
+    /// contradictory or cannot be represented by the shared crypto codec.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, pos_core::CoreError> {
-        strict_codec::encode_evidence(self)
-            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+        verify_evidence(self)
+            .map_err(|error| {
+                pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
+            })
+            .and_then(|()| {
+                strict_codec::encode_evidence(self)
+                    .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+            })
     }
 
     /// Import an evidence envelope from deterministic canonical CBOR.
@@ -1640,6 +1668,11 @@ impl MoatProofEvidenceV1 {
             pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
         })?;
         self.verification_digests().and_then(|digests| {
+            let missing = matches!(
+                self.manifest.replay_claim,
+                ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
+            );
+            let incompatible = self.manifest.replay_claim == ReplayClaimV1::IncompatibleProfile;
             let mut result = VerificationResultV1 {
                 request_digest: self.manifest.input_digest,
                 manifest_digest: digests.manifest,
@@ -1649,15 +1682,32 @@ impl MoatProofEvidenceV1 {
                 fixture_digest: Some(digests.fixture),
                 evaluator_digest: self.manifest.evaluator_digest,
                 reproducibility_class: self.manifest.reproducibility_class,
-                verification_outcome: VerificationOutcomeV1::VerifiedExact,
+                verification_outcome: if incompatible {
+                    VerificationOutcomeV1::IncompatibleProfile
+                } else if missing {
+                    VerificationOutcomeV1::UnverifiableArtifactsMissing
+                } else {
+                    VerificationOutcomeV1::VerifiedExact
+                },
                 replay_claim: self.manifest.replay_claim,
-                authoritative_result_digest: Some(digests.authoritative_result),
+                authoritative_result_digest: (!missing && !incompatible)
+                    .then_some(digests.authoritative_result),
                 divergence_report_digest: None,
-                first_error: None,
+                first_error: (missing || incompatible).then_some(VerificationErrorV1 {
+                    code: if incompatible {
+                        SafeErrorCodeV1::ProfileUnsupported
+                    } else {
+                        SafeErrorCodeV1::ClosureIncomplete
+                    },
+                    field_ordinal: None,
+                    canonical_coordinate: None,
+                    related_digest: Some(self.manifest.artifact_closure_digest),
+                }),
                 checked_artifact_count: u64::try_from(
                     self.authoritative_events.len()
                         + self.projections.len()
-                        + self.causal_trace.len(),
+                        + self.causal_trace.len()
+                        + self.structural_causal_trace.len(),
                 )
                 .unwrap_or(u64::MAX),
                 provenance_digest: digests.authoritative_result,
@@ -1885,9 +1935,9 @@ pub mod strict_codec {
     }
 
     pub(crate) fn decode_evidence(bytes: &[u8]) -> Result<MoatProofEvidenceV1, StrictCborError> {
-        let root = decode_value(bytes)?;
-        let fields = array_values(&root, "evidence")?;
-        decode_evidence_fields(fields)
+        decode_value(bytes).and_then(|root| {
+            array_values(&root, "evidence").and_then(decode_evidence_fields)
+        })
     }
 
     fn decode_evidence_fields(fields: &[Value]) -> Result<MoatProofEvidenceV1, StrictCborError> {
@@ -2958,17 +3008,27 @@ pub mod strict_codec {
     fn decode_structural_traces(
         value: &Value,
     ) -> Result<Vec<StructuralCausalTraceEntryV1>, StrictCborError> {
-        array_values(value, "structural_causal_trace")?
-            .iter()
-            .map(|value| {
-                let fields = array(value, "structural_causal_trace_entry", 3)?;
-                Ok(StructuralCausalTraceEntryV1 {
-                    cause_seq: uint_value(&fields[0], "cause_seq")?,
-                    effect_seq: uint_value(&fields[1], "effect_seq")?,
-                    dependency_class: decode_dependency_class(&fields[2])?,
+        array_values(value, "structural_causal_trace").and_then(|values| {
+            values.iter().map(decode_structural_trace).collect()
+        })
+    }
+
+    fn decode_structural_trace(
+        value: &Value,
+    ) -> Result<StructuralCausalTraceEntryV1, StrictCborError> {
+        array(value, "structural_causal_trace_entry", 3).and_then(|fields| {
+            uint_value(&fields[0], "cause_seq").and_then(|cause_seq| {
+                uint_value(&fields[1], "effect_seq").and_then(|effect_seq| {
+                    decode_dependency_class(&fields[2]).map(|dependency_class| {
+                        StructuralCausalTraceEntryV1 {
+                            cause_seq,
+                            effect_seq,
+                            dependency_class,
+                        }
+                    })
                 })
             })
-            .collect()
+        })
     }
 
     fn decode_trace(value: &Value) -> Result<CausalTraceEntryV1, StrictCborError> {
@@ -4660,7 +4720,14 @@ fn verify_causal_trace(
         replay_claim,
         ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
     );
-    if !causal_trace_shape_is_valid(trace, structural_trace, structurally_redacted, sequences) {
+    let labels_redacted = replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
+    if !causal_trace_shape_is_valid(
+        trace,
+        structural_trace,
+        structurally_redacted,
+        labels_redacted,
+        sequences,
+    ) {
         return Err(EvidenceError::InvalidCausalEdge);
     }
     let authoritative_edges = events
@@ -4689,6 +4756,7 @@ fn causal_trace_shape_is_valid(
     trace: &[CausalTraceEntryV1],
     structural_trace: &[StructuralCausalTraceEntryV1],
     structurally_redacted: bool,
+    labels_redacted: bool,
     sequences: &BTreeSet<u64>,
 ) -> bool {
     !((structurally_redacted && !trace.is_empty())
@@ -4697,18 +4765,22 @@ fn causal_trace_shape_is_valid(
             edge.cause_seq >= edge.effect_seq
                 || !sequences.contains(&edge.cause_seq)
                 || !sequences.contains(&edge.effect_seq)
-                || !matches!(
-                    edge.relation.as_str(),
-                    "physical_to_agent"
-                        | "agent_to_society"
-                        | "intervention_to_physics"
-                        | "derived"
-                )
-                || !matches!(
-                    edge.visibility.as_str(),
-                    "operator" | "participant" | "public"
-                )
+                || !causal_trace_labels_are_valid(edge, labels_redacted)
         }))
+}
+
+fn causal_trace_labels_are_valid(edge: &CausalTraceEntryV1, labels_redacted: bool) -> bool {
+    if labels_redacted {
+        edge.relation == "redacted" && edge.visibility == "redacted"
+    } else {
+        matches!(
+            edge.relation.as_str(),
+            "physical_to_agent" | "agent_to_society" | "intervention_to_physics" | "derived"
+        ) && matches!(
+            edge.visibility.as_str(),
+            "operator" | "participant" | "public"
+        )
+    }
 }
 
 fn causal_trace_edges(
@@ -5070,6 +5142,7 @@ fn counterfactual_header_is_valid(evidence: &MoatProofEvidenceV1) -> bool {
         .replay_claim
         .is_no_stronger_than(evidence.manifest.replay_claim)
         && counterfactual.contract_digest != [0; 32]
+        && counterfactual.contract_digest == counterfactual.calculated_digest()
         && counterfactual.frontier.frontier_digest != [0; 32]
         && counterfactual.invalidation.invalidation_digest != [0; 32]
         && counterfactual.frontier.unknown_edge_policy == UnknownEdgePolicyV1::Reject
@@ -6213,7 +6286,7 @@ pub mod tests {
             provenance_digest: [9; 32],
             invalidation_digest: [10; 32],
         };
-        CounterfactualContractV1 {
+        let mut contract = CounterfactualContractV1 {
             fork_id: [3; 16],
             prior_generation: 0,
             generation: 1,
@@ -6244,8 +6317,10 @@ pub mod tests {
             recomputed_event_seqs: vec![2],
             retained_exogenous_digests: vec![[8; 32]],
             replay_claim: ReplayClaimV1::Exact,
-            contract_digest: [11; 32],
-        }
+            contract_digest: [0; 32],
+        };
+        contract.refresh_digest();
+        contract
     }
 
     pub(crate) fn test_report() -> ConformanceReportV1 {

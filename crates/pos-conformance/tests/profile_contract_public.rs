@@ -1573,11 +1573,29 @@ fn conformance_report_applies_structural_erasure_without_reconstructing_case_evi
 }
 
 #[test]
-fn unverifiable_enclosing_claim_removes_comparison_material_without_members() -> TestResult {
+fn missing_required_member_removes_unverifiable_comparison_material() -> TestResult {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1,
+        RegisteredArtifactV1,
+    };
+
     let mut report = report_with_cases(1)?;
     let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
-        pos_core::ErasureReplayClaimV1::UnverifiableArtifactsMissing,
-        &[],
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([31; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([32; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::Remove,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::Erased,
+        }],
     )?;
 
     report.apply_artifact_evaluation(&evaluation)?;
@@ -1586,7 +1604,7 @@ fn unverifiable_enclosing_claim_removes_comparison_material_without_members() ->
         report.replay_claim,
         ReplayClaimV1::UnverifiableArtifactsMissing
     );
-    assert_eq!(report.redaction_state, RedactionStateV1::None);
+    assert_eq!(report.redaction_state, RedactionStateV1::EvidenceMissing);
     assert_eq!(report.cases[0].outcome, CaseOutcomeStatusV1::Unavailable);
     assert!(report.cases[0].first_coordinate.is_none());
     assert!(report.cases[0].expected_digest.is_none());

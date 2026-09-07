@@ -168,16 +168,18 @@ mod tests {
     #[test]
     fn erased_timeline_cannot_be_replayed_as_authoritative_input() {
         let mut registry = ProjectionRegistry::new();
-        assert!(matches!(
-            super::replay(
-                &ReadFailStore,
-                TimelineId::new(),
-                &mut registry,
-                REPLAY_DIGEST,
-                &replay_evaluation(pos_core::ArtifactStateV1::Erased),
-            ),
-            Err(CoreError::ArtifactUnavailable)
-        ));
+        match super::replay(
+            &ReadFailStore,
+            TimelineId::new(),
+            &mut registry,
+            REPLAY_DIGEST,
+            &replay_evaluation(pos_core::ArtifactStateV1::Erased),
+        ) {
+            Err(CoreError::ArtifactUnavailable) => {}
+            other => std::panic::resume_unwind(Box::new(format!(
+                "expected unavailable replay, got {other:?}"
+            ))),
+        }
     }
 
     struct ReadFailStore;

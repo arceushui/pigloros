@@ -1274,7 +1274,7 @@ fn build_counterfactual_contract(
         replay_claim: ReplayClaimV1::Exact,
         contract_digest: [0; 32],
     };
-    counterfactual.contract_digest = serialized_digest(&counterfactual);
+    counterfactual.refresh_digest();
     counterfactual
 }
 

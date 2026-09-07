@@ -192,18 +192,16 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
     }
 }
 
-#[test]
-fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
+fn artifact_evaluation(
+    transition_rule: pos_core::ArtifactTransitionRuleV1,
+) -> pos_core::ReplayClaimEvaluationV1 {
     use pos_core::{
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1,
-        RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+        ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
+        ReplayClaimEvaluatorV1,
     };
 
-    let mut evidence = public_evidence_fixture();
-    evidence.causal_trace[0].relation = "deleted-subject-label".to_owned();
-    evidence.causal_trace[0].visibility = "deleted-private-audience".to_owned();
-    let evaluation = ok(ReplayClaimEvaluatorV1::evaluate(
+    ok(ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::Exact,
         &[ArtifactClaimInputV1 {
             registration: RegisteredArtifactV1::new(
@@ -213,12 +211,23 @@ fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
                 None,
                 ErasureReferenceV1::from_digest([72; 32]),
                 ArtifactOptionalityV1::Required,
-                ArtifactTransitionRuleV1::RetainStructure,
+                transition_rule,
             ),
             current_claim: ErasureReplayClaimV1::Exact,
             state: ArtifactStateV1::TransitionApplied,
         }],
-    ));
+    ))
+}
+
+#[test]
+fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
+    use pos_core::ArtifactTransitionRuleV1;
+
+    let mut evidence = public_evidence_fixture();
+    let original_contract_digest = evidence.contract.counterfactual.contract_digest;
+    evidence.causal_trace[0].relation = "deleted-subject-label".to_owned();
+    evidence.causal_trace[0].visibility = "deleted-private-audience".to_owned();
+    let evaluation = artifact_evaluation(ArtifactTransitionRuleV1::RetainStructure);
 
     evidence.apply_artifact_evaluation(&evaluation);
 
@@ -232,6 +241,14 @@ fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
         evidence.contract.counterfactual.replay_claim,
         ReplayClaimV1::StructuralOnly
     );
+    assert_ne!(
+        evidence.contract.counterfactual.contract_digest,
+        original_contract_digest
+    );
+    assert_eq!(
+        evidence.contract.counterfactual.contract_digest,
+        evidence.contract.counterfactual.calculated_digest()
+    );
     let json = ok(evidence.to_json());
     let cbor = ok(evidence.to_canonical_cbor());
     assert!(!json.contains("deleted-subject-label"));
@@ -244,6 +261,87 @@ fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
         evidence
     );
     assert_eq!(verify_evidence(&evidence), Ok(()));
+}
+
+#[test]
+fn redacted_view_export_removes_protected_causal_labels() {
+    let mut evidence = public_evidence_fixture();
+    evidence.causal_trace[0].relation = "deleted-subject-label".to_owned();
+    evidence.causal_trace[0].visibility = "deleted-private-audience".to_owned();
+    let evaluation = artifact_evaluation(pos_core::ArtifactTransitionRuleV1::RedactViews);
+
+    evidence.apply_artifact_evaluation(&evaluation);
+
+    assert_eq!(
+        evidence.manifest.replay_claim,
+        ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+    );
+    assert_eq!(evidence.causal_trace[0].relation, "redacted");
+    assert_eq!(evidence.causal_trace[0].visibility, "redacted");
+    assert!(evidence.structural_causal_trace.is_empty());
+    let json = ok(evidence.to_json());
+    let cbor = ok(evidence.to_canonical_cbor());
+    assert!(!json.contains("deleted-subject-label"));
+    assert!(!json.contains("deleted-private-audience"));
+    assert!(!String::from_utf8_lossy(&cbor).contains("deleted-subject-label"));
+    assert!(!String::from_utf8_lossy(&cbor).contains("deleted-private-audience"));
+    assert_eq!(verify_evidence(&evidence), Ok(()));
+}
+
+#[test]
+fn public_serializers_reject_contradictory_structural_evidence() {
+    let mut evidence = public_evidence_fixture();
+    evidence.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+    evidence.contract.counterfactual.replay_claim = ReplayClaimV1::StructuralOnly;
+    evidence.contract.counterfactual.refresh_digest();
+
+    expect_err(&evidence.to_json());
+    expect_err(&evidence.to_canonical_cbor());
+}
+
+#[test]
+fn missing_artifacts_never_produce_an_exact_verification_outcome() {
+    let mut evidence = public_evidence_fixture();
+    let evaluation = artifact_evaluation(pos_core::ArtifactTransitionRuleV1::Remove);
+    evidence.apply_artifact_evaluation(&evaluation);
+
+    let result = ok(evidence.to_verification_result());
+
+    assert_eq!(
+        result.verification_outcome,
+        VerificationOutcomeV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(
+        result.replay_claim,
+        ReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(result.authoritative_result_digest, None);
+    assert_eq!(result.checked_artifact_count, 5);
+    assert_eq!(
+        result.first_error.as_ref().map(|error| error.code),
+        Some(SafeErrorCodeV1::ClosureIncomplete)
+    );
+}
+
+#[test]
+fn incompatible_profile_produces_a_typed_non_exact_verification_outcome() {
+    let mut evidence = public_evidence_fixture();
+    evidence.manifest.replay_claim = ReplayClaimV1::IncompatibleProfile;
+    evidence.contract.counterfactual.replay_claim = ReplayClaimV1::IncompatibleProfile;
+    evidence.contract.counterfactual.refresh_digest();
+
+    let result = ok(evidence.to_verification_result());
+
+    assert_eq!(
+        result.verification_outcome,
+        VerificationOutcomeV1::IncompatibleProfile
+    );
+    assert_eq!(result.replay_claim, ReplayClaimV1::IncompatibleProfile);
+    assert_eq!(result.authoritative_result_digest, None);
+    assert_eq!(
+        result.first_error.as_ref().map(|error| error.code),
+        Some(SafeErrorCodeV1::ProfileUnsupported)
+    );
 }
 
 fn authorization_fixtures() -> (
@@ -337,7 +435,7 @@ fn counterfactual_fixture() -> CounterfactualContractV1 {
         provenance_digest: [9; 32],
         invalidation_digest: [10; 32],
     };
-    CounterfactualContractV1 {
+    let mut contract = CounterfactualContractV1 {
         fork_id: [3; 16],
         prior_generation: 0,
         generation: 1,
@@ -368,8 +466,10 @@ fn counterfactual_fixture() -> CounterfactualContractV1 {
         recomputed_event_seqs: vec![2],
         retained_exogenous_digests: vec![[8; 32]],
         replay_claim: ReplayClaimV1::Exact,
-        contract_digest: [11; 32],
-    }
+        contract_digest: [0; 32],
+    };
+    contract.refresh_digest();
+    contract
 }
 
 fn proof_contract_fixture() -> Wave8ProofContractV1 {

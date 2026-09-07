@@ -347,58 +347,8 @@ impl ErasureReceiptV1 {
     /// # Errors
     ///
     /// Returns a closed error for incomplete or conflicting terminal evidence.
-    pub fn new(mut input: ErasureReceiptInputV1) -> Result<Self, ErasureErrorV1> {
-        validate_receipt_preconditions(&input)?;
-        sort_inventories(&mut input.inventories);
-        if !inventory_categories_match(&input.inventories) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if inventories_have_duplicate_targets(&input.inventories) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        input.acknowledgements.sort_unstable();
-        input.frozen_targets.sort_unstable();
-        input.pending_owners.sort_unstable();
-        input.failed_owners.sort_unstable();
-        if has_duplicate(&input.frozen_targets)
-            || has_duplicate_acknowledgement_identity(&input.acknowledgements)
-            || invalid_owner_sets(&input.pending_owners, &input.failed_owners)
-        {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if !acknowledgements_are_closure_subset(&input.frozen_targets, &input.acknowledgements) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if !acknowledgements_reference_inventory_entries(
-            &input.inventories,
-            &input.acknowledgements,
-        ) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        let (derived_pending, derived_failed) =
-            derived_inventory_outcome_owners(&input.inventories, &input.acknowledgements);
-        if input.pending_owners != derived_pending || input.failed_owners != derived_failed {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if !inventories_are_within_closure(&input.frozen_targets, &input.inventories) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        let complete =
-            acknowledgements_cover_inventory_entries(&input.inventories, &input.acknowledgements)
-                && input
-                    .acknowledgements
-                    .iter()
-                    .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
-        let unresolved =
-            !complete || !input.pending_owners.is_empty() || !input.failed_owners.is_empty();
-        if input.lifecycle == ErasureLifecycleV1::Complete && !complete {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if input.lifecycle == ErasureLifecycleV1::PartialFailure && !unresolved {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        input.receipt_digest = reference_zero();
-        Self(input).with_digest()
+    pub fn new(input: ErasureReceiptInputV1) -> Result<Self, ErasureErrorV1> {
+        validate_receipt_preconditions(&input).and_then(|()| normalize_receipt(input))
     }
     /// Encode exact-length deterministic ERC1.
     ///
@@ -702,10 +652,58 @@ fn receipt_claim_matches_inventory(input: &ErasureReceiptInputV1) -> bool {
     input.replay_claim == inventory_replay_claim(&input.inventories)
 }
 
+fn normalize_receipt(mut input: ErasureReceiptInputV1) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+    sort_inventories(&mut input.inventories);
+    if !inventory_categories_match(&input.inventories)
+        || inventories_have_duplicate_targets(&input.inventories)
+    {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    input.acknowledgements.sort_unstable();
+    input.frozen_targets.sort_unstable();
+    input.pending_owners.sort_unstable();
+    input.failed_owners.sort_unstable();
+    if has_duplicate(&input.frozen_targets)
+        || has_duplicate_acknowledgement_identity(&input.acknowledgements)
+        || invalid_owner_sets(&input.pending_owners, &input.failed_owners)
+        || !acknowledgements_are_closure_subset(&input.frozen_targets, &input.acknowledgements)
+        || !acknowledgements_reference_inventory_entries(
+            &input.inventories,
+            &input.acknowledgements,
+        )
+    {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    let (derived_pending, derived_failed) =
+        derived_inventory_outcome_owners(&input.inventories, &input.acknowledgements);
+    if input.pending_owners != derived_pending
+        || input.failed_owners != derived_failed
+        || !inventories_are_within_closure(&input.frozen_targets, &input.inventories)
+    {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    let complete =
+        acknowledgements_cover_inventory_entries(&input.inventories, &input.acknowledgements)
+            && input
+                .acknowledgements
+                .iter()
+                .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let unresolved =
+        !complete || !input.pending_owners.is_empty() || !input.failed_owners.is_empty();
+    if input.lifecycle == ErasureLifecycleV1::Complete && !complete {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    if input.lifecycle == ErasureLifecycleV1::PartialFailure && !unresolved {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    input.receipt_digest = reference_zero();
+    ErasureReceiptV1(input).with_digest()
+}
+
 fn validate_receipt_preconditions(input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-    validate_terminal_receipt_lifecycle(input.lifecycle)?;
-    validate_receipt_bounds(input)?;
-    validate_receipt_claim_policy(input)
+    validate_terminal_receipt_lifecycle(input.lifecycle)
+        .and_then(|()| validate_receipt_bounds(input))
+        .and_then(|()| validate_receipt_claim_policy(input))
 }
 
 const fn validate_terminal_receipt_lifecycle(

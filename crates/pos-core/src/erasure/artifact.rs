@@ -225,31 +225,87 @@ pub struct ArtifactClaimInputV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EvaluatedArtifactClaimV1 {
     /// Closed class of the registered artifact.
-    pub artifact_class: ErasureArtifactClassV1,
+    artifact_class: ErasureArtifactClassV1,
     /// Registered artifact identity.
-    pub artifact_digest: ErasureReferenceV1,
+    artifact_digest: ErasureReferenceV1,
     /// Claim before evaluation.
-    pub from: ErasureReplayClaimV1,
+    from: ErasureReplayClaimV1,
     /// Claim after evaluation.
-    pub to: ErasureReplayClaimV1,
+    to: ErasureReplayClaimV1,
     /// Redaction state independent of profile compatibility.
-    pub redaction_state: ArtifactRedactionStateV1,
+    redaction_state: ArtifactRedactionStateV1,
     /// Whether this exact state may be used as authoritative runtime input.
-    pub authoritative_use_permitted: bool,
+    authoritative_use_permitted: bool,
+}
+
+impl EvaluatedArtifactClaimV1 {
+    /// Return the evaluated artifact class.
+    #[must_use]
+    pub const fn artifact_class(&self) -> ErasureArtifactClassV1 {
+        self.artifact_class
+    }
+
+    /// Return the evaluated artifact identity.
+    #[must_use]
+    pub const fn artifact_digest(&self) -> ErasureReferenceV1 {
+        self.artifact_digest
+    }
+
+    /// Return the claim before evaluation.
+    #[must_use]
+    pub const fn from(&self) -> ErasureReplayClaimV1 {
+        self.from
+    }
+
+    /// Return the claim after evaluation.
+    #[must_use]
+    pub const fn to(&self) -> ErasureReplayClaimV1 {
+        self.to
+    }
+
+    /// Return the orthogonal redaction result.
+    #[must_use]
+    pub const fn redaction_state(&self) -> ArtifactRedactionStateV1 {
+        self.redaction_state
+    }
+
+    /// Return whether the host evaluator admitted authoritative use.
+    #[must_use]
+    pub const fn authoritative_use_permitted(&self) -> bool {
+        self.authoritative_use_permitted
+    }
 }
 
 /// Aggregate result plus canonically ordered per-artifact transitions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplayClaimEvaluationV1 {
     /// Weakest claim among required members and the enclosing claim.
-    pub replay_claim: ErasureReplayClaimV1,
+    replay_claim: ErasureReplayClaimV1,
     /// Weakest redaction state among required members.
-    pub redaction_state: ArtifactRedactionStateV1,
+    redaction_state: ArtifactRedactionStateV1,
     /// Per-artifact results in canonical `(class, digest)` order.
-    pub artifacts: Vec<EvaluatedArtifactClaimV1>,
+    artifacts: Vec<EvaluatedArtifactClaimV1>,
 }
 
 impl ReplayClaimEvaluationV1 {
+    /// Return the weakest required-member replay claim.
+    #[must_use]
+    pub const fn replay_claim(&self) -> ErasureReplayClaimV1 {
+        self.replay_claim
+    }
+
+    /// Return the weakest required-member redaction state.
+    #[must_use]
+    pub const fn redaction_state(&self) -> ArtifactRedactionStateV1 {
+        self.redaction_state
+    }
+
+    /// Return the canonical per-artifact evaluation results.
+    #[must_use]
+    pub fn artifacts(&self) -> &[EvaluatedArtifactClaimV1] {
+        &self.artifacts
+    }
+
     /// Require a registered artifact to remain eligible as authoritative input.
     ///
     /// # Errors
@@ -300,7 +356,7 @@ impl ReplayClaimEvaluatorV1 {
         enclosing_claim: ErasureReplayClaimV1,
         inputs: &[ArtifactClaimInputV1],
     ) -> Result<ReplayClaimEvaluationV1, ErasureErrorV1> {
-        if inputs.len() > ERASURE_MAX_TARGETS {
+        if inputs.is_empty() || inputs.len() > ERASURE_MAX_TARGETS {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         let mut inputs = inputs.to_vec();

@@ -69,17 +69,20 @@ fn every_artifact_class_uses_its_registered_one_way_transition() {
         )
         .test_ok();
         assert_eq!(
-            evaluation.replay_claim,
+            evaluation.replay_claim(),
             ErasureReplayClaimV1::StructuralOnly
         );
-        assert_eq!(evaluation.artifacts[0].from, ErasureReplayClaimV1::Exact);
         assert_eq!(
-            evaluation.artifacts[0].to,
+            evaluation.artifacts()[0].from(),
+            ErasureReplayClaimV1::Exact
+        );
+        assert_eq!(
+            evaluation.artifacts()[0].to(),
             ErasureReplayClaimV1::StructuralOnly
         );
-        assert!(!evaluation.artifacts[0].authoritative_use_permitted);
+        assert!(!evaluation.artifacts()[0].authoritative_use_permitted());
         assert_eq!(
-            evaluation.artifacts[0].redaction_state,
+            evaluation.artifacts()[0].redaction_state(),
             ArtifactRedactionStateV1::StructuralOnly
         );
     }
@@ -125,10 +128,10 @@ fn transition_rules_produce_the_adr_060_claims() {
             )],
         )
         .test_ok();
-        assert_eq!(evaluation.replay_claim, expected);
-        assert_eq!(evaluation.redaction_state, redaction);
+        assert_eq!(evaluation.replay_claim(), expected);
+        assert_eq!(evaluation.redaction_state(), redaction);
         assert_eq!(
-            evaluation.artifacts[0].authoritative_use_permitted,
+            evaluation.artifacts()[0].authoritative_use_permitted(),
             authoritative
         );
     }
@@ -164,16 +167,16 @@ fn export_takes_the_weakest_required_member_and_ignores_optional_absence() {
     )
     .test_ok();
     assert_eq!(
-        evaluation.replay_claim,
+        evaluation.replay_claim(),
         ErasureReplayClaimV1::StructuralOnly
     );
     assert_eq!(
-        evaluation.redaction_state,
+        evaluation.redaction_state(),
         ArtifactRedactionStateV1::StructuralOnly
     );
-    assert_eq!(evaluation.artifacts[0].artifact_digest, reference(1));
-    assert_eq!(evaluation.artifacts[1].artifact_digest, reference(3));
-    assert_eq!(evaluation.artifacts[2].artifact_digest, reference(2));
+    assert_eq!(evaluation.artifacts()[0].artifact_digest(), reference(1));
+    assert_eq!(evaluation.artifacts()[1].artifact_digest(), reference(3));
+    assert_eq!(evaluation.artifacts()[2].artifact_digest(), reference(2));
 }
 
 #[test]
@@ -202,12 +205,12 @@ fn every_missing_prerequisite_and_quarantined_artifact_is_unverifiable() {
         )
         .test_ok();
         assert_eq!(
-            evaluation.replay_claim,
+            evaluation.replay_claim(),
             ErasureReplayClaimV1::UnverifiableArtifactsMissing
         );
-        assert!(!evaluation.artifacts[0].authoritative_use_permitted);
+        assert!(!evaluation.artifacts()[0].authoritative_use_permitted());
         assert_eq!(
-            evaluation.redaction_state,
+            evaluation.redaction_state(),
             ArtifactRedactionStateV1::EvidenceMissing
         );
     }
@@ -227,11 +230,11 @@ fn retained_artifact_preserves_an_existing_weaker_claim() {
         ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::StructuralOnly, &[artifact])
             .test_ok();
     assert_eq!(
-        evaluation.replay_claim,
+        evaluation.replay_claim(),
         ErasureReplayClaimV1::StructuralOnly
     );
     assert_eq!(
-        evaluation.artifacts[0].to,
+        evaluation.artifacts()[0].to(),
         ErasureReplayClaimV1::StructuralOnly
     );
 }
@@ -250,11 +253,11 @@ fn incompatible_profile_remains_orthogonal_to_erasure() {
         ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::IncompatibleProfile, &[artifact])
             .test_ok();
     assert_eq!(
-        evaluation.replay_claim,
+        evaluation.replay_claim(),
         ErasureReplayClaimV1::IncompatibleProfile
     );
     assert_eq!(
-        evaluation.artifacts[0].to,
+        evaluation.artifacts()[0].to(),
         ErasureReplayClaimV1::IncompatibleProfile
     );
 }
@@ -275,18 +278,14 @@ fn duplicate_artifact_policy_fails_closed() {
 }
 
 #[test]
-fn empty_required_closure_preserves_the_enclosing_claim() {
-    let evaluation = ReplayClaimEvaluatorV1::evaluate(
-        ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-        &[],
-    )
-    .test_ok();
+fn empty_required_closure_cannot_claim_complete_evidence() {
     assert_eq!(
-        evaluation.replay_claim,
-        ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        ReplayClaimEvaluatorV1::evaluate(
+            ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            &[],
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
-    assert!(evaluation.artifacts.is_empty());
-    assert_eq!(evaluation.redaction_state, ArtifactRedactionStateV1::None);
 }
 
 #[test]
