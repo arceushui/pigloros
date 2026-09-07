@@ -4638,7 +4638,9 @@ pub fn compare(
         DivergenceClassV1::AuthoritativeEvents
     } else if left.projections != right.projections {
         DivergenceClassV1::Projections
-    } else if left.causal_trace != right.causal_trace {
+    } else if left.causal_trace != right.causal_trace
+        || left.structural_causal_trace != right.structural_causal_trace
+    {
         DivergenceClassV1::CausalTrace
     } else if left.uncertainty != right.uncertainty
         || left.participant_views != right.participant_views
@@ -7109,6 +7111,29 @@ pub mod tests {
             compare(&evidence(), &right)?.divergence,
             DivergenceClassV1::CausalTrace
         );
+        Ok(())
+    }
+
+    #[test]
+    fn compares_structural_causal_trace_divergence() -> Result<(), pos_core::CoreError> {
+        let mut left = evidence();
+        left.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+        left.contract.counterfactual.replay_claim = ReplayClaimV1::StructuralOnly;
+        left.contract.counterfactual.refresh_digest()?;
+        left.structural_causal_trace = left
+            .causal_trace
+            .iter()
+            .map(CausalTraceEntryV1::structural)
+            .collect();
+        left.causal_trace.clear();
+        let mut right = left.clone();
+        right.structural_causal_trace[0].dependency_class = DependencyClassV1::FixedPolicy;
+
+        let comparison = compare(&left, &right)?;
+
+        assert!(!comparison.equal);
+        assert_eq!(comparison.divergence, DivergenceClassV1::CausalTrace);
+        assert_ne!(comparison.left_digest, comparison.right_digest);
         Ok(())
     }
 
