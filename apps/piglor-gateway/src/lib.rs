@@ -1677,7 +1677,9 @@ impl Gateway {
         authorization
             .authorize(request)
             .map_err(map_authorization_error)?;
-        self.read_events_page(timeline_id, from_seq, limit).await
+        let page = self.read_events_page(timeline_id, from_seq, limit).await;
+        drop(_fence);
+        page
     }
 
     /// Compatibility shim for Timelines that fit in one bounded page.

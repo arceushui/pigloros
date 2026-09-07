@@ -388,7 +388,8 @@ impl GatewayAuthorization {
     /// racing a final authorization check and append.
     pub async fn replace_authority(&self, authority: PersistedAuthorityV1) {
         let _guard = self.commit_lock.lock().await;
-        if let Ok(mut current) = self.authority.write() {
+        let write_result = self.authority.write();
+        if let Ok(mut current) = write_result {
             *current = authority;
         }
     }
