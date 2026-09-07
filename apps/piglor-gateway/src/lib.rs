@@ -37,7 +37,7 @@ use pos_core::{
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
     ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1,
-    ErasureGate, ErasureReferenceV1, ErasureVerifiedStateQueryV1, Plugin, ProposedAction,
+    ErasureGate, Plugin, ProposedAction,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
@@ -1149,47 +1149,6 @@ impl Gateway {
             action_principal: None,
         }
         .schedule_startup_consent_cleanup())
-    }
-
-    /// Recover verified ERS1 evidence and bind its host-resolved
-    /// Timeline/Fork scope before starting the Gateway executor.
-    ///
-    /// The query owns durable recovery and authorization validation; the
-    /// Gateway receives only the payload-free snapshot through the concrete
-    /// containment gate. A failed query blocks every supplied boundary and
-    /// prevents Gateway construction from claiming a usable protected path.
-    pub fn new_with_verified_erasure_state<Q: ErasureVerifiedStateQueryV1>(
-        store: Box<dyn EventStore>,
-        gate: Arc<ErasureContainmentGateV1>,
-        query: &mut Q,
-        request: ErasureReferenceV1,
-        bindings: &[(TimelineId, ErasureReferenceV1)],
-    ) -> Result<Self, GatewayError> {
-        gate.install_from_verified_query(query, request, bindings)
-            .map_err(|error| {
-                GatewayError::Store(pos_core::store::erasure_containment_error(error))
-            })?;
-        Self::new_with_erasure_gate(store, gate)
-    }
-
-    /// Recover verified ERS1 evidence and the opaque, complete topology proof
-    /// before starting the Gateway executor. A caller cannot whitelist an
-    /// unaffected Timeline by supplying a public digest or binding list.
-    ///
-    /// # Errors
-    /// Returns a recovery, verification, or store error when the durable
-    /// query cannot establish both state and topology proof.
-    pub fn new_with_verified_erasure_topology<Q: ErasureVerifiedStateQueryV1>(
-        store: Box<dyn EventStore>,
-        gate: Arc<ErasureContainmentGateV1>,
-        query: &mut Q,
-        request: ErasureReferenceV1,
-    ) -> Result<Self, GatewayError> {
-        gate.install_from_verified_query_with_topology(query, request)
-            .map_err(|error| {
-                GatewayError::Store(pos_core::store::erasure_containment_error(error))
-            })?;
-        Self::new_with_erasure_gate(store, gate)
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.
@@ -3713,7 +3672,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    enum ScriptMode {
+    pub(super) enum ScriptMode {
         FailCreate,
         FailList,
         FailGetTimeline,
@@ -3735,8 +3694,8 @@ mod tests {
         MissingTimeline,
     }
 
-    struct ScriptedStore {
-        mode: ScriptMode,
+    pub(super) struct ScriptedStore {
+        pub(super) mode: ScriptMode,
     }
 
     impl EventStore for ScriptedStore {
@@ -6177,29 +6136,26 @@ mod coverage_entrypoints {
     use std::error::Error;
     use std::sync::Arc;
 
-    struct MissingVerifiedStateQuery;
-
-    impl ErasureVerifiedStateQueryV1 for MissingVerifiedStateQuery {
-        fn verified_state(
-            &mut self,
-            _request: ErasureReferenceV1,
-        ) -> Result<Option<pos_core::ErasureVerifiedStateV1>, pos_core::ErasureErrorV1> {
-            Ok(None)
-        }
-    }
-
     #[test]
     fn action_registry_entrypoint_builds_the_gateway_registry() {
         assert_eq!(gateway_action_registry().driver_count(), 0);
     }
 
     #[test]
-    fn erasure_gate_constructors_cover_binding_success_and_recovery_failure(
+    fn erasure_gate_constructors_cover_binding_success_and_rejection(
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let gateway =
             Gateway::new_with_erasure_gate(open_store(StoreConfig::Memory)?, Arc::clone(&gate))?;
         drop(gateway);
+
+        let rejected = Gateway::new_with_erasure_gate(
+            Box::new(super::tests::ScriptedStore {
+                mode: super::tests::ScriptMode::FailCreate,
+            }),
+            Arc::clone(&gate),
+        );
+        assert!(matches!(rejected, Err(GatewayError::Store(_))));
 
         let owner_key = OwnTracksOwnerKey([7; 32]);
         let owntracks = Gateway::new_with_owntracks_ingress_and_erasure_gate(
@@ -6208,25 +6164,6 @@ mod coverage_entrypoints {
             gate,
         )?;
         drop(owntracks);
-
-        let mut query = MissingVerifiedStateQuery;
-        let recovery = Gateway::new_with_verified_erasure_state(
-            open_store(StoreConfig::Memory)?,
-            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
-            &mut query,
-            ErasureReferenceV1::from_digest([1; 32]),
-            &[],
-        );
-        assert!(recovery.is_err());
-        drop(recovery);
-        let recovery_with_topology = Gateway::new_with_verified_erasure_topology(
-            open_store(StoreConfig::Memory)?,
-            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
-            &mut query,
-            ErasureReferenceV1::from_digest([1; 32]),
-        );
-        assert!(recovery_with_topology.is_err());
-        drop(recovery_with_topology);
         Ok(())
     }
 }

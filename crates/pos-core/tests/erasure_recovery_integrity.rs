@@ -434,6 +434,22 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
 }
 
 #[test]
+fn verified_topology_query_propagates_recovery_failure() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let adapter = port(Vec::new(), None).with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::LoadManifest,
+        occurrence: 0,
+    });
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
+    assert_eq!(
+        <ErasureCoordinatorStateMachineV1<PublicCoordinatorPort> as
+            ErasureVerifiedStateQueryV1>::verified_topology(&mut coordinator, request.reference()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    Ok(())
+}
+
+#[test]
 fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(), ErasureErrorV1> {
     let graph = active_graph(vec![target(10)], None)?;
     let request = graph.request.reference();

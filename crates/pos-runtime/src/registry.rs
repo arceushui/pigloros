@@ -5249,6 +5249,44 @@ mod erasure_gate_coverage {
         let registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&gate));
         assert!(registry.clone_erasure_gate().is_some());
     }
+
+    #[test]
+    fn append_fence_rejects_missing_and_unavailable_erasure_gates() {
+        let timeline = pos_core::ids::TimelineId::new();
+        let mut missing = PluginRegistry::new();
+        missing
+            .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
+            .expect("the default gate permits staging");
+        let mut missing = missing.without_erasure_gate();
+        let mut missing_store =
+            pos_store::open_store(pos_store::StoreConfig::Memory).expect("memory store opens");
+        assert!(matches!(
+            missing.append_and_commit_step_at(
+                missing_store.as_mut(),
+                pos_core::clock::Seq::ZERO,
+                0,
+                &[],
+            ),
+            Err(RuntimeError::ErasureOperationUnavailable)
+        ));
+
+        let mut rejecting = PluginRegistry::new();
+        rejecting
+            .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
+            .expect("the default gate permits staging");
+        rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        let mut rejecting_store =
+            pos_store::open_store(pos_store::StoreConfig::Memory).expect("memory store opens");
+        assert!(matches!(
+            rejecting.append_and_commit_step_at(
+                rejecting_store.as_mut(),
+                pos_core::clock::Seq::ZERO,
+                0,
+                &[],
+            ),
+            Err(RuntimeError::ErasureContainment(_))
+        ));
+    }
 }
 
 #[cfg(test)]

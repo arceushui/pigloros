@@ -1126,30 +1126,48 @@ mod erasure_gate_coverage_tests {
     use super::*;
 
     #[test]
-    fn startup_gateway_constructors_cover_memory_and_sqlite_paths(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let memory = gateway_for_startup(
+    fn startup_gateway_constructors_cover_memory_and_sqlite_paths() {
+        assert!(gateway_for_startup(
             None,
             StoreConfig::Memory,
             None,
             Arc::new(ErasureContainmentGateV1::new_fail_closed()),
-        )?;
-        drop(memory);
+        )
+        .is_ok());
 
-        let directory = tempfile::tempdir()?;
+        let directory = tempfile::tempdir().expect("temporary directory opens");
         let database = directory.path().join("gateway.db");
         let owner_key_path = directory.path().join("owner.key");
-        owntracks::create_or_load_owner_key(&owner_key_path)?;
-        let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
-        let sqlite = gateway_for_startup(
-            database.to_str(),
+        owntracks::create_or_load_owner_key(&owner_key_path).expect("owner key is created");
+        let owner_key = OwnTracksOwnerKey::load(&owner_key_path).expect("owner key loads");
+        assert!(gateway_for_startup(
+            Some(database.to_str().expect("database path is UTF-8")),
             StoreConfig::Sqlite {
                 path: database.to_string_lossy().into_owned(),
             },
             Some(&owner_key),
             Arc::new(ErasureContainmentGateV1::new_fail_closed()),
-        )?;
-        drop(sqlite);
-        Ok(())
+        )
+        .is_ok());
+
+        let invalid_path = directory.path().to_str().expect("directory path is UTF-8");
+        assert!(gateway_for_startup(
+            Some(invalid_path),
+            StoreConfig::Sqlite {
+                path: invalid_path.to_owned(),
+            },
+            Some(&owner_key),
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+        )
+        .is_err());
+        assert!(gateway_for_startup(
+            Some(invalid_path),
+            StoreConfig::Sqlite {
+                path: invalid_path.to_owned(),
+            },
+            None,
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+        )
+        .is_err());
     }
 }

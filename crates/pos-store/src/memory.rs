@@ -2642,17 +2642,21 @@ impl EventStore for MemoryStore {
             .collect::<Vec<_>>();
         let mut timelines = Vec::new();
         for timeline in candidates {
+            let Some(candidate) = self
+                .timelines
+                .get(&timeline)
+                .map(|state| state.timeline.clone())
+            else {
+                continue;
+            };
             let visible = self.with_erasure_read_filter(
                 timeline,
                 ErasureProtectedOperationV1::Read,
                 |store| {
-                    let Some(state) = store.timelines.get(&timeline) else {
-                        return Err(CoreError::TimelineNotFound(timeline));
-                    };
                     crate::generic_timeline_is_visible(
                         store.timeline_contains_geographic_evidence(timeline),
                     )
-                    .map(|visible| visible.then(|| state.timeline.clone()))
+                    .map(|visible| visible.then_some(candidate.clone()))
                 },
             )?;
             if let Some(Some(timeline)) = visible {
