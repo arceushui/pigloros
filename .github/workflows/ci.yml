@@ -312,6 +312,9 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -321,6 +324,10 @@ jobs:
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-llvm-cov
+      - name: Install covgate
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
+        with:
+          tool: covgate@0.2.0
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: coverage
@@ -341,18 +348,14 @@ jobs:
           path: ${{ runner.temp }}/coverage.lcov
           retention-days: 1
           if-no-files-found: error
-      - name: Export coverage details
-        if: always()
-        continue-on-error: true
+      - name: Export coverage details for new-code gate
         run: cargo llvm-cov report --json
           --output-path "${{ runner.temp }}/coverage.json"
-      - name: Upload coverage details
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-details
-          path: ${{ runner.temp }}/coverage.json
-          if-no-files-found: ignore
+      - name: Enforce new production Rust code coverage (lines ≥99%, regions ≥99%)
+        run: >
+          covgate check "${{ runner.temp }}/coverage.json"
+          --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
+          --no-github-summary
 
   cargo-crap:
     name: cargo-crap

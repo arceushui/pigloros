@@ -18,7 +18,7 @@ Shared reference for humans and agents.
 | Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
-| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions for Rust-affecting changes |
+| Coverage | `cargo llvm-cov` with `--include-ignored` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
 | Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 for Rust-affecting changes |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
@@ -29,6 +29,26 @@ mapped to a source line or segment after a fresh non-root run. It is a
 reporting-tolerance only: all tests still run with `--include-ignored`, and
 `coverage(off)` remains test-only. Do not use the allowance to exempt
 production code or avoid writing a reachable behavior test.
+
+The same coverage job runs `covgate` 0.2.0 against the exact pull-request base
+(or the previous commit on a push). Its checked-in configuration applies the
+same 99% line and 99% region thresholds to changed production Rust files under
+`**/src/**/*.rs`. `covgate` reads the detailed LLVM JSON report produced by the
+completed `cargo llvm-cov` run, so the diff gate and repository-wide gate use the
+same test execution and native coverage data. Install the local tool with:
+
+```bash
+cargo install covgate --version 0.2.0 --locked
+```
+
+Then reproduce the gate against the exact pull-request base with:
+
+```bash
+DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
+```
+
+`covgate` resolves the supplied base against the current worktree, so local
+staged and unstaged tracked production-Rust edits use the same scope as CI.
 
 ## Change-risk policy
 
@@ -155,6 +175,9 @@ git config core.hooksPath .githooks
 
 # Full CI parity:
 ./scripts/ci.sh
+
+# Full CI parity for a pull request (use the exact base commit):
+DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
 ```
 
 ## cargo-deny ≠ source attributes
