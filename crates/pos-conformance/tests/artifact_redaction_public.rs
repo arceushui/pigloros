@@ -15,15 +15,15 @@ fn evaluation(
     ReplayClaimEvaluatorV1::evaluate(
         current,
         &[ArtifactClaimInputV1 {
-            registration: RegisteredArtifactV1 {
-                artifact_class: ErasureArtifactClassV1::ReproManifest,
-                artifact_digest: ErasureReferenceV1::from_digest([1; 32]),
-                data_class: ArtifactDataClassV1::PrivateSubjectData,
-                key_role: Some(ErasureKeyRoleV1::DataEncryption),
-                owner: ErasureReferenceV1::from_digest([2; 32]),
-                optionality: ArtifactOptionalityV1::Required,
-                transition_rule: rule,
-            },
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ReproManifest,
+                ErasureReferenceV1::from_digest([1; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                Some(ErasureKeyRoleV1::DataEncryption),
+                ErasureReferenceV1::from_digest([2; 32]),
+                ArtifactOptionalityV1::Required,
+                rule,
+            ),
             current_claim: current,
             state,
         }],

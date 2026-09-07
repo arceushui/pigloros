@@ -839,10 +839,7 @@ mod tests {
         let tl = store.create_timeline("eval-zero").test_ok();
 
         let report = compute_report(store.as_ref(), tl.id()).test_ok();
-        assert_eq!(
-            report.replay_claim,
-            pos_core::ErasureReplayClaimV1::Exact
-        );
+        assert_eq!(report.replay_claim, pos_core::ErasureReplayClaimV1::Exact);
         assert_eq!(report.n_predictions, 0);
         assert_eq!(report.n_resolved, 0);
         assert!((report.brier_score).abs() < f64::EPSILON);
@@ -858,8 +855,8 @@ mod tests {
     fn calibration_report_consumes_host_claim_and_never_strengthens() {
         use pos_core::{
             ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-            ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1,
-            ErasureReferenceV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+            ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
+            RegisteredArtifactV1, ReplayClaimEvaluatorV1,
         };
 
         let mut store = open_store(StoreConfig::Memory).test_ok();
@@ -868,15 +865,15 @@ mod tests {
         let evaluation = ReplayClaimEvaluatorV1::evaluate(
             pos_core::ErasureReplayClaimV1::Exact,
             &[ArtifactClaimInputV1 {
-                registration: RegisteredArtifactV1 {
-                    artifact_class: ErasureArtifactClassV1::CalibrationReport,
-                    artifact_digest: ErasureReferenceV1::from_digest([1; 32]),
-                    data_class: ArtifactDataClassV1::AggregateData,
-                    key_role: Some(ErasureKeyRoleV1::DataEncryption),
-                    owner: ErasureReferenceV1::from_digest([2; 32]),
-                    optionality: ArtifactOptionalityV1::Required,
-                    transition_rule: ArtifactTransitionRuleV1::RetainStructure,
-                },
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::CalibrationReport,
+                    ErasureReferenceV1::from_digest([1; 32]),
+                    ArtifactDataClassV1::AggregateData,
+                    Some(ErasureKeyRoleV1::DataEncryption),
+                    ErasureReferenceV1::from_digest([2; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::RetainStructure,
+                ),
                 current_claim: pos_core::ErasureReplayClaimV1::Exact,
                 state: ArtifactStateV1::TransitionApplied,
             }],
@@ -888,11 +885,8 @@ mod tests {
             pos_core::ErasureReplayClaimV1::StructuralOnly
         );
 
-        let exact = ReplayClaimEvaluatorV1::evaluate(
-            pos_core::ErasureReplayClaimV1::Exact,
-            &[],
-        )
-        .test_ok();
+        let exact =
+            ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &[]).test_ok();
         report.apply_artifact_evaluation(&exact);
         assert_eq!(
             report.replay_claim,

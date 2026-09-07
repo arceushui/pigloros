@@ -99,19 +99,85 @@ pub enum ArtifactRedactionStateV1 {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RegisteredArtifactV1 {
     /// Closed artifact class used by ADR-060 receipts.
-    pub artifact_class: ErasureArtifactClassV1,
+    artifact_class: ErasureArtifactClassV1,
     /// Content identity of the registered artifact.
-    pub artifact_digest: ErasureReferenceV1,
+    artifact_digest: ErasureReferenceV1,
     /// Data class fixed before commit.
-    pub data_class: ArtifactDataClassV1,
+    data_class: ArtifactDataClassV1,
     /// Key role, when artifact availability depends on a role-separated key.
-    pub key_role: Option<ErasureKeyRoleV1>,
+    key_role: Option<ErasureKeyRoleV1>,
     /// Registered adapter/owner identity.
-    pub owner: ErasureReferenceV1,
+    owner: ErasureReferenceV1,
     /// Whether the artifact is required by its enclosing claim.
-    pub optionality: ArtifactOptionalityV1,
+    optionality: ArtifactOptionalityV1,
     /// One-way transition applied after a successful erasure acknowledgement.
-    pub transition_rule: ArtifactTransitionRuleV1,
+    transition_rule: ArtifactTransitionRuleV1,
+}
+
+impl RegisteredArtifactV1 {
+    /// Register the fixed policy facts for one artifact before commit.
+    #[must_use]
+    pub const fn new(
+        artifact_class: ErasureArtifactClassV1,
+        artifact_digest: ErasureReferenceV1,
+        data_class: ArtifactDataClassV1,
+        key_role: Option<ErasureKeyRoleV1>,
+        owner: ErasureReferenceV1,
+        optionality: ArtifactOptionalityV1,
+        transition_rule: ArtifactTransitionRuleV1,
+    ) -> Self {
+        Self {
+            artifact_class,
+            artifact_digest,
+            data_class,
+            key_role,
+            owner,
+            optionality,
+            transition_rule,
+        }
+    }
+
+    /// Return the closed artifact class.
+    #[must_use]
+    pub const fn artifact_class(self) -> ErasureArtifactClassV1 {
+        self.artifact_class
+    }
+
+    /// Return the content identity.
+    #[must_use]
+    pub const fn artifact_digest(self) -> ErasureReferenceV1 {
+        self.artifact_digest
+    }
+
+    /// Return the pre-erasure data class.
+    #[must_use]
+    pub const fn data_class(self) -> ArtifactDataClassV1 {
+        self.data_class
+    }
+
+    /// Return the optional role-separated key dependency.
+    #[must_use]
+    pub const fn key_role(self) -> Option<ErasureKeyRoleV1> {
+        self.key_role
+    }
+
+    /// Return the registered byte-owner identity.
+    #[must_use]
+    pub const fn owner(self) -> ErasureReferenceV1 {
+        self.owner
+    }
+
+    /// Return whether this artifact is required by its enclosing claim.
+    #[must_use]
+    pub const fn optionality(self) -> ArtifactOptionalityV1 {
+        self.optionality
+    }
+
+    /// Return the transition rule fixed before erasure.
+    #[must_use]
+    pub const fn transition_rule(self) -> ArtifactTransitionRuleV1 {
+        self.transition_rule
+    }
 }
 
 /// One artifact and its current claim/state supplied to the evaluator.

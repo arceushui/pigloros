@@ -1539,15 +1539,15 @@ fn conformance_report_applies_structural_erasure_without_reconstructing_case_evi
     let evaluation = ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::Exact,
         &[ArtifactClaimInputV1 {
-            registration: RegisteredArtifactV1 {
-                artifact_class: ErasureArtifactClassV1::ConformanceReport,
-                artifact_digest: ErasureReferenceV1::from_digest([21; 32]),
-                data_class: ArtifactDataClassV1::PrivateSubjectData,
-                key_role: Some(ErasureKeyRoleV1::DataEncryption),
-                owner: ErasureReferenceV1::from_digest([22; 32]),
-                optionality: ArtifactOptionalityV1::Required,
-                transition_rule: ArtifactTransitionRuleV1::RetainStructure,
-            },
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([21; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                Some(ErasureKeyRoleV1::DataEncryption),
+                ErasureReferenceV1::from_digest([22; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::RetainStructure,
+            ),
             current_claim: ErasureReplayClaimV1::Exact,
             state: ArtifactStateV1::TransitionApplied,
         }],
@@ -1588,15 +1588,15 @@ fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestR
     let evaluation = ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::IncompatibleProfile,
         &[ArtifactClaimInputV1 {
-            registration: RegisteredArtifactV1 {
-                artifact_class: ErasureArtifactClassV1::ConformanceReport,
-                artifact_digest: ErasureReferenceV1::from_digest([31; 32]),
-                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-                key_role: None,
-                owner: ErasureReferenceV1::from_digest([32; 32]),
-                optionality: ArtifactOptionalityV1::Required,
-                transition_rule: ArtifactTransitionRuleV1::RetainStructure,
-            },
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([31; 32]),
+                ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                ErasureReferenceV1::from_digest([32; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::RetainStructure,
+            ),
             current_claim: ErasureReplayClaimV1::IncompatibleProfile,
             state: ArtifactStateV1::TransitionApplied,
         }],

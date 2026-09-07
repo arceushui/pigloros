@@ -473,15 +473,15 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
         ReplayClaimEvaluatorV1::evaluate(
             ErasureReplayClaimV1::Exact,
             &[ArtifactClaimInputV1 {
-                registration: RegisteredArtifactV1 {
-                    artifact_class: ErasureArtifactClassV1::ForkOrSnapshot,
-                    artifact_digest: ErasureReferenceV1::from_digest(*digest.as_bytes()),
-                    data_class: ArtifactDataClassV1::PrivateSubjectData,
-                    key_role: Some(ErasureKeyRoleV1::DataEncryption),
-                    owner: ErasureReferenceV1::from_digest([71; 32]),
-                    optionality: ArtifactOptionalityV1::Required,
-                    transition_rule: ArtifactTransitionRuleV1::Remove,
-                },
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::ForkOrSnapshot,
+                    ErasureReferenceV1::from_digest(*digest.as_bytes()),
+                    ArtifactDataClassV1::PrivateSubjectData,
+                    Some(ErasureKeyRoleV1::DataEncryption),
+                    ErasureReferenceV1::from_digest([71; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::Remove,
+                ),
                 current_claim: ErasureReplayClaimV1::Exact,
                 state,
             }],

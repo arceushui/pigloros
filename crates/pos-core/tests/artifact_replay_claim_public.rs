@@ -17,15 +17,15 @@ fn input(
     state: ArtifactStateV1,
 ) -> ArtifactClaimInputV1 {
     ArtifactClaimInputV1 {
-        registration: RegisteredArtifactV1 {
+        registration: RegisteredArtifactV1::new(
             artifact_class,
-            artifact_digest: reference(byte),
-            data_class: ArtifactDataClassV1::PrivateSubjectData,
-            key_role: Some(ErasureKeyRoleV1::DataEncryption),
-            owner: reference(byte.wrapping_add(64)),
+            reference(byte),
+            ArtifactDataClassV1::PrivateSubjectData,
+            Some(ErasureKeyRoleV1::DataEncryption),
+            reference(byte.wrapping_add(64)),
             optionality,
             transition_rule,
-        },
+        ),
         current_claim: ErasureReplayClaimV1::Exact,
         state,
     }
@@ -297,20 +297,24 @@ fn registrations_record_every_pre_erasure_policy_fact() {
         ArtifactStateV1::Retained,
     )
     .registration;
-    assert_eq!(registration.artifact_digest, reference(7));
+    assert_eq!(registration.artifact_digest(), reference(7));
     assert_eq!(
-        registration.data_class,
+        registration.data_class(),
         ArtifactDataClassV1::PrivateSubjectData
     );
     assert_eq!(
-        registration.key_role,
+        registration.key_role(),
         Some(ErasureKeyRoleV1::DataEncryption)
     );
-    assert_eq!(registration.owner, reference(71));
-    assert_eq!(registration.optionality, ArtifactOptionalityV1::Required);
+    assert_eq!(registration.owner(), reference(71));
+    assert_eq!(registration.optionality(), ArtifactOptionalityV1::Required);
     assert_eq!(
-        registration.transition_rule,
+        registration.transition_rule(),
         ArtifactTransitionRuleV1::RedactViews
+    );
+    assert_eq!(
+        registration.artifact_class(),
+        ErasureArtifactClassV1::CalibrationReport
     );
 }
 
@@ -330,38 +334,24 @@ fn authoritative_release_requires_the_exact_registered_class_and_digest() {
         ArtifactTransitionRuleV1::Remove,
         ArtifactStateV1::Erased,
     );
-    let evaluation = ReplayClaimEvaluatorV1::evaluate(
-        ErasureReplayClaimV1::Exact,
-        &[retained, erased],
-    )
-    .expect("distinct registered artifacts should evaluate");
+    let evaluation =
+        ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &[retained, erased])
+            .expect("distinct registered artifacts should evaluate");
 
     assert_eq!(
-        evaluation.require_authoritative_use(
-            ErasureArtifactClassV1::ReproManifest,
-            reference(1),
-        ),
+        evaluation.require_authoritative_use(ErasureArtifactClassV1::ReproManifest, reference(1),),
         Ok(())
     );
     assert_eq!(
-        evaluation.require_authoritative_use(
-            ErasureArtifactClassV1::ForkOrSnapshot,
-            reference(2),
-        ),
+        evaluation.require_authoritative_use(ErasureArtifactClassV1::ForkOrSnapshot, reference(2),),
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
-        evaluation.require_authoritative_use(
-            ErasureArtifactClassV1::TimelineReplay,
-            reference(1),
-        ),
+        evaluation.require_authoritative_use(ErasureArtifactClassV1::TimelineReplay, reference(1),),
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
-        evaluation.require_authoritative_use(
-            ErasureArtifactClassV1::ReproManifest,
-            reference(9),
-        ),
+        evaluation.require_authoritative_use(ErasureArtifactClassV1::ReproManifest, reference(9),),
         Err(ErasureErrorV1::PolicyConflict)
     );
 }
