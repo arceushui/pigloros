@@ -2809,9 +2809,10 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
     assert_eq!(retry_state.lifecycle(), ErasureLifecycleV1::PartialFailure);
     let mut stronger_replay = coordinator_receipt_input(target, 30);
     stronger_replay.replay_claim = ErasureReplayClaimV1::Exact;
+    let derived_partial = api.finalize(request.reference(), stronger_replay)?;
     assert_eq!(
-        api.finalize(request.reference(), stronger_replay),
-        Err(ErasureErrorV1::PolicyConflict)
+        derived_partial.replay_claim(),
+        ErasureReplayClaimV1::StructuralOnly
     );
     api.acknowledge(
         request.reference(),
