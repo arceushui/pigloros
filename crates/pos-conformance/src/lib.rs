@@ -2142,24 +2142,7 @@ pub mod strict_codec {
     }
 
     fn validate_verification_result(result: &VerificationResultV1) -> Result<(), StrictCborError> {
-        let valid = verification_outcome_matches_claim(result)
-            && match result.verification_outcome {
-                VerificationOutcomeV1::VerifiedExact => {
-                    result.authoritative_result_digest.is_some()
-                        && result.divergence_report_digest.is_none()
-                        && result.first_error.is_none()
-                }
-                VerificationOutcomeV1::Diverged => {
-                    result.divergence_report_digest.is_some() && result.first_error.is_none()
-                }
-                VerificationOutcomeV1::InvalidManifest
-                | VerificationOutcomeV1::UnverifiableArtifactsMissing
-                | VerificationOutcomeV1::IncompatibleProfile
-                | VerificationOutcomeV1::ResourceLimitExceeded => {
-                    result.first_error.is_some() && result.divergence_report_digest.is_none()
-                }
-            };
-        if !valid
+        if !verification_result_shape_is_valid(result)
             || result.checked_artifact_count > 65_536
             || result.provenance_digest == [0; 32]
             || result.result_digest == [0; 32]
@@ -2180,6 +2163,26 @@ pub mod strict_codec {
             }
         }
         Ok(())
+    }
+
+    fn verification_result_shape_is_valid(result: &VerificationResultV1) -> bool {
+        verification_outcome_matches_claim(result)
+            && match result.verification_outcome {
+                VerificationOutcomeV1::VerifiedExact => {
+                    result.authoritative_result_digest.is_some()
+                        && result.divergence_report_digest.is_none()
+                        && result.first_error.is_none()
+                }
+                VerificationOutcomeV1::Diverged => {
+                    result.divergence_report_digest.is_some() && result.first_error.is_none()
+                }
+                VerificationOutcomeV1::InvalidManifest
+                | VerificationOutcomeV1::UnverifiableArtifactsMissing
+                | VerificationOutcomeV1::IncompatibleProfile
+                | VerificationOutcomeV1::ResourceLimitExceeded => {
+                    result.first_error.is_some() && result.divergence_report_digest.is_none()
+                }
+            }
     }
 
     fn verification_outcome_matches_claim(result: &VerificationResultV1) -> bool {
@@ -2696,10 +2699,14 @@ pub mod strict_codec {
     }
 
     fn enum_unknown_edge_policy(value: UnknownEdgePolicyV1) -> Value {
-        uint(match value {
+        uint(unknown_edge_policy_code(value))
+    }
+
+    const fn unknown_edge_policy_code(value: UnknownEdgePolicyV1) -> u64 {
+        match value {
             UnknownEdgePolicyV1::Reject => 0,
             UnknownEdgePolicyV1::FullSuffixFromCut => 1,
-        })
+        }
     }
 
     fn decode_unknown_edge_policy(value: &Value) -> Result<UnknownEdgePolicyV1, StrictCborError> {
@@ -2713,13 +2720,17 @@ pub mod strict_codec {
     }
 
     fn enum_invalidation_reason(value: SuffixInvalidationReasonV1) -> Value {
-        uint(match value {
+        uint(invalidation_reason_code(value))
+    }
+
+    const fn invalidation_reason_code(value: SuffixInvalidationReasonV1) -> u64 {
+        match value {
             SuffixInvalidationReasonV1::NewIntervention => 0,
             SuffixInvalidationReasonV1::ChangedIntervention => 1,
             SuffixInvalidationReasonV1::UnknownEdgeFallback => 2,
             SuffixInvalidationReasonV1::RetryAfterAtomicFailure => 3,
             SuffixInvalidationReasonV1::TrustOrErasureChange => 4,
-        })
+        }
     }
 
     fn decode_invalidation_reason(
@@ -3112,7 +3123,7 @@ pub mod strict_codec {
     }
 
     fn encode_uncertainty(claim: &UncertaintyV1) -> Result<Value, StrictCborError> {
-        if !claim.lower.is_finite() || !claim.upper.is_finite() || !claim.confidence.is_finite() {
+        if !uncertainty_values_are_finite(claim) {
             return Err(StrictCborError::InvalidField {
                 field: "uncertainty_float".to_owned(),
             });
@@ -3123,6 +3134,10 @@ pub mod strict_codec {
             uint(claim.upper.to_bits()),
             uint(claim.confidence.to_bits()),
         ]))
+    }
+
+    fn uncertainty_values_are_finite(claim: &UncertaintyV1) -> bool {
+        claim.lower.is_finite() && claim.upper.is_finite() && claim.confidence.is_finite()
     }
 
     fn decode_uncertainty(value: &Value) -> Result<Vec<UncertaintyV1>, StrictCborError> {
@@ -4612,25 +4627,7 @@ pub fn compare(
     left: &MoatProofEvidenceV1,
     right: &MoatProofEvidenceV1,
 ) -> Result<ComparisonV1, pos_core::CoreError> {
-    let manifests_match = left.manifest.format_version == right.manifest.format_version
-        && left.manifest.input_digest == right.manifest.input_digest
-        && left.manifest.fork_cut_seq == right.manifest.fork_cut_seq
-        && left.manifest.seed == right.manifest.seed
-        && left.manifest.resource_limit == right.manifest.resource_limit
-        && left.manifest.network_enabled == right.manifest.network_enabled
-        && left.manifest.reproducibility_class == right.manifest.reproducibility_class
-        && left.manifest.execution_profile == right.manifest.execution_profile
-        && left.manifest.execution_profile_digest == right.manifest.execution_profile_digest
-        && left.manifest.trust_policy_snapshot_digest
-            == right.manifest.trust_policy_snapshot_digest
-        && left.manifest.artifact_closure_digest == right.manifest.artifact_closure_digest
-        && left.manifest.evaluator_digest == right.manifest.evaluator_digest
-        && left.manifest.replay_claim == right.manifest.replay_claim
-        && left.manifest.plugin_versions == right.manifest.plugin_versions
-        && left.manifest.scenario_room_digest == right.manifest.scenario_room_digest
-        && left.manifest.scheduler_digest == right.manifest.scheduler_digest
-        && left.manifest.budget_digest == right.manifest.budget_digest;
-    let divergence = if !manifests_match {
+    let divergence = if !manifests_match(&left.manifest, &right.manifest) {
         DivergenceClassV1::Metadata
     } else if left.authoritative_events != right.authoritative_events {
         DivergenceClassV1::AuthoritativeEvents
@@ -4658,6 +4655,26 @@ pub fn compare(
             right_digest,
         })
     })
+}
+
+fn manifests_match(left: &ReproManifestV1, right: &ReproManifestV1) -> bool {
+    left.format_version == right.format_version
+        && left.input_digest == right.input_digest
+        && left.fork_cut_seq == right.fork_cut_seq
+        && left.seed == right.seed
+        && left.resource_limit == right.resource_limit
+        && left.network_enabled == right.network_enabled
+        && left.reproducibility_class == right.reproducibility_class
+        && left.execution_profile == right.execution_profile
+        && left.execution_profile_digest == right.execution_profile_digest
+        && left.trust_policy_snapshot_digest == right.trust_policy_snapshot_digest
+        && left.artifact_closure_digest == right.artifact_closure_digest
+        && left.evaluator_digest == right.evaluator_digest
+        && left.replay_claim == right.replay_claim
+        && left.plugin_versions == right.plugin_versions
+        && left.scenario_room_digest == right.scenario_room_digest
+        && left.scheduler_digest == right.scheduler_digest
+        && left.budget_digest == right.budget_digest
 }
 
 /// Compare only the authoritative Events and Projections produced by two
@@ -4780,19 +4797,8 @@ fn verify_causal_trace(
     if !event_causation_is_valid(events, sequences) {
         return Err(EvidenceError::InvalidCausalEdge);
     }
-    let structurally_redacted_by_claim = matches!(
-        replay_claim,
-        ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
-    );
-    let incompatible = replay_claim == ReplayClaimV1::IncompatibleProfile;
-    let structurally_redacted = structurally_redacted_by_claim
-        || (incompatible && trace.is_empty() && !structural_trace.is_empty());
-    let labels_redacted = replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
-        || (incompatible
-            && !trace.is_empty()
-            && trace
-                .iter()
-                .all(|edge| edge.relation == "redacted" && edge.visibility == "redacted"));
+    let (structurally_redacted, labels_redacted) =
+        causal_redaction_modes(trace, structural_trace, replay_claim);
     if !causal_trace_shape_is_valid(
         trace,
         structural_trace,
@@ -4812,6 +4818,27 @@ fn verify_causal_trace(
     } else {
         Err(EvidenceError::IncompleteCausalTrace)
     }
+}
+
+fn causal_redaction_modes(
+    trace: &[CausalTraceEntryV1],
+    structural_trace: &[StructuralCausalTraceEntryV1],
+    replay_claim: ReplayClaimV1,
+) -> (bool, bool) {
+    let structurally_redacted_by_claim = matches!(
+        replay_claim,
+        ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    let incompatible = replay_claim == ReplayClaimV1::IncompatibleProfile;
+    let structurally_redacted = structurally_redacted_by_claim
+        || (incompatible && trace.is_empty() && !structural_trace.is_empty());
+    let labels_redacted = replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        || (incompatible
+            && !trace.is_empty()
+            && trace
+                .iter()
+                .all(|edge| edge.relation == "redacted" && edge.visibility == "redacted"));
+    (structurally_redacted, labels_redacted)
 }
 
 fn event_causation_is_valid(events: &[AuthoritativeEventV1], sequences: &BTreeSet<u64>) -> bool {
@@ -5196,8 +5223,7 @@ fn verify_counterfactual_contract(evidence: &MoatProofEvidenceV1) -> Result<(), 
             dependency.consumer.owner_id.as_str(),
             dependency.consumer.output_ordinal,
             dependency.consumer.artifact_digest,
-        )) || dependency.authorization_digest == [0; 32]
-            || dependency.provenance_digest == [0; 32]
+        )) || counterfactual_dependency_is_invalid(dependency)
         {
             return Err(EvidenceError::InvalidDependencyGraph);
         }
@@ -5208,15 +5234,17 @@ fn verify_counterfactual_contract(evidence: &MoatProofEvidenceV1) -> Result<(), 
     Ok(())
 }
 
+fn counterfactual_dependency_is_invalid(dependency: &InputDependencyV1) -> bool {
+    dependency.authorization_digest == [0; 32] || dependency.provenance_digest == [0; 32]
+}
+
 fn counterfactual_header_is_valid(evidence: &MoatProofEvidenceV1) -> bool {
     let counterfactual = &evidence.contract.counterfactual;
     counterfactual
         .replay_claim
         .is_no_stronger_than(evidence.manifest.replay_claim)
         && counterfactual.contract_digest != [0; 32]
-        && counterfactual
-            .calculated_digest()
-            .is_ok_and(|digest| counterfactual.contract_digest == digest)
+        && counterfactual_digest_is_valid(counterfactual)
         && counterfactual.frontier.frontier_digest != [0; 32]
         && counterfactual.invalidation.invalidation_digest != [0; 32]
         && counterfactual.frontier.unknown_edge_policy == UnknownEdgePolicyV1::Reject
@@ -5225,6 +5253,12 @@ fn counterfactual_header_is_valid(evidence: &MoatProofEvidenceV1) -> bool {
         && counterfactual.invalidation.prior_generation == counterfactual.prior_generation
         && (counterfactual.intervention.is_none()
             || counterfactual.generation == counterfactual.prior_generation.saturating_add(1))
+}
+
+fn counterfactual_digest_is_valid(counterfactual: &CounterfactualContractV1) -> bool {
+    counterfactual
+        .calculated_digest()
+        .is_ok_and(|digest| counterfactual.contract_digest == digest)
 }
 
 fn verify_intervention_contract(
