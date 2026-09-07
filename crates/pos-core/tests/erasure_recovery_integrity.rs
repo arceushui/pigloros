@@ -470,6 +470,65 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
 }
 
 #[test]
+fn verified_state_query_pins_scoped_topology_observation() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let affected = TimelineId::new();
+    let unaffected = TimelineId::new();
+    let coordinator_port = port(vec![target], None)
+        .with_verified_topology(vec![(affected, reference(7))], vec![unaffected]);
+    let observer = coordinator_port.clone();
+    let request = request()?;
+    {
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(coordinator_port, COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    }
+
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(observer, COORDINATOR);
+    let (verified, proof) = restarted
+        .verified_state_with_topology(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let gate = ErasureContainmentGateV1::new_fail_closed();
+    gate.install_verified_state_with_topology(&verified, &proof)
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        gate.authorize(affected, ErasureProtectedOperationV1::Read),
+        Err(pos_core::ErasureContainmentErrorV1::AccessFrozen)
+    );
+    assert_eq!(
+        gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn verified_state_query_rejects_manifest_mismatched_topology_observation(
+) -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let affected = TimelineId::new();
+    let coordinator_port = port(vec![target], None)
+        .with_verified_topology(vec![(affected, reference(7))], Vec::new())
+        .with_topology_manifest_override(reference(250));
+    let observer = coordinator_port.clone();
+    let request = request()?;
+    {
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(coordinator_port, COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    }
+
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(observer, COORDINATOR);
+    assert_eq!(
+        restarted.verified_state_with_topology(request.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
 fn legacy_recovery_query_denies_combined_default() -> Result<(), ErasureErrorV1> {
     let request = request()?;
     let mut coordinator =

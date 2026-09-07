@@ -1289,7 +1289,21 @@ impl<P: ErasureCoordinatorPortV1> ErasureVerifiedStateQueryV1
                 Vec::new(),
             ))
         } else {
-            None
+            let Some(observation) = self
+                .port
+                .verified_topology_observation(request, state.manifest_digest())?
+            else {
+                self.cache(record);
+                return Ok(None);
+            };
+            if observation.manifest_digest() != state.manifest_digest() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            Some(ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                observation.manifest_digest(),
+                observation.bindings().to_vec(),
+                observation.unaffected().to_vec(),
+            ))
         };
         self.cache(record);
         Ok(proof.map(|proof| (state, proof)))

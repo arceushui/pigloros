@@ -3670,6 +3670,60 @@ pub struct ErasureVerifiedTopologyProofV1 {
     unaffected: Vec<TimelineId>,
 }
 
+/// Host-owned topology observation returned alongside one verified recovery
+/// snapshot.
+///
+/// This is an input to the coordinator's opaque proof construction rather than
+/// a proof that callers can install directly. The host must derive all
+/// bindings and unaffected Timelines from the same durable revision identified
+/// by [`Self::manifest_digest`]. The containment gate never resolves topology
+/// from these identifiers itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureVerifiedTopologyObservationV1 {
+    manifest_digest: ErasureReferenceV1,
+    bindings: Vec<(TimelineId, ErasureReferenceV1)>,
+    unaffected: Vec<TimelineId>,
+}
+
+impl ErasureVerifiedTopologyObservationV1 {
+    /// Construct one host observation for a verified manifest revision.
+    ///
+    /// The coordinator and gate perform the authoritative completeness and
+    /// conflict checks when the observation is installed. This constructor is
+    /// intentionally payload-free and only packages the host's already
+    /// authenticated topology result.
+    #[must_use]
+    pub fn new(
+        manifest_digest: ErasureReferenceV1,
+        bindings: Vec<(TimelineId, ErasureReferenceV1)>,
+        unaffected: Vec<TimelineId>,
+    ) -> Self {
+        Self {
+            manifest_digest,
+            bindings,
+            unaffected,
+        }
+    }
+
+    /// Return the durable manifest revision used for the observation.
+    #[must_use]
+    pub const fn manifest_digest(&self) -> ErasureReferenceV1 {
+        self.manifest_digest
+    }
+
+    /// Return host-resolved affected Timeline/Fork bindings.
+    #[must_use]
+    pub fn bindings(&self) -> &[(TimelineId, ErasureReferenceV1)] {
+        &self.bindings
+    }
+
+    /// Return host-resolved unaffected Timelines.
+    #[must_use]
+    pub fn unaffected(&self) -> &[TimelineId] {
+        &self.unaffected
+    }
+}
+
 impl ErasureVerifiedTopologyProofV1 {
     pub(crate) const fn from_verified_recovery(
         manifest_digest: ErasureReferenceV1,
@@ -4658,6 +4712,25 @@ pub trait ErasureCoordinatorPortV1:
     + ErasureFreezeAuthorizationVerifierV1
     + ErasureRecoveryAuthorizationVerifierV1
 {
+    /// Recover the complete Timeline/Fork topology observation for one pinned
+    /// manifest revision.
+    ///
+    /// A production host must override this method for frozen/scoped state and
+    /// derive the result from the same durable snapshot/CAS revision as the
+    /// coordinator's recovered state. The default denies the newer capability
+    /// so a host cannot accidentally authorize from state-only recovery.
+    ///
+    /// # Errors
+    /// Returns a closed persistence, provenance, or authorization error when
+    /// the topology cannot be verified.
+    fn verified_topology_observation(
+        &self,
+        _request: ErasureReferenceV1,
+        _manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        Ok(None)
+    }
+
     /// Authenticate a request before the state machine records it.
     ///
     /// # Errors
