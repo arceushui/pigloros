@@ -31,9 +31,8 @@ pub fn replay(
         )
         .map_err(|_| CoreError::ArtifactUnavailable)
         .and_then(|()| store.read(timeline, SeqRange::all()))
-        .map(|events| {
-            registry.fold_events(&events);
-            events
+        .inspect(|events| {
+            registry.fold_events(events);
         })
 }
 
