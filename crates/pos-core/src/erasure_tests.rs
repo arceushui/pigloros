@@ -51,26 +51,6 @@ impl ErasureVerifiedStateQueryV1 for ErrorStateQuery {
     }
 }
 
-struct ErrorTopologyQuery {
-    state: ErasureVerifiedStateV1,
-}
-
-impl ErasureVerifiedStateQueryV1 for ErrorTopologyQuery {
-    fn verified_state(
-        &mut self,
-        _request: ErasureReferenceV1,
-    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
-        Ok(Some(self.state.clone()))
-    }
-
-    fn verified_topology(
-        &mut self,
-        _request: ErasureReferenceV1,
-    ) -> Result<Option<ErasureVerifiedTopologyProofV1>, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
-    }
-}
-
 #[test]
 fn lifecycle_permits_exactly_the_adr_edges() {
     let lifecycles = [
@@ -965,8 +945,7 @@ fn containment_gate_blocks_bindings_when_verified_query_fails() {
 }
 
 #[test]
-fn containment_gate_maps_verified_query_errors_to_recovery_unavailable(
-) -> Result<(), ErasureErrorV1> {
+fn containment_gate_denies_legacy_combined_query_and_maps_errors() -> Result<(), ErasureErrorV1> {
     let gate = ErasureContainmentGateV1::new_fail_closed();
     let mut state_query = ErrorStateQuery;
     assert_eq!(
@@ -974,12 +953,12 @@ fn containment_gate_maps_verified_query_errors_to_recovery_unavailable(
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
 
-    let mut topology_query = ErrorTopologyQuery {
-        state: verified_state_for_containment(
+    let mut topology_query = TestVerifiedStateQuery {
+        state: Some(verified_state_for_containment(
             ErasureLifecycleV1::AccessFrozen,
             Some(scope()?),
             Vec::new(),
-        )?,
+        )?),
     };
     assert_eq!(
         gate.install_from_verified_query_with_topology(&mut topology_query, reference(3)),

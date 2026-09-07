@@ -459,7 +459,7 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
 }
 
 #[test]
-fn legacy_recovery_query_uses_fail_closed_combined_default() -> Result<(), ErasureErrorV1> {
+fn legacy_recovery_query_denies_combined_default() -> Result<(), ErasureErrorV1> {
     let request = request()?;
     let mut coordinator =
         ErasureCoordinatorStateMachineV1::new(port(Vec::new(), None), COORDINATOR);
@@ -477,7 +477,7 @@ fn legacy_recovery_query_uses_fail_closed_combined_default() -> Result<(), Erasu
     };
     assert!(successful
         .verified_state_with_topology(request.reference())?
-        .is_some());
+        .is_none());
 
     let mut absent = LegacyVerifiedRecoveryQuery {
         state: None,

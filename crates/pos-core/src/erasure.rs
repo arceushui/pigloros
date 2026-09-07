@@ -3709,27 +3709,21 @@ pub trait ErasureVerifiedStateQueryV1 {
 
     /// Recover one state and its topology proof as one pinned observation.
     ///
-    /// Implementations backed by durable persistence should override this
+    /// Implementations backed by durable persistence must override this
     /// method so the state and proof are derived from the same recovery
     /// snapshot/CAS revision. The default preserves source compatibility for
-    /// older query implementations, but remains fail-closed when either half
-    /// is unavailable.
+    /// older query implementations but always denies the combined capability;
+    /// it must never authorize a split state/topology read.
     ///
     /// # Errors
     /// Returns a closed persistence, provenance, authorization, or validation
     /// error when the durable graph cannot be verified.
     fn verified_state_with_topology(
         &mut self,
-        request: ErasureReferenceV1,
+        _request: ErasureReferenceV1,
     ) -> Result<Option<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>, ErasureErrorV1>
     {
-        let Some(state) = self.verified_state(request)? else {
-            return Ok(None);
-        };
-        let Some(proof) = self.verified_topology(request)? else {
-            return Ok(None);
-        };
-        Ok(Some((state, proof)))
+        Ok(None)
     }
 
     /// Recover the authoritative, complete Timeline/Fork topology proof for
