@@ -1132,29 +1132,6 @@ impl Gateway {
         .schedule_startup_consent_cleanup()
     }
 
-    /// Wrap a store with World bodies and a compatibility principal configuration.
-    ///
-    /// The configuration is translated into the provider-neutral host authority
-    /// seam. It does not install the historical Gateway-local entity/capability
-    /// shortcut; new deployments should prefer
-    /// [`Self::new_with_world_bodies_and_authorization`].
-    #[must_use]
-    pub fn new_with_world_bodies_and_principal(
-        store: Box<dyn EventStore>,
-        bodies: impl IntoIterator<Item = EntityId>,
-        principal: ActionPrincipal,
-    ) -> Self {
-        let bodies: Vec<_> = bodies.into_iter().collect();
-        let authorization = crate::authorization::legacy_authorization_for(
-            principal.entity_id(),
-            principal
-                .capabilities()
-                .iter()
-                .map(|capability| capability.as_str().to_owned()),
-        );
-        Self::new_with_world_bodies_and_authorization(store, bodies, authorization)
-    }
-
     #[cfg(test)]
     fn new_with_world_bodies_and_principal_for_test(
         store: Box<dyn EventStore>,
@@ -2898,75 +2875,6 @@ mod tests {
             .test_err();
         assert!(matches!(denied, GatewayError::AuthorizationDenied));
         gateway.shutdown().await.test_ok();
-    }
-
-    #[tokio::test]
-    async fn compatibility_principal_constructor_binds_the_host_authorizer() {
-        let actor = EntityId::new();
-        let body = EntityId::new();
-        let gateway = Gateway::new_with_world_bodies_and_principal(
-            open_store(StoreConfig::Memory).test_ok(),
-            [body],
-            ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
-        );
-        assert!(gateway.has_authorization());
-        let timeline = gateway
-            .create_timeline("compatibility-authority")
-            .await
-            .test_ok();
-        let event = gateway
-            .submit_json_action(
-                &timeline.id().to_string(),
-                &actor.to_string(),
-                EVENT_TYPE_ACTION,
-                &serde_json::json!({
-                    "actor_entity_id": actor,
-                    "body_entity_id": body,
-                    "action_kind": "impulse",
-                    "params": [1],
-                    "action_scope": 0,
-                    "catalogue_version": 1,
-                    "tick": 1
-                }),
-                "world.action.submit",
-            )
-            .await
-            .test_ok();
-        assert_eq!(event.entity, actor);
-        let page = gateway
-            .read_events_page_authorized(
-                &timeline.id().to_string(),
-                0,
-                1,
-                GatewayAuthorizationRequest::read(actor, WallTime::now()),
-            )
-            .await
-            .test_ok();
-        assert_eq!(page.events.len(), 1);
-        gateway.shutdown().await.test_ok();
-
-        let unavailable = Gateway::new_with_world_bodies_and_principal(
-            open_store(StoreConfig::Memory).test_ok(),
-            [body],
-            ActionPrincipal::new(actor, std::iter::empty()),
-        );
-        assert!(unavailable.has_authorization());
-        let timeline = unavailable
-            .create_timeline("compatibility-unavailable")
-            .await
-            .test_ok();
-        let error = unavailable
-            .submit_json_action(
-                &timeline.id().to_string(),
-                &actor.to_string(),
-                EVENT_TYPE_ACTION,
-                &serde_json::json!({}),
-                "world.action.submit",
-            )
-            .await
-            .test_err();
-        assert!(matches!(error, GatewayError::AuthorizationDenied));
-        unavailable.shutdown().await.test_ok();
     }
 
     #[tokio::test]

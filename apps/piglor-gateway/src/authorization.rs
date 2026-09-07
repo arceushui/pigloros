@@ -9,12 +9,10 @@
 //! tracked by Redmine #180; the wiki page remains canonical.
 
 use pos_core::{
-    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
-    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1,
-    CapabilityGrantDraftV1, CapabilityScopeDraftV1, ConsentEvidenceV1, EntityId, EventId, Hash,
-    PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, EventId,
+    Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use std::{
     collections::VecDeque,
@@ -460,132 +458,6 @@ impl GatewayAuthorization {
     pub(crate) async fn commit_fence(&self) -> OwnedMutexGuard<()> {
         Arc::clone(&self.commit_lock).lock_owned().await
     }
-}
-
-/// Adapt the pre-ADR-059 constructor configuration onto the host authority
-/// seam. This preserves source compatibility while ensuring that the old
-/// constructor no longer installs a Gateway-local entity/capability bypass.
-/// Empty capability input becomes a fail-closed authority that denies all
-/// operations. Any failure in the fixed compatibility record invariants aborts
-/// construction rather than exposing an unprotected Gateway.
-pub(crate) fn legacy_authorization_for(
-    actor: EntityId,
-    capabilities: impl IntoIterator<Item = String>,
-) -> GatewayAuthorization {
-    let mut actions: Vec<String> = capabilities.into_iter().collect();
-    actions.sort_unstable();
-    actions.dedup();
-    let has_action_capability = !actions.is_empty();
-    if has_action_capability {
-        actions.push("read".to_owned());
-        actions.sort_unstable();
-        actions.dedup();
-    } else {
-        actions.push("__no_capability__".to_owned());
-    }
-    let resources = if has_action_capability {
-        vec!["timeline.events".to_owned(), "world.action".to_owned()]
-    } else {
-        vec!["__no_resource__".to_owned()]
-    };
-    let purposes = if has_action_capability {
-        vec!["action".to_owned(), "read".to_owned()]
-    } else {
-        vec!["__no_purpose__".to_owned()]
-    };
-    let mut principal_id = [0_u8; 16];
-    principal_id.copy_from_slice(&blake3::hash(&actor.inner().to_bytes()).as_bytes()[..16]);
-    PrincipalRefV1::try_new(principal_id, "gateway.legacy")
-        .ok()
-        .and_then(|principal| {
-            AssuranceLevelV1::try_new(1).ok().and_then(|assurance| {
-                AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-                    principal: principal.clone(),
-                    adapter_id: "legacy-static".to_owned(),
-                    assurance,
-                    issued_at: WallTime::now(),
-                    expires_at: WallTime::from_micros(u64::MAX),
-                    binding_digest: Hash::from_bytes([2; 32]),
-                })
-                .ok()
-                .and_then(|authenticated| {
-                    let authority_timeline = TimelineId::new();
-                    let registry_digest = Hash::from_bytes([3; 32]);
-                    let policy_revision = Hash::from_bytes([4; 32]);
-                    let scope =
-                        pos_core::CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-                            resources,
-                            actions,
-                            purposes,
-                            audiences: vec!["gateway".to_owned()],
-                            actor_entity_ids: vec![actor],
-                            subject_ids: Vec::new(),
-                            participant_ids: Vec::new(),
-                            plugin_id: None,
-                            principal_roles: vec![AuthorityRoleV1::Actor],
-                            max_uses: u64::MAX,
-                            budget: u64::MAX,
-                            environment_constraints: Vec::new(),
-                        })
-                        .ok();
-                    scope
-                        .and_then(|scope| {
-                            pos_core::CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-                                grant_id: Hash::from_bytes([5; 32]),
-                                grantor: principal.clone(),
-                                grantee: AuthorityGranteeV1::Principal(principal),
-                                trust_domain: "gateway.legacy".to_owned(),
-                                scope,
-                                valid_from_position: Seq::from_u64(1),
-                                valid_until_position: Seq::from_u64(u64::MAX),
-                                parent_grant_id: None,
-                                delegation_depth: 0,
-                                max_delegation_depth: 0,
-                                permitted_delegate_classes: Vec::new(),
-                                consent_references: Vec::new(),
-                                policy_revision,
-                                issuance_timeline: authority_timeline,
-                                issuance_seq: Seq::from_u64(1),
-                                revocation_epoch: 0,
-                                revocation_fence: None,
-                                authority_registry_digest: registry_digest,
-                            })
-                            .ok()
-                        })
-                        .and_then(|grant| {
-                            grant.binding_digest().ok().and_then(|grant_binding| {
-                                AuthorityRegistrySnapshotV1::try_new(
-                                    registry_digest,
-                                    vec![authenticated.registry_binding_digest()],
-                                    vec![grant_binding],
-                                    Vec::new(),
-                                )
-                                .ok()
-                                .and_then(|registry| {
-                                    let host = AuthorityPersistenceHostV1::new(&registry);
-                                    host.authorize_grant(&grant).ok().and_then(|permit| {
-                                        let mut state = AuthorityPersistenceStateV1::new();
-                                        state
-                                            .issue_grant(permit, grant.clone())
-                                            .ok()
-                                            .and_then(|_| state.resolve(grant.grant_id()).ok())
-                                            .map(|authority| {
-                                                GatewayAuthorization::new(
-                                                    Arc::new(LocalAuthenticationAdapter::new(
-                                                        authenticated,
-                                                    )),
-                                                    authority,
-                                                    registry,
-                                                )
-                                            })
-                                    })
-                                })
-                            })
-                        })
-                })
-            })
-        })
-        .expect("legacy compatibility authority construction invariant")
 }
 
 fn core_request(
