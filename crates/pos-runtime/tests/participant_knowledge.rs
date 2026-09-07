@@ -1041,17 +1041,25 @@ fn authorized_driver_accepts_its_exact_resource_limit() {
 fn authorized_commit_rejects_a_legacy_pending_step() {
     let fixture = fixture();
     let (mut registry, state) = registry(&fixture, false);
-    let drafts = registry.step_all(fixture.timeline_id).test_ok();
+    let drafts = registry
+        .step_all_anchored(fixture.timeline_id, Seq::from_u64(12))
+        .test_ok();
     let mut store = open_store(StoreConfig::Memory).test_ok();
 
-    assert!(error_text(registry.append_and_commit_authorized_step_at(
+    let error = registry.append_and_commit_authorized_step_at(
         store.as_mut(),
         &drafts,
         &current_authority(&fixture),
         &fixture.authority_registry,
         Seq::from_u64(10),
-    ))
-    .contains("requires a fresh authority fence"));
+    );
+    match error {
+        Err(RuntimeError::AuthorityFenceRequired) => {}
+        Ok(_) => std::panic::resume_unwind(Box::new("expected authority fence error")),
+        Err(other) => std::panic::resume_unwind(Box::new(format!(
+            "expected authority fence error, got: {other}"
+        ))),
+    }
     assert_eq!(
         state
             .lock()
