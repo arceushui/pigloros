@@ -946,7 +946,7 @@ mod tests {
         let authority = Arc::clone(&authorization.authority);
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = authority.write().test_ok();
-            panic!("poison authority lock");
+            std::panic::resume_unwind(Box::new("poison authority lock"));
         }))
         .is_err());
         assert_eq!(
