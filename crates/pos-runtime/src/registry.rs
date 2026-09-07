@@ -1761,6 +1761,14 @@ impl PluginRegistry {
         events: &[Event],
     ) -> Result<(), RuntimeError> {
         self.ensure_live_execution()?;
+        self.restore_driver_state_live(timeline_segments, events)
+    }
+
+    fn restore_driver_state_live(
+        &mut self,
+        timeline_segments: &[TimelineHistorySegment],
+        events: &[Event],
+    ) -> Result<(), RuntimeError> {
         self.ensure_no_pending_step()?;
         validate_recovery_evidence(timeline_segments, events)?;
         // Consent is host control-plane history. Validate the full durable
