@@ -2268,6 +2268,52 @@ impl MemoryStore {
         }
         Ok(Seq::from_u64(logical_head))
     }
+
+    fn create_timeline_with_meta_with_erasure_fence(
+        &mut self,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        let mut create = |store: &mut Self| {
+            // Resolve fork parent before duplicate-id check (parity with SqliteStore).
+            let chain = if let Some((parent, at_seq)) = meta.fork_point {
+                store
+                    .ensure_generic_timeline_visibility(parent)
+                    .and_then(|()| {
+                        let parent_head = store.logical_head(parent)?;
+                        if at_seq > parent_head {
+                            Err(CoreError::ForkBeyondHead {
+                                fork_seq: at_seq.as_u64(),
+                                head: parent_head.as_u64(),
+                            })
+                        } else {
+                            store.compute_chain_hash_at(parent, at_seq)
+                        }
+                    })
+            } else {
+                Ok(store.hasher.genesis_hash())
+            };
+            chain.and_then(|chain| {
+                if store.timelines.contains_key(&meta.id) {
+                    return Err(CoreError::Storage(format!(
+                        "timeline already exists: {}",
+                        meta.id
+                    )));
+                }
+                let id = meta.id;
+                let timeline = Timeline::new(meta.clone());
+                store
+                    .timelines
+                    .insert(id, TimelineState::new(timeline.clone(), chain));
+                Ok(timeline)
+            })
+        };
+        match meta.fork_point {
+            Some((parent, _)) => {
+                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, &mut create)
+            }
+            None => create(self),
+        }
+    }
 }
 
 impl EventStore for MemoryStore {
@@ -2615,52 +2661,6 @@ impl EventStore for MemoryStore {
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
         self.create_timeline_with_meta_with_erasure_fence(meta)
-    }
-
-    fn create_timeline_with_meta_with_erasure_fence(
-        &mut self,
-        meta: TimelineMeta,
-    ) -> Result<Timeline, CoreError> {
-        let mut create = |store: &mut Self| {
-            // Resolve fork parent before duplicate-id check (parity with SqliteStore).
-            let chain = if let Some((parent, at_seq)) = meta.fork_point {
-                store
-                    .ensure_generic_timeline_visibility(parent)
-                    .and_then(|()| {
-                        let parent_head = store.logical_head(parent)?;
-                        if at_seq > parent_head {
-                            Err(CoreError::ForkBeyondHead {
-                                fork_seq: at_seq.as_u64(),
-                                head: parent_head.as_u64(),
-                            })
-                        } else {
-                            store.compute_chain_hash_at(parent, at_seq)
-                        }
-                    })
-            } else {
-                Ok(store.hasher.genesis_hash())
-            };
-            chain.and_then(|chain| {
-                if store.timelines.contains_key(&meta.id) {
-                    return Err(CoreError::Storage(format!(
-                        "timeline already exists: {}",
-                        meta.id
-                    )));
-                }
-                let id = meta.id;
-                let timeline = Timeline::new(meta.clone());
-                store
-                    .timelines
-                    .insert(id, TimelineState::new(timeline.clone(), chain));
-                Ok(timeline)
-            })
-        };
-        match meta.fork_point {
-            Some((parent, _)) => {
-                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, &mut create)
-            }
-            None => create(self),
-        }
     }
 
     fn append_committed(
