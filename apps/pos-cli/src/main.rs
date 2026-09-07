@@ -348,18 +348,7 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
 
     let mut registry = pos_state::ProjectionRegistry::new();
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
-        tl_id,
-        pos_core::ErasureArtifactClassV1::TimelineReplay,
-        b"pos-cli/timeline-replay",
-    )?;
-    let events = pos_time::replay(
-        store.as_ref(),
-        tl_id,
-        &mut registry,
-        artifact_digest,
-        &evaluation,
-    )?;
+    let events = replay_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
     let entity_count = events
         .iter()
         .map(|e| e.entity)
@@ -380,18 +369,7 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
     let mut registry = pos_state::ProjectionRegistry::new();
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
-        tl_id,
-        pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-        b"pos-cli/timeline-snapshot",
-    )?;
-    let snapshot = pos_time::snapshot(
-        store.as_ref(),
-        tl_id,
-        &mut registry,
-        artifact_digest,
-        &evaluation,
-    )?;
+    let snapshot = snapshot_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
 
     let entity_count = count_snapshot_entities(&snapshot);
 
@@ -432,6 +410,32 @@ fn retained_timeline_artifact(
         }],
     )
     .map(|evaluation| (artifact_digest, evaluation))
+}
+
+fn replay_retained_timeline(
+    store: &dyn pos_core::store::EventStore,
+    timeline: TimelineId,
+    registry: &mut pos_state::ProjectionRegistry,
+) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
+    let (artifact_digest, evaluation) = retained_timeline_artifact(
+        timeline,
+        pos_core::ErasureArtifactClassV1::TimelineReplay,
+        b"pos-cli/timeline-replay",
+    )?;
+    pos_time::replay(store, timeline, registry, artifact_digest, &evaluation).map_err(Into::into)
+}
+
+fn snapshot_retained_timeline(
+    store: &dyn pos_core::store::EventStore,
+    timeline: TimelineId,
+    registry: &mut pos_state::ProjectionRegistry,
+) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
+    let (artifact_digest, evaluation) = retained_timeline_artifact(
+        timeline,
+        pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+        b"pos-cli/timeline-snapshot",
+    )?;
+    pos_time::snapshot(store, timeline, registry, artifact_digest, &evaluation).map_err(Into::into)
 }
 
 fn cmd_timeline_compare(

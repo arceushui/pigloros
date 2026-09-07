@@ -1862,25 +1862,32 @@ pub mod strict_codec {
             encode_host_closure(&evidence.host_closure),
             encode_contract(&evidence.contract),
         ];
-        if !evidence.structural_causal_trace.is_empty() {
-            fields.insert(
-                6,
-                Value::Array(
-                    evidence
-                        .structural_causal_trace
-                        .iter()
-                        .map(encode_structural_trace)
-                        .collect(),
-                ),
-            );
-        }
+        append_structural_trace(&mut fields, &evidence.structural_causal_trace);
         let root = Value::Array(fields);
         encode_value(&root)
+    }
+
+    fn append_structural_trace(
+        fields: &mut Vec<Value>,
+        structural_trace: &[StructuralCausalTraceEntryV1],
+    ) {
+        if !structural_trace.is_empty() {
+            fields.insert(
+                6,
+                Value::Array(structural_trace.iter().map(encode_structural_trace).collect()),
+            );
+        }
     }
 
     pub(crate) fn decode_evidence(bytes: &[u8]) -> Result<MoatProofEvidenceV1, StrictCborError> {
         let root = decode_value(bytes)?;
         let fields = array_values(&root, "evidence")?;
+        decode_evidence_fields(fields)
+    }
+
+    fn decode_evidence_fields(
+        fields: &[Value],
+    ) -> Result<MoatProofEvidenceV1, StrictCborError> {
         if !matches!(fields.len(), 11 | 12) {
             return Err(StrictCborError::ArrayLength {
                 field: "evidence".to_owned(),
@@ -4643,20 +4650,48 @@ fn verify_causal_trace(
     replay_claim: ReplayClaimV1,
     sequences: &BTreeSet<u64>,
 ) -> Result<(), EvidenceError> {
-    if events.iter().any(|event| {
-        event.causation_seq.is_some_and(|cause_seq| {
-            cause_seq >= event.seq
-                || !sequences.contains(&cause_seq)
-                || !sequences.contains(&event.seq)
-        })
-    }) {
+    if !event_causation_is_valid(events, sequences) {
         return Err(EvidenceError::InvalidCausalEdge);
     }
     let structurally_redacted = matches!(
         replay_claim,
         ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
     );
-    if (structurally_redacted && !trace.is_empty())
+    if !causal_trace_shape_is_valid(trace, structural_trace, structurally_redacted, sequences) {
+        return Err(EvidenceError::InvalidCausalEdge);
+    }
+    let authoritative_edges = events
+        .iter()
+        .filter_map(|event| event.causation_seq.map(|cause| (cause, event.seq)))
+        .collect::<BTreeSet<_>>();
+    let traced_edges = causal_trace_edges(trace, structural_trace, structurally_redacted);
+    if authoritative_edges == traced_edges {
+        Ok(())
+    } else {
+        Err(EvidenceError::IncompleteCausalTrace)
+    }
+}
+
+fn event_causation_is_valid(
+    events: &[AuthoritativeEventV1],
+    sequences: &BTreeSet<u64>,
+) -> bool {
+    !events.iter().any(|event| {
+        event.causation_seq.is_some_and(|cause_seq| {
+            cause_seq >= event.seq
+                || !sequences.contains(&cause_seq)
+                || !sequences.contains(&event.seq)
+        })
+    })
+}
+
+fn causal_trace_shape_is_valid(
+    trace: &[CausalTraceEntryV1],
+    structural_trace: &[StructuralCausalTraceEntryV1],
+    structurally_redacted: bool,
+    sequences: &BTreeSet<u64>,
+) -> bool {
+    !((structurally_redacted && !trace.is_empty())
         || (!structurally_redacted && !structural_trace.is_empty())
         || trace.iter().any(|edge| {
             edge.cause_seq >= edge.effect_seq
@@ -4673,29 +4708,24 @@ fn verify_causal_trace(
                     edge.visibility.as_str(),
                     "operator" | "participant" | "public"
                 )
-        })
-    {
-        return Err(EvidenceError::InvalidCausalEdge);
-    }
-    let authoritative_edges = events
-        .iter()
-        .filter_map(|event| event.causation_seq.map(|cause| (cause, event.seq)))
-        .collect::<BTreeSet<_>>();
-    let traced_edges = if structurally_redacted {
+        }))
+}
+
+fn causal_trace_edges(
+    trace: &[CausalTraceEntryV1],
+    structural_trace: &[StructuralCausalTraceEntryV1],
+    structurally_redacted: bool,
+) -> BTreeSet<(u64, u64)> {
+    if structurally_redacted {
         structural_trace
             .iter()
             .map(|edge| (edge.cause_seq, edge.effect_seq))
-            .collect::<BTreeSet<_>>()
+            .collect()
     } else {
         trace
             .iter()
             .map(|edge| (edge.cause_seq, edge.effect_seq))
-            .collect::<BTreeSet<_>>()
-    };
-    if authoritative_edges == traced_edges {
-        Ok(())
-    } else {
-        Err(EvidenceError::IncompleteCausalTrace)
+            .collect()
     }
 }
 
@@ -5255,8 +5285,7 @@ fn validate_conformance_case<'a>(
             case.redaction_state,
             RedactionStateV1::None | RedactionStateV1::RedactedViews
         ) && case.outcome != CaseOutcomeStatusV1::Pass
-            && !(case.outcome == CaseOutcomeStatusV1::Unavailable
-                && case.replay_claim == ReplayClaimV1::UnverifiableArtifactsMissing)
+            && !unavailable_due_to_missing_aggregate(case)
             && case.expected_digest == case.actual_digest
             && case.expected_error == case.actual_error)
     {
@@ -5264,6 +5293,11 @@ fn validate_conformance_case<'a>(
     } else {
         Ok(())
     }
+}
+
+fn unavailable_due_to_missing_aggregate(case: &CaseOutcomeV1) -> bool {
+    case.outcome == CaseOutcomeStatusV1::Unavailable
+        && case.replay_claim == ReplayClaimV1::UnverifiableArtifactsMissing
 }
 
 fn valid_conformance_case_result(case: &CaseOutcomeV1) -> bool {
