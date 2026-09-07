@@ -346,7 +346,9 @@ fn signed_result_for_receipt(
     result.agr1_digest = Some(receipt.authority.agr1_digest);
     result.spr1_digest = Some(receipt.receipt_digest);
     result.operational_events = operational_events;
-    result.runtime_attestation_key_id = receipt.runtime_attestation_key_id.clone();
+    result
+        .runtime_attestation_key_id
+        .clone_from(&receipt.runtime_attestation_key_id);
     result.sign(key)
 }
 
