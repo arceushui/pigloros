@@ -72,6 +72,7 @@ jobs:
           grep -q 'invalid_signature=rejected-before-unit' pinned-host-profile.txt
           cp -RL result/sim1-evidence pinned-sim1-evidence
           cp -RL result/runtime-identity pinned-runtime-identity
+          chmod -R u+w pinned-runtime-identity
           guest_closure=$(find pinned-runtime-identity \
             -name guest-system-closure.json -print -quit)
           guest_root=$(find pinned-runtime-identity \
