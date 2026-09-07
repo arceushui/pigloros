@@ -63,13 +63,8 @@ fn assert_blocked<S: EventStore>(mut store: S) -> Result<(), Box<dyn std::error:
         read_error.map(|error| error.to_string()),
         Some("erasure containment boundary is unavailable".to_owned())
     );
-    let export_error = export_timeline_raw(
-        &store,
-        timeline.id(),
-        EXPORT_DIGEST,
-        &export_evaluation(),
-    )
-    .err();
+    let export_error =
+        export_timeline_raw(&store, timeline.id(), EXPORT_DIGEST, &export_evaluation()).err();
     assert_eq!(
         export_error.map(|error| error.to_string()),
         Some("erasure containment boundary is unavailable".to_owned())
