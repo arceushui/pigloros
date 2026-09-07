@@ -2,6 +2,7 @@
 //! It is deliberately not production provider code and must never be promoted
 //! by copying it into the workspace.
 
+mod release_barrier;
 mod release_wire;
 
 use futures_util::TryStreamExt as _;
@@ -41,6 +42,13 @@ const PROBE_IO_WEIGHT: u64 = 200;
 
 fn main() {
     let arguments: Vec<String> = std::env::args().collect();
+    if let Some(result) = release_barrier::dispatch(&arguments) {
+        if let Err(error) = result {
+            eprintln!("release-barrier-rejected;reason={error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if arguments.iter().any(|argument| argument == "--leaf") {
         loop {
             thread::park();
