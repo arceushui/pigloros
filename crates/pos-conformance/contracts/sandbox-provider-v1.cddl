@@ -1,0 +1,81 @@
+; PiglorOS Sandbox Provider Plugin public contract v1 (ADR-069).
+; This package is provider-neutral. Backend configuration is intentionally absent.
+
+digest32 = bytes .size 32
+sha256 = bytes .size 32
+id16 = bytes .size 16
+key-id = text .size (1..128)
+identifier = text .size (1..128)
+safe-detail = text .size (1..256) / null
+epoch = uint
+
+provider-capability = [identifier, uint, uint]
+architecture = 0 / 1
+partition-descriptor = [0..2, bytes .size 16, bytes .size 16,
+  uint, 1..17179869184, digest32]
+network-capability = [identifier, 0, 0 / 1,
+  (bytes .size 4) / (bytes .size 16), 1..65535, 1..134217728, 1..134217728]
+limit-record = [0..15, uint]
+
+spm1-u = ["SPM1",1,identifier,digest32,digest32,digest32,digest32,key-id,
+  [1* provider-capability],[1* architecture],digest32,digest32,digest32,digest32,
+  epoch,digest32,digest32,key-id]
+spm1 = [spm1-u,digest32,bytes .size 64]
+
+sim1-u = ["SIM1",1,identifier,architecture,uint,digest32,
+  [partition-descriptor,partition-descriptor,partition-descriptor],
+  sha256,4096,4096,1,bytes .size 0,
+  [uint,sha256,bytes .size (1..1048576)],sha256,uint,
+  text .size (1..512),digest32,[* text .size (1..256)],epoch,key-id]
+sim1 = [sim1-u,digest32,bytes .size 64]
+
+lps1-u = ["LPS1",1,identifier,0..3,digest32,
+  [1* limit-record],[* network-capability]]
+lps1 = [lps1-u,digest32]
+
+sandbox-requirement = [digest32,digest32,provider-capability,digest32,epoch]
+implementation-identity = [identifier,digest32,digest32,digest32,digest32,identifier / null]
+output-capability = [digest32,uint,uint]
+evr1 = ["EVR1",1,id16,digest32,digest32,0..2,digest32,
+  implementation-identity,digest32,digest32,output-capability,digest32,digest32,
+  sandbox-requirement / null,digest32]
+
+request-common = [id16,digest32,epoch,bytes .size 16]
+sdq1-u = ["SDQ1",1,request-common]
+sdq1 = [sdq1-u,digest32]
+sdy1-u = ["SDY1",1,id16,digest32,digest32,digest32,digest32,key-id]
+sdy1 = [sdy1-u,digest32,bytes .size 64]
+scq1-u = ["SCQ1",1,request-common,id16,digest32]
+scq1 = [scq1-u,digest32]
+scy1-u = ["SCY1",1,id16,id16,0 / 1,digest32,key-id]
+scy1 = [scy1-u,digest32,bytes .size 64]
+srq1-u = ["SRQ1",1,request-common,id16,digest32]
+srq1 = [srq1-u,digest32]
+sry1-u = ["SRY1",1,id16,id16,true,digest32,key-id]
+sry1 = [sry1-u,digest32,bytes .size 64]
+sle1 = ["SLE1",1,(0..3) / null,id16 / null,0..3,safe-detail]
+
+network-plan = ["NXP1",1,id16,uint,identifier,uint,digest32,uint,digest32,digest32,digest32]
+spx1-u = ["SPX1",1,request-common,id16,
+  digest32,digest32,digest32,digest32,digest32,digest32,
+  digest32,digest32,digest32,digest32,digest32,digest32,digest32,digest32,digest32,
+  [* identifier],[uint,digest32,bytes],[* network-plan]]
+spx1 = [spx1-u,digest32]
+
+agr1-u = ["AGR1",1,id16,id16,digest32,digest32,digest32,digest32,digest32,
+  digest32,digest32,digest32,digest32,digest32,digest32,digest32,digest32,
+  epoch,epoch,epoch,digest32,digest32,[* digest32],digest32,digest32,key-id]
+agr1 = [agr1-u,digest32,bytes .size 64]
+
+spr1-u = ["SPR1",1,id16,digest32,digest32,digest32,digest32,digest32,digest32,
+  digest32,digest32,epoch,epoch,epoch,digest32,digest32,[* digest32],digest32 / null,
+  digest32 / null,digest32,digest32,digest32,digest32,digest32,key-id]
+spr1 = [spr1-u,digest32,bytes .size 64]
+
+spy1-u = ["SPY1",1,id16,id16,0..4,
+  [uint,digest32,bytes] / null,digest32 / null,digest32 / null,[* uint],key-id]
+spy1 = [spy1-u,digest32,bytes .size 64]
+
+spe1-u = ["SPE1",1,(0..3) / null,id16 / null,digest32 / null,id16 / null,0..17,
+  safe-detail,key-id]
+spe1 = [spe1-u,digest32,bytes .size 64]

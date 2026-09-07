@@ -161,6 +161,7 @@ impl SubjectAdapter for PublicAdapter {
         Ok(SubjectObservation {
             result: SubjectResult::Output(self.output.clone()),
             usage: ResourceUsage::default(),
+            sandbox_receipt_digest: None,
         })
     }
 }
@@ -178,6 +179,7 @@ impl SubjectAdapter for KindAdapter {
         Ok(SubjectObservation {
             result: SubjectResult::Output(self.output.clone()),
             usage: ResourceUsage::default(),
+            sandbox_receipt_digest: None,
         })
     }
 }
@@ -196,6 +198,7 @@ impl SubjectAdapter for RecordingAdapter {
         Ok(SubjectObservation {
             result: SubjectResult::Output(self.output.clone()),
             usage: ResourceUsage::default(),
+            sandbox_receipt_digest: None,
         })
     }
 }
@@ -227,6 +230,7 @@ impl SubjectAdapter for MixedOracleAdapter {
         Ok(SubjectObservation {
             result,
             usage: ResourceUsage::default(),
+            sandbox_receipt_digest: None,
         })
     }
 }
@@ -256,6 +260,7 @@ impl SubjectAdapter for MismatchedOracleAdapter {
         Ok(SubjectObservation {
             result,
             usage: ResourceUsage::default(),
+            sandbox_receipt_digest: None,
         })
     }
 }
@@ -275,6 +280,7 @@ impl SubjectAdapter for AdverseAdapter {
             AdverseBehavior::WrongOutput => Ok(SubjectObservation {
                 result: SubjectResult::Output(b"wrong".to_vec()),
                 usage: ResourceUsage::default(),
+                sandbox_receipt_digest: None,
             }),
             AdverseBehavior::ExcessiveUsage => Ok(SubjectObservation {
                 result: SubjectResult::Output(Vec::new()),
@@ -282,10 +288,12 @@ impl SubjectAdapter for AdverseAdapter {
                     memory_bytes: u64::MAX,
                     ..ResourceUsage::default()
                 },
+                sandbox_receipt_digest: None,
             }),
             AdverseBehavior::SubjectUnavailable => Ok(SubjectObservation {
                 result: SubjectResult::Unavailable,
                 usage: ResourceUsage::default(),
+                sandbox_receipt_digest: None,
             }),
             AdverseBehavior::WrongResultKind => Ok(SubjectObservation {
                 result: SubjectResult::Failure(NamespacedFailure {
@@ -294,6 +302,7 @@ impl SubjectAdapter for AdverseAdapter {
                     code_id: "unexpected".to_owned(),
                 }),
                 usage: ResourceUsage::default(),
+                sandbox_receipt_digest: None,
             }),
         }
     }

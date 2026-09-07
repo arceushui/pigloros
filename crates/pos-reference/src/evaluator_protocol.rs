@@ -80,6 +80,24 @@ pub struct OutputCapability {
     pub diagnostic_bytes_limit: u64,
 }
 
+/// Provider-neutral capability required by one sandboxed evaluator request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequiredProviderCapability {
+    pub capability_id: String,
+    pub capability_version: u64,
+    pub minimum_strength: u64,
+}
+
+/// Exact provider authority embedded in the replacement EVR1 layout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxRequirement {
+    pub lps1_digest: [u8; 32],
+    pub sim1_digest: [u8; 32],
+    pub required_provider_capability: RequiredProviderCapability,
+    pub apt1_digest: [u8; 32],
+    pub policy_epoch: u64,
+}
+
 /// Exact public EVR1 request consumed by the standalone evaluator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationRequest {
@@ -94,6 +112,7 @@ pub struct EvaluationRequest {
     pub output_capability: OutputCapability,
     pub evaluator_protocol_digest: [u8; 32],
     pub evaluator_hard_caps_digest: [u8; 32],
+    pub sandbox_requirement: Option<SandboxRequirement>,
     pub request_digest: [u8; 32],
 }
 
@@ -105,7 +124,7 @@ impl EvaluationRequest {
     /// self-inconsistent input.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let value = decode_canonical(bytes)?;
-        let fields = array(&value, 14)?;
+        let fields = array(&value, 15)?;
         if text(&fields[0])? != "EVR1" || uint(&fields[1])? != 1 {
             return Err(ProtocolError::UnsupportedVersion);
         }
@@ -121,7 +140,8 @@ impl EvaluationRequest {
             output_capability: decode_output_capability(&fields[10])?,
             evaluator_protocol_digest: fixed_bytes(&fields[11])?,
             evaluator_hard_caps_digest: fixed_bytes(&fields[12])?,
-            request_digest: fixed_bytes(&fields[13])?,
+            sandbox_requirement: decode_sandbox_requirement(&fields[13])?,
+            request_digest: fixed_bytes(&fields[14])?,
         };
         request.validate().map(|()| request)
     }
@@ -186,6 +206,13 @@ impl EvaluationRequest {
             || self.output_capability.report_bytes_limit == 0
             || self.output_capability.report_bytes_limit > 16 * 1024 * 1024
             || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
+        {
+            return Err(ProtocolError::FieldOutOfBounds);
+        }
+        if self
+            .sandbox_requirement
+            .as_ref()
+            .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
         {
             return Err(ProtocolError::FieldOutOfBounds);
         }
@@ -634,12 +661,56 @@ fn request_value(value: &EvaluationRequest, include_digest: bool) -> Value {
         ]),
         bytes(&value.evaluator_protocol_digest),
         bytes(&value.evaluator_hard_caps_digest),
+        value
+            .sandbox_requirement
+            .as_ref()
+            .map_or(Value::Null, sandbox_requirement_value),
         if include_digest {
             bytes(&value.request_digest)
         } else {
             Value::Null
         },
     ])
+}
+
+fn sandbox_requirement_value(value: &SandboxRequirement) -> Value {
+    Value::Array(vec![
+        bytes(&value.lps1_digest),
+        bytes(&value.sim1_digest),
+        Value::Array(vec![
+            Value::Text(value.required_provider_capability.capability_id.clone()),
+            unsigned(value.required_provider_capability.capability_version),
+            unsigned(value.required_provider_capability.minimum_strength),
+        ]),
+        bytes(&value.apt1_digest),
+        unsigned(value.policy_epoch),
+    ])
+}
+
+fn decode_sandbox_requirement(value: &Value) -> Result<Option<SandboxRequirement>, ProtocolError> {
+    if value == &Value::Null {
+        return Ok(None);
+    }
+    let fields = array(value, 5)?;
+    let capability = array(&fields[2], 3)?;
+    Ok(Some(SandboxRequirement {
+        lps1_digest: fixed_bytes(&fields[0])?,
+        sim1_digest: fixed_bytes(&fields[1])?,
+        required_provider_capability: RequiredProviderCapability {
+            capability_id: text(&capability[0])?.to_owned(),
+            capability_version: uint(&capability[1])?,
+            minimum_strength: uint(&capability[2])?,
+        },
+        apt1_digest: fixed_bytes(&fields[3])?,
+        policy_epoch: uint(&fields[4])?,
+    }))
+}
+
+fn valid_sandbox_requirement(value: &SandboxRequirement) -> bool {
+    value.lps1_digest != [0; 32]
+        && value.sim1_digest != [0; 32]
+        && value.apt1_digest != [0; 32]
+        && validate_identifier(&value.required_provider_capability.capability_id).is_ok()
 }
 
 fn report_value(value: &ConformanceReport, include_digest: bool) -> Value {

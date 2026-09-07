@@ -384,6 +384,7 @@ pub fn read_observation(
     let observation = SubjectObservation {
         result,
         usage: decode_usage(&fields[7])?,
+        sandbox_receipt_digest: None,
     };
     validate_observation(&observation, maximum)?;
     require_eof(&mut reader)?;

@@ -95,6 +95,8 @@ pub enum SubjectResult {
 pub struct SubjectObservation {
     pub result: SubjectResult,
     pub usage: ResourceUsage,
+    /// Validated SPR1 self-digest when this observation came from a Sandbox Provider.
+    pub sandbox_receipt_digest: Option<[u8; 32]>,
 }
 
 /// Public-only subject seam. Implementations may speak the exported-artifact,
@@ -415,6 +417,14 @@ fn case_outcome(
         redaction_state: fixture.redaction_state,
         provenance_digest: fixture.provenance_digest,
     };
+    if let Some(receipt_digest) = observation
+        .as_ref()
+        .ok()
+        .and_then(|value| value.sandbox_receipt_digest)
+        .filter(|digest| *digest != [0; 32])
+    {
+        outcome.provenance_digest = receipt_digest;
+    }
     if outcome.redaction_state >= 2 {
         return outcome;
     }

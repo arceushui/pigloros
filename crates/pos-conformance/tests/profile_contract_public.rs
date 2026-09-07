@@ -10,8 +10,9 @@ use pos_conformance::{
     FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderKeyV1,
     FixtureProviderRegistryBindingV1, FollowOnMismatchV1, ImplementationIdentityV1,
     IndependenceEvidenceV1, IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1,
-    RedactionStateV1, ReplayClaimV1, ReproducibilityClassV1, StrictOracleKindV1, StrictOracleV1,
-    SubjectAdapterKindV1, VerificationOutcomeV1, VerificationResultV1,
+    ProviderCapabilityV1, RedactionStateV1, ReplayClaimV1, ReproducibilityClassV1,
+    SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
+    VerificationOutcomeV1, VerificationResultV1,
     DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
 
@@ -242,6 +243,7 @@ pub mod fixtures {
             Value::Array(vec![bytes(6), uint(1), uint(1)]),
             bytes(13),
             bytes(14),
+            Value::Null,
             Value::Bytes(vec![1]),
         ]))
     }
@@ -515,6 +517,7 @@ fn request_for_caps(caps: &EvaluatorHardCapsV1) -> EvaluatorRequestV1 {
         },
         evaluator_protocol_digest: [11; 32],
         evaluator_hard_caps_digest: caps.digest(),
+        sandbox_requirement: None,
         request_digest: [0; 32],
     };
     request.output_capability.capability_digest = request.expected_output_capability_digest();
@@ -1178,6 +1181,41 @@ fn public_request_validation_rejects_each_closed_invalid_field(
         }
         assert!(invalid.validate().is_err(), "request mutation {mutation}");
     }
+    Ok(())
+}
+
+#[test]
+fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult {
+    let caps = profile_for_digest().evaluator_protocol.hard_caps;
+    let mut request = request_for_caps(&caps);
+    request.sandbox_requirement = Some(SandboxRequirementV1 {
+        lps1_digest: [31; 32],
+        sim1_digest: [32; 32],
+        required_provider_capability: ProviderCapabilityV1 {
+            capability_id: "managed-attempt-exec".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        apt1_digest: [33; 32],
+        policy_epoch: 7,
+    });
+    request.request_digest = request.digest();
+    let bytes = request.to_canonical_cbor()?;
+    assert_eq!(EvaluatorRequestV1::from_canonical_cbor(&bytes)?, request);
+
+    let mut invalid = request;
+    invalid
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .required_provider_capability
+        .capability_id
+        .clear();
+    invalid.request_digest = invalid.digest();
+    assert_eq!(
+        invalid.validate(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
     Ok(())
 }
 
@@ -2746,14 +2784,14 @@ fn public_profile_decoder_rejects_each_raw_cbor_boundary() -> Result<(), Box<dyn
 #[test]
 fn public_request_decoder_rejects_each_top_level_and_nested_field(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for length in [13, 15] {
+    for length in [14, 16] {
         let malformed = fixtures::encode(&Value::Array(vec![Value::Null; length]))?;
         assert_eq!(
             EvaluatorRequestV1::from_canonical_cbor(&malformed),
             Err(ConformanceContractError::InvalidEncoding)
         );
     }
-    let mut paths = (0..14).map(|index| vec![index]).collect::<Vec<_>>();
+    let mut paths = (0..15).map(|index| vec![index]).collect::<Vec<_>>();
     paths.extend((0..6).map(|index| vec![7, index]));
     paths.extend((0..3).map(|index| vec![10, index]));
     for path in paths {

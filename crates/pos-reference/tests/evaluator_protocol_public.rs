@@ -9,7 +9,8 @@ use pos_reference::evaluator::{
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_protocol::{
-    CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError, SubjectAdapterKind,
+    CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError, RequiredProviderCapability,
+    SandboxRequirement, SubjectAdapterKind,
 };
 use pos_reference::profile::ProfileError;
 use pos_reference::signed_bundle::BundleError;
@@ -79,6 +80,30 @@ struct PassingAdapter {
     output: Vec<u8>,
 }
 
+struct ReceiptAdapter {
+    subject_digest: [u8; 32],
+    output: Vec<u8>,
+    receipt_digest: [u8; 32],
+}
+
+impl SubjectAdapter for ReceiptAdapter {
+    fn kind(&self) -> SubjectAdapterKind {
+        SubjectAdapterKind::ExportedArtifact
+    }
+
+    fn subject_artifact_digest(&self) -> [u8; 32] {
+        self.subject_digest
+    }
+
+    fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        Ok(SubjectObservation {
+            result: SubjectResult::Output(self.output.clone()),
+            usage: ResourceUsage::default(),
+            sandbox_receipt_digest: Some(self.receipt_digest),
+        })
+    }
+}
+
 impl SubjectAdapter for PassingAdapter {
     fn kind(&self) -> SubjectAdapterKind {
         SubjectAdapterKind::ExportedArtifact
@@ -92,6 +117,7 @@ impl SubjectAdapter for PassingAdapter {
         Ok(SubjectObservation {
             result: SubjectResult::Output(self.output.clone()),
             usage: ResourceUsage::default(),
+            sandbox_receipt_digest: None,
         })
     }
 }
@@ -119,6 +145,30 @@ fn valid_report() -> TestResult<ConformanceReport> {
         &mut adapter,
     )?
     .report)
+}
+
+#[test]
+fn sandboxed_case_provenance_is_the_validated_receipt_digest() -> TestResult {
+    let corpus = support::corpus()?;
+    let receipt_digest = [91; 32];
+    let mut adapter = ReceiptAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+        receipt_digest,
+    };
+    let report = evaluate(
+        &corpus.request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity()?,
+        &mut adapter,
+    )?
+    .report;
+    assert!(report
+        .cases
+        .iter()
+        .all(|case| case.provenance_digest == receipt_digest));
+    Ok(())
 }
 
 fn reseal(report: &mut ConformanceReport) -> TestResult {
@@ -272,6 +322,36 @@ fn request_round_trips_every_adapter_and_optional_identity_shape() -> TestResult
 }
 
 #[test]
+fn request_round_trips_sandbox_requirement_and_rejects_old_layout() -> TestResult {
+    let mut request = valid_request()?;
+    request.sandbox_requirement = Some(SandboxRequirement {
+        lps1_digest: [31; 32],
+        sim1_digest: [32; 32],
+        required_provider_capability: RequiredProviderCapability {
+            capability_id: "managed-attempt-exec".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        apt1_digest: [33; 32],
+        policy_epoch: 7,
+    });
+    request.request_digest = request.digest()?;
+    let encoded = request.to_canonical_cbor()?;
+    assert_eq!(EvaluationRequest::from_canonical_cbor(&encoded)?, request);
+
+    let mut old_layout = decoded_value(&encoded)?;
+    let Value::Array(fields) = &mut old_layout else {
+        return Err("EVR1 must be an array".into());
+    };
+    fields.remove(13);
+    assert_eq!(
+        EvaluationRequest::from_canonical_cbor(&canonical(&old_layout)?),
+        Err(ProtocolError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
 fn request_rejects_each_identifier_boundary() -> TestResult {
     for identifier in [String::new(), "a".repeat(129)] {
         let mut request = valid_request()?;
@@ -388,7 +468,7 @@ fn public_decoders_reject_each_canonical_cbor_framing_boundary() {
 fn request_and_report_decoders_reject_wrong_types_at_every_required_field() -> TestResult {
     let request_bytes = valid_request()?.to_canonical_cbor()?;
     let request = decoded_value(&request_bytes)?;
-    for path in (0..14)
+    for path in (0..15)
         .map(|index| vec![index])
         .chain((0..5).map(|index| vec![7, index]))
         .chain((0..3).map(|index| vec![10, index]))

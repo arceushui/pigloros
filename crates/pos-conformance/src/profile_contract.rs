@@ -448,6 +448,21 @@ pub struct EvaluatorOutputCapabilityV1 {
     pub diagnostic_bytes_limit: u64,
 }
 
+/// Exact provider-neutral sandbox authority selected for one EVR1 request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxRequirementV1 {
+    /// Exact launch-policy digest.
+    pub lps1_digest: [u8; 32],
+    /// Exact signed-image-manifest digest.
+    pub sim1_digest: [u8; 32],
+    /// Required provider capability and minimum admitted strength.
+    pub required_provider_capability: crate::sandbox_provider_contract::ProviderCapabilityV1,
+    /// Exact administrator-policy digest.
+    pub apt1_digest: [u8; 32],
+    /// Exact administrator-policy epoch.
+    pub policy_epoch: u64,
+}
+
 /// Exact public evaluator input request; it binds all authority-relevant identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluatorRequestV1 {
@@ -462,6 +477,9 @@ pub struct EvaluatorRequestV1 {
     pub output_capability: EvaluatorOutputCapabilityV1,
     pub evaluator_protocol_digest: [u8; 32],
     pub evaluator_hard_caps_digest: [u8; 32],
+    /// Sandbox authority for provider-executed cases; absent only when no
+    /// Sandbox Provider is involved in the request.
+    pub sandbox_requirement: Option<SandboxRequirementV1>,
     pub request_digest: [u8; 32],
 }
 
@@ -538,6 +556,10 @@ impl EvaluatorRequestV1 {
             || self.output_capability.report_bytes_limit > MAX_PROFILE_BYTES as u64
             || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
             || self.output_capability.capability_digest != self.expected_output_capability_digest()
+            || self
+                .sandbox_requirement
+                .as_ref()
+                .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
         {
             return Err(ConformanceContractError::FieldOutOfBounds);
         }
@@ -714,6 +736,16 @@ impl EvaluatorRequestV1 {
             &encode_request(self, false),
         )
     }
+}
+
+fn valid_sandbox_requirement(requirement: &SandboxRequirementV1) -> bool {
+    !zero_digest(&requirement.lps1_digest)
+        && !zero_digest(&requirement.sim1_digest)
+        && !zero_digest(&requirement.apt1_digest)
+        && crate::identifier(
+            &requirement.required_provider_capability.capability_id,
+            128,
+        )
 }
 
 fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
@@ -1724,11 +1756,29 @@ fn encode_request(request: &EvaluatorRequestV1, include_digest: bool) -> Value {
         encode_output_capability(&request.output_capability),
         digest(&request.evaluator_protocol_digest),
         digest(&request.evaluator_hard_caps_digest),
+        request
+            .sandbox_requirement
+            .as_ref()
+            .map_or(Value::Null, encode_sandbox_requirement),
         if include_digest {
             digest(&request.request_digest)
         } else {
             Value::Null
         },
+    ])
+}
+
+fn encode_sandbox_requirement(value: &SandboxRequirementV1) -> Value {
+    Value::Array(vec![
+        digest(&value.lps1_digest),
+        digest(&value.sim1_digest),
+        Value::Array(vec![
+            text(&value.required_provider_capability.capability_id),
+            uint(value.required_provider_capability.capability_version),
+            uint(value.required_provider_capability.minimum_strength),
+        ]),
+        digest(&value.apt1_digest),
+        uint(value.policy_epoch),
     ])
 }
 
@@ -2152,7 +2202,7 @@ fn decode_requirements(
 }
 
 fn decode_request(value: &Value) -> Result<EvaluatorRequestV1, ConformanceContractError> {
-    array(value, 14)
+    array(value, 15)
         .and_then(|fields| {
             text_value(&fields[0]).and_then(|magic| {
                 uint_value(&fields[1]).and_then(|version| {
@@ -2177,7 +2227,8 @@ fn decode_request(value: &Value) -> Result<EvaluatorRequestV1, ConformanceContra
                 decode_output_capability(&fields[10]) => output_capability,
                 digest_value(&fields[11]) => evaluator_protocol_digest,
                 digest_value(&fields[12]) => evaluator_hard_caps_digest,
-                digest_value(&fields[13]) => request_digest,
+                decode_sandbox_requirement(&fields[13]) => sandbox_requirement,
+                digest_value(&fields[14]) => request_digest,
                 Ok(EvaluatorRequestV1 {
                     request_id,
                     conformance_profile_digest,
@@ -2190,10 +2241,35 @@ fn decode_request(value: &Value) -> Result<EvaluatorRequestV1, ConformanceContra
                     output_capability,
                     evaluator_protocol_digest,
                     evaluator_hard_caps_digest,
+                    sandbox_requirement,
                     request_digest,
                 })
             }
         })
+}
+
+fn decode_sandbox_requirement(
+    value: &Value,
+) -> Result<Option<SandboxRequirementV1>, ConformanceContractError> {
+    if value == &Value::Null {
+        return Ok(None);
+    }
+    array(value, 5).and_then(|fields| {
+        array(&fields[2], 3).and_then(|capability| {
+            Ok(Some(SandboxRequirementV1 {
+                lps1_digest: digest_value(&fields[0])?,
+                sim1_digest: digest_value(&fields[1])?,
+                required_provider_capability:
+                    crate::sandbox_provider_contract::ProviderCapabilityV1 {
+                        capability_id: text_value(&capability[0])?,
+                        capability_version: uint_value(&capability[1])?,
+                        minimum_strength: uint_value(&capability[2])?,
+                    },
+                apt1_digest: digest_value(&fields[3])?,
+                policy_epoch: uint_value(&fields[4])?,
+            }))
+        })
+    })
 }
 
 fn decode_output_capability(
