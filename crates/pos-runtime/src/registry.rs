@@ -2179,7 +2179,13 @@ impl PluginRegistry {
             return Err(ActionRejected::UnknownEventType);
         };
 
-        let draft = approver.approve(proposal)?;
+        Self::validate_approver_draft(proposal, approver.approve(proposal)?)
+    }
+
+    fn validate_approver_draft(
+        proposal: &ProposedAction,
+        draft: EventDraft,
+    ) -> Result<EventDraft, ActionRejected> {
         if draft.entity != proposal.actor_entity_id {
             return Err(ActionRejected::DomainValidationFailed(
                 "approver returned an event for a different actor".to_owned(),
