@@ -64,8 +64,28 @@ fn registry() -> ProjectionRegistry {
 fn snapshot_verification_requires_authoritative_artifact_evidence() {
     let mut store = open_store(StoreConfig::Memory).test_ok();
     let timeline = store.create_timeline("artifact-snapshot").test_ok();
+    for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
+        let mut rejected_registry = registry();
+        assert!(matches!(
+            snapshot(
+                store.as_ref(),
+                timeline.id(),
+                &mut rejected_registry,
+                SNAPSHOT_DIGEST,
+                &evaluation(state),
+            ),
+            Err(pos_core::CoreError::ArtifactUnavailable)
+        ));
+    }
     let mut capture_registry = registry();
-    let snapshot = snapshot(store.as_ref(), timeline.id(), &mut capture_registry).test_ok();
+    let snapshot = snapshot(
+        store.as_ref(),
+        timeline.id(),
+        &mut capture_registry,
+        SNAPSHOT_DIGEST,
+        &evaluation(ArtifactStateV1::Retained),
+    )
+    .test_ok();
 
     let mut retained_registry = registry();
     verify_snapshot_consistency(

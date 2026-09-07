@@ -35,17 +35,25 @@ pub fn snapshot(
     store: &dyn EventStore,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
 ) -> Result<Snapshot, CoreError> {
-    let events = store.read(timeline, SeqRange::all())?;
-    let at_seq = events.last().map_or(Seq::ZERO, |e| e.seq);
-
-    registry.fold_events(&events);
-
-    Ok(Snapshot {
-        timeline,
-        at_seq,
-        registry: registry.state_snapshot(),
-    })
+    evaluation
+        .require_authoritative_use(
+            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+            artifact_digest,
+        )
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|()| store.read(timeline, SeqRange::all()))
+        .map(|events| {
+            let at_seq = events.last().map_or(Seq::ZERO, |event| event.seq);
+            registry.fold_events(&events);
+            Snapshot {
+                timeline,
+                at_seq,
+                registry: registry.state_snapshot(),
+            }
+        })
 }
 
 /// Error type for snapshot consistency checks.
@@ -250,6 +258,20 @@ mod tests {
             }],
         )
         .test_ok()
+    }
+
+    fn snapshot(
+        store: &dyn EventStore,
+        timeline: TimelineId,
+        registry: &mut ProjectionRegistry,
+    ) -> Result<Snapshot, CoreError> {
+        super::snapshot(
+            store,
+            timeline,
+            registry,
+            SNAPSHOT_DIGEST,
+            &snapshot_evaluation(ArtifactStateV1::Retained),
+        )
     }
 
     struct CountReducer;
@@ -482,6 +504,20 @@ mod extra_tests {
             }],
         )
         .test_ok()
+    }
+
+    fn snapshot(
+        store: &dyn EventStore,
+        timeline: TimelineId,
+        registry: &mut ProjectionRegistry,
+    ) -> Result<Snapshot, CoreError> {
+        super::snapshot(
+            store,
+            timeline,
+            registry,
+            SNAPSHOT_DIGEST,
+            &snapshot_evaluation(ArtifactStateV1::Retained),
+        )
     }
 
     struct ReadFailStore;

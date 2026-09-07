@@ -1405,6 +1405,7 @@ impl PluginRegistry {
         plugin_id: PluginId,
         timeline: pos_core::ids::TimelineId,
         observation: AuthorizedObservationV1,
+        artifact_evaluation: &pos_core::ReplayClaimEvaluationV1,
         knowledge: &KnowledgeSnapshotV1,
         authority: &PersistedAuthorityV1,
         authority_registry: &AuthorityRegistrySnapshotV1,
@@ -1418,15 +1419,22 @@ impl PluginRegistry {
                     .map_err(RuntimeError::Authority)
             })
             .and_then(|()| {
-                knowledge
-                    .validate_observation_snapshot(observation.snapshot())
+                observation
+                    .authoritative_snapshot(artifact_evaluation)
                     .map_err(RuntimeError::Authority)
+                    .and_then(|snapshot| {
+                        knowledge
+                            .validate_observation_snapshot(snapshot)
+                            .map(|()| snapshot.clone())
+                            .map_err(RuntimeError::Authority)
+                    })
             })
-            .and_then(|()| {
+            .and_then(|snapshot| {
                 self.stage_authorized_driver_after_fence(
                     plugin_id,
                     timeline,
                     observation,
+                    &snapshot,
                     knowledge,
                 )
             })
@@ -1437,9 +1445,9 @@ impl PluginRegistry {
         plugin_id: PluginId,
         timeline: pos_core::ids::TimelineId,
         observation: AuthorizedObservationV1,
+        snapshot: &pos_core::ObservationSnapshotV1,
         knowledge: &KnowledgeSnapshotV1,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        let snapshot = observation.snapshot();
         if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
             return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
         }
@@ -1700,6 +1708,7 @@ impl PluginRegistry {
         &mut self,
         store: &mut dyn pos_core::store::EventStore,
         drafts: &[EventDraft],
+        artifact_evaluation: &pos_core::ReplayClaimEvaluationV1,
         authority: &PersistedAuthorityV1,
         authority_registry: &AuthorityRegistrySnapshotV1,
         authority_position: Seq,
@@ -1713,8 +1722,14 @@ impl PluginRegistry {
         };
         let validation = authorized
             .observation
-            .revalidate(authority, authority_registry, authority_position)
+            .authoritative_snapshot(artifact_evaluation)
             .map_err(RuntimeError::Authority)
+            .and_then(|_| {
+                authorized
+                    .observation
+                    .revalidate(authority, authority_registry, authority_position)
+                    .map_err(RuntimeError::Authority)
+            })
             .and_then(|()| {
                 if drafts == authorized.drafts.as_slice() {
                     Ok(())

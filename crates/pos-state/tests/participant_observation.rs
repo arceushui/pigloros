@@ -468,7 +468,51 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
             &context(TimelineId::new()),
         )
         .test_ok();
-    let digest = observation.records()[0].artifact_digest().test_ok();
+    let snapshot_digest = observation.artifact_digest();
+    let snapshot_evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ForkOrSnapshot,
+                ErasureReferenceV1::from_digest(*snapshot_digest.as_bytes()),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([70; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::Retained,
+        }],
+    )
+    .test_ok();
+    let erased_snapshot_evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ForkOrSnapshot,
+                ErasureReferenceV1::from_digest(*snapshot_digest.as_bytes()),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([70; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::Remove,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::Erased,
+        }],
+    )
+    .test_ok();
+    assert!(matches!(
+        observation.authoritative_snapshot(&erased_snapshot_evaluation),
+        Err(pos_core::AuthorityErrorV1::SourceUnavailable)
+    ));
+    let digest = observation
+        .authoritative_snapshot(&snapshot_evaluation)
+        .test_ok()
+        .records()[0]
+        .artifact_digest()
+        .test_ok();
     let evaluate = |state| {
         ReplayClaimEvaluatorV1::evaluate(
             ErasureReplayClaimV1::Exact,

@@ -416,10 +416,14 @@ impl ProjectionRegistry {
                 authority_position,
             )
             .and_then(|()| self.materialize_authorized_projection(request, decision, context))
-            .map(|snapshot| AuthorizedObservationV1 {
-                snapshot,
-                request: request.clone(),
-                decision: decision.clone(),
+            .map(|snapshot| {
+                let artifact_digest = snapshot.provenance_digest();
+                AuthorizedObservationV1 {
+                    snapshot,
+                    artifact_digest,
+                    request: request.clone(),
+                    decision: decision.clone(),
+                }
             })
     }
 
@@ -635,15 +639,35 @@ impl ProjectionRegistry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizedObservationV1 {
     snapshot: ObservationSnapshotV1,
+    artifact_digest: Hash,
     request: AuthorizationRequestV1,
     decision: AuthorizationDecisionV1,
 }
 
 impl AuthorizedObservationV1 {
-    /// Return the minimized immutable OBS1 snapshot.
+    /// Return the safe content identity used to register this OBS1 artifact.
     #[must_use]
-    pub const fn snapshot(&self) -> &ObservationSnapshotV1 {
-        &self.snapshot
+    pub const fn artifact_digest(&self) -> Hash {
+        self.artifact_digest
+    }
+
+    /// Release the minimized immutable OBS1 snapshot only while its registered
+    /// artifact remains authoritative.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityErrorV1::SourceUnavailable`] after structural
+    /// degradation, erasure, invalidation, or a mismatched registration.
+    pub fn authoritative_snapshot(
+        &self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) -> Result<&ObservationSnapshotV1, AuthorityErrorV1> {
+        evaluation
+            .require_authoritative_use(
+                pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+                pos_core::ErasureReferenceV1::from_digest(*self.artifact_digest.as_bytes()),
+            )
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+            .map(|()| &self.snapshot)
     }
 
     /// Release one snapshot artifact only when ADR-060 still permits authoritative use.
@@ -688,14 +712,6 @@ impl AuthorizedObservationV1 {
             registry,
             at_position,
         )
-    }
-}
-
-impl std::ops::Deref for AuthorizedObservationV1 {
-    type Target = ObservationSnapshotV1;
-
-    fn deref(&self) -> &Self::Target {
-        self.snapshot()
     }
 }
 

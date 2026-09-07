@@ -20,10 +20,20 @@ pub fn replay(
     store: &dyn EventStore,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
-    let events = store.read(timeline, SeqRange::all())?;
-    registry.fold_events(&events);
-    Ok(events)
+    evaluation
+        .require_authoritative_use(
+            pos_core::ErasureArtifactClassV1::TimelineReplay,
+            artifact_digest,
+        )
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|()| store.read(timeline, SeqRange::all()))
+        .map(|events| {
+            registry.fold_events(&events);
+            events
+        })
 }
 
 /// Replay events up to and **including** `at_seq` on `timeline`.
@@ -37,10 +47,17 @@ pub fn replay_at(
     timeline: TimelineId,
     at_seq: Seq,
     registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
 ) -> Result<(), CoreError> {
-    let events = store.read(timeline, SeqRange::bounded(Seq::ZERO, at_seq))?;
-    registry.fold_events(&events);
-    Ok(())
+    evaluation
+        .require_authoritative_use(
+            pos_core::ErasureArtifactClassV1::TimelineReplay,
+            artifact_digest,
+        )
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|()| store.read(timeline, SeqRange::bounded(Seq::ZERO, at_seq)))
+        .map(|events| registry.fold_events(&events))
 }
 
 #[cfg(test)]
@@ -93,6 +110,74 @@ mod tests {
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
+
+    const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
+        pos_core::ErasureReferenceV1::from_digest([43; 32]);
+
+    fn replay_evaluation(state: pos_core::ArtifactStateV1) -> pos_core::ReplayClaimEvaluationV1 {
+        pos_core::ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[pos_core::ArtifactClaimInputV1 {
+                registration: pos_core::RegisteredArtifactV1::new(
+                    pos_core::ErasureArtifactClassV1::TimelineReplay,
+                    REPLAY_DIGEST,
+                    pos_core::ArtifactDataClassV1::PrivateSubjectData,
+                    None,
+                    pos_core::ErasureReferenceV1::from_digest([44; 32]),
+                    pos_core::ArtifactOptionalityV1::Required,
+                    pos_core::ArtifactTransitionRuleV1::Remove,
+                ),
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state,
+            }],
+        )
+        .test_ok()
+    }
+
+    fn replay(
+        store: &dyn EventStore,
+        timeline: TimelineId,
+        registry: &mut ProjectionRegistry,
+    ) -> Result<Vec<Event>, CoreError> {
+        super::replay(
+            store,
+            timeline,
+            registry,
+            REPLAY_DIGEST,
+            &replay_evaluation(pos_core::ArtifactStateV1::Retained),
+        )
+    }
+
+    fn replay_at(
+        store: &dyn EventStore,
+        timeline: TimelineId,
+        at_seq: Seq,
+        registry: &mut ProjectionRegistry,
+    ) -> Result<(), CoreError> {
+        super::replay_at(
+            store,
+            timeline,
+            at_seq,
+            registry,
+            REPLAY_DIGEST,
+            &replay_evaluation(pos_core::ArtifactStateV1::Retained),
+        )
+    }
+
+    #[test]
+    fn erased_timeline_cannot_be_replayed_as_authoritative_input() {
+        let mut registry = ProjectionRegistry::new();
+        assert!(matches!(
+            super::replay(
+                &ReadFailStore,
+                TimelineId::new(),
+                &mut registry,
+                REPLAY_DIGEST,
+                &replay_evaluation(pos_core::ArtifactStateV1::Erased),
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+    }
 
     struct ReadFailStore;
 

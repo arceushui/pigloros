@@ -1,13 +1,16 @@
 use pos_core::{
-    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
-    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, Capability,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
-    ConsentGrantRefV1, ConsentGrantStatusV1, EntityId, Event, EventDraft, Hash, Kind,
-    KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationSnapshotV1,
-    PersistedAuthorityV1, Plugin, PluginId, PrincipalRefV1, Reducer, Seq, SeqRange, State,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
+    AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1,
+    AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
+    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
+    ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, Hash,
+    Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
+    ObservationSnapshotV1, PersistedAuthorityV1, Plugin, PluginId, PrincipalRefV1, Reducer,
+    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange, State,
     TimelineId, WallTime,
 };
 use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
@@ -52,6 +55,38 @@ fn authority_error<T>(result: Result<T, RuntimeError>) -> AuthorityErrorV1 {
 
 const fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
+}
+
+fn observation_evaluation(observation: &AuthorizedObservationV1) -> ReplayClaimEvaluationV1 {
+    observation_evaluation_for(
+        observation,
+        ArtifactStateV1::Retained,
+        ArtifactTransitionRuleV1::PreserveExact,
+    )
+}
+
+fn observation_evaluation_for(
+    observation: &AuthorizedObservationV1,
+    state: ArtifactStateV1,
+    transition_rule: ArtifactTransitionRuleV1,
+) -> ReplayClaimEvaluationV1 {
+    ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ForkOrSnapshot,
+                ErasureReferenceV1::from_digest(*observation.artifact_digest().as_bytes()),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([242; 32]),
+                ArtifactOptionalityV1::Required,
+                transition_rule,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state,
+        }],
+    )
+    .test_ok()
 }
 
 struct Fixture {
@@ -319,7 +354,11 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
             },
         )
         .test_ok();
-    let knowledge = knowledge_snapshot(observation.snapshot());
+    let knowledge = knowledge_snapshot(
+        observation
+            .authoritative_snapshot(&observation_evaluation(&observation))
+            .test_ok(),
+    );
     Fixture {
         observation,
         knowledge,
@@ -575,6 +614,7 @@ fn stage_current(
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.observation.clone(),
+        &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
         &current_authority(fixture),
         &fixture.authority_registry,
@@ -643,6 +683,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         fixture.plugin_id,
         TimelineId::new(),
         fixture.observation.clone(),
+        &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
         &authority,
         &fixture.authority_registry,
@@ -662,6 +703,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.observation.clone(),
+        &observation_evaluation(&fixture.observation),
         &fixture_with_timeline(fixture.timeline_id).knowledge,
         &authority,
         &fixture.authority_registry,
@@ -681,6 +723,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.observation.clone(),
+        &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
         &authority,
         &fixture.authority_registry,
@@ -727,6 +770,7 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
         authority_error(registry.append_and_commit_authorized_step_at(
             store.as_mut(),
             &drafts,
+            &observation_evaluation(&fixture.observation),
             &authority,
             &fixture.authority_registry,
             Seq::from_u64(11),
@@ -754,6 +798,7 @@ fn current_consent_is_required_before_driver_invocation() {
             fixture.plugin_id,
             fixture.timeline_id,
             fixture.observation.clone(),
+            &observation_evaluation(&fixture.observation),
             &fixture.knowledge,
             &authority,
             &registry_without_consent(&fixture),
@@ -781,6 +826,7 @@ fn consent_revocation_after_staging_aborts_before_append() {
         authority_error(registry.append_and_commit_authorized_step_at(
             store.as_mut(),
             &drafts,
+            &observation_evaluation(&fixture.observation),
             &current_authority(&fixture),
             &registry_without_consent(&fixture),
             Seq::from_u64(11),
@@ -811,6 +857,7 @@ fn capability_removal_after_staging_aborts_without_append() {
         authority_error(registry.append_and_commit_authorized_step_at(
             store.as_mut(),
             &drafts,
+            &observation_evaluation(&fixture.observation),
             &current_authority(&fixture),
             &registry_without_capability(&fixture),
             Seq::from_u64(10),
@@ -861,6 +908,7 @@ fn revoked_authority_is_rejected_before_driver_invocation() {
             fixture.plugin_id,
             fixture.timeline_id,
             fixture.observation.clone(),
+            &observation_evaluation(&fixture.observation),
             &fixture.knowledge,
             &authority,
             &fixture.authority_registry,
@@ -906,6 +954,7 @@ fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
     assert!(error_text(substituted.append_and_commit_authorized_step_at(
         substituted_store.as_mut(),
         &changed_drafts,
+        &observation_evaluation(&fixture.observation),
         &authority,
         &fixture.authority_registry,
         Seq::from_u64(10),
@@ -932,6 +981,7 @@ fn current_authority_fence_appends_then_commits_the_driver() {
         .append_and_commit_authorized_step_at(
             store.as_mut(),
             &drafts,
+            &observation_evaluation(&fixture.observation),
             &authority,
             &fixture.authority_registry,
             Seq::from_u64(10),
@@ -950,6 +1000,43 @@ fn current_authority_fence_appends_then_commits_the_driver() {
 }
 
 #[test]
+fn erased_observation_between_stage_and_commit_aborts_without_appending() {
+    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let timeline = store
+        .create_timeline("erased-authorized-participant")
+        .test_ok();
+    let fixture = fixture_with_timeline(timeline.id());
+    let (mut registry, state) = registry(&fixture, false);
+    let drafts = stage_current(&mut registry, &fixture).test_ok();
+    let erased = observation_evaluation_for(
+        &fixture.observation,
+        ArtifactStateV1::Erased,
+        ArtifactTransitionRuleV1::Remove,
+    );
+
+    assert_eq!(
+        authority_error(registry.append_and_commit_authorized_step_at(
+            store.as_mut(),
+            &drafts,
+            &erased,
+            &current_authority(&fixture),
+            &fixture.authority_registry,
+            Seq::from_u64(10),
+        )),
+        AuthorityErrorV1::SourceUnavailable
+    );
+    assert!(store
+        .read(timeline.id(), SeqRange::all())
+        .test_ok()
+        .is_empty());
+    let state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(state.aborts, 1);
+    assert_eq!(state.commits, 0);
+}
+
+#[test]
 fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     let fixture = fixture();
     let authority = current_authority(&fixture);
@@ -958,6 +1045,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.observation.clone(),
+        &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
         &authority,
         &fixture.authority_registry,
@@ -979,6 +1067,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.observation.clone(),
+        &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
         &authority,
         &fixture.authority_registry,
@@ -992,6 +1081,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         fixture.plugin_id,
         fixture.timeline_id,
         fixture.observation.clone(),
+        &observation_evaluation(&fixture.observation),
         &fixture.knowledge,
         &authority,
         &fixture.authority_registry,
@@ -1013,6 +1103,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     assert!(error_text(registry.append_and_commit_authorized_step_at(
         store.as_mut(),
         &drafts,
+        &observation_evaluation(&fixture.observation),
         &authority,
         &fixture.authority_registry,
         Seq::from_u64(10),
@@ -1028,6 +1119,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     assert!(error_text(registry.append_and_commit_authorized_step_at(
         store.as_mut(),
         &drafts,
+        &observation_evaluation(&fixture.observation),
         &authority,
         &fixture.authority_registry,
         Seq::from_u64(10),
@@ -1064,6 +1156,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
             fixture.plugin_id,
             fixture.timeline_id,
             fixture.observation.clone(),
+            &observation_evaluation(&fixture.observation),
             &fixture.knowledge,
             &authority,
             &fixture.authority_registry,
@@ -1115,6 +1208,7 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
             fixture.plugin_id,
             fixture.timeline_id,
             fixture.observation.clone(),
+            &observation_evaluation(&fixture.observation),
             &fixture.knowledge,
             &current_authority(&fixture),
             &fixture.authority_registry,
@@ -1162,6 +1256,7 @@ fn authorized_commit_rejects_a_legacy_pending_step() {
     let error = registry.append_and_commit_authorized_step_at(
         store.as_mut(),
         &drafts,
+        &observation_evaluation(&fixture.observation),
         &current_authority(&fixture),
         &fixture.authority_registry,
         Seq::from_u64(10),

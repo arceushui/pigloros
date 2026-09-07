@@ -348,7 +348,18 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
 
     let mut registry = pos_state::ProjectionRegistry::new();
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    let events = pos_time::replay(store.as_ref(), tl_id, &mut registry)?;
+    let (artifact_digest, evaluation) = retained_timeline_artifact(
+        tl_id,
+        pos_core::ErasureArtifactClassV1::TimelineReplay,
+        b"pos-cli/timeline-replay",
+    )?;
+    let events = pos_time::replay(
+        store.as_ref(),
+        tl_id,
+        &mut registry,
+        artifact_digest,
+        &evaluation,
+    )?;
     let entity_count = events
         .iter()
         .map(|e| e.entity)
@@ -369,7 +380,18 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
     let mut registry = pos_state::ProjectionRegistry::new();
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
-    let snapshot = pos_time::snapshot(store.as_ref(), tl_id, &mut registry)?;
+    let (artifact_digest, evaluation) = retained_timeline_artifact(
+        tl_id,
+        pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+        b"pos-cli/timeline-snapshot",
+    )?;
+    let snapshot = pos_time::snapshot(
+        store.as_ref(),
+        tl_id,
+        &mut registry,
+        artifact_digest,
+        &evaluation,
+    )?;
 
     let entity_count = count_snapshot_entities(&snapshot);
 
@@ -377,6 +399,39 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
     output_stdout!("entity_count: {entity_count}");
 
     Ok(())
+}
+
+fn retained_timeline_artifact(
+    timeline: pos_core::TimelineId,
+    artifact_class: pos_core::ErasureArtifactClassV1,
+    owner_domain: &[u8],
+) -> Result<
+    (
+        pos_core::ErasureReferenceV1,
+        pos_core::ReplayClaimEvaluationV1,
+    ),
+    pos_core::ErasureErrorV1,
+> {
+    let artifact_digest = pos_core::ErasureReferenceV1::from_digest(
+        *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
+    );
+    pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                artifact_class,
+                artifact_digest,
+                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                pos_core::ErasureReferenceV1::from_digest(*blake3::hash(owner_domain).as_bytes()),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .map(|evaluation| (artifact_digest, evaluation))
 }
 
 fn cmd_timeline_compare(
