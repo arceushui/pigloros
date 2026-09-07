@@ -198,8 +198,7 @@ fn artifact_evaluation(
 ) -> pos_core::ReplayClaimEvaluationV1 {
     use pos_core::{
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-        ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
-        ReplayClaimEvaluatorV1,
+        ErasureArtifactClassV1, ErasureReferenceV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
     };
 
     let inputs = [
