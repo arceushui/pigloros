@@ -253,8 +253,20 @@ async fn complete_release(
     if ready.invocation_id != decode_fixed_hex(invocation_id.trim())? {
         return Err("ReadyV1 invocation ID mismatch".to_owned());
     }
+    validate_ready_executables(main_pid, &ready)?;
     validate_namespaces(main_pid)?;
     validate_requested_readback(unit, parameters)?;
+    let mut premature_marker = [0_u8; 64];
+    match recv(
+        proxy_socket.as_raw_fd(),
+        &mut premature_marker,
+        MsgFlags::MSG_DONTWAIT,
+    ) {
+        Err(nix::errno::Errno::EAGAIN) => {}
+        Ok(0) => return Err("Local proxy closed before release".to_owned()),
+        Ok(_) => return Err("adapter executed before ReleaseV1".to_owned()),
+        Err(error) => return Err(format!("Local proxy pre-release probe failed: {error}")),
+    }
 
     let ready_digest = ready_digest(&ready_bytes)?;
     let observed = proof_digest("release-proof-observed-readback-v1");
@@ -698,6 +710,38 @@ fn validate_namespaces(main_pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_ready_executables(main_pid: u32, ready: &Ready) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let expected_digest = digest_file(&std::env::current_exe().map_err(display_error)?)?;
+    let process_executable = Path::new("/proc").join(main_pid.to_string()).join("exe");
+    let observed_digest = digest_file(&process_executable)?;
+    let observed_inode = std::fs::metadata(&process_executable)
+        .map_err(display_error)?
+        .ino();
+    let mountinfo =
+        std::fs::read_to_string(format!("/proc/{main_pid}/mountinfo")).map_err(display_error)?;
+    let launcher_mount_id = mountinfo
+        .lines()
+        .find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            (fields.get(4) == Some(&RELEASE_LAUNCHER)).then(|| fields[0].parse())
+        })
+        .transpose()
+        .map_err(display_error)?
+        .ok_or_else(|| "launcher bind mount is absent from mountinfo".to_owned())?;
+    if ready.launcher_digest != expected_digest
+        || observed_digest != expected_digest
+        || ready.adapter_digest != expected_digest
+        || ready.launcher_identity.inode != observed_inode
+        || ready.launcher_identity.mount_id != launcher_mount_id
+        || ready.adapter_identity == ready.launcher_identity
+    {
+        return Err("ReadyV1 executable identity mismatch".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_requested_readback(unit: &str, parameters: &LaunchParameters) -> Result<(), String> {
     let properties = [
         ("Type", "exec"),
@@ -821,7 +865,7 @@ fn descriptor_property(
         .map(|(descriptor_name, descriptor)| {
             StructureBuilder::new()
                 .add_field(descriptor_name)
-                .add_field(descriptor)
+                .append_field(ZbusValue::Fd(descriptor.into()))
                 .build()
                 .map_err(display_error)
         });
