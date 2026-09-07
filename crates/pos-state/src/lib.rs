@@ -280,10 +280,10 @@ pub struct ProjectionRegistry {
 
 #[derive(Clone, Copy)]
 struct ObservationIdentity {
-    subject_id: EntityId,
-    participant_id: EntityId,
-    plugin_id: PluginId,
-    installation_id: [u8; 16],
+    subject: EntityId,
+    participant: EntityId,
+    plugin: PluginId,
+    installation: [u8; 16],
 }
 
 impl std::fmt::Debug for ProjectionRegistry {
@@ -428,10 +428,10 @@ impl ProjectionRegistry {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
         let identity = ObservationIdentity {
-            subject_id,
-            participant_id,
-            plugin_id,
-            installation_id,
+            subject: subject_id,
+            participant: participant_id,
+            plugin: plugin_id,
+            installation: installation_id,
         };
         authority
             .validate_observation_authorization(
@@ -475,7 +475,7 @@ impl ProjectionRegistry {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
         slot.registry
-            .get(&identity.subject_id)
+            .get(&identity.subject)
             .map(|state| canonical_state_artifact(state, policy.permitted_fields()))
             .transpose()
             .and_then(|artifact| {
@@ -486,7 +486,7 @@ impl ProjectionRegistry {
                                 ObservationStatusV1::NotObserved,
                                 None,
                                 None,
-                                absence_source_digest(context, identity.subject_id),
+                                absence_source_digest(context, identity.subject),
                                 Vec::new(),
                             )
                         },
@@ -502,7 +502,7 @@ impl ProjectionRegistry {
                         },
                     );
                 ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
-                    participant_id: identity.participant_id,
+                    participant_id: identity.participant,
                     resource: request.resource().to_owned(),
                     data_category: request.data_category().to_owned(),
                     status,
@@ -518,9 +518,9 @@ impl ProjectionRegistry {
                 .and_then(|record| {
                     ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
                         principal: decision.principal().clone(),
-                        participant_id: identity.participant_id,
-                        plugin_id: identity.plugin_id,
-                        installation_id: identity.installation_id,
+                        participant_id: identity.participant,
+                        plugin_id: identity.plugin,
+                        installation_id: identity.installation,
                         timeline_id: context.timeline_id,
                         observed_through: context.observed_through,
                         authority_timeline: decision.authority_timeline(),
