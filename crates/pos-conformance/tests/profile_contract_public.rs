@@ -543,6 +543,21 @@ fn canonical_value(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>>
     fixtures::encode(value)
 }
 
+fn replace_value_path(value: &mut Value, path: &[usize], replacement: Value) -> TestResult {
+    let (&index, remainder) = path.split_first().ok_or("test path is empty")?;
+    let Value::Array(fields) = value else {
+        return Err("test path does not select an array".into());
+    };
+    let field = fields
+        .get_mut(index)
+        .ok_or("test path index is out of bounds")?;
+    if remainder.is_empty() {
+        *field = replacement;
+        return Ok(());
+    }
+    replace_value_path(field, remainder, replacement)
+}
+
 fn contract_digest(domain: &[u8], value: &Value) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let bytes = canonical_value(value)?;
     let length = u64::try_from(bytes.len())?.to_be_bytes();
@@ -1215,6 +1230,47 @@ fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult 
         invalid.validate(),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
+    Ok(())
+}
+
+#[test]
+fn public_request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
+    let caps = profile_for_digest().evaluator_protocol.hard_caps;
+    let mut request = request_for_caps(&caps);
+    request.sandbox_requirement = Some(SandboxRequirementV1 {
+        lps1_digest: [31; 32],
+        sim1_digest: [32; 32],
+        required_provider_capability: ProviderCapabilityV1 {
+            capability_id: "managed-attempt-exec".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        apt1_digest: [33; 32],
+        policy_epoch: 7,
+    });
+    request.request_digest = request.digest();
+    let encoded = request.to_canonical_cbor()?;
+    let valid: Value = ciborium::from_reader(encoded.as_slice())?;
+
+    let malformed_fields = [
+        (vec![13], Value::Bool(false)),
+        (vec![13], Value::Array(Vec::new())),
+        (vec![13, 0], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 1], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 2], Value::Bool(false)),
+        (vec![13, 2], Value::Array(Vec::new())),
+        (vec![13, 2, 0], Value::Bool(false)),
+        (vec![13, 2, 1], Value::Bool(false)),
+        (vec![13, 2, 2], Value::Bool(false)),
+        (vec![13, 3], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 4], Value::Bool(false)),
+    ];
+
+    for (path, replacement) in malformed_fields {
+        let mut malformed = valid.clone();
+        replace_value_path(&mut malformed, &path, replacement)?;
+        assert!(EvaluatorRequestV1::from_canonical_cbor(&canonical_value(&malformed)?).is_err());
+    }
     Ok(())
 }
 

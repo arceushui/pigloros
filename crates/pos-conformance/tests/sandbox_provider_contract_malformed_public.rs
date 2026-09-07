@@ -423,6 +423,13 @@ fn every_decoder_rejects_non_record_and_trailing_frames() -> TestResult {
 }
 
 #[test]
+fn independent_preflight_accepts_the_four_byte_length_form_before_shape_rejection() {
+    let mut bytes = vec![0x5a, 0x00, 0x01, 0x00, 0x00];
+    bytes.resize(5 + 65_536, 0);
+    assert!(independent::LaunchPolicy::from_canonical_cbor(&bytes).is_err());
+}
+
+#[test]
 fn decoders_reject_semantically_invalid_self_digested_collections() -> TestResult {
     let mut lps1 = decode_value(Record::Lps1.bytes())?;
     let network =

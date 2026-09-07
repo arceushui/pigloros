@@ -6,6 +6,7 @@ use pos_conformance::{
     SandboxProviderReceiptV1, SandboxProviderResultV1, SandboxReconcileRequestV1,
     SandboxReconcileResponseV1, SignedImageManifestV1,
 };
+use pos_reference::sandbox_provider_protocol as independent;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -208,6 +209,20 @@ fn every_self_digested_public_surface_propagates_validation_failures() -> TestRe
         ))?,
         |value: &mut SandboxReconcileRequestV1| value.authority.request_id = [0; 16],
         request_digest
+    );
+    Ok(())
+}
+
+#[test]
+fn independent_error_verification_rejects_mutated_nul_detail() -> TestResult {
+    let key = SigningKey::from_bytes(&[42; 32]);
+    let mut error = independent::SandboxProviderError::from_canonical_cbor(include_bytes!(
+        "../vectors/sandbox-provider-v1/spe1.cbor"
+    ))?;
+    error.safe_detail = Some("unsafe\0detail".to_owned());
+    assert_eq!(
+        error.verify_signature(&key.verifying_key()),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
     );
     Ok(())
 }

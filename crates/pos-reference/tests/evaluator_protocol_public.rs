@@ -303,6 +303,57 @@ fn request_round_trips_sandbox_requirement_and_rejects_old_layout() -> TestResul
 }
 
 #[test]
+fn request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
+    let mut request = valid_request()?;
+    request.sandbox_requirement = Some(SandboxRequirement {
+        lps1_digest: [31; 32],
+        sim1_digest: [32; 32],
+        required_provider_capability: RequiredProviderCapability {
+            capability_id: "managed-attempt-exec".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        apt1_digest: [33; 32],
+        policy_epoch: 7,
+    });
+    request.request_digest = request.digest()?;
+    let valid = decoded_value(&request.to_canonical_cbor()?)?;
+    let valid_requirement = match &valid {
+        Value::Array(fields) => fields[13].clone(),
+        _ => return Err("EVR1 must be an array".into()),
+    };
+
+    let malformed_fields = [
+        (vec![13], Value::Bool(false)),
+        (vec![13], Value::Array(Vec::new())),
+        (vec![13, 0], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 1], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 2], Value::Bool(false)),
+        (vec![13, 2], Value::Array(Vec::new())),
+        (vec![13, 2, 0], Value::Bool(false)),
+        (vec![13, 2, 1], Value::Bool(false)),
+        (vec![13, 2, 2], Value::Bool(false)),
+        (vec![13, 3], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 4], Value::Bool(false)),
+    ];
+
+    for (path, replacement) in malformed_fields {
+        let mut malformed = valid.clone();
+        replace_path(&mut malformed, &path, replacement)?;
+        assert_eq!(
+            EvaluationRequest::from_canonical_cbor(&canonical(&malformed)?),
+            Err(ProtocolError::InvalidEncoding),
+            "malformed path {path:?}"
+        );
+    }
+
+    let mut restored = valid;
+    replace_path(&mut restored, &[13], valid_requirement)?;
+    assert!(EvaluationRequest::from_canonical_cbor(&canonical(&restored)?).is_ok());
+    Ok(())
+}
+
+#[test]
 fn request_rejects_each_identifier_boundary() -> TestResult {
     for identifier in [String::new(), "a".repeat(129)] {
         let mut request = valid_request()?;
