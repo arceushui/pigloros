@@ -2925,22 +2925,11 @@ mod tests {
         drop(gateway);
     }
 
-    #[tokio::test]
-    async fn authority_bound_gateway_action_paths_fail_closed_at_each_public_boundary() {
-        let actor = EntityId::new();
-        let body = EntityId::new();
-        let authorization = crate::authorization::test_authorization_for(actor);
-        let audit_host = authorization.clone();
-        let gateway = Gateway::new_with_world_bodies_and_authorization(
-            open_store(StoreConfig::Memory).test_ok(),
-            [body],
-            authorization,
-        );
-        let timeline = gateway
-            .create_timeline("authority-action-boundaries")
-            .await
-            .test_ok();
-        let timeline_id = timeline.id().to_string();
+    async fn assert_authority_proposed_action_boundaries(
+        gateway: &Gateway,
+        timeline_id: &str,
+        actor: EntityId,
+    ) {
         let proposal = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
             actor,
@@ -2967,28 +2956,24 @@ mod tests {
             Kind::new("world.action.submit"),
         );
         assert!(matches!(
-            gateway
-                .submit_proposed_action(&timeline_id, malformed)
-                .await,
+            gateway.submit_proposed_action(timeline_id, malformed).await,
             Err(GatewayError::ActionRejected(_))
         ));
+    }
 
-        let payload = serde_json::json!({
-            "actor_entity_id": actor,
-            "body_entity_id": body,
-            "action_kind": "impulse",
-            "params": [1],
-            "action_scope": 0,
-            "catalogue_version": 1,
-            "tick": 1
-        });
+    async fn assert_authority_identified_action_boundaries(
+        gateway: &Gateway,
+        timeline_id: &str,
+        actor: EntityId,
+        payload: &serde_json::Value,
+    ) {
         assert!(matches!(
             gateway
                 .submit_identified_json_action(
                     "not-a-timeline",
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
-                    &payload,
+                    payload,
                     "world.action.submit",
                     "boundary-invalid-timeline",
                 )
@@ -3001,7 +2986,7 @@ mod tests {
                     &TimelineId::new().to_string(),
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
-                    &payload,
+                    payload,
                     "world.action.submit",
                     "boundary-missing-timeline",
                 )
@@ -3011,10 +2996,10 @@ mod tests {
         assert!(matches!(
             gateway
                 .submit_identified_json_action(
-                    &timeline_id,
+                    timeline_id,
                     "not-an-entity",
                     EVENT_TYPE_ACTION,
-                    &payload,
+                    payload,
                     "world.action.submit",
                     "boundary-invalid-entity",
                 )
@@ -3025,7 +3010,7 @@ mod tests {
         assert!(matches!(
             gateway
                 .submit_identified_json_action(
-                    &timeline_id,
+                    timeline_id,
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &malformed_payload,
@@ -3035,6 +3020,36 @@ mod tests {
                 .await,
             Err(GatewayError::ActionRejected(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn authority_bound_gateway_action_paths_fail_closed_at_each_public_boundary() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_for(actor);
+        let audit_host = authorization.clone();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            authorization,
+        );
+        let timeline = gateway
+            .create_timeline("authority-action-boundaries")
+            .await
+            .test_ok();
+        let timeline_id = timeline.id().to_string();
+        assert_authority_proposed_action_boundaries(&gateway, &timeline_id, actor).await;
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+        assert_authority_identified_action_boundaries(&gateway, &timeline_id, actor, &payload)
+            .await;
         let appended = gateway
             .submit_identified_json_action(
                 &timeline_id,
