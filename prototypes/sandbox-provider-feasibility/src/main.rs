@@ -2,6 +2,8 @@
 //! It is deliberately not production provider code and must never be promoted
 //! by copying it into the workspace.
 
+mod release_wire;
+
 use futures_util::TryStreamExt as _;
 use netlink_packet_core::{
     Emitable as _, NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE,
