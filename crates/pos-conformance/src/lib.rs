@@ -1002,6 +1002,10 @@ pub struct CounterfactualContractV1 {
 
 impl CounterfactualContractV1 {
     /// Apply artifact loss to the counterfactual closure without strengthening.
+    ///
+    /// # Errors
+    /// Returns the canonical serialization error when the refreshed contract
+    /// digest cannot be represented by the shared deterministic codec.
     pub fn apply_artifact_evaluation(
         &mut self,
         evaluation: &pos_core::ReplayClaimEvaluationV1,
@@ -1014,6 +1018,10 @@ impl CounterfactualContractV1 {
     }
 
     /// Recompute the contract identity after a host-owned claim transition.
+    ///
+    /// # Errors
+    /// Returns the canonical serialization error when the contract cannot be
+    /// represented by the shared deterministic codec.
     pub fn refresh_digest(&mut self) -> Result<(), pos_core::CoreError> {
         self.calculated_digest().map(|digest| {
             self.contract_digest = digest;
@@ -1605,8 +1613,8 @@ impl MoatProofEvidenceV1 {
             let redaction = RedactionStateV1::None.after_artifact_evaluation(evaluation);
             if redaction == RedactionStateV1::RedactedViews {
                 for edge in &mut self.causal_trace {
-                    edge.relation = "redacted".to_owned();
-                    edge.visibility = "redacted".to_owned();
+                    "redacted".clone_into(&mut edge.relation);
+                    "redacted".clone_into(&mut edge.visibility);
                 }
             } else if matches!(
                 self.manifest.replay_claim,
@@ -1985,26 +1993,29 @@ pub mod strict_codec {
         {
             return Err(StrictCborError::UnsupportedVersion);
         }
-        Ok(MoatProofEvidenceV1 {
+        let evidence = MoatProofEvidenceV1 {
             format_version: EVIDENCE_FORMAT_V1,
             manifest: decode_manifest(&fields[2])?,
             authoritative_events: decode_events(&fields[3])?,
             projections: decode_projections(&fields[4])?,
             causal_trace: decode_traces(&fields[5])?,
-            structural_causal_trace: if structural {
-                match decode_structural_traces(&fields[6]) {
-                    Ok(trace) => trace,
-                    Err(error) => return Err(error),
-                }
-            } else {
-                Vec::new()
-            },
+            structural_causal_trace: Vec::new(),
             uncertainty: decode_uncertainty(&fields[6 + offset])?,
             participant_views: decode_participant_views(&fields[7 + offset])?,
             plugin_failures: decode_plugin_failures(&fields[8 + offset])?,
             host_closure: decode_host_closure(&fields[9 + offset])?,
             contract: decode_contract(&fields[10 + offset])?,
-        })
+        };
+        if structural {
+            decode_structural_traces(&fields[6]).map(|structural_causal_trace| {
+                MoatProofEvidenceV1 {
+                    structural_causal_trace,
+                    ..evidence
+                }
+            })
+        } else {
+            Ok(evidence)
+        }
     }
 
     fn encode_value(value: &Value) -> Result<Vec<u8>, StrictCborError> {
