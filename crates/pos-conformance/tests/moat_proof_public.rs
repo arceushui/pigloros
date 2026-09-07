@@ -990,15 +990,6 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
     counterfactual.frontier.global_frontier_tick = 2;
     counterfactual.frontier.global_frontier_scheduler_position = 3;
     counterfactual.frontier.endogenous_suffix_end_tick = 2;
-    counterfactual.frontier.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
-    counterfactual.frontier.unknown_edge_coordinates = vec![DependencyNodeV1 {
-        tick: 2,
-        scheduler_position: 1,
-        owner_id: "unknown-owner".to_owned(),
-        output_ordinal: 0,
-        schema_id: schema_id_for_event_type("unknown.event.v1"),
-        artifact_digest: [26; 32],
-    }];
     counterfactual.invalidation.invalid_start = society_node.clone();
     counterfactual.invalidation.invalid_end = society_node.clone();
     counterfactual.invalidation.invalid_artifacts = vec![InvalidArtifactV1 {
