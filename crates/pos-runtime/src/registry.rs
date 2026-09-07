@@ -18,7 +18,12 @@ use pos_core::{
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
 use crate::{
-    composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin},
+    composition::{
+        PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
+        PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
+        RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
+        ResolvedPluginV1,
+    },
     driver::{
         Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey, SnapshotAnchor,
         StepOutput, TimelineHistorySegment,
@@ -663,6 +668,7 @@ struct PluginEntry {
     approver: Option<Box<dyn ActionApprover>>,
     last_tick: Option<u128>,
     event_cursor: Seq,
+    registration: Option<PluginRegistrationV1>,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -722,6 +728,7 @@ pub struct PluginRegistry {
     projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
     run_mode: RunMode,
+    composition_mode: PluginExecutionModeV1,
     resource_limit: Option<u64>,
     poisoned_driver: Option<String>,
     consent_gate: Option<Arc<dyn ConsentGate>>,
@@ -743,6 +750,10 @@ impl PluginRegistry {
                 id: *id,
                 name: entry.name.clone(),
                 version: entry.version.clone(),
+                pin: entry
+                    .registration
+                    .as_ref()
+                    .map(|registration| registration.pin().clone()),
             })
             .collect();
 
@@ -757,6 +768,96 @@ impl PluginRegistry {
         schemas.sort_unstable_by(|left, right| left.event_type.cmp(&right.event_type));
 
         PluginComposition { plugins, schemas }
+    }
+
+    /// Resolve a complete ordered set of required domain implementations.
+    ///
+    /// Resolution is exact: it never substitutes another implementation that
+    /// claims the same role, and it returns no partial evidence.
+    ///
+    /// # Errors
+    /// Returns a closed composition error when mode, identity, order, pin, or
+    /// availability differs from the host registration snapshot.
+    pub fn resolve_required_composition(
+        &self,
+        required: &RequiredPluginCompositionV1,
+    ) -> Result<ResolvedPluginCompositionV1, PluginCompositionErrorV1> {
+        if self.composition_mode != required.mode() {
+            return Err(PluginCompositionErrorV1::ExecutionModeMismatch);
+        }
+
+        for expected in required.plugins() {
+            if !self.plugins.contains_key(&expected.plugin_id()) {
+                return Err(PluginCompositionErrorV1::MissingImplementation {
+                    plugin_id: expected.plugin_id(),
+                });
+            }
+        }
+        if self
+            .plugins
+            .keys()
+            .copied()
+            .ne(required.plugins().iter().map(RequiredPluginV1::plugin_id))
+        {
+            return Err(PluginCompositionErrorV1::ExecutionOrderMismatch);
+        }
+
+        let mut resolved = Vec::with_capacity(required.plugins().len());
+        for expected in required.plugins() {
+            let entry = &self.plugins[&expected.plugin_id()];
+            let Some(registration) = entry.registration.as_ref() else {
+                return Err(PluginCompositionErrorV1::UnpinnedImplementation {
+                    plugin_id: expected.plugin_id(),
+                });
+            };
+            let field = if entry.version != expected.version() {
+                Some(PluginPinFieldV1::Version)
+            } else if registration.pin().configuration_digest()
+                != expected.pin().configuration_digest()
+            {
+                Some(PluginPinFieldV1::ConfigurationDigest)
+            } else if registration.pin().implementation_kind()
+                != expected.pin().implementation_kind()
+            {
+                Some(PluginPinFieldV1::ImplementationKind)
+            } else if registration.pin().isolation() != expected.pin().isolation() {
+                Some(PluginPinFieldV1::Isolation)
+            } else if registration.pin().roles() != expected.pin().roles() {
+                Some(PluginPinFieldV1::Roles)
+            } else {
+                None
+            };
+            if let Some(field) = field {
+                return Err(PluginCompositionErrorV1::IncompatibleImplementation {
+                    plugin_id: expected.plugin_id(),
+                    field,
+                });
+            }
+            if registration.availability() != PluginAvailabilityV1::Available {
+                return Err(PluginCompositionErrorV1::ImplementationUnavailable {
+                    plugin_id: expected.plugin_id(),
+                    availability: registration.availability(),
+                });
+            }
+            resolved.push(ResolvedPluginV1::new(
+                expected.plugin_id(),
+                entry.name.clone(),
+                entry.version.clone(),
+                registration.pin().clone(),
+            ));
+        }
+        Ok(ResolvedPluginCompositionV1::new(required.mode(), resolved))
+    }
+
+    fn ensure_live_execution(&self) -> Result<(), RuntimeError> {
+        if self.run_mode == RunMode::Live {
+            Ok(())
+        } else {
+            Err(RuntimeError::ModeMismatch {
+                expected: RunMode::Live.to_string(),
+                got: self.run_mode.to_string(),
+            })
+        }
     }
 
     fn snapshot_for_subscriptions(&self, subscriptions: &[ProjectionKey]) -> ObservationSnapshot {
@@ -825,16 +926,22 @@ impl PluginRegistry {
 
     #[must_use]
     pub fn new() -> Self {
-        Self::new_with_mode(RunMode::Live)
+        Self::new_with_mode(RunMode::Live, PluginExecutionModeV1::Local)
+    }
+
+    /// Create a live registry for an Air-Gapped execution profile.
+    #[must_use]
+    pub fn new_air_gapped() -> Self {
+        Self::new_with_mode(RunMode::Live, PluginExecutionModeV1::AirGapped)
     }
 
     /// Create a projection-only registry for replay.
     #[must_use]
     pub fn new_replay() -> Self {
-        Self::new_with_mode(RunMode::Replay)
+        Self::new_with_mode(RunMode::Replay, PluginExecutionModeV1::Replay)
     }
 
-    fn new_with_mode(run_mode: RunMode) -> Self {
+    fn new_with_mode(run_mode: RunMode, composition_mode: PluginExecutionModeV1) -> Self {
         let mut schemas = SchemaRegistry::new();
         // Auto-register the Recorder's internal event type so that
         // Recorder::to_draft() output passes SchemaRegistry::validate().
@@ -855,6 +962,7 @@ impl PluginRegistry {
             projections: ProjectionRegistry::new(),
             pending_step: None,
             run_mode,
+            composition_mode,
             resource_limit: None,
             poisoned_driver: None,
             // Every live registry has a host-owned gate, even before the
@@ -1194,6 +1302,24 @@ impl PluginRegistry {
         committed_events: &[Event],
         operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_live_execution()?;
+        self.step_anchored_transaction_live(
+            timeline,
+            observed_through,
+            selection,
+            committed_events,
+            operation,
+        )
+    }
+
+    fn step_anchored_transaction_live(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        observed_through: Seq,
+        selection: AnchoredSelection,
+        committed_events: &[Event],
+        operation: OperationContext,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
@@ -1271,7 +1397,8 @@ impl PluginRegistry {
     /// the work can only cross the matching fresh authority fence.
     ///
     /// # Errors
-    /// Returns a closed authority error for mismatched or ambient inputs, or a
+    /// Returns [`RuntimeError::ModeMismatch`] when the registry is in Replay
+    /// mode, a closed authority error for mismatched or ambient inputs, or a
     /// Driver/resource error when staging fails.
     pub fn stage_authorized_driver(
         &mut self,
@@ -1283,7 +1410,8 @@ impl PluginRegistry {
         authority_registry: &AuthorityRegistrySnapshotV1,
         authority_position: Seq,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        self.ensure_no_pending_step()
+        self.ensure_live_execution()
+            .and_then(|()| self.ensure_no_pending_step())
             .and_then(|()| {
                 observation
                     .revalidate(authority, authority_registry, authority_position)
@@ -1624,9 +1752,19 @@ impl PluginRegistry {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::PendingDriverStep`] if a transaction is active,
-    /// or the first Driver-specific durable-history validation error.
+    /// Returns [`RuntimeError::ModeMismatch`] when the registry is in Replay
+    /// mode, [`RuntimeError::PendingDriverStep`] if a transaction is active, or
+    /// the first Driver-specific durable-history validation error.
     pub fn restore_driver_state(
+        &mut self,
+        timeline_segments: &[TimelineHistorySegment],
+        events: &[Event],
+    ) -> Result<(), RuntimeError> {
+        self.ensure_live_execution()?;
+        self.restore_driver_state_live(timeline_segments, events)
+    }
+
+    fn restore_driver_state_live(
         &mut self,
         timeline_segments: &[TimelineHistorySegment],
         events: &[Event],
@@ -1705,6 +1843,27 @@ impl PluginRegistry {
         self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
     }
 
+    /// Register an implementation through the explicit V1 composition seam.
+    ///
+    /// # Errors
+    /// Returns a registration or closed composition error before mutating the registry.
+    pub fn register_pinned(
+        &mut self,
+        plugin: &dyn Plugin,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        self.register_pinned_with_approver(
+            plugin,
+            registration,
+            reducer,
+            driver,
+            None,
+            std::iter::empty(),
+        )
+    }
+
     /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
     ///
     /// Wires event-type schemas, (optionally) a reducer and driver, and (optionally)
@@ -1730,6 +1889,34 @@ impl PluginRegistry {
             approver,
             &approver_event_types,
             context,
+            None,
+        )
+    }
+
+    /// Register a pinned implementation with an optional ADR-057 approver.
+    ///
+    /// # Errors
+    /// Returns a registration or closed composition error before mutating the registry.
+    pub fn register_pinned_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        self.validate_registration_roles(&registration)?;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            &approver_event_types,
+            context,
+            Some(registration),
         )
     }
 
@@ -1747,6 +1934,23 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
+    fn validate_registration_roles(
+        &self,
+        registration: &PluginRegistrationV1,
+    ) -> Result<(), PluginCompositionErrorV1> {
+        let duplicate = registration.pin().roles().iter().find(|role| {
+            self.plugins.values().any(|entry| {
+                entry
+                    .registration
+                    .as_ref()
+                    .is_some_and(|registered| registered.pin().roles().contains(role))
+            })
+        });
+        duplicate.map_or(Ok(()), |role| {
+            Err(PluginCompositionErrorV1::DuplicateRole { role: role.clone() })
+        })
+    }
+
     fn register_with_approver_slice(
         &mut self,
         plugin: &dyn Plugin,
@@ -1755,6 +1959,7 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: &[Kind],
         context: (PluginId, String, Capability),
+        registration: Option<PluginRegistrationV1>,
     ) -> Result<(), RuntimeError> {
         let (id, name, cap) = context;
         if let Some(kind) = cap
@@ -1857,6 +2062,7 @@ impl PluginRegistry {
                 approver,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
+                registration,
             },
         );
         Ok(())
@@ -1903,6 +2109,7 @@ impl PluginRegistry {
                 approver: None,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
+                registration: None,
             },
         );
     }
@@ -1963,6 +2170,15 @@ impl PluginRegistry {
     /// Panics only if the registry's internal due-driver set refers to an entry
     /// whose registered driver disappeared without passing through a public API.
     pub fn tick_cadenced(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        now_ns: u128,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_live_execution()?;
+        self.tick_cadenced_live(timeline, now_ns)
+    }
+
+    fn tick_cadenced_live(
         &mut self,
         timeline: pos_core::ids::TimelineId,
         now_ns: u128,
@@ -2113,6 +2329,14 @@ impl PluginRegistry {
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers.
     pub fn step_all(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_live_execution()?;
+        self.step_all_live(timeline)
+    }
+
+    fn step_all_live(
         &mut self,
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
@@ -3242,6 +3466,7 @@ mod tests {
                 approver: None,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
+                registration: None,
             },
         );
 

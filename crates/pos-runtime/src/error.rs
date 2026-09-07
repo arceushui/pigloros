@@ -4,6 +4,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error(transparent)]
+    Composition(#[from] crate::PluginCompositionErrorV1),
+
     #[error("plugin '{name}' (id={id}) is already registered")]
     DuplicatePlugin { id: PluginId, name: String },
 
