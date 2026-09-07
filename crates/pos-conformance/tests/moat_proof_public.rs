@@ -842,9 +842,10 @@ fn configure_intervention_events(evidence: &mut MoatProofEvidenceV1) {
     evidence.authoritative_events[1].tick = 2;
     "world.action.v1".clone_into(&mut evidence.authoritative_events[1].event_type);
     evidence.authoritative_events[1].payload_digest = [24; 32];
-    let mut closure = evidence.authoritative_events.pop().unwrap_or_else(|| {
-        std::panic::resume_unwind(Box::new("closure Event fixture is absent"))
-    });
+    let mut closure = evidence
+        .authoritative_events
+        .pop()
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("closure Event fixture is absent")));
     evidence.authoritative_events.push(AuthoritativeEventV1 {
         seq: 3,
         tick: 2,

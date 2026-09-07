@@ -1974,9 +1974,8 @@ pub mod strict_codec {
     }
 
     pub(crate) fn decode_evidence(bytes: &[u8]) -> Result<MoatProofEvidenceV1, StrictCborError> {
-        decode_value(bytes).and_then(|root| {
-            array_values(&root, "evidence").and_then(decode_evidence_fields)
-        })
+        decode_value(bytes)
+            .and_then(|root| array_values(&root, "evidence").and_then(decode_evidence_fields))
     }
 
     fn decode_evidence_fields(fields: &[Value]) -> Result<MoatProofEvidenceV1, StrictCborError> {
@@ -3072,9 +3071,8 @@ pub mod strict_codec {
     fn decode_structural_traces(
         value: &Value,
     ) -> Result<Vec<StructuralCausalTraceEntryV1>, StrictCborError> {
-        array_values(value, "structural_causal_trace").and_then(|values| {
-            values.iter().map(decode_structural_trace).collect()
-        })
+        array_values(value, "structural_causal_trace")
+            .and_then(|values| values.iter().map(decode_structural_trace).collect())
     }
 
     fn decode_structural_trace(
@@ -4792,9 +4790,9 @@ fn verify_causal_trace(
     let labels_redacted = replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
         || (incompatible
             && !trace.is_empty()
-            && trace.iter().all(|edge| {
-                edge.relation == "redacted" && edge.visibility == "redacted"
-            }));
+            && trace
+                .iter()
+                .all(|edge| edge.relation == "redacted" && edge.visibility == "redacted"));
     if !causal_trace_shape_is_valid(
         trace,
         structural_trace,
