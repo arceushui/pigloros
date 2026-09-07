@@ -1673,7 +1673,7 @@ fn local_errors_round_trip_every_operation_and_failure_code() -> TestResult {
 }
 
 #[test]
-fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
+fn describe_responses_reject_mismatched_request_bindings() -> TestResult {
     let key = signing_key();
     let describe = SandboxDescribeRequestV1 {
         authority: operation_authority(),
@@ -1728,7 +1728,12 @@ fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
         invalid_described.validate_for_request(&describe),
         Err(SandboxContractErrorV1::DigestMismatch)
     );
+    Ok(())
+}
 
+#[test]
+fn cancel_responses_reject_mismatched_request_bindings() -> TestResult {
+    let key = signing_key();
     let cancel = SandboxCancelRequestV1 {
         authority: operation_authority(),
         attempt_id: [8; 16],
@@ -1786,7 +1791,12 @@ fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
         invalid_cancelled.validate_for_request(&cancel),
         Err(SandboxContractErrorV1::DigestMismatch)
     );
+    Ok(())
+}
 
+#[test]
+fn reconcile_responses_reject_mismatched_request_bindings() -> TestResult {
+    let key = signing_key();
     let reconcile = SandboxReconcileRequestV1 {
         authority: operation_authority(),
         attempt_id: [8; 16],
