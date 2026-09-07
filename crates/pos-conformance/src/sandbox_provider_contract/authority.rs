@@ -298,7 +298,7 @@ impl LaunchPolicyV1 {
         if self
             .effective_limits
             .iter()
-            .any(|limit| limit.limit_id > 16 || limit.value == 0)
+            .any(|limit| limit.limit_id > 16)
             || self
                 .network_capabilities
                 .iter()
@@ -549,10 +549,11 @@ impl SignedImageManifestV1 {
             || self.executable_blake3_digest == [0; 32]
             || !normalized_absolute_path(&self.executable_path)
             || self.arguments.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
-            || self
-                .arguments
-                .iter()
-                .any(|argument| argument.is_empty() || argument.len() > MAX_ARGUMENT_BYTES)
+            || self.arguments.iter().any(|argument| {
+                argument.is_empty()
+                    || argument.len() > MAX_ARGUMENT_BYTES
+                    || argument.contains('\0')
+            })
             || !bounded_text(&self.image_project_key_id, MAX_IDENTIFIER_BYTES)
             || !valid_pkcs7(&self.root_hash_signature)
         {

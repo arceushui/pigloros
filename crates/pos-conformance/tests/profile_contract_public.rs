@@ -17,6 +17,21 @@ use pos_conformance::{
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+fn verify_and_materialize_sandbox_vector(name: &str, bytes: &[u8]) -> TestResult {
+    let filename = format!("{name}.cbor");
+    if let Some(root) = std::env::var_os("SANDBOX_PROVIDER_VECTOR_OUTPUT") {
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(std::path::Path::new(&root).join(&filename), bytes)?;
+    }
+    let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("vectors/sandbox-provider-v1")
+        .join(filename);
+    if std::fs::read(&committed)? != bytes {
+        return Err(format!("committed vector {} has drifted", committed.display()).into());
+    }
+    Ok(())
+}
+
 pub mod fixtures {
     use super::*;
 
@@ -1223,6 +1238,26 @@ fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult 
     let bytes = request.to_canonical_cbor()?;
     assert_eq!(EvaluatorRequestV1::from_canonical_cbor(&bytes)?, request);
     pos_reference::evaluator_protocol::EvaluationRequest::from_canonical_cbor(&bytes)?;
+    verify_and_materialize_sandbox_vector("evr1", &bytes)?;
+
+    let Value::Array(mut old_layout) = ciborium::from_reader(bytes.as_slice())? else {
+        return Err("EVR1 must encode as an array".into());
+    };
+    old_layout.remove(13);
+    let old_unsigned = Value::Array(old_layout[..13].to_vec());
+    old_layout[13] =
+        Value::Bytes(contract_digest(b"PiglorOS.EvaluatorRequest.v1", &old_unsigned)?.to_vec());
+    let old_layout_bytes = canonical_value(&Value::Array(old_layout))?;
+    assert_eq!(
+        EvaluatorRequestV1::from_canonical_cbor(&old_layout_bytes),
+        Err(ConformanceContractError::InvalidEncoding)
+    );
+    assert!(
+        pos_reference::evaluator_protocol::EvaluationRequest::from_canonical_cbor(
+            &old_layout_bytes
+        )
+        .is_err()
+    );
 
     let mut invalid = request;
     invalid

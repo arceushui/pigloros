@@ -90,6 +90,6 @@ spy1-u = ["SPY1",1,id16,id16,0..4,
   payload-descriptor / null,digest32 / null,digest32 / null,operational-events,key-id]
 spy1 = [spy1-u,digest32,bytes .size 64]
 
-spe1-u = ["SPE1",1,(0..3) / null,id16 / null,digest32 / null,id16 / null,0..17,
+spe1-u = ["SPE1",1,(0..3) / null,id16 / null,digest32 / null,id16 / null,0..18,
   safe-detail,key-id]
 spe1 = [spe1-u,digest32,bytes .size 64]

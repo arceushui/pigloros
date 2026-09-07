@@ -272,7 +272,7 @@ impl LaunchPolicy {
         if self
             .effective_limits
             .iter()
-            .any(|limit| limit.limit_id > 16 || limit.value == 0)
+            .any(|limit| limit.limit_id > 16)
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
@@ -427,10 +427,11 @@ impl SignedImageManifest {
             || self.executable_blake3_digest == [0; 32]
             || !normalized_absolute_path(&self.executable_path)
             || self.arguments.len() > MAX_LIST_ENTRIES
-            || self
-                .arguments
-                .iter()
-                .any(|argument| argument.is_empty() || argument.len() > MAX_ARGUMENT_BYTES)
+            || self.arguments.iter().any(|argument| {
+                argument.is_empty()
+                    || argument.len() > MAX_ARGUMENT_BYTES
+                    || argument.contains('\0')
+            })
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }

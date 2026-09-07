@@ -227,7 +227,7 @@ fn value_at_mut<'a>(value: &'a mut Value, path: &[usize]) -> Option<&'a mut Valu
 
 fn scalar_replacements(value: &Value) -> Vec<Value> {
     match value {
-        Value::Integer(_) => (0_u64..=17)
+        Value::Integer(_) => (0_u64..=18)
             .chain([u64::MAX])
             .map(|value| Value::Integer(value.into()))
             .chain([Value::Text("not-an-integer".to_owned())])
@@ -357,6 +357,15 @@ fn local_error_decoders_reject_nul_safe_detail() -> TestResult {
     *value_at_mut(&mut value, &[5]).ok_or("SLE1 safe-detail path must resolve")? =
         Value::Text("unsafe\0detail".to_owned());
     assert_rejected(record, &value, "NUL safe detail")
+}
+
+#[test]
+fn image_manifest_decoders_reject_nul_fixed_arguments() -> TestResult {
+    let record = Record::Sim1;
+    let mut value = decode_value(record.bytes())?;
+    *value_at_mut(&mut value, &[0, 17, 0]).ok_or("SIM1 first argument path must resolve")? =
+        Value::Text("--mode=local\0ignored".to_owned());
+    assert_rejected(record, &value, "NUL fixed argument")
 }
 
 #[test]

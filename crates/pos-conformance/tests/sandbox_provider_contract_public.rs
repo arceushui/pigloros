@@ -500,12 +500,15 @@ fn authority_contracts_reject_order_digest_and_partition_changes() -> TestResult
         Err(SandboxContractErrorV1::NonCanonicalOrder)
     );
 
-    let mut invalid_policy = launch_policy();
-    invalid_policy.effective_limits[0].value = 0;
+    let mut zero_limit_policy = launch_policy();
+    zero_limit_policy.effective_limits[0].value = 0;
+    let zero_limit_policy = zero_limit_policy.seal()?;
+    let zero_limit_bytes = zero_limit_policy.to_canonical_cbor()?;
     assert_eq!(
-        invalid_policy.seal(),
-        Err(SandboxContractErrorV1::FieldOutOfBounds)
+        LaunchPolicyV1::from_canonical_cbor(&zero_limit_bytes)?,
+        zero_limit_policy
     );
+    independent::LaunchPolicy::from_canonical_cbor(&zero_limit_bytes)?;
 
     let mut invalid_network_address = launch_policy();
     invalid_network_address.network_capabilities[0].address = vec![127; 5];
@@ -605,7 +608,7 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         )?),
         agr1_digest: Some(digest(3)),
         spr1_digest: Some(digest(4)),
-        operational_events: vec![0, 4, 10],
+        operational_events: vec![11, 12],
         runtime_attestation_key_id: "runtime-key".to_owned(),
         result_digest: [0; 32],
         signature: [0; 64],
@@ -626,6 +629,13 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
     assert_eq!(
         invalid_union.validate(),
         Err(SandboxContractErrorV1::InconsistentFields)
+    );
+
+    let mut nul_argument = image_manifest();
+    nul_argument.arguments = vec!["--mode=local\0ignored".to_owned()];
+    assert_eq!(
+        nul_argument.sign(&key),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
 
     let error = SandboxProviderErrorV1 {
@@ -728,27 +738,27 @@ fn result_receipt_pairs_accept_each_reachable_lifecycle_stage() -> TestResult {
         (
             ReceiptStage::BeforeReady,
             SandboxTerminalOutcomeV1::Cancelled,
-            vec![],
+            vec![1],
         ),
         (
             ReceiptStage::Ready,
             SandboxTerminalOutcomeV1::Cancelled,
-            vec![11],
+            vec![11, 1],
         ),
         (
             ReceiptStage::Ready,
             SandboxTerminalOutcomeV1::Cancelled,
-            vec![11, 13],
+            vec![11, 13, 1],
         ),
         (
             ReceiptStage::Released,
             SandboxTerminalOutcomeV1::Cancelled,
-            vec![11, 12],
+            vec![11, 12, 1],
         ),
         (
             ReceiptStage::Released,
             SandboxTerminalOutcomeV1::Completed,
-            vec![0, 11, 12],
+            vec![11, 12],
         ),
     ] {
         let receipt = signed_receipt_at_stage(&key, stage)?;
@@ -833,19 +843,13 @@ fn result_receipt_pair_validation_rejects_invalid_records_before_comparing_them(
 fn result_receipt_pairs_reject_impossible_lifecycle_evidence() -> TestResult {
     let key = signing_key();
     let cases = [
-        (ReceiptStage::BeforeReady, vec![11]),
-        (ReceiptStage::BeforeReady, vec![12]),
-        (ReceiptStage::BeforeReady, vec![13]),
-        (ReceiptStage::Ready, vec![]),
-        (ReceiptStage::Ready, vec![11, 11]),
-        (ReceiptStage::Ready, vec![11, 12]),
-        (ReceiptStage::Ready, vec![13, 11]),
-        (ReceiptStage::Ready, vec![11, 13, 13]),
-        (ReceiptStage::Released, vec![11]),
-        (ReceiptStage::Released, vec![12]),
-        (ReceiptStage::Released, vec![12, 11]),
-        (ReceiptStage::Released, vec![11, 12, 12]),
-        (ReceiptStage::Released, vec![11, 12, 13]),
+        (ReceiptStage::BeforeReady, vec![11, 1]),
+        (ReceiptStage::BeforeReady, vec![11, 13, 1]),
+        (ReceiptStage::BeforeReady, vec![11, 12, 1]),
+        (ReceiptStage::Ready, vec![1]),
+        (ReceiptStage::Ready, vec![11, 12, 1]),
+        (ReceiptStage::Released, vec![11, 1]),
+        (ReceiptStage::Released, vec![11, 13, 1]),
     ];
     for (stage, events) in cases {
         let receipt = signed_receipt_at_stage(&key, stage)?;
@@ -860,9 +864,8 @@ fn result_receipt_pairs_reject_impossible_lifecycle_evidence() -> TestResult {
 fn completed_result_requires_released_receipt_evidence() -> TestResult {
     let key = signing_key();
     for (stage, events) in [
-        (ReceiptStage::BeforeReady, vec![]),
-        (ReceiptStage::Ready, vec![11]),
-        (ReceiptStage::Ready, vec![11, 13]),
+        (ReceiptStage::BeforeReady, vec![11, 12]),
+        (ReceiptStage::Ready, vec![11, 12]),
     ] {
         let receipt = signed_receipt_at_stage(&key, stage)?;
         let result =
@@ -876,12 +879,21 @@ fn completed_result_requires_released_receipt_evidence() -> TestResult {
 fn spy1_accepts_the_closed_sau1_event_domain_only() -> TestResult {
     let key = signing_key();
     let template = result_for_outcome(SandboxTerminalOutcomeV1::UnavailableAfterAdmission)?;
-    for event in 0..=13 {
+    for event in (0..=10).filter(|event| *event != 1) {
         let mut result = template.clone();
         result.operational_events = vec![event];
         let result = result.sign(&key)?;
         independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?;
     }
+
+    let cancelled = result_for_outcome(SandboxTerminalOutcomeV1::Cancelled)?.sign(&key)?;
+    independent::SandboxProviderResult::from_canonical_cbor(&cancelled.to_canonical_cbor()?)?;
+    let completed = result_for_outcome(SandboxTerminalOutcomeV1::Completed)?.sign(&key)?;
+    independent::SandboxProviderResult::from_canonical_cbor(&completed.to_canonical_cbor()?)?;
+    let mut release_denied = template.clone();
+    release_denied.operational_events = vec![11, 13, 10];
+    let release_denied = release_denied.sign(&key)?;
+    independent::SandboxProviderResult::from_canonical_cbor(&release_denied.to_canonical_cbor()?)?;
 
     let mut unknown_event = template;
     unknown_event.operational_events = vec![14];
@@ -938,7 +950,13 @@ fn result_for_outcome(
         output,
         agr1_digest: admitted.then_some(digest(3)),
         spr1_digest: admitted.then_some(digest(4)),
-        operational_events: vec![0],
+        operational_events: match outcome {
+            SandboxTerminalOutcomeV1::Completed => vec![11, 12],
+            SandboxTerminalOutcomeV1::Cancelled => vec![1],
+            SandboxTerminalOutcomeV1::UnavailableBeforeAdmission
+            | SandboxTerminalOutcomeV1::Rejected => vec![],
+            SandboxTerminalOutcomeV1::UnavailableAfterAdmission => vec![10],
+        },
         runtime_attestation_key_id: "runtime-key".to_owned(),
         result_digest: [0; 32],
         signature: [0; 64],
@@ -964,6 +982,57 @@ fn terminal_results_round_trip_every_closed_outcome() -> TestResult {
         result.verify_signature(&key.verifying_key())?;
         independent::SandboxProviderResult::from_canonical_cbor(&bytes)?
             .verify_signature(&key.verifying_key())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn terminal_results_reject_outcome_event_contradictions_in_both_implementations() -> TestResult {
+    let key = signing_key();
+    let receipt = signed_receipt_at_stage(&key, ReceiptStage::Released)?;
+    let decoded_receipt =
+        independent::SandboxProviderReceipt::from_canonical_cbor(&receipt.to_canonical_cbor()?)?;
+    let cases = [
+        (SandboxTerminalOutcomeV1::Completed, vec![0, 11, 12]),
+        (SandboxTerminalOutcomeV1::Completed, vec![11]),
+        (SandboxTerminalOutcomeV1::Cancelled, vec![]),
+        (SandboxTerminalOutcomeV1::Cancelled, vec![0]),
+        (SandboxTerminalOutcomeV1::Cancelled, vec![11, 11, 1]),
+        (
+            SandboxTerminalOutcomeV1::UnavailableBeforeAdmission,
+            vec![10],
+        ),
+        (SandboxTerminalOutcomeV1::Rejected, vec![1]),
+        (SandboxTerminalOutcomeV1::UnavailableAfterAdmission, vec![]),
+        (SandboxTerminalOutcomeV1::UnavailableAfterAdmission, vec![1]),
+        (
+            SandboxTerminalOutcomeV1::UnavailableAfterAdmission,
+            vec![10, 11],
+        ),
+        (
+            SandboxTerminalOutcomeV1::UnavailableAfterAdmission,
+            vec![11, 11, 10],
+        ),
+    ];
+    for (outcome, events) in cases {
+        let mut invalid = result_for_outcome(outcome)?;
+        invalid.operational_events.clone_from(&events);
+        assert_eq!(
+            invalid.sign(&key),
+            Err(SandboxContractErrorV1::InconsistentFields)
+        );
+
+        let valid = result_for_outcome(outcome)?.sign(&key)?;
+        let mut decoded =
+            independent::SandboxProviderResult::from_canonical_cbor(&valid.to_canonical_cbor()?)?;
+        decoded.operational_events = events
+            .into_iter()
+            .map(u8::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            decoded.validate_receipt_lifecycle(&decoded_receipt),
+            Err(independent::SandboxProviderProtocolError::InconsistentFields)
+        );
     }
     Ok(())
 }
@@ -1004,6 +1073,7 @@ fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestR
         SandboxProviderErrorCodeV1::UnknownAttempt,
         SandboxProviderErrorCodeV1::RequestIdentityConflict,
         SandboxProviderErrorCodeV1::AttemptInProgress,
+        SandboxProviderErrorCodeV1::PayloadTransferTimeout,
     ] {
         let error = error_for_code(code).sign(&key)?;
         let bytes = error.to_canonical_cbor()?;
@@ -1039,6 +1109,57 @@ fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestR
         orphaned_digest.sign(&key),
         Err(SandboxContractErrorV1::InconsistentFields)
     );
+    Ok(())
+}
+
+#[test]
+fn payload_transfer_timeout_requires_authenticated_execute_identities() -> TestResult {
+    let key = signing_key();
+    let timeout = error_for_code(SandboxProviderErrorCodeV1::PayloadTransferTimeout);
+    let signed_timeout = timeout.clone().sign(&key)?;
+    let timeout_bytes = signed_timeout.to_canonical_cbor()?;
+    let decoded_timeout = independent::SandboxProviderError::from_canonical_cbor(&timeout_bytes)?;
+    decoded_timeout.verify_signature(&key.verifying_key())?;
+
+    let mut wrong_operation = timeout.clone();
+    wrong_operation.operation = Some(0);
+    let mut missing_request = timeout.clone();
+    missing_request.request_id = None;
+    let mut missing_digest = timeout.clone();
+    missing_digest.request_digest = None;
+    let mut missing_attempt = timeout;
+    missing_attempt.attempt_id = None;
+    for invalid in [
+        wrong_operation,
+        missing_request,
+        missing_digest,
+        missing_attempt,
+    ] {
+        assert_eq!(
+            invalid.sign(&key),
+            Err(SandboxContractErrorV1::InconsistentFields)
+        );
+    }
+
+    let mut wrong_operation = decoded_timeout.clone();
+    wrong_operation.operation = Some(0);
+    let mut missing_request = decoded_timeout.clone();
+    missing_request.request_id = None;
+    let mut missing_digest = decoded_timeout.clone();
+    missing_digest.request_digest = None;
+    let mut missing_attempt = decoded_timeout;
+    missing_attempt.attempt_id = None;
+    for invalid in [
+        wrong_operation,
+        missing_request,
+        missing_digest,
+        missing_attempt,
+    ] {
+        assert_eq!(
+            invalid.verify_signature(&key.verifying_key()),
+            Err(independent::SandboxProviderProtocolError::InconsistentFields)
+        );
+    }
     Ok(())
 }
 
@@ -1406,7 +1527,8 @@ fn describe_operation_round_trips_and_binds_response() -> TestResult {
         SandboxDescribeRequestV1::from_canonical_cbor(&describe_bytes)?,
         describe
     );
-    independent::SandboxDescribeRequest::from_canonical_cbor(&describe_bytes)?;
+    let independent_describe =
+        independent::SandboxDescribeRequest::from_canonical_cbor(&describe_bytes)?;
     verify_and_materialize_vector("sdq1", &describe_bytes)?;
     let described = SandboxDescribeResponseV1 {
         request_id: authority.request_id,
@@ -1422,8 +1544,10 @@ fn describe_operation_round_trips_and_binds_response() -> TestResult {
     let response_bytes = described.to_canonical_cbor()?;
     described.validate_for_request(&describe)?;
     described.verify_signature(&key.verifying_key())?;
-    independent::SandboxDescribeResponse::from_canonical_cbor(&response_bytes)?
-        .verify_signature(&key.verifying_key())?;
+    let independent_described =
+        independent::SandboxDescribeResponse::from_canonical_cbor(&response_bytes)?;
+    independent_described.verify_signature(&key.verifying_key())?;
+    independent_described.validate_for_request(&independent_describe)?;
     verify_and_materialize_vector("sdy1", &response_bytes)?;
     Ok(())
 }
@@ -1440,7 +1564,7 @@ fn cancel_operation_round_trips_and_binds_response() -> TestResult {
     }
     .seal()?;
     let cancel_bytes = cancel.to_canonical_cbor()?;
-    independent::SandboxCancelRequest::from_canonical_cbor(&cancel_bytes)?;
+    let independent_cancel = independent::SandboxCancelRequest::from_canonical_cbor(&cancel_bytes)?;
     verify_and_materialize_vector("scq1", &cancel_bytes)?;
     let cancelled = SandboxCancelResponseV1 {
         request_id: cancel.authority.request_id,
@@ -1459,8 +1583,10 @@ fn cancel_operation_round_trips_and_binds_response() -> TestResult {
         SandboxCancelResponseV1::from_canonical_cbor(&response_bytes)?,
         cancelled
     );
-    independent::SandboxCancelResponse::from_canonical_cbor(&response_bytes)?
-        .verify_signature(&key.verifying_key())?;
+    let independent_cancelled =
+        independent::SandboxCancelResponse::from_canonical_cbor(&response_bytes)?;
+    independent_cancelled.verify_signature(&key.verifying_key())?;
+    independent_cancelled.validate_for_request(&independent_cancel)?;
     verify_and_materialize_vector("scy1", &response_bytes)?;
     Ok(())
 }
@@ -1476,7 +1602,8 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
     }
     .seal()?;
     let reconcile_bytes = reconcile.to_canonical_cbor()?;
-    independent::SandboxReconcileRequest::from_canonical_cbor(&reconcile_bytes)?;
+    let independent_reconcile =
+        independent::SandboxReconcileRequest::from_canonical_cbor(&reconcile_bytes)?;
     verify_and_materialize_vector("srq1", &reconcile_bytes)?;
     let reconciled = SandboxReconcileResponseV1 {
         request_id: reconcile.authority.request_id,
@@ -1495,8 +1622,10 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
         SandboxReconcileResponseV1::from_canonical_cbor(&response_bytes)?,
         reconciled
     );
-    independent::SandboxReconcileResponse::from_canonical_cbor(&response_bytes)?
-        .verify_signature(&key.verifying_key())?;
+    let independent_reconciled =
+        independent::SandboxReconcileResponse::from_canonical_cbor(&response_bytes)?;
+    independent_reconciled.verify_signature(&key.verifying_key())?;
+    independent_reconciled.validate_for_request(&independent_reconcile)?;
     verify_and_materialize_vector("sry1", &response_bytes)?;
 
     let local_error = SandboxLocalErrorV1 {
@@ -1566,6 +1695,27 @@ fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
         mismatched_describe.validate_for_request(&describe),
         Err(SandboxContractErrorV1::InconsistentFields)
     );
+    let independent_describe =
+        independent::SandboxDescribeRequest::from_canonical_cbor(&describe.to_canonical_cbor()?)?;
+    let independent_described = independent::SandboxDescribeResponse::from_canonical_cbor(
+        &mismatched_describe.to_canonical_cbor()?,
+    )?;
+    assert_eq!(
+        independent_described.validate_for_request(&independent_describe),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    let mut invalid_independent_describe = independent_describe.clone();
+    invalid_independent_describe.request_digest[0] ^= 1;
+    assert_eq!(
+        independent_described.validate_for_request(&invalid_independent_describe),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
+    let mut invalid_independent_described = independent_described;
+    invalid_independent_described.response_digest[0] ^= 1;
+    assert_eq!(
+        invalid_independent_described.validate_for_request(&independent_describe),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
     let mut invalid_describe = describe.clone();
     invalid_describe.request_digest[0] ^= 1;
     assert_eq!(
@@ -1604,6 +1754,25 @@ fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
         mismatched_cancel.validate_for_request(&cancel),
         Err(SandboxContractErrorV1::InconsistentFields)
     );
+    let independent_cancel =
+        independent::SandboxCancelRequest::from_canonical_cbor(&cancel.to_canonical_cbor()?)?;
+    let independent_cancelled = independent::SandboxCancelResponse::from_canonical_cbor(&bytes)?;
+    assert_eq!(
+        independent_cancelled.validate_for_request(&independent_cancel),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    let mut invalid_independent_cancel = independent_cancel.clone();
+    invalid_independent_cancel.request_digest[0] ^= 1;
+    assert_eq!(
+        independent_cancelled.validate_for_request(&invalid_independent_cancel),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
+    let mut invalid_independent_cancelled = independent_cancelled;
+    invalid_independent_cancelled.response_digest[0] ^= 1;
+    assert_eq!(
+        invalid_independent_cancelled.validate_for_request(&independent_cancel),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
 
     let mut invalid_cancel = cancel.clone();
     invalid_cancel.request_digest[0] ^= 1;
@@ -1627,7 +1796,7 @@ fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
     .seal()?;
     let reconciled = SandboxReconcileResponseV1 {
         request_id: reconcile.authority.request_id,
-        attempt_id: reconcile.attempt_id,
+        attempt_id: [9; 16],
         clean: true,
         reconciliation_evidence_digest: digest(11),
         runtime_attestation_key_id: "runtime-key".to_owned(),
@@ -1635,6 +1804,31 @@ fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
         signature: [0; 64],
     }
     .sign(&key)?;
+    assert_eq!(
+        reconciled.validate_for_request(&reconcile),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+    let independent_reconcile =
+        independent::SandboxReconcileRequest::from_canonical_cbor(&reconcile.to_canonical_cbor()?)?;
+    let independent_reconciled = independent::SandboxReconcileResponse::from_canonical_cbor(
+        &reconciled.to_canonical_cbor()?,
+    )?;
+    assert_eq!(
+        independent_reconciled.validate_for_request(&independent_reconcile),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    let mut invalid_independent_reconcile = independent_reconcile.clone();
+    invalid_independent_reconcile.request_digest[0] ^= 1;
+    assert_eq!(
+        independent_reconciled.validate_for_request(&invalid_independent_reconcile),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
+    let mut invalid_independent_reconciled = independent_reconciled;
+    invalid_independent_reconciled.response_digest[0] ^= 1;
+    assert_eq!(
+        invalid_independent_reconciled.validate_for_request(&independent_reconcile),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
     let mut invalid_reconcile = reconcile.clone();
     invalid_reconcile.request_digest[0] ^= 1;
     assert_eq!(

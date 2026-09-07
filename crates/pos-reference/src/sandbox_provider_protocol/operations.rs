@@ -113,6 +113,15 @@ pub(super) fn validate_request_authority(
     }
 }
 
+fn request_authority_value(value: &RequestAuthority) -> Value {
+    Value::Array(vec![
+        bytes_value(&value.request_id),
+        bytes_value(&value.apt1_digest),
+        uint_value(value.policy_epoch),
+        bytes_value(&value.nonce),
+    ])
+}
+
 /// SDQ1 describe request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxDescribeRequest {
@@ -210,6 +219,45 @@ request_codec!(
     })
 );
 
+impl SandboxDescribeRequest {
+    fn validate(&self) -> Result<(), SandboxProviderProtocolError> {
+        let unsigned = [
+            text_value("SDQ1"),
+            uint_value(1),
+            request_authority_value(&self.request),
+        ];
+        validate_request_record(&self.request, "SDQ1", &unsigned, self.request_digest)
+    }
+}
+
+impl SandboxCancelRequest {
+    fn validate(&self) -> Result<(), SandboxProviderProtocolError> {
+        let unsigned = [
+            text_value("SCQ1"),
+            uint_value(1),
+            request_authority_value(&self.request),
+            bytes_value(&self.attempt_id),
+            bytes_value(&self.agr1_digest),
+        ];
+        validate_attempt_binding(self.attempt_id, self.agr1_digest)?;
+        validate_request_record(&self.request, "SCQ1", &unsigned, self.request_digest)
+    }
+}
+
+impl SandboxReconcileRequest {
+    fn validate(&self) -> Result<(), SandboxProviderProtocolError> {
+        let unsigned = [
+            text_value("SRQ1"),
+            uint_value(1),
+            request_authority_value(&self.request),
+            bytes_value(&self.attempt_id),
+            bytes_value(&self.agr1_digest),
+        ];
+        validate_attempt_binding(self.attempt_id, self.agr1_digest)?;
+        validate_request_record(&self.request, "SRQ1", &unsigned, self.request_digest)
+    }
+}
+
 request_codec!(
     SandboxCancelRequest,
     "SCQ1",
@@ -265,9 +313,13 @@ macro_rules! signed_response_codec {
                 &self,
                 key: &ed25519_dalek::VerifyingKey,
             ) -> Result<(), SandboxProviderProtocolError> {
-                let unsigned: [Value; $width] = ($unsigned)(self);
+                let unsigned = self.unsigned_value();
                 self.validate(&unsigned)?;
                 verify_signature($magic, &self.response_digest, &self.signature, key)
+            }
+
+            fn unsigned_value(&self) -> [Value; $width] {
+                ($unsigned)(self)
             }
         }
     };
@@ -316,6 +368,25 @@ impl SandboxDescribeResponse {
         require_signature(&self.signature)?;
         verify_digest("SDY1", unsigned, self.response_digest)
     }
+
+    /// Validate that this response answers the exact request and active APT1.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error when either record is invalid or identities differ.
+    pub fn validate_for_request(
+        &self,
+        request: &SandboxDescribeRequest,
+    ) -> Result<(), SandboxProviderProtocolError> {
+        request.validate()?;
+        self.validate(&self.unsigned_value())?;
+        if self.request_id == request.request.request_id
+            && self.active_apt1_digest == request.request.apt1_digest
+        {
+            Ok(())
+        } else {
+            Err(SandboxProviderProtocolError::InconsistentFields)
+        }
+    }
 }
 
 signed_response_codec!(
@@ -361,6 +432,24 @@ impl SandboxCancelResponse {
         require_signature(&self.signature)?;
         verify_digest("SCY1", unsigned, self.response_digest)
     }
+
+    /// Validate the exact request and attempt identity answered by this response.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error when either record is invalid or identities differ.
+    pub fn validate_for_request(
+        &self,
+        request: &SandboxCancelRequest,
+    ) -> Result<(), SandboxProviderProtocolError> {
+        request.validate()?;
+        self.validate(&self.unsigned_value())?;
+        validate_response_identity(
+            self.request_id,
+            self.attempt_id,
+            &request.request,
+            request.attempt_id,
+        )
+    }
 }
 
 signed_response_codec!(
@@ -405,6 +494,24 @@ impl SandboxReconcileResponse {
         require_signature(&self.signature)?;
         verify_digest("SRY1", unsigned, self.response_digest)
     }
+
+    /// Validate the exact request and attempt identity answered by this response.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error when either record is invalid or identities differ.
+    pub fn validate_for_request(
+        &self,
+        request: &SandboxReconcileRequest,
+    ) -> Result<(), SandboxProviderProtocolError> {
+        request.validate()?;
+        self.validate(&self.unsigned_value())?;
+        validate_response_identity(
+            self.request_id,
+            self.attempt_id,
+            &request.request,
+            request.attempt_id,
+        )
+    }
 }
 
 fn validate_request_record<const N: usize>(
@@ -425,5 +532,18 @@ fn validate_attempt_binding(
         Err(SandboxProviderProtocolError::FieldOutOfBounds)
     } else {
         Ok(())
+    }
+}
+
+fn validate_response_identity(
+    response_request_id: [u8; 16],
+    response_attempt_id: [u8; 16],
+    request: &RequestAuthority,
+    request_attempt_id: [u8; 16],
+) -> Result<(), SandboxProviderProtocolError> {
+    if response_request_id == request.request_id && response_attempt_id == request_attempt_id {
+        Ok(())
+    } else {
+        Err(SandboxProviderProtocolError::InconsistentFields)
     }
 }

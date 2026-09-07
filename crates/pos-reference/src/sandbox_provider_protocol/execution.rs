@@ -475,6 +475,42 @@ fn unique_event_position(
     }
 }
 
+fn valid_lifecycle_prefix(events: &[u8]) -> bool {
+    matches!(
+        events,
+        [] | [LAUNCHER_READY_EVENT]
+            | [LAUNCHER_READY_EVENT, EXECUTION_RELEASED_EVENT]
+            | [LAUNCHER_READY_EVENT, EXECUTION_RELEASE_DENIED_EVENT]
+    )
+}
+
+fn validate_terminal_event_shape(
+    outcome: SandboxTerminalOutcome,
+    events: &[u8],
+) -> Result<(), SandboxProviderProtocolError> {
+    let valid = match outcome {
+        SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected => {
+            events.is_empty()
+        }
+        SandboxTerminalOutcome::Completed => {
+            events == [LAUNCHER_READY_EVENT, EXECUTION_RELEASED_EVENT]
+        }
+        SandboxTerminalOutcome::Cancelled => {
+            events.split_last().is_some_and(|(terminal, lifecycle)| {
+                *terminal == 1 && valid_lifecycle_prefix(lifecycle)
+            })
+        }
+        SandboxTerminalOutcome::UnavailableAfterAdmission => {
+            events.split_last().is_some_and(|(terminal, lifecycle)| {
+                (*terminal == 0 || (2..=10).contains(terminal)) && valid_lifecycle_prefix(lifecycle)
+            })
+        }
+    };
+    valid
+        .then_some(())
+        .ok_or(SandboxProviderProtocolError::InconsistentFields)
+}
+
 fn validate_lifecycle_events(
     outcome: SandboxTerminalOutcome,
     events: &[u8],
@@ -584,6 +620,7 @@ impl SandboxProviderResult {
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
+        validate_terminal_event_shape(self.outcome, &self.operational_events)?;
         require_signature(&self.signature)?;
         if self
             .output
@@ -656,6 +693,7 @@ pub enum SandboxProviderErrorCode {
     UnknownAttempt,
     RequestIdentityConflict,
     AttemptInProgress,
+    PayloadTransferTimeout,
 }
 
 impl SandboxProviderErrorCode {
@@ -679,6 +717,7 @@ impl SandboxProviderErrorCode {
             Self::UnknownAttempt => 15,
             Self::RequestIdentityConflict => 16,
             Self::AttemptInProgress => 17,
+            Self::PayloadTransferTimeout => 18,
         }
     }
 
@@ -702,6 +741,7 @@ impl SandboxProviderErrorCode {
             15 => Ok(Self::UnknownAttempt),
             16 => Ok(Self::RequestIdentityConflict),
             17 => Ok(Self::AttemptInProgress),
+            18 => Ok(Self::PayloadTransferTimeout),
             _ => Err(SandboxProviderProtocolError::InvalidEncoding),
         }
     }
@@ -772,6 +812,14 @@ impl SandboxProviderError {
         if (self.request_digest.is_some() && self.request_id.is_none())
             || (self.attempt_id.is_some()
                 && (self.operation.is_none() || self.request_id.is_none()))
+        {
+            return Err(SandboxProviderProtocolError::InconsistentFields);
+        }
+        if self.code == SandboxProviderErrorCode::PayloadTransferTimeout
+            && (self.operation != Some(1)
+                || self.request_id.is_none()
+                || self.request_digest.is_none()
+                || self.attempt_id.is_none())
         {
             return Err(SandboxProviderProtocolError::InconsistentFields);
         }
