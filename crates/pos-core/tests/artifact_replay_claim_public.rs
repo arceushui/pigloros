@@ -1,7 +1,8 @@
 use pos_core::{
-    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureErrorV1, ErasureKeyRoleV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
+    ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureErrorV1,
+    ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
+    ReplayClaimEvaluatorV1,
 };
 
 fn reference(byte: u8) -> ErasureReferenceV1 {
@@ -63,6 +64,10 @@ fn every_artifact_class_uses_its_registered_one_way_transition() {
             ErasureReplayClaimV1::StructuralOnly
         );
         assert!(!evaluation.artifacts[0].authoritative_use_permitted);
+        assert_eq!(
+            evaluation.artifacts[0].redaction_state,
+            ArtifactRedactionStateV1::StructuralOnly
+        );
     }
 }
 
@@ -72,25 +77,29 @@ fn transition_rules_produce_the_adr_060_claims() {
         (
             ArtifactTransitionRuleV1::PreserveExact,
             ErasureReplayClaimV1::Exact,
+            ArtifactRedactionStateV1::None,
             true,
         ),
         (
             ArtifactTransitionRuleV1::RedactViews,
             ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            ArtifactRedactionStateV1::RedactedViews,
             true,
         ),
         (
             ArtifactTransitionRuleV1::RetainStructure,
             ErasureReplayClaimV1::StructuralOnly,
+            ArtifactRedactionStateV1::StructuralOnly,
             false,
         ),
         (
             ArtifactTransitionRuleV1::Remove,
             ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+            ArtifactRedactionStateV1::EvidenceMissing,
             false,
         ),
     ];
-    for (index, (rule, expected, authoritative)) in cases.into_iter().enumerate() {
+    for (index, (rule, expected, redaction, authoritative)) in cases.into_iter().enumerate() {
         let evaluation = ReplayClaimEvaluatorV1::evaluate(
             ErasureReplayClaimV1::Exact,
             &[input(
@@ -103,6 +112,7 @@ fn transition_rules_produce_the_adr_060_claims() {
         )
         .expect("registered transition should evaluate");
         assert_eq!(evaluation.replay_claim, expected);
+        assert_eq!(evaluation.redaction_state, redaction);
         assert_eq!(
             evaluation.artifacts[0].authoritative_use_permitted,
             authoritative
@@ -143,6 +153,10 @@ fn export_takes_the_weakest_required_member_and_ignores_optional_absence() {
         evaluation.replay_claim,
         ErasureReplayClaimV1::StructuralOnly
     );
+    assert_eq!(
+        evaluation.redaction_state,
+        ArtifactRedactionStateV1::StructuralOnly
+    );
     assert_eq!(evaluation.artifacts[0].artifact_digest, reference(1));
     assert_eq!(evaluation.artifacts[1].artifact_digest, reference(3));
     assert_eq!(evaluation.artifacts[2].artifact_digest, reference(2));
@@ -178,6 +192,10 @@ fn every_missing_prerequisite_and_quarantined_artifact_is_unverifiable() {
             ErasureReplayClaimV1::UnverifiableArtifactsMissing
         );
         assert!(!evaluation.artifacts[0].authoritative_use_permitted);
+        assert_eq!(
+            evaluation.redaction_state,
+            ArtifactRedactionStateV1::EvidenceMissing
+        );
     }
 }
 
@@ -254,6 +272,7 @@ fn empty_required_closure_preserves_the_enclosing_claim() {
         ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
     );
     assert!(evaluation.artifacts.is_empty());
+    assert_eq!(evaluation.redaction_state, ArtifactRedactionStateV1::None);
 }
 
 #[test]

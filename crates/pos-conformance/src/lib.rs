@@ -221,6 +221,27 @@ impl ReplayClaimV1 {
     }
 }
 
+impl RedactionStateV1 {
+    /// Apply host-owned artifact redaction independently of profile support.
+    #[must_use]
+    pub const fn after_artifact_evaluation(
+        self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) -> Self {
+        let evaluated = match evaluation.redaction_state {
+            pos_core::ArtifactRedactionStateV1::None => Self::None,
+            pos_core::ArtifactRedactionStateV1::RedactedViews => Self::RedactedViews,
+            pos_core::ArtifactRedactionStateV1::StructuralOnly => Self::StructuralOnly,
+            pos_core::ArtifactRedactionStateV1::EvidenceMissing => Self::EvidenceMissing,
+        };
+        if self >= evaluated {
+            self
+        } else {
+            evaluated
+        }
+    }
+}
+
 /// Execution profile used by a proof run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1234,6 +1255,60 @@ pub struct ConformanceReportV1 {
 }
 
 impl ConformanceReportV1 {
+    /// Apply one host-owned artifact decision to every required report case.
+    ///
+    /// Structural or missing evidence clears comparison material instead of
+    /// reconstructing it. The aggregate counts, claims, redaction state, and
+    /// report digest are then derived again from the cases.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::InvalidConformanceReport`] if the resulting
+    /// report cannot be represented by the public CNR1 contract.
+    pub fn apply_artifact_evaluation(
+        &mut self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) -> Result<(), EvidenceError> {
+        for case in &mut self.cases {
+            case.replay_claim = case
+                .replay_claim
+                .after_artifact_evaluation(evaluation);
+            case.redaction_state = case
+                .redaction_state
+                .after_artifact_evaluation(evaluation);
+            if matches!(
+                case.redaction_state,
+                RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
+            ) {
+                case.outcome = CaseOutcomeStatusV1::Unavailable;
+                case.first_coordinate = None;
+                case.expected_digest = None;
+                case.actual_digest = None;
+                case.expected_error = None;
+                case.actual_error = None;
+            }
+        }
+
+        self.passed = count_cases(&self.cases, CaseOutcomeStatusV1::Pass);
+        self.failed = count_cases(&self.cases, CaseOutcomeStatusV1::Fail);
+        self.skipped = count_cases(&self.cases, CaseOutcomeStatusV1::Skip);
+        self.unavailable = count_cases(&self.cases, CaseOutcomeStatusV1::Unavailable);
+        self.not_applicable = count_cases(&self.cases, CaseOutcomeStatusV1::NotApplicable);
+        self.replay_claim = self
+            .cases
+            .iter()
+            .map(|case| case.replay_claim)
+            .max()
+            .ok_or(EvidenceError::InvalidConformanceReport)?;
+        self.redaction_state = self
+            .cases
+            .iter()
+            .map(|case| case.redaction_state)
+            .max()
+            .ok_or(EvidenceError::InvalidConformanceReport)?;
+        self.report_digest = self.digest()?;
+        self.validate()
+    }
+
     /// Validate the complete public CNR1 record, including case shape,
     /// aggregate counts, weakest claims, and the self-digest.
     ///
@@ -1284,6 +1359,10 @@ impl ConformanceReportV1 {
     pub fn digest(&self) -> Result<[u8; 32], EvidenceError> {
         strict_codec::conformance_report_digest(self).map_err(Into::into)
     }
+}
+
+fn count_cases(cases: &[CaseOutcomeV1], outcome: CaseOutcomeStatusV1) -> u32 {
+    u32::try_from(cases.iter().filter(|case| case.outcome == outcome).count()).unwrap_or(u32::MAX)
 }
 
 /// All typed Wave 8 seams that an independent evaluator must see.

@@ -1527,6 +1527,90 @@ fn public_report_validation_and_encoding_cover_empty_and_large_boundaries(
 }
 
 #[test]
+fn conformance_report_applies_structural_erasure_without_reconstructing_case_evidence() -> TestResult {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1,
+        ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
+        ReplayClaimEvaluatorV1,
+    };
+
+    let mut report = report_with_cases(2)?;
+    let evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1 {
+                artifact_class: ErasureArtifactClassV1::ConformanceReport,
+                artifact_digest: ErasureReferenceV1::from_digest([21; 32]),
+                data_class: ArtifactDataClassV1::PrivateSubjectData,
+                key_role: Some(ErasureKeyRoleV1::DataEncryption),
+                owner: ErasureReferenceV1::from_digest([22; 32]),
+                optionality: ArtifactOptionalityV1::Required,
+                transition_rule: ArtifactTransitionRuleV1::RetainStructure,
+            },
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::TransitionApplied,
+        }],
+    )
+    .expect("a unique conformance artifact should evaluate");
+
+    report.apply_artifact_evaluation(&evaluation)?;
+    assert_eq!(report.replay_claim, ReplayClaimV1::StructuralOnly);
+    assert_eq!(report.redaction_state, RedactionStateV1::StructuralOnly);
+    assert_eq!(report.passed, 0);
+    assert_eq!(report.unavailable, 2);
+    for case in &report.cases {
+        assert_eq!(case.outcome, CaseOutcomeStatusV1::Unavailable);
+        assert_eq!(case.replay_claim, ReplayClaimV1::StructuralOnly);
+        assert_eq!(case.redaction_state, RedactionStateV1::StructuralOnly);
+        assert!(case.first_coordinate.is_none());
+        assert!(case.expected_digest.is_none());
+        assert!(case.actual_digest.is_none());
+        assert!(case.expected_error.is_none());
+        assert!(case.actual_error.is_none());
+    }
+    report.validate()?;
+    Ok(())
+}
+
+#[test]
+fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestResult {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let mut report = report_with_cases(1)?;
+    report.cases[0].replay_claim = ReplayClaimV1::IncompatibleProfile;
+    report.replay_claim = ReplayClaimV1::IncompatibleProfile;
+    report.report_digest = report.digest()?;
+    let evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::IncompatibleProfile,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1 {
+                artifact_class: ErasureArtifactClassV1::ConformanceReport,
+                artifact_digest: ErasureReferenceV1::from_digest([31; 32]),
+                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+                key_role: None,
+                owner: ErasureReferenceV1::from_digest([32; 32]),
+                optionality: ArtifactOptionalityV1::Required,
+                transition_rule: ArtifactTransitionRuleV1::RetainStructure,
+            },
+            current_claim: ErasureReplayClaimV1::IncompatibleProfile,
+            state: ArtifactStateV1::TransitionApplied,
+        }],
+    )
+    .expect("a unique conformance artifact should evaluate");
+
+    report.apply_artifact_evaluation(&evaluation)?;
+    assert_eq!(report.replay_claim, ReplayClaimV1::IncompatibleProfile);
+    assert_eq!(report.redaction_state, RedactionStateV1::StructuralOnly);
+    report.validate()?;
+    Ok(())
+}
+
+#[test]
 fn public_conformance_report_rejects_trailing_cbor_items() -> Result<(), Box<dyn std::error::Error>>
 {
     let report = report_with_cases(1)?;

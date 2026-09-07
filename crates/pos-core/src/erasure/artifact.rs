@@ -82,6 +82,19 @@ pub enum ArtifactStateV1 {
     Invalidated,
 }
 
+/// Artifact redaction state, kept orthogonal to profile compatibility.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ArtifactRedactionStateV1 {
+    /// No required member was redacted.
+    None,
+    /// Authoritative evidence survives but protected views are unavailable.
+    RedactedViews,
+    /// Only minimized identity, ordering, and dependency structure survive.
+    StructuralOnly,
+    /// Required evidence is erased, invalidated, or otherwise unavailable.
+    EvidenceMissing,
+}
+
 /// Immutable policy facts registered by the adapter that owns artifact bytes.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RegisteredArtifactV1 {
@@ -121,6 +134,8 @@ pub struct EvaluatedArtifactClaimV1 {
     pub from: ErasureReplayClaimV1,
     /// Claim after evaluation.
     pub to: ErasureReplayClaimV1,
+    /// Redaction state independent of profile compatibility.
+    pub redaction_state: ArtifactRedactionStateV1,
     /// Whether this exact state may be used as authoritative runtime input.
     pub authoritative_use_permitted: bool,
 }
@@ -130,6 +145,8 @@ pub struct EvaluatedArtifactClaimV1 {
 pub struct ReplayClaimEvaluationV1 {
     /// Weakest claim among required members and the enclosing claim.
     pub replay_claim: ErasureReplayClaimV1,
+    /// Weakest redaction state among required members.
+    pub redaction_state: ArtifactRedactionStateV1,
     /// Per-artifact results in canonical `(class, digest)` order.
     pub artifacts: Vec<EvaluatedArtifactClaimV1>,
 }
@@ -168,14 +185,31 @@ impl ReplayClaimEvaluatorV1 {
         }
 
         let mut replay_claim = enclosing_claim;
+        let mut redaction_state = ArtifactRedactionStateV1::None;
         let artifacts = inputs
             .into_iter()
             .map(|input| {
-                let disposition_claim = match input.state {
-                    ArtifactStateV1::Retained => input.current_claim,
-                    ArtifactStateV1::TransitionApplied => {
-                        input.registration.transition_rule.claim()
+                let (disposition_claim, artifact_redaction) = match input.state {
+                    ArtifactStateV1::Retained => {
+                        (input.current_claim, ArtifactRedactionStateV1::None)
                     }
+                    ArtifactStateV1::TransitionApplied => (
+                        input.registration.transition_rule.claim(),
+                        match input.registration.transition_rule {
+                            ArtifactTransitionRuleV1::PreserveExact => {
+                                ArtifactRedactionStateV1::None
+                            }
+                            ArtifactTransitionRuleV1::RedactViews => {
+                                ArtifactRedactionStateV1::RedactedViews
+                            }
+                            ArtifactTransitionRuleV1::RetainStructure => {
+                                ArtifactRedactionStateV1::StructuralOnly
+                            }
+                            ArtifactTransitionRuleV1::Remove => {
+                                ArtifactRedactionStateV1::EvidenceMissing
+                            }
+                        },
+                    ),
                     ArtifactStateV1::MissingParentCut
                     | ArtifactStateV1::MissingFrozenInput
                     | ArtifactStateV1::MissingKey
@@ -185,18 +219,21 @@ impl ReplayClaimEvaluatorV1 {
                     | ArtifactStateV1::MissingRuntime
                     | ArtifactStateV1::MissingRequiredOutput
                     | ArtifactStateV1::Erased
-                    | ArtifactStateV1::Invalidated => {
-                        ErasureReplayClaimV1::UnverifiableArtifactsMissing
-                    }
+                    | ArtifactStateV1::Invalidated => (
+                        ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+                        ArtifactRedactionStateV1::EvidenceMissing,
+                    ),
                 };
                 let to = weaker(input.current_claim, disposition_claim);
                 if input.registration.optionality == ArtifactOptionalityV1::Required {
                     replay_claim = weaker(replay_claim, to);
+                    redaction_state = redaction_state.max(artifact_redaction);
                 }
                 EvaluatedArtifactClaimV1 {
                     artifact_digest: input.registration.artifact_digest,
                     from: input.current_claim,
                     to,
+                    redaction_state: artifact_redaction,
                     authoritative_use_permitted: matches!(
                         input.state,
                         ArtifactStateV1::Retained | ArtifactStateV1::TransitionApplied
@@ -210,6 +247,7 @@ impl ReplayClaimEvaluatorV1 {
             .collect();
         Ok(ReplayClaimEvaluationV1 {
             replay_claim,
+            redaction_state,
             artifacts,
         })
     }
