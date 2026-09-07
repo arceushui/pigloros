@@ -46,15 +46,37 @@ pub(super) fn verify_digest(
     }
 }
 
+pub(super) fn verify_digest_with_domain(
+    domain: &[u8],
+    unsigned: &[Value],
+    expected: [u8; 32],
+) -> Result<(), SandboxProviderProtocolError> {
+    let actual = digest_with_domain(domain, &Value::Array(unsigned.to_vec()))?;
+    if expected == [0; 32] || expected != actual {
+        Err(SandboxProviderProtocolError::DigestMismatch)
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) fn record_digest(
     magic: &str,
     unsigned: &Value,
 ) -> Result<[u8; 32], SandboxProviderProtocolError> {
+    let mut domain = Vec::with_capacity(magic.len() + 13);
+    domain.extend_from_slice(b"PiglorOS.");
+    domain.extend_from_slice(magic.as_bytes());
+    domain.extend_from_slice(b".v1\0");
+    digest_with_domain(&domain, unsigned)
+}
+
+fn digest_with_domain(
+    domain: &[u8],
+    unsigned: &Value,
+) -> Result<[u8; 32], SandboxProviderProtocolError> {
     let encoded = encode(unsigned)?;
-    let mut preimage = Vec::with_capacity(magic.len() + encoded.len() + 13);
-    preimage.extend_from_slice(b"PiglorOS.");
-    preimage.extend_from_slice(magic.as_bytes());
-    preimage.extend_from_slice(b".v1\0");
+    let mut preimage = Vec::with_capacity(domain.len() + encoded.len());
+    preimage.extend_from_slice(domain);
     preimage.extend_from_slice(&encoded);
     Ok(*blake3::hash(&preimage).as_bytes())
 }

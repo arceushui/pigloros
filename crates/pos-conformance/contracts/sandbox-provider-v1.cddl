@@ -15,7 +15,7 @@ partition-descriptor = [0..2, bytes .size 16, bytes .size 16,
   uint, 1..17179869184, digest32]
 network-capability = [identifier, 0, 0 / 1,
   (bytes .size 4) / (bytes .size 16), 1..65535, 1..134217728, 1..134217728]
-limit-record = [0..15, uint]
+limit-record = [0..16, uint]
 
 spm1-u = ["SPM1",1,identifier,digest32,digest32,digest32,digest32,key-id,
   [1* provider-capability],[1* architecture],digest32,digest32,digest32,digest32,
@@ -56,10 +56,15 @@ sry1 = [sry1-u,digest32,bytes .size 64]
 sle1 = ["SLE1",1,(0..3) / null,id16 / null,0..3,safe-detail]
 
 network-plan = ["NXP1",1,id16,uint,identifier,uint,digest32,uint,digest32,digest32,digest32]
+payload-descriptor = [0..134217728,digest32]
+payload-direction = 0 / 1
+sbc1-u = ["SBC1",1,digest32,id16,id16,payload-direction,uint,uint,
+  bytes .size (1..1048576)]
+sbc1 = [sbc1-u,digest32]
 spx1-u = ["SPX1",1,request-common,id16,
   digest32,digest32,digest32,digest32,digest32,digest32,
   digest32,digest32,digest32,digest32,digest32,digest32,digest32,digest32,digest32,
-  [* identifier],[uint,digest32,bytes],[* network-plan]]
+  [* identifier],payload-descriptor,[* network-plan]]
 spx1 = [spx1-u,digest32]
 
 agr1-u = ["AGR1",1,id16,id16,digest32,digest32,digest32,digest32,digest32,
@@ -68,12 +73,12 @@ agr1-u = ["AGR1",1,id16,id16,digest32,digest32,digest32,digest32,digest32,
 agr1 = [agr1-u,digest32,bytes .size 64]
 
 spr1-u = ["SPR1",1,id16,digest32,digest32,digest32,digest32,digest32,digest32,
-  digest32,digest32,epoch,epoch,epoch,digest32,digest32,[* digest32],digest32 / null,
-  digest32 / null,digest32,digest32,digest32,digest32,digest32,key-id]
+  digest32,digest32,epoch,epoch,epoch,digest32,digest32,[* digest32],digest32,
+  digest32,digest32,digest32,digest32,digest32,digest32,key-id]
 spr1 = [spr1-u,digest32,bytes .size 64]
 
 spy1-u = ["SPY1",1,id16,id16,0..4,
-  [uint,digest32,bytes] / null,digest32 / null,digest32 / null,[* uint],key-id]
+  payload-descriptor / null,digest32 / null,digest32 / null,[* 0..10],key-id]
 spy1 = [spy1-u,digest32,bytes .size 64]
 
 spe1-u = ["SPE1",1,(0..3) / null,id16 / null,digest32 / null,id16 / null,0..17,

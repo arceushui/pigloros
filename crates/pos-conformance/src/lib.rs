@@ -54,17 +54,19 @@ pub use provider_contract::{
     MAX_PROVIDER_ARTIFACT_BYTES_V1,
 };
 pub use sandbox_provider_contract::{
-    AdapterInputV1, AdmissionAuthorityV1, AdmissionGrantV1, LaunchPolicyV1, NetworkCapabilityV1,
-    NetworkExchangePlanV1, PartitionDescriptorV1, PartitionRoleV1, Pkcs7ProofV1,
-    ProviderCapabilityV1, ReceiptAuthorityV1, RequestAuthorityV1, SandboxArchitectureV1,
-    SandboxCancelRequestV1, SandboxCancelResponseV1, SandboxCancelResultV1, SandboxContractErrorV1,
+    AdmissionAuthorityV1, AdmissionGrantV1, LaunchPolicyV1, NetworkCapabilityV1,
+    NetworkExchangePlanV1, PartitionDescriptorV1, PartitionRoleV1, PayloadDescriptorV1,
+    PayloadDirectionV1, PayloadStreamValidatorV1, Pkcs7ProofV1, ProviderCapabilityV1,
+    ReceiptAuthorityV1, RequestAuthorityV1, SandboxArchitectureV1, SandboxCancelRequestV1,
+    SandboxCancelResponseV1, SandboxCancelResultV1, SandboxContractErrorV1,
     SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxExecuteRequestV1, SandboxLimitV1,
-    SandboxLocalErrorCodeV1, SandboxLocalErrorV1, SandboxOutputV1, SandboxProviderErrorCodeV1,
-    SandboxProviderErrorV1, SandboxProviderManifestV1, SandboxProviderOperationV1,
-    SandboxProviderReceiptV1, SandboxProviderResultV1, SandboxReconcileRequestV1,
-    SandboxReconcileResponseV1, SandboxTerminalOutcomeV1, SignedImageManifestV1,
+    SandboxLocalErrorCodeV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
+    SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
+    SandboxProviderOperationV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
+    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxTerminalOutcomeV1,
+    SignedImageManifestV1, MAX_SANDBOX_PAYLOAD_BYTES_V1, MAX_SANDBOX_PAYLOAD_CHUNKS_V1,
     MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1, MAX_SANDBOX_PROVIDER_ENTRIES_V1,
-    SANDBOX_RELEASE_TIMEOUT_SECONDS_V1,
+    SANDBOX_PAYLOAD_CHUNK_BYTES_V1, SANDBOX_RELEASE_TIMEOUT_SECONDS_V1,
 };
 
 fn encode_artifact_descriptor_value(value: &ArtifactDescriptorV1) -> Value {

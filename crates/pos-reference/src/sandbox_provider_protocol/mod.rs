@@ -14,10 +14,10 @@ pub use authority::{
     SandboxProviderManifest, SignedImageManifest,
 };
 pub use execution::{
-    AdapterInput, AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan,
-    ReceiptAuthority, SandboxExecuteRequest, SandboxOutput, SandboxProviderError,
-    SandboxProviderErrorCode, SandboxProviderReceipt, SandboxProviderResult,
-    SandboxTerminalOutcome,
+    AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,
+    PayloadDirection, PayloadStreamValidator, ReceiptAuthority, SandboxExecuteRequest,
+    SandboxPayloadChunk, SandboxProviderError, SandboxProviderErrorCode, SandboxProviderReceipt,
+    SandboxProviderResult, SandboxTerminalOutcome,
 };
 pub use operations::{
     RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,

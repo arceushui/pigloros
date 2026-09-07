@@ -167,6 +167,9 @@ impl EvaluationRequest {
             bytes(&self.trust_policy_snapshot_digest),
             bytes(&self.evaluator_protocol_digest),
             bytes(&self.evaluator_hard_caps_digest),
+            self.sandbox_requirement
+                .as_ref()
+                .map_or(Value::Null, sandbox_requirement_value),
         ]);
         Ok(domain_digest(
             b"PiglorOS.EvaluatorOutputCapability.v1",

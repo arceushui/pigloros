@@ -1202,6 +1202,7 @@ fn public_request_validation_rejects_each_closed_invalid_field(
 fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult {
     let caps = profile_for_digest().evaluator_protocol.hard_caps;
     let mut request = request_for_caps(&caps);
+    let unsandboxed_capability = request.output_capability.capability_digest;
     request.sandbox_requirement = Some(SandboxRequirementV1 {
         lps1_digest: [31; 32],
         sim1_digest: [32; 32],
@@ -1213,9 +1214,15 @@ fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult 
         apt1_digest: [33; 32],
         policy_epoch: 7,
     });
+    request.output_capability.capability_digest = request.expected_output_capability_digest();
+    assert_ne!(
+        request.output_capability.capability_digest,
+        unsandboxed_capability
+    );
     request.request_digest = request.digest();
     let bytes = request.to_canonical_cbor()?;
     assert_eq!(EvaluatorRequestV1::from_canonical_cbor(&bytes)?, request);
+    pos_reference::evaluator_protocol::EvaluationRequest::from_canonical_cbor(&bytes)?;
 
     let mut invalid = request;
     invalid
@@ -1234,6 +1241,52 @@ fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult 
 }
 
 #[test]
+fn sandbox_authority_fields_change_output_capability_identity() -> TestResult {
+    let caps = profile_for_digest().evaluator_protocol.hard_caps;
+    let mut request = request_for_caps(&caps);
+    request.sandbox_requirement = Some(SandboxRequirementV1 {
+        lps1_digest: [31; 32],
+        sim1_digest: [32; 32],
+        required_provider_capability: ProviderCapabilityV1 {
+            capability_id: "managed-attempt-exec".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        apt1_digest: [33; 32],
+        policy_epoch: 7,
+    });
+    let expected = request.expected_output_capability_digest();
+    for mutation in 0..6 {
+        let mut changed = request.clone();
+        let requirement = changed
+            .sandbox_requirement
+            .as_mut()
+            .ok_or("sandbox requirement must exist")?;
+        match mutation {
+            0 => requirement.lps1_digest = [41; 32],
+            1 => requirement.sim1_digest = [42; 32],
+            2 => requirement
+                .required_provider_capability
+                .capability_id
+                .push('2'),
+            3 => requirement.required_provider_capability.capability_version += 1,
+            4 => requirement.required_provider_capability.minimum_strength += 1,
+            5 => requirement.apt1_digest = [43; 32],
+            _ => return Err(format!("unsupported sandbox authority mutation {mutation}").into()),
+        }
+        assert_ne!(changed.expected_output_capability_digest(), expected);
+    }
+    let mut changed_epoch = request;
+    changed_epoch
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .policy_epoch += 1;
+    assert_ne!(changed_epoch.expected_output_capability_digest(), expected);
+    Ok(())
+}
+
+#[test]
 fn public_request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
     let caps = profile_for_digest().evaluator_protocol.hard_caps;
     let mut request = request_for_caps(&caps);
@@ -1248,6 +1301,7 @@ fn public_request_rejects_every_malformed_sandbox_requirement_field() -> TestRes
         apt1_digest: [33; 32],
         policy_epoch: 7,
     });
+    request.output_capability.capability_digest = request.expected_output_capability_digest();
     request.request_digest = request.digest();
     let encoded = request.to_canonical_cbor()?;
     let valid: Value = ciborium::from_reader(encoded.as_slice())?;

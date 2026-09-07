@@ -264,7 +264,7 @@ impl LaunchPolicy {
         if !valid_identifier(&self.policy_id)
             || self.sim1_digest == [0; 32]
             || self.effective_limits.is_empty()
-            || self.effective_limits.len() > 16
+            || self.effective_limits.len() > 17
             || self.network_capabilities.len() > MAX_LIST_ENTRIES
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
@@ -272,7 +272,7 @@ impl LaunchPolicy {
         if self
             .effective_limits
             .iter()
-            .any(|limit| limit.limit_id > 15 || limit.value == 0)
+            .any(|limit| limit.limit_id > 16 || limit.value == 0)
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }

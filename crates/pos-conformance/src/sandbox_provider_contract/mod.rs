@@ -21,10 +21,11 @@ pub use operations::{
     SandboxReconcileResponseV1,
 };
 pub use protocol::{
-    AdapterInputV1, AdmissionAuthorityV1, AdmissionGrantV1, NetworkExchangePlanV1,
-    ReceiptAuthorityV1, RequestAuthorityV1, SandboxExecuteRequestV1, SandboxOutputV1,
-    SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderReceiptV1,
-    SandboxProviderResultV1, SandboxTerminalOutcomeV1,
+    AdmissionAuthorityV1, AdmissionGrantV1, NetworkExchangePlanV1, PayloadDescriptorV1,
+    PayloadDirectionV1, PayloadStreamValidatorV1, ReceiptAuthorityV1, RequestAuthorityV1,
+    SandboxExecuteRequestV1, SandboxPayloadChunkV1, SandboxProviderErrorCodeV1,
+    SandboxProviderErrorV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
+    SandboxTerminalOutcomeV1,
 };
 
 use thiserror::Error;
@@ -33,6 +34,12 @@ use thiserror::Error;
 pub const MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1: usize = 16 * 1024 * 1024;
 /// Maximum number of capabilities or exchanges in one control document.
 pub const MAX_SANDBOX_PROVIDER_ENTRIES_V1: usize = 256;
+/// Largest input or output payload described by SPX1 or SPY1.
+pub const MAX_SANDBOX_PAYLOAD_BYTES_V1: u64 = 128 * 1024 * 1024;
+/// Exact nonfinal SBC1 payload size.
+pub const SANDBOX_PAYLOAD_CHUNK_BYTES_V1: usize = 1024 * 1024;
+/// Largest number of SBC1 records in one payload transfer.
+pub const MAX_SANDBOX_PAYLOAD_CHUNKS_V1: u64 = 128;
 /// Canonical upper bound for a Sandbox Release Launcher response wait.
 pub const SANDBOX_RELEASE_TIMEOUT_SECONDS_V1: u64 = 30;
 
@@ -76,7 +83,7 @@ pub struct ProviderCapabilityV1 {
 /// One exact resource limit selected by LPS1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SandboxLimitV1 {
-    /// Closed ADR-069 limit discriminant in `0..=15`.
+    /// Closed ADR-069 limit discriminant in `0..=16`.
     pub limit_id: u8,
     /// Nonzero selected ceiling.
     pub value: u64,

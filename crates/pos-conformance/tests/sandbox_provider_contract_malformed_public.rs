@@ -2,7 +2,7 @@ use ciborium::value::Value;
 use pos_conformance::{
     AdmissionGrantV1, LaunchPolicyV1, SandboxCancelRequestV1, SandboxCancelResponseV1,
     SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxExecuteRequestV1,
-    SandboxLocalErrorV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
+    SandboxLocalErrorV1, SandboxPayloadChunkV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
     SandboxProviderReceiptV1, SandboxProviderResultV1, SandboxReconcileRequestV1,
     SandboxReconcileResponseV1, SignedImageManifestV1,
 };
@@ -23,6 +23,7 @@ enum Record {
     Sry1,
     Sle1,
     Spx1,
+    Sbc1,
     Agr1,
     Spy1,
     Spe1,
@@ -30,7 +31,7 @@ enum Record {
 }
 
 impl Record {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::Spm1,
         Self::Lps1,
         Self::Sim1,
@@ -42,6 +43,7 @@ impl Record {
         Self::Sry1,
         Self::Sle1,
         Self::Spx1,
+        Self::Sbc1,
         Self::Agr1,
         Self::Spy1,
         Self::Spe1,
@@ -61,6 +63,7 @@ impl Record {
             Self::Sry1 => "sry1",
             Self::Sle1 => "sle1",
             Self::Spx1 => "spx1",
+            Self::Sbc1 => "sbc1",
             Self::Agr1 => "agr1",
             Self::Spy1 => "spy1",
             Self::Spe1 => "spe1",
@@ -85,6 +88,7 @@ impl Record {
             Self::Sry1 => include_bytes!("../vectors/sandbox-provider-v1/sry1.cbor"),
             Self::Sle1 => include_bytes!("../vectors/sandbox-provider-v1/sle1.cbor"),
             Self::Spx1 => include_bytes!("../vectors/sandbox-provider-v1/spx1.cbor"),
+            Self::Sbc1 => include_bytes!("../vectors/sandbox-provider-v1/sbc1.cbor"),
             Self::Agr1 => include_bytes!("../vectors/sandbox-provider-v1/agr1.cbor"),
             Self::Spy1 => include_bytes!("../vectors/sandbox-provider-v1/spy1.cbor"),
             Self::Spe1 => include_bytes!("../vectors/sandbox-provider-v1/spe1.cbor"),
@@ -105,6 +109,7 @@ impl Record {
             Self::Sry1 => SandboxReconcileResponseV1::from_canonical_cbor(bytes).is_ok(),
             Self::Sle1 => SandboxLocalErrorV1::from_canonical_cbor(bytes).is_ok(),
             Self::Spx1 => SandboxExecuteRequestV1::from_canonical_cbor(bytes).is_ok(),
+            Self::Sbc1 => SandboxPayloadChunkV1::from_canonical_cbor(bytes).is_ok(),
             Self::Agr1 => AdmissionGrantV1::from_canonical_cbor(bytes).is_ok(),
             Self::Spy1 => SandboxProviderResultV1::from_canonical_cbor(bytes).is_ok(),
             Self::Spe1 => SandboxProviderErrorV1::from_canonical_cbor(bytes).is_ok(),
@@ -125,6 +130,7 @@ impl Record {
             Self::Sry1 => independent::SandboxReconcileResponse::from_canonical_cbor(bytes).is_ok(),
             Self::Sle1 => independent::SandboxLocalError::from_canonical_cbor(bytes).is_ok(),
             Self::Spx1 => independent::SandboxExecuteRequest::from_canonical_cbor(bytes).is_ok(),
+            Self::Sbc1 => independent::SandboxPayloadChunk::from_canonical_cbor(bytes).is_ok(),
             Self::Agr1 => independent::AdmissionGrant::from_canonical_cbor(bytes).is_ok(),
             Self::Spy1 => independent::SandboxProviderResult::from_canonical_cbor(bytes).is_ok(),
             Self::Spe1 => independent::SandboxProviderError::from_canonical_cbor(bytes).is_ok(),
@@ -143,23 +149,37 @@ fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
     Ok(bytes)
 }
 
+fn digest_with_domain(domain: &[u8], unsigned_bytes: &[u8]) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(domain.len() + unsigned_bytes.len());
+    preimage.extend_from_slice(domain);
+    preimage.extend_from_slice(unsigned_bytes);
+    *blake3::hash(&preimage).as_bytes()
+}
+
+fn contract_digest(magic: &str, unsigned_bytes: &[u8]) -> [u8; 32] {
+    let mut domain = Vec::with_capacity(magic.len() + 13);
+    domain.extend_from_slice(b"PiglorOS.");
+    domain.extend_from_slice(magic.as_bytes());
+    domain.extend_from_slice(b".v1\0");
+    digest_with_domain(&domain, unsigned_bytes)
+}
+
+fn network_plan_digest(unsigned_bytes: &[u8]) -> [u8; 32] {
+    digest_with_domain(b"PiglorOS.NetworkExchangePlan.v1\0", unsigned_bytes)
+}
+
 fn refresh_record_digest(value: &mut Value, magic: &str) -> TestResult {
     let Value::Array(wrapper) = value else {
         return Err("record wrapper must be an array".into());
     };
     let unsigned = wrapper.first().ok_or("record must have an unsigned body")?;
     let unsigned_bytes = encode_value(unsigned)?;
-    let mut preimage = Vec::with_capacity(magic.len() + unsigned_bytes.len() + 13);
-    preimage.extend_from_slice(b"PiglorOS.");
-    preimage.extend_from_slice(magic.as_bytes());
-    preimage.extend_from_slice(b".v1\0");
-    preimage.extend_from_slice(&unsigned_bytes);
     *wrapper.get_mut(1).ok_or("record must have a digest")? =
-        Value::Bytes(blake3::hash(&preimage).as_bytes().to_vec());
+        Value::Bytes(contract_digest(magic, &unsigned_bytes).to_vec());
     Ok(())
 }
 
-fn refresh_inline_digest(value: &mut Value, magic: &str) -> TestResult {
+fn refresh_network_plan_digest(value: &mut Value) -> TestResult {
     let Value::Array(fields) = value else {
         return Err("inline record must be an array".into());
     };
@@ -168,12 +188,7 @@ fn refresh_inline_digest(value: &mut Value, magic: &str) -> TestResult {
         .checked_sub(1)
         .ok_or("inline record is empty")?;
     let unsigned_bytes = encode_value(&Value::Array(fields[..digest_index].to_vec()))?;
-    let mut preimage = Vec::with_capacity(magic.len() + unsigned_bytes.len() + 13);
-    preimage.extend_from_slice(b"PiglorOS.");
-    preimage.extend_from_slice(magic.as_bytes());
-    preimage.extend_from_slice(b".v1\0");
-    preimage.extend_from_slice(&unsigned_bytes);
-    fields[digest_index] = Value::Bytes(blake3::hash(&preimage).as_bytes().to_vec());
+    fields[digest_index] = Value::Bytes(network_plan_digest(&unsigned_bytes).to_vec());
     Ok(())
 }
 
@@ -336,6 +351,15 @@ fn unsigned_local_error_rejects_only_invalid_scalar_boundaries() -> TestResult {
 }
 
 #[test]
+fn local_error_decoders_reject_nul_safe_detail() -> TestResult {
+    let record = Record::Sle1;
+    let mut value = decode_value(record.bytes())?;
+    *value_at_mut(&mut value, &[5]).ok_or("SLE1 safe-detail path must resolve")? =
+        Value::Text("unsafe\0detail".to_owned());
+    assert_rejected(record, &value, "NUL safe detail")
+}
+
+#[test]
 fn producer_and_independent_decoders_reject_every_array_boundary_mutation() -> TestResult {
     let mut exercised = 0_usize;
     for record in Record::ALL {
@@ -464,7 +488,7 @@ fn decoders_reject_semantically_invalid_self_digested_collections() -> TestResul
         .ok_or("second NXP1 occurrence must exist")? = Value::Integer(0.into());
     let nested =
         value_at_mut(&mut occurrence_gap, &[0, 21, 1]).ok_or("second NXP1 record must exist")?;
-    refresh_inline_digest(nested, "NXP1")?;
+    refresh_network_plan_digest(nested)?;
     refresh_record_digest(&mut occurrence_gap, "SPX1")?;
     assert_rejected(
         Record::Spx1,

@@ -1,15 +1,18 @@
+use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
-    AdapterInputV1, AdmissionAuthorityV1, AdmissionGrantV1, ExecutionModeV1, LaunchPolicyV1,
-    NetworkCapabilityV1, NetworkExchangePlanV1, PartitionDescriptorV1, PartitionRoleV1,
-    Pkcs7ProofV1, ProviderCapabilityV1, ReceiptAuthorityV1, RequestAuthorityV1,
-    SandboxArchitectureV1, SandboxCancelRequestV1, SandboxCancelResponseV1, SandboxCancelResultV1,
-    SandboxContractErrorV1, SandboxDescribeRequestV1, SandboxDescribeResponseV1,
-    SandboxExecuteRequestV1, SandboxLimitV1, SandboxLocalErrorCodeV1, SandboxLocalErrorV1,
-    SandboxOutputV1, SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
+    AdmissionAuthorityV1, AdmissionGrantV1, ExecutionModeV1, LaunchPolicyV1, NetworkCapabilityV1,
+    NetworkExchangePlanV1, PartitionDescriptorV1, PartitionRoleV1, PayloadDescriptorV1,
+    PayloadDirectionV1, PayloadStreamValidatorV1, Pkcs7ProofV1, ProviderCapabilityV1,
+    ReceiptAuthorityV1, RequestAuthorityV1, SandboxArchitectureV1, SandboxCancelRequestV1,
+    SandboxCancelResponseV1, SandboxCancelResultV1, SandboxContractErrorV1,
+    SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxExecuteRequestV1, SandboxLimitV1,
+    SandboxLocalErrorCodeV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
+    SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
     SandboxProviderOperationV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
     SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxTerminalOutcomeV1,
-    SignedImageManifestV1,
+    SignedImageManifestV1, MAX_SANDBOX_PAYLOAD_BYTES_V1, MAX_SANDBOX_PAYLOAD_CHUNKS_V1,
+    SANDBOX_PAYLOAD_CHUNK_BYTES_V1,
 };
 use sha2::{Digest, Sha256};
 
@@ -17,7 +20,7 @@ use pos_reference::sandbox_provider_protocol as independent;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn publish_vector(name: &str, bytes: &[u8]) -> TestResult {
+fn verify_and_materialize_vector(name: &str, bytes: &[u8]) -> TestResult {
     let filename = format!("{name}.cbor");
     let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("vectors/sandbox-provider-v1")
@@ -107,6 +110,10 @@ fn launch_policy() -> LaunchPolicyV1 {
                 limit_id: 1,
                 value: 4096,
             },
+            SandboxLimitV1 {
+                limit_id: 16,
+                value: 30_000,
+            },
         ],
         network_capabilities: vec![NetworkCapabilityV1 {
             capability_id: "tcp-loopback".to_owned(),
@@ -194,6 +201,29 @@ fn network_plan(occurrence: u64) -> Result<NetworkExchangePlanV1, SandboxContrac
     .seal()
 }
 
+#[test]
+fn network_plan_digest_uses_normative_domain() -> TestResult {
+    let plan = network_plan(0)?;
+    let unsigned = Value::Array(vec![
+        Value::Text("NXP1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(plan.exchange_id.to_vec()),
+        Value::Integer(plan.occurrence.into()),
+        Value::Text(plan.capability_id.clone()),
+        Value::Integer(plan.request_length.into()),
+        Value::Bytes(plan.request_digest.to_vec()),
+        Value::Integer(plan.response_maximum.into()),
+        Value::Bytes(plan.expected_response_digest.to_vec()),
+        Value::Bytes(plan.retention_policy_digest.to_vec()),
+    ]);
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&unsigned, &mut encoded)?;
+    let mut preimage = b"PiglorOS.NetworkExchangePlan.v1\0".to_vec();
+    preimage.extend_from_slice(&encoded);
+    assert_eq!(plan.plan_digest, *blake3::hash(&preimage).as_bytes());
+    Ok(())
+}
+
 fn execute_request() -> Result<SandboxExecuteRequestV1, SandboxContractErrorV1> {
     let input = b"canonical EAI1 stream".to_vec();
     Ok(SandboxExecuteRequestV1 {
@@ -220,10 +250,7 @@ fn execute_request() -> Result<SandboxExecuteRequestV1, SandboxContractErrorV1> 
         pcr1_digest: digest(33),
         hcp1_digest: digest(34),
         capability_ids: vec!["managed-attempt-exec".to_owned()],
-        adapter_input: AdapterInputV1 {
-            digest: *blake3::hash(&input).as_bytes(),
-            bytes: input,
-        },
+        adapter_input: PayloadDescriptorV1::from_bytes(PayloadDirectionV1::Input, &input)?,
         network_plans: vec![network_plan(0)?, network_plan(1)?],
         request_digest: [0; 32],
     })
@@ -281,13 +308,13 @@ fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
     manifest.verify_signature(&key.verifying_key())?;
     independent::SandboxProviderManifest::from_canonical_cbor(&manifest_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("spm1", &manifest_bytes)?;
+    verify_and_materialize_vector("spm1", &manifest_bytes)?;
 
     let policy = launch_policy().seal()?;
     let policy_bytes = policy.to_canonical_cbor()?;
     assert_eq!(LaunchPolicyV1::from_canonical_cbor(&policy_bytes)?, policy);
     independent::LaunchPolicy::from_canonical_cbor(&policy_bytes)?;
-    publish_vector("lps1", &policy_bytes)?;
+    verify_and_materialize_vector("lps1", &policy_bytes)?;
 
     let image = image_manifest().sign(&key)?;
     let image_bytes = image.to_canonical_cbor()?;
@@ -298,7 +325,7 @@ fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
     image.verify_signature(&key.verifying_key())?;
     independent::SignedImageManifest::from_canonical_cbor(&image_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("sim1", &image_bytes)?;
+    verify_and_materialize_vector("sim1", &image_bytes)?;
     Ok(())
 }
 
@@ -344,6 +371,29 @@ fn authority_contracts_cover_every_architecture_and_execution_mode() -> TestResu
 }
 
 #[test]
+fn network_capability_identifier_grammar_and_ipv6_round_trip() -> TestResult {
+    let mut policy = launch_policy();
+    policy.network_capabilities = ["0", "a-b", "a.b", "a/b", "a_b"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, capability_id)| {
+            Ok(NetworkCapabilityV1 {
+                capability_id: capability_id.to_owned(),
+                address: vec![u8::try_from(index)?; 16],
+                destination_port: 8443,
+                request_maximum: 4096,
+                response_maximum: 8192,
+            })
+        })
+        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?;
+    let policy = policy.seal()?;
+    let bytes = policy.to_canonical_cbor()?;
+    assert_eq!(LaunchPolicyV1::from_canonical_cbor(&bytes)?, policy);
+    independent::LaunchPolicy::from_canonical_cbor(&bytes)?;
+    Ok(())
+}
+
+#[test]
 fn authority_contracts_reject_order_digest_and_partition_changes() -> TestResult {
     let key = signing_key();
     let mut unordered = manifest();
@@ -357,6 +407,13 @@ fn authority_contracts_reject_order_digest_and_partition_changes() -> TestResult
     invalid_policy.effective_limits[0].value = 0;
     assert_eq!(
         invalid_policy.seal(),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+
+    let mut invalid_network_address = launch_policy();
+    invalid_network_address.network_capabilities[0].address = vec![127; 5];
+    assert_eq!(
+        invalid_network_address.seal(),
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
 
@@ -405,7 +462,7 @@ fn execute_and_admission_contracts_round_trip_and_reject_gaps() -> TestResult {
         request
     );
     independent::SandboxExecuteRequest::from_canonical_cbor(&request_bytes)?;
-    publish_vector("spx1", &request_bytes)?;
+    verify_and_materialize_vector("spx1", &request_bytes)?;
     let mut gap = execute_request()?;
     gap.network_plans[1] = network_plan(2)?;
     assert_eq!(gap.seal(), Err(SandboxContractErrorV1::InconsistentFields));
@@ -433,7 +490,7 @@ fn execute_and_admission_contracts_round_trip_and_reject_gaps() -> TestResult {
     grant.verify_signature(&key.verifying_key())?;
     independent::AdmissionGrant::from_canonical_cbor(&grant_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("agr1", &grant_bytes)?;
+    verify_and_materialize_vector("agr1", &grant_bytes)?;
     Ok(())
 }
 
@@ -445,10 +502,10 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         request_id: [1; 16],
         attempt_id: [2; 16],
         outcome: SandboxTerminalOutcomeV1::Completed,
-        output: Some(SandboxOutputV1 {
-            digest: *blake3::hash(&output).as_bytes(),
-            bytes: output,
-        }),
+        output: Some(PayloadDescriptorV1::from_bytes(
+            PayloadDirectionV1::Output,
+            &output,
+        )?),
         agr1_digest: Some(digest(3)),
         spr1_digest: Some(digest(4)),
         operational_events: vec![0, 4, 10],
@@ -465,7 +522,7 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
     result.verify_signature(&key.verifying_key())?;
     independent::SandboxProviderResult::from_canonical_cbor(&result_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("spy1", &result_bytes)?;
+    verify_and_materialize_vector("spy1", &result_bytes)?;
 
     let mut invalid_union = result;
     invalid_union.output = None;
@@ -493,7 +550,7 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
     );
     independent::SandboxProviderError::from_canonical_cbor(&error_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("spe1", &error_bytes)?;
+    verify_and_materialize_vector("spe1", &error_bytes)?;
 
     let receipt = SandboxProviderReceiptV1 {
         attempt_id: [2; 16],
@@ -504,8 +561,8 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         hcp1_digest: digest(9),
         elm1_digest: digest(10),
         network_transcript_digests: vec![digest(11)],
-        ready1_digest: Some(digest(12)),
-        release1_digest: Some(digest(13)),
+        ready1_digest: digest(12),
+        release1_digest: digest(13),
         requested_configuration_evidence: digest(14),
         kernel_observation_evidence: digest(15),
         negative_probe_evidence: digest(16),
@@ -524,42 +581,75 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
     receipt.verify_signature(&key.verifying_key())?;
     independent::SandboxProviderReceipt::from_canonical_cbor(&receipt_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("spr1", &receipt_bytes)?;
+    verify_and_materialize_vector("spr1", &receipt_bytes)?;
 
-    let mut release_without_ready = receipt;
-    release_without_ready.ready1_digest = None;
+    let mut missing_ready_evidence = receipt;
+    missing_ready_evidence.ready1_digest = [0; 32];
     assert_eq!(
-        release_without_ready.validate(),
-        Err(SandboxContractErrorV1::InconsistentFields)
+        missing_ready_evidence.validate(),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+
+    let mut unknown_event = result_for_outcome(SandboxTerminalOutcomeV1::Completed)?;
+    unknown_event.operational_events = vec![11];
+    assert_eq!(
+        unknown_event.sign(&key).err(),
+        Some(SandboxContractErrorV1::FieldOutOfBounds)
     );
     Ok(())
 }
 
-fn result_for_outcome(outcome: SandboxTerminalOutcomeV1) -> SandboxProviderResultV1 {
+#[test]
+fn signed_provider_error_round_trips_safe_detail() -> TestResult {
+    let key = signing_key();
+    let error = SandboxProviderErrorV1 {
+        operation: Some(1),
+        request_id: Some([1; 16]),
+        request_digest: Some(digest(2)),
+        attempt_id: Some([3; 16]),
+        code: SandboxProviderErrorCodeV1::AttemptInProgress,
+        safe_detail: Some("attempt remains active".to_owned()),
+        runtime_attestation_key_id: "runtime-key".to_owned(),
+        error_digest: [0; 32],
+        signature: [0; 64],
+    }
+    .sign(&key)?;
+    let bytes = error.to_canonical_cbor()?;
+    assert_eq!(SandboxProviderErrorV1::from_canonical_cbor(&bytes)?, error);
+    independent::SandboxProviderError::from_canonical_cbor(&bytes)?
+        .verify_signature(&key.verifying_key())?;
+    Ok(())
+}
+
+fn result_for_outcome(
+    outcome: SandboxTerminalOutcomeV1,
+) -> Result<SandboxProviderResultV1, SandboxContractErrorV1> {
     let admitted = matches!(
         outcome,
         SandboxTerminalOutcomeV1::Completed
             | SandboxTerminalOutcomeV1::Cancelled
             | SandboxTerminalOutcomeV1::UnavailableAfterAdmission
     );
-    SandboxProviderResultV1 {
+    let output = if outcome == SandboxTerminalOutcomeV1::Completed {
+        Some(PayloadDescriptorV1::from_bytes(
+            PayloadDirectionV1::Output,
+            b"terminal output",
+        )?)
+    } else {
+        None
+    };
+    Ok(SandboxProviderResultV1 {
         request_id: [1; 16],
         attempt_id: [2; 16],
         outcome,
-        output: (outcome == SandboxTerminalOutcomeV1::Completed).then(|| {
-            let bytes = b"terminal output".to_vec();
-            SandboxOutputV1 {
-                digest: *blake3::hash(&bytes).as_bytes(),
-                bytes,
-            }
-        }),
+        output,
         agr1_digest: admitted.then_some(digest(3)),
         spr1_digest: admitted.then_some(digest(4)),
         operational_events: vec![0],
         runtime_attestation_key_id: "runtime-key".to_owned(),
         result_digest: [0; 32],
         signature: [0; 64],
-    }
+    })
 }
 
 #[test]
@@ -572,7 +662,7 @@ fn terminal_results_round_trip_every_closed_outcome() -> TestResult {
         SandboxTerminalOutcomeV1::Rejected,
         SandboxTerminalOutcomeV1::UnavailableAfterAdmission,
     ] {
-        let result = result_for_outcome(outcome).sign(&key)?;
+        let result = result_for_outcome(outcome)?.sign(&key)?;
         let bytes = result.to_canonical_cbor()?;
         assert_eq!(
             SandboxProviderResultV1::from_canonical_cbor(&bytes)?,
@@ -662,12 +752,350 @@ fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestR
 #[test]
 fn control_document_limit_is_enforced_after_field_validation() -> TestResult {
     let mut request = execute_request()?;
-    request.adapter_input.bytes = vec![0; 16 * 1024 * 1024];
-    request.adapter_input.digest = *blake3::hash(&request.adapter_input.bytes).as_bytes();
+    request.adapter_input.byte_length = 128 * 1024 * 1024 + 1;
     assert_eq!(
         request.seal(),
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
+    Ok(())
+}
+
+fn payload_chunk(
+    parent_digest: [u8; 32],
+    direction: PayloadDirectionV1,
+    index: u64,
+    bytes: Vec<u8>,
+) -> Result<SandboxPayloadChunkV1, SandboxContractErrorV1> {
+    SandboxPayloadChunkV1 {
+        parent_digest,
+        request_id: [1; 16],
+        attempt_id: [2; 16],
+        direction,
+        index,
+        offset: index * SANDBOX_PAYLOAD_CHUNK_BYTES_V1 as u64,
+        bytes,
+        chunk_digest: [0; 32],
+    }
+    .seal()
+}
+
+#[test]
+fn payload_chunks_round_trip_and_stream_through_independent_boundaries() -> TestResult {
+    let parent = digest(90);
+    let bytes = b"parent-bound payload".to_vec();
+    let descriptor = PayloadDescriptorV1::from_bytes(PayloadDirectionV1::Input, &bytes)?;
+    let chunk = payload_chunk(parent, PayloadDirectionV1::Input, 0, bytes)?;
+    let encoded = chunk.to_canonical_cbor()?;
+    assert_eq!(SandboxPayloadChunkV1::from_canonical_cbor(&encoded)?, chunk);
+    let independently_decoded = independent::SandboxPayloadChunk::from_canonical_cbor(&encoded)?;
+
+    let mut producer = PayloadStreamValidatorV1::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        PayloadDirectionV1::Input,
+        descriptor.clone(),
+    )?;
+    producer.accept(&chunk)?;
+    producer.finish()?;
+
+    let mut consumer = independent::PayloadStreamValidator::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        independent::PayloadDirection::Input,
+        independent::PayloadDescriptor {
+            byte_length: descriptor.byte_length,
+            digest: descriptor.digest,
+        },
+    )?;
+    consumer.accept(&independently_decoded)?;
+    consumer.finish()?;
+    verify_and_materialize_vector("sbc1", &encoded)?;
+    Ok(())
+}
+
+#[test]
+fn payload_stream_rejects_gap_interleave_missing_and_digest_mismatch() -> TestResult {
+    let parent = digest(91);
+    let full = vec![7; SANDBOX_PAYLOAD_CHUNK_BYTES_V1 + 1];
+    let descriptor = PayloadDescriptorV1::from_bytes(PayloadDirectionV1::Output, &full)?;
+    let first = payload_chunk(
+        parent,
+        PayloadDirectionV1::Output,
+        0,
+        full[..SANDBOX_PAYLOAD_CHUNK_BYTES_V1].to_vec(),
+    )?;
+    let second = payload_chunk(parent, PayloadDirectionV1::Output, 1, vec![7])?;
+
+    let missing = PayloadStreamValidatorV1::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        PayloadDirectionV1::Output,
+        descriptor.clone(),
+    )?;
+    assert_eq!(
+        missing.finish(),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+
+    let mut stream = PayloadStreamValidatorV1::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        PayloadDirectionV1::Output,
+        descriptor.clone(),
+    )?;
+    assert_eq!(
+        stream.accept(&second),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+    stream.accept(&first)?;
+    assert_eq!(
+        stream.accept(&first),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+    let foreign = payload_chunk(digest(92), PayloadDirectionV1::Output, 1, vec![7])?;
+    assert_eq!(
+        stream.accept(&foreign),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+    stream.accept(&second)?;
+    stream.finish()?;
+
+    let mut corrupt = first.clone();
+    corrupt.chunk_digest[0] ^= 1;
+    let mut stream = PayloadStreamValidatorV1::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        PayloadDirectionV1::Output,
+        descriptor.clone(),
+    )?;
+    assert_eq!(
+        stream.accept(&corrupt),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
+
+    let mut bad_digest = descriptor;
+    bad_digest.digest = digest(93);
+    let mut stream = PayloadStreamValidatorV1::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        PayloadDirectionV1::Output,
+        bad_digest,
+    )?;
+    stream.accept(&first)?;
+    stream.accept(&second)?;
+    assert_eq!(stream.finish(), Err(SandboxContractErrorV1::DigestMismatch));
+    Ok(())
+}
+
+#[test]
+fn independent_payload_stream_rejects_sequence_and_digest_failures() -> TestResult {
+    let parent = digest(91);
+    let full = vec![7; SANDBOX_PAYLOAD_CHUNK_BYTES_V1 + 1];
+    let first = payload_chunk(
+        parent,
+        PayloadDirectionV1::Output,
+        0,
+        full[..SANDBOX_PAYLOAD_CHUNK_BYTES_V1].to_vec(),
+    )?;
+    let second = payload_chunk(parent, PayloadDirectionV1::Output, 1, vec![7])?;
+    let foreign = payload_chunk(digest(92), PayloadDirectionV1::Output, 1, vec![7])?;
+    let independent_descriptor = independent::PayloadDescriptor {
+        byte_length: u64::try_from(full.len())?,
+        digest: PayloadDescriptorV1::from_bytes(PayloadDirectionV1::Output, &full)?.digest,
+    };
+    let independent_first =
+        independent::SandboxPayloadChunk::from_canonical_cbor(&first.to_canonical_cbor()?)?;
+    let independent_second =
+        independent::SandboxPayloadChunk::from_canonical_cbor(&second.to_canonical_cbor()?)?;
+    let independent_foreign =
+        independent::SandboxPayloadChunk::from_canonical_cbor(&foreign.to_canonical_cbor()?)?;
+
+    let missing = independent::PayloadStreamValidator::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        independent::PayloadDirection::Output,
+        independent_descriptor.clone(),
+    )?;
+    assert_eq!(
+        missing.finish(),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+
+    let mut stream = independent::PayloadStreamValidator::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        independent::PayloadDirection::Output,
+        independent_descriptor.clone(),
+    )?;
+    assert_eq!(
+        stream.accept(&independent_second),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    stream.accept(&independent_first)?;
+    assert_eq!(
+        stream.accept(&independent_first),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    assert_eq!(
+        stream.accept(&independent_foreign),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+    stream.accept(&independent_second)?;
+    stream.finish()?;
+
+    let mut corrupt = independent_first.clone();
+    corrupt.chunk_digest[0] ^= 1;
+    let mut stream = independent::PayloadStreamValidator::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        independent::PayloadDirection::Output,
+        independent_descriptor.clone(),
+    )?;
+    assert_eq!(
+        stream.accept(&corrupt),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
+
+    let mut bad_digest = independent_descriptor;
+    bad_digest.digest = digest(93);
+    let mut stream = independent::PayloadStreamValidator::new(
+        parent,
+        [1; 16],
+        [2; 16],
+        independent::PayloadDirection::Output,
+        bad_digest,
+    )?;
+    stream.accept(&independent_first)?;
+    stream.accept(&independent_second)?;
+    assert_eq!(
+        stream.finish(),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn payload_stream_rejects_each_invalid_identity_and_descriptor() -> TestResult {
+    let descriptor = PayloadDescriptorV1::from_bytes(PayloadDirectionV1::Input, b"payload")?;
+    for (parent, request, attempt) in [
+        ([0; 32], [1; 16], [2; 16]),
+        (digest(96), [0; 16], [2; 16]),
+        (digest(96), [1; 16], [0; 16]),
+    ] {
+        assert_eq!(
+            PayloadStreamValidatorV1::new(
+                parent,
+                request,
+                attempt,
+                PayloadDirectionV1::Input,
+                descriptor.clone(),
+            )
+            .err(),
+            Some(SandboxContractErrorV1::FieldOutOfBounds)
+        );
+    }
+    let oversized = PayloadDescriptorV1 {
+        byte_length: MAX_SANDBOX_PAYLOAD_BYTES_V1 + 1,
+        digest: digest(97),
+    };
+    assert_eq!(
+        PayloadStreamValidatorV1::new(
+            digest(96),
+            [1; 16],
+            [2; 16],
+            PayloadDirectionV1::Input,
+            oversized,
+        )
+        .err(),
+        Some(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+
+    let descriptor = independent::PayloadDescriptor {
+        byte_length: 7,
+        digest: descriptor.digest,
+    };
+    for (parent, request, attempt) in [
+        ([0; 32], [1; 16], [2; 16]),
+        (digest(96), [0; 16], [2; 16]),
+        (digest(96), [1; 16], [0; 16]),
+    ] {
+        assert_eq!(
+            independent::PayloadStreamValidator::new(
+                parent,
+                request,
+                attempt,
+                independent::PayloadDirection::Input,
+                descriptor.clone(),
+            )
+            .err(),
+            Some(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+        );
+    }
+    let oversized = independent::PayloadDescriptor {
+        byte_length: MAX_SANDBOX_PAYLOAD_BYTES_V1 + 1,
+        digest: digest(97),
+    };
+    assert_eq!(
+        independent::PayloadStreamValidator::new(
+            digest(96),
+            [1; 16],
+            [2; 16],
+            independent::PayloadDirection::Input,
+            oversized,
+        )
+        .err(),
+        Some(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn payload_stream_accepts_empty_and_exact_128_mib_without_one_large_allocation() -> TestResult {
+    let empty = PayloadDescriptorV1::from_bytes(PayloadDirectionV1::Input, &[])?;
+    PayloadStreamValidatorV1::new(
+        digest(94),
+        [1; 16],
+        [2; 16],
+        PayloadDirectionV1::Input,
+        empty,
+    )?
+    .finish()?;
+
+    let bytes = vec![9; SANDBOX_PAYLOAD_CHUNK_BYTES_V1];
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.SandboxInputBytes.v1\0");
+    for _ in 0..MAX_SANDBOX_PAYLOAD_CHUNKS_V1 {
+        hasher.update(&bytes);
+    }
+    let descriptor = PayloadDescriptorV1 {
+        byte_length: MAX_SANDBOX_PAYLOAD_BYTES_V1,
+        digest: *hasher.finalize().as_bytes(),
+    };
+    let mut stream = PayloadStreamValidatorV1::new(
+        digest(95),
+        [1; 16],
+        [2; 16],
+        PayloadDirectionV1::Input,
+        descriptor,
+    )?;
+    for index in 0..MAX_SANDBOX_PAYLOAD_CHUNKS_V1 {
+        stream.accept(&payload_chunk(
+            digest(95),
+            PayloadDirectionV1::Input,
+            index,
+            bytes.clone(),
+        )?)?;
+    }
+    stream.finish()?;
     Ok(())
 }
 
@@ -686,7 +1114,7 @@ fn describe_operation_round_trips_and_binds_response() -> TestResult {
         describe
     );
     independent::SandboxDescribeRequest::from_canonical_cbor(&describe_bytes)?;
-    publish_vector("sdq1", &describe_bytes)?;
+    verify_and_materialize_vector("sdq1", &describe_bytes)?;
     let described = SandboxDescribeResponseV1 {
         request_id: authority.request_id,
         spm1_digest: digest(5),
@@ -703,7 +1131,7 @@ fn describe_operation_round_trips_and_binds_response() -> TestResult {
     described.verify_signature(&key.verifying_key())?;
     independent::SandboxDescribeResponse::from_canonical_cbor(&response_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("sdy1", &response_bytes)?;
+    verify_and_materialize_vector("sdy1", &response_bytes)?;
     Ok(())
 }
 
@@ -720,7 +1148,7 @@ fn cancel_operation_round_trips_and_binds_response() -> TestResult {
     .seal()?;
     let cancel_bytes = cancel.to_canonical_cbor()?;
     independent::SandboxCancelRequest::from_canonical_cbor(&cancel_bytes)?;
-    publish_vector("scq1", &cancel_bytes)?;
+    verify_and_materialize_vector("scq1", &cancel_bytes)?;
     let cancelled = SandboxCancelResponseV1 {
         request_id: cancel.authority.request_id,
         attempt_id: cancel.attempt_id,
@@ -740,7 +1168,7 @@ fn cancel_operation_round_trips_and_binds_response() -> TestResult {
     );
     independent::SandboxCancelResponse::from_canonical_cbor(&response_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("scy1", &response_bytes)?;
+    verify_and_materialize_vector("scy1", &response_bytes)?;
     Ok(())
 }
 
@@ -756,7 +1184,7 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
     .seal()?;
     let reconcile_bytes = reconcile.to_canonical_cbor()?;
     independent::SandboxReconcileRequest::from_canonical_cbor(&reconcile_bytes)?;
-    publish_vector("srq1", &reconcile_bytes)?;
+    verify_and_materialize_vector("srq1", &reconcile_bytes)?;
     let reconciled = SandboxReconcileResponseV1 {
         request_id: reconcile.authority.request_id,
         attempt_id: reconcile.attempt_id,
@@ -776,7 +1204,7 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
     );
     independent::SandboxReconcileResponse::from_canonical_cbor(&response_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("sry1", &response_bytes)?;
+    verify_and_materialize_vector("sry1", &response_bytes)?;
 
     let local_error = SandboxLocalErrorV1 {
         operation: Some(SandboxProviderOperationV1::Execute),
@@ -790,7 +1218,7 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
         local_error
     );
     independent::SandboxLocalError::from_canonical_cbor(&local_error_bytes)?;
-    publish_vector("sle1", &local_error_bytes)?;
+    verify_and_materialize_vector("sle1", &local_error_bytes)?;
     Ok(())
 }
 

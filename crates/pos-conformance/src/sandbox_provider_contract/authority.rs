@@ -290,7 +290,7 @@ impl LaunchPolicyV1 {
         if !identifier(&self.policy_id, MAX_IDENTIFIER_BYTES)
             || self.sim1_digest == [0; 32]
             || self.effective_limits.is_empty()
-            || self.effective_limits.len() > 16
+            || self.effective_limits.len() > 17
             || self.network_capabilities.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
@@ -298,7 +298,7 @@ impl LaunchPolicyV1 {
         if self
             .effective_limits
             .iter()
-            .any(|limit| limit.limit_id > 15 || limit.value == 0)
+            .any(|limit| limit.limit_id > 16 || limit.value == 0)
             || self
                 .network_capabilities
                 .iter()

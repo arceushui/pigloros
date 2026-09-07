@@ -629,6 +629,9 @@ impl EvaluatorRequestV1 {
                 digest(&self.trust_policy_snapshot_digest),
                 digest(&self.evaluator_protocol_digest),
                 digest(&self.evaluator_hard_caps_digest),
+                self.sandbox_requirement
+                    .as_ref()
+                    .map_or(Value::Null, encode_sandbox_requirement),
             ]),
         )
     }

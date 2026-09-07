@@ -5,21 +5,210 @@ use super::codec::{
     decode_identifiers, decode_u8_list, digest32, digest_list_value, id16, identifier,
     invalid_digest_list, key_id, nonzero_optional, optional_bytes_value, optional_digest,
     optional_digest_value, optional_id16, optional_text, optional_u8, require_signature,
-    self_digested, signed, text_value, uint, uint_value, usize_u64, valid_key_id,
-    validate_identifier_order, validate_magic, verify_digest, verify_signature, MAX_LIST_ENTRIES,
+    self_digested, signed, text_value, uint, uint_value, valid_key_id, validate_identifier_order,
+    validate_magic, verify_digest, verify_digest_with_domain, verify_signature, MAX_LIST_ENTRIES,
 };
 use super::operations::{decode_request_authority, validate_request_authority, RequestAuthority};
 use super::SandboxProviderProtocolError;
 
 const MAX_SAFE_DETAIL_BYTES: usize = 256;
-const MAX_INPUT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_INPUT_BYTES_U64: u64 = 128 * 1024 * 1024;
+const PAYLOAD_CHUNK_BYTES: usize = 1024 * 1024;
+const MAX_PAYLOAD_CHUNKS: u64 = 128;
 
-/// Exact bounded adapter input carried by SPX1.
+/// Direction of one provider payload transfer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PayloadDirection {
+    Input,
+    Output,
+}
+
+impl PayloadDirection {
+    const fn code(self) -> u64 {
+        match self {
+            Self::Input => 0,
+            Self::Output => 1,
+        }
+    }
+
+    const fn decode(value: u64) -> Result<Self, SandboxProviderProtocolError> {
+        match value {
+            0 => Ok(Self::Input),
+            1 => Ok(Self::Output),
+            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
+        }
+    }
+
+    const fn domain(self) -> &'static [u8] {
+        match self {
+            Self::Input => b"PiglorOS.SandboxInputBytes.v1\0",
+            Self::Output => b"PiglorOS.SandboxOutputBytes.v1\0",
+        }
+    }
+}
+
+/// Exact bounded payload descriptor carried by SPX1 or SPY1.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdapterInput {
+pub struct PayloadDescriptor {
+    pub byte_length: u64,
     pub digest: [u8; 32],
+}
+
+/// Independently decoded parent-bound SBC1 payload chunk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxPayloadChunk {
+    pub parent_digest: [u8; 32],
+    pub request_id: [u8; 16],
+    pub attempt_id: [u8; 16],
+    pub direction: PayloadDirection,
+    pub index: u64,
+    pub offset: u64,
     pub bytes: Vec<u8>,
+    pub chunk_digest: [u8; 32],
+}
+
+impl SandboxPayloadChunk {
+    /// Decode and fully validate exact canonical SBC1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error for malformed, noncanonical, or invalid bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxProviderProtocolError> {
+        let value = decode_document(bytes)?;
+        let (fields, chunk_digest) = self_digested::<9>(&value, "SBC1")?;
+        let chunk = Self {
+            parent_digest: digest32(&fields[2])?,
+            request_id: id16(&fields[3])?,
+            attempt_id: id16(&fields[4])?,
+            direction: PayloadDirection::decode(uint(&fields[5])?)?,
+            index: uint(&fields[6])?,
+            offset: uint(&fields[7])?,
+            bytes: byte_string(&fields[8])?.to_vec(),
+            chunk_digest,
+        };
+        chunk.validate(fields).map(|()| chunk)
+    }
+
+    fn validate(&self, fields: &[Value; 9]) -> Result<(), SandboxProviderProtocolError> {
+        let expected_offset = self
+            .index
+            .checked_mul(PAYLOAD_CHUNK_BYTES as u64)
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)?;
+        if self.parent_digest == [0; 32]
+            || self.index >= MAX_PAYLOAD_CHUNKS
+            || self.offset != expected_offset
+            || self.bytes.is_empty()
+            || self.bytes.len() > PAYLOAD_CHUNK_BYTES
+        {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
+        verify_digest("SBC1", fields, self.chunk_digest)
+    }
+
+    fn unsigned_value(&self) -> [Value; 9] {
+        [
+            text_value("SBC1"),
+            uint_value(1),
+            bytes_value(&self.parent_digest),
+            bytes_value(&self.request_id),
+            bytes_value(&self.attempt_id),
+            uint_value(self.direction.code()),
+            uint_value(self.index),
+            uint_value(self.offset),
+            bytes_value(&self.bytes),
+        ]
+    }
+}
+
+/// Independent incremental validator for one non-interleaved SBC1 sequence.
+pub struct PayloadStreamValidator {
+    parent_digest: [u8; 32],
+    request_id: [u8; 16],
+    attempt_id: [u8; 16],
+    direction: PayloadDirection,
+    descriptor: PayloadDescriptor,
+    next_index: u64,
+    accepted_bytes: u64,
+    hasher: blake3::Hasher,
+}
+
+impl PayloadStreamValidator {
+    /// Begin one descriptor-bound transfer.
+    ///
+    /// # Errors
+    /// Returns a closed error for invalid identities or an oversized descriptor.
+    pub fn new(
+        parent_digest: [u8; 32],
+        request_id: [u8; 16],
+        attempt_id: [u8; 16],
+        direction: PayloadDirection,
+        descriptor: PayloadDescriptor,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if parent_digest == [0; 32]
+            || request_id == [0; 16]
+            || attempt_id == [0; 16]
+            || descriptor.byte_length > MAX_INPUT_BYTES_U64
+        {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(direction.domain());
+        Ok(Self {
+            parent_digest,
+            request_id,
+            attempt_id,
+            direction,
+            descriptor,
+            next_index: 0,
+            accepted_bytes: 0,
+            hasher,
+        })
+    }
+
+    /// Accept the next exact contiguous chunk.
+    ///
+    /// # Errors
+    /// Rejects foreign, duplicate, reordered, gapped, or wrongly sized chunks.
+    pub fn accept(
+        &mut self,
+        chunk: &SandboxPayloadChunk,
+    ) -> Result<(), SandboxProviderProtocolError> {
+        chunk.validate(&chunk.unsigned_value())?;
+        let remaining = self
+            .descriptor
+            .byte_length
+            .saturating_sub(self.accepted_bytes);
+        let expected_size = remaining.min(PAYLOAD_CHUNK_BYTES as u64);
+        let identity_mismatch = chunk.parent_digest != self.parent_digest
+            || chunk.request_id != self.request_id
+            || chunk.attempt_id != self.attempt_id
+            || chunk.direction != self.direction;
+        let position_mismatch =
+            chunk.index != self.next_index || chunk.offset != self.accepted_bytes;
+        if identity_mismatch
+            || position_mismatch
+            || chunk.bytes.len() as u64 != expected_size
+            || expected_size == 0
+        {
+            return Err(SandboxProviderProtocolError::InconsistentFields);
+        }
+        self.hasher.update(&chunk.bytes);
+        self.accepted_bytes += expected_size;
+        self.next_index += 1;
+        Ok(())
+    }
+
+    /// Finish after the exact descriptor length and digest have been observed.
+    ///
+    /// # Errors
+    /// Rejects missing chunks or an aggregate digest mismatch.
+    pub fn finish(self) -> Result<(), SandboxProviderProtocolError> {
+        if self.accepted_bytes != self.descriptor.byte_length {
+            return Err(SandboxProviderProtocolError::InconsistentFields);
+        }
+        (self.hasher.finalize().as_bytes() == &self.descriptor.digest)
+            .then_some(())
+            .ok_or(SandboxProviderProtocolError::DigestMismatch)
+    }
 }
 
 /// Named NXP1 network exchange plan nested in SPX1.
@@ -63,7 +252,7 @@ pub struct SandboxExecuteRequest {
     pub attempt_id: [u8; 16],
     pub authority: ExecuteAuthority,
     pub capability_ids: Vec<String>,
-    pub adapter_input: AdapterInput,
+    pub adapter_input: PayloadDescriptor,
     pub network_plans: Vec<NetworkExchangePlan>,
     pub request_digest: [u8; 32],
 }
@@ -81,7 +270,7 @@ impl SandboxExecuteRequest {
             attempt_id: id16(&fields[3])?,
             authority: ExecuteAuthority::decode(&fields[4..19])?,
             capability_ids: decode_identifiers(&fields[19])?,
-            adapter_input: decode_adapter_input(&fields[20])?,
+            adapter_input: decode_payload_descriptor(&fields[20])?,
             network_plans: decode_network_plans(&fields[21])?,
             request_digest,
         };
@@ -95,9 +284,7 @@ impl SandboxExecuteRequest {
             || self.request.apt1_digest != self.authority.apt1_digest
             || self.capability_ids.len() > MAX_LIST_ENTRIES
             || self.network_plans.len() > MAX_LIST_ENTRIES
-            || self.adapter_input.bytes.len() > MAX_INPUT_BYTES
-            || self.adapter_input.digest == [0; 32]
-            || self.adapter_input.digest != *blake3::hash(&self.adapter_input.bytes).as_bytes()
+            || self.adapter_input.byte_length > MAX_INPUT_BYTES_U64
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
@@ -236,13 +423,6 @@ impl AdmissionGrant {
     }
 }
 
-/// Exact bounded output present only in completed SPY1 records.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SandboxOutput {
-    pub digest: [u8; 32],
-    pub bytes: Vec<u8>,
-}
-
 /// Closed SPY1 terminal outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SandboxTerminalOutcome {
@@ -282,7 +462,7 @@ pub struct SandboxProviderResult {
     pub request_id: [u8; 16],
     pub attempt_id: [u8; 16],
     pub outcome: SandboxTerminalOutcome,
-    pub output: Option<SandboxOutput>,
+    pub output: Option<PayloadDescriptor>,
     pub agr1_digest: Option<[u8; 32]>,
     pub spr1_digest: Option<[u8; 32]>,
     pub operational_events: Vec<u8>,
@@ -337,12 +517,12 @@ impl SandboxProviderResult {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
         require_signature(&self.signature)?;
-        if self.output.as_ref().is_some_and(|output| {
-            output.bytes.len() > MAX_INPUT_BYTES
-                || output.digest == [0; 32]
-                || output.digest != *blake3::hash(&output.bytes).as_bytes()
-        }) {
-            return Err(SandboxProviderProtocolError::DigestMismatch);
+        if self
+            .output
+            .as_ref()
+            .is_some_and(|output| output.byte_length > MAX_INPUT_BYTES_U64)
+        {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
         let post_admission = nonzero_optional(self.agr1_digest)
             && nonzero_optional(self.spr1_digest)
@@ -572,8 +752,8 @@ pub struct SandboxProviderReceipt {
     pub hcp1_digest: [u8; 32],
     pub elm1_digest: [u8; 32],
     pub network_transcript_digests: Vec<[u8; 32]>,
-    pub ready1_digest: Option<[u8; 32]>,
-    pub release1_digest: Option<[u8; 32]>,
+    pub ready1_digest: [u8; 32],
+    pub release1_digest: [u8; 32],
     pub requested_configuration_evidence: [u8; 32],
     pub kernel_observation_evidence: [u8; 32],
     pub negative_probe_evidence: [u8; 32],
@@ -601,8 +781,8 @@ impl SandboxProviderReceipt {
             hcp1_digest: digest32(&fields[14])?,
             elm1_digest: digest32(&fields[15])?,
             network_transcript_digests: decode_digest_list(&fields[16])?,
-            ready1_digest: optional_digest(&fields[17])?,
-            release1_digest: optional_digest(&fields[18])?,
+            ready1_digest: digest32(&fields[17])?,
+            release1_digest: digest32(&fields[18])?,
             requested_configuration_evidence: digest32(&fields[19])?,
             kernel_observation_evidence: digest32(&fields[20])?,
             negative_probe_evidence: digest32(&fields[21])?,
@@ -634,6 +814,8 @@ impl SandboxProviderReceipt {
             || [
                 self.hcp1_digest,
                 self.elm1_digest,
+                self.ready1_digest,
+                self.release1_digest,
                 self.requested_configuration_evidence,
                 self.kernel_observation_evidence,
                 self.negative_probe_evidence,
@@ -642,9 +824,6 @@ impl SandboxProviderReceipt {
             ]
             .contains(&[0; 32])
             || invalid_digest_list(&self.network_transcript_digests)
-            || self.ready1_digest == Some([0; 32])
-            || self.release1_digest == Some([0; 32])
-            || (self.release1_digest.is_some() && self.ready1_digest.is_none())
             || !valid_key_id(&self.runtime_attestation_key_id)
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
@@ -672,8 +851,8 @@ impl SandboxProviderReceipt {
             bytes_value(&self.hcp1_digest),
             bytes_value(&self.elm1_digest),
             digest_list_value(&self.network_transcript_digests),
-            optional_digest_value(self.ready1_digest.as_ref()),
-            optional_digest_value(self.release1_digest.as_ref()),
+            bytes_value(&self.ready1_digest),
+            bytes_value(&self.release1_digest),
             bytes_value(&self.requested_configuration_evidence),
             bytes_value(&self.kernel_observation_evidence),
             bytes_value(&self.negative_probe_evidence),
@@ -788,16 +967,19 @@ named_digest_authority!(
     rvs1_digest,
 );
 
-fn decode_adapter_input(value: &Value) -> Result<AdapterInput, SandboxProviderProtocolError> {
-    let fields = array::<3>(value)?;
-    let bytes = byte_string(&fields[2])?.to_vec();
-    if uint(&fields[0])? != usize_u64(bytes.len())? {
-        return Err(SandboxProviderProtocolError::InconsistentFields);
-    }
-    Ok(AdapterInput {
+fn decode_payload_descriptor(
+    value: &Value,
+) -> Result<PayloadDescriptor, SandboxProviderProtocolError> {
+    let fields = array::<2>(value)?;
+    let descriptor = PayloadDescriptor {
+        byte_length: uint(&fields[0])?,
         digest: digest32(&fields[1])?,
-        bytes,
-    })
+    };
+    if descriptor.byte_length > MAX_INPUT_BYTES_U64 {
+        Err(SandboxProviderProtocolError::FieldOutOfBounds)
+    } else {
+        Ok(descriptor)
+    }
 }
 
 fn decode_network_plans(
@@ -838,7 +1020,11 @@ fn validate_network_plan(
     {
         return Err(SandboxProviderProtocolError::FieldOutOfBounds);
     }
-    verify_digest("NXP1", &fields[..10], value.plan_digest)
+    verify_digest_with_domain(
+        b"PiglorOS.NetworkExchangePlan.v1\0",
+        &fields[..10],
+        value.plan_digest,
+    )
 }
 
 fn validate_network_plans(
@@ -876,25 +1062,16 @@ fn network_plan_value(value: &NetworkExchangePlan) -> [Value; 11] {
     ]
 }
 
-fn decode_output(value: &Value) -> Result<Option<SandboxOutput>, SandboxProviderProtocolError> {
+fn decode_output(value: &Value) -> Result<Option<PayloadDescriptor>, SandboxProviderProtocolError> {
     if value == &Value::Null {
         return Ok(None);
     }
-    let fields = array::<3>(value)?;
-    let bytes = byte_string(&fields[2])?.to_vec();
-    if uint(&fields[0])? != usize_u64(bytes.len())? {
-        return Err(SandboxProviderProtocolError::InconsistentFields);
-    }
-    Ok(Some(SandboxOutput {
-        digest: digest32(&fields[1])?,
-        bytes,
-    }))
+    decode_payload_descriptor(value).map(Some)
 }
 
-fn output_value(value: &SandboxOutput) -> Value {
+fn output_value(value: &PayloadDescriptor) -> Value {
     Value::Array(vec![
-        uint_value(u64::try_from(value.bytes.len()).unwrap_or(u64::MAX)),
+        uint_value(value.byte_length),
         bytes_value(&value.digest),
-        bytes_value(&value.bytes),
     ])
 }

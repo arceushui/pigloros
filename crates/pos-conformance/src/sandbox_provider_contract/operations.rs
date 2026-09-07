@@ -785,10 +785,9 @@ impl SandboxLocalErrorV1 {
     /// Returns a closed contract error for invalid local evidence.
     pub fn validate(&self) -> Result<(), SandboxContractErrorV1> {
         if self.request_id == Some([0; 16])
-            || self
-                .safe_detail
-                .as_ref()
-                .is_some_and(|detail| detail.is_empty() || detail.len() > MAX_SAFE_DETAIL_BYTES)
+            || self.safe_detail.as_ref().is_some_and(|detail| {
+                detail.is_empty() || detail.len() > MAX_SAFE_DETAIL_BYTES || detail.contains('\0')
+            })
         {
             Err(SandboxContractErrorV1::FieldOutOfBounds)
         } else {

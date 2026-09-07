@@ -2,9 +2,9 @@ use ed25519_dalek::SigningKey;
 use pos_conformance::{
     AdmissionGrantV1, LaunchPolicyV1, SandboxCancelRequestV1, SandboxCancelResponseV1,
     SandboxContractErrorV1, SandboxDescribeRequestV1, SandboxDescribeResponseV1,
-    SandboxExecuteRequestV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
-    SandboxProviderReceiptV1, SandboxProviderResultV1, SandboxReconcileRequestV1,
-    SandboxReconcileResponseV1, SignedImageManifestV1,
+    SandboxExecuteRequestV1, SandboxPayloadChunkV1, SandboxProviderErrorV1,
+    SandboxProviderManifestV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
+    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SignedImageManifestV1,
 };
 use pos_reference::sandbox_provider_protocol as independent;
 
@@ -188,6 +188,13 @@ fn every_self_digested_public_surface_propagates_validation_failures() -> TestRe
         ))?,
         |value: &mut SandboxExecuteRequestV1| value.authority.request_id = [0; 16],
         request_digest
+    );
+    assert_self_digested_surface_rejects!(
+        SandboxPayloadChunkV1::from_canonical_cbor(include_bytes!(
+            "../vectors/sandbox-provider-v1/sbc1.cbor"
+        ))?,
+        |value: &mut SandboxPayloadChunkV1| value.request_id = [0; 16],
+        chunk_digest
     );
     assert_self_digested_surface_rejects!(
         SandboxDescribeRequestV1::from_canonical_cbor(include_bytes!(

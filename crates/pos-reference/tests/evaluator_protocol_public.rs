@@ -275,6 +275,7 @@ fn request_round_trips_every_adapter_and_optional_identity_shape() -> TestResult
 #[test]
 fn request_round_trips_sandbox_requirement_and_rejects_old_layout() -> TestResult {
     let mut request = valid_request()?;
+    let unsandboxed_capability = request.output_capability.capability_digest;
     request.sandbox_requirement = Some(SandboxRequirement {
         lps1_digest: [31; 32],
         sim1_digest: [32; 32],
@@ -286,6 +287,11 @@ fn request_round_trips_sandbox_requirement_and_rejects_old_layout() -> TestResul
         apt1_digest: [33; 32],
         policy_epoch: 7,
     });
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    assert_ne!(
+        request.output_capability.capability_digest,
+        unsandboxed_capability
+    );
     request.request_digest = request.digest()?;
     let encoded = request.to_canonical_cbor()?;
     assert_eq!(EvaluationRequest::from_canonical_cbor(&encoded)?, request);
@@ -303,6 +309,51 @@ fn request_round_trips_sandbox_requirement_and_rejects_old_layout() -> TestResul
 }
 
 #[test]
+fn sandbox_authority_fields_change_independent_capability_identity() -> TestResult {
+    let mut request = valid_request()?;
+    request.sandbox_requirement = Some(SandboxRequirement {
+        lps1_digest: [31; 32],
+        sim1_digest: [32; 32],
+        required_provider_capability: RequiredProviderCapability {
+            capability_id: "managed-attempt-exec".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        apt1_digest: [33; 32],
+        policy_epoch: 7,
+    });
+    let expected = request.expected_output_capability_digest()?;
+    for mutation in 0..6 {
+        let mut changed = request.clone();
+        let requirement = changed
+            .sandbox_requirement
+            .as_mut()
+            .ok_or("sandbox requirement must exist")?;
+        match mutation {
+            0 => requirement.lps1_digest = [41; 32],
+            1 => requirement.sim1_digest = [42; 32],
+            2 => requirement
+                .required_provider_capability
+                .capability_id
+                .push('2'),
+            3 => requirement.required_provider_capability.capability_version += 1,
+            4 => requirement.required_provider_capability.minimum_strength += 1,
+            5 => requirement.apt1_digest = [43; 32],
+            _ => return Err(format!("unsupported sandbox authority mutation {mutation}").into()),
+        }
+        assert_ne!(changed.expected_output_capability_digest()?, expected);
+    }
+    let mut changed_epoch = request;
+    changed_epoch
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .policy_epoch += 1;
+    assert_ne!(changed_epoch.expected_output_capability_digest()?, expected);
+    Ok(())
+}
+
+#[test]
 fn request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
     let mut request = valid_request()?;
     request.sandbox_requirement = Some(SandboxRequirement {
@@ -316,6 +367,7 @@ fn request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
         apt1_digest: [33; 32],
         policy_epoch: 7,
     });
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
     let valid = decoded_value(&request.to_canonical_cbor()?)?;
     let valid_requirement = match &valid {
