@@ -42,7 +42,7 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureContainmentGateV1,
     ErasureCoordinator, ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
-    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureInventoryCategoryV1,
+    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureGate, ErasureInventoryCategoryV1,
     ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
     ErasureRecoveryErrorQueryV1, ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1,
@@ -368,12 +368,12 @@ fn assert_recovery_query_trait(
 fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), ErasureErrorV1> {
     let target = target(10);
     let lineage_rule = reference(170);
-    let port = port(vec![target], Some(lineage_rule));
-    let observer = port.clone();
+    let coordinator_port = port(vec![target], Some(lineage_rule));
+    let observer = coordinator_port.clone();
     let request = request()?;
     let extension_record;
     {
-        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(coordinator_port, COORDINATOR);
         coordinator.submit(request.clone(), request.provenance())?;
         coordinator.authorize(request.reference(), reference(21))?;
         coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
@@ -424,7 +424,8 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
 
     let pre_freeze_gate = ErasureContainmentGateV1::new_fail_closed();
     pre_freeze_gate
-        .install_from_verified_query_with_topology(&mut pre_freeze, request.reference())?;
+        .install_from_verified_query_with_topology(&mut pre_freeze, request.reference())
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(
         pre_freeze_gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::Read),
         Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
@@ -432,7 +433,9 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
 
     let frozen_gate = ErasureContainmentGateV1::new_fail_closed();
     let frozen_timeline = TimelineId::new();
-    frozen_gate.install_verified_state(&verified, &[(frozen_timeline, reference(7))])?;
+    frozen_gate
+        .install_verified_state(&verified, &[(frozen_timeline, reference(7))])
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(
         frozen_gate.authorize(frozen_timeline, ErasureProtectedOperationV1::Read),
         Err(pos_core::ErasureContainmentErrorV1::AccessFrozen)
