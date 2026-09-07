@@ -17,7 +17,9 @@ trap cleanup EXIT
 
 rm -rf "$evidence_dir" "$work_dir"
 mkdir -p "$evidence_dir" "$work_dir/definitions" "$work_dir/tree/.pigloros" \
-  "$work_dir/tree/usr/bin" "$work_dir/tree/usr/lib"
+  "$work_dir/tree/dev" "$work_dir/tree/proc" "$work_dir/tree/run" \
+  "$work_dir/tree/sys" "$work_dir/tree/tmp" "$work_dir/tree/usr/bin" \
+  "$work_dir/tree/usr/lib"
 
 losetup --list --noheadings --output NAME,BACK-FILE | sort \
   >"$work_dir/loops-before.txt"
