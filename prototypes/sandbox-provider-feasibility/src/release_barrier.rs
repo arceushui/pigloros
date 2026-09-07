@@ -23,7 +23,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{IoSliceMut, Read as _, Seek as _, SeekFrom, Write as _},
     os::{
-        fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd},
+        fd::{AsRawFd as _, OwnedFd, RawFd},
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     },
     path::{Component, Path, PathBuf},
@@ -627,7 +627,7 @@ fn transient_properties(
         false,
         0_u64,
     )];
-    let syscalls = flattened_system_service_syscalls()?;
+    let syscalls = flattened_release_syscalls()?;
     Ok(vec![
         property("Description", "PiglorOS ADR-069 release barrier proof")?,
         property("Type", "exec")?,
@@ -881,26 +881,33 @@ fn run_launcher(arguments: &[String]) -> Result<(), String> {
     let encoded =
         hex::decode(required_argument(arguments, "--launch-parameters")?).map_err(display_error)?;
     let parameters = decode_launch_parameters(&encoded)?;
-    let named_descriptors = if mode == ExecutionMode::Local {
-        vec![(3, PROXY_NAME), (4, RELEASE_NAME)]
+    let expected_descriptors = if mode == ExecutionMode::Local {
+        vec![
+            (3, PROXY_NAME, SockType::Stream),
+            (4, RELEASE_NAME, SockType::SeqPacket),
+        ]
     } else {
-        vec![(3, RELEASE_NAME)]
+        vec![(3, RELEASE_NAME, SockType::SeqPacket)]
     };
-    let typed_descriptors = if mode == ExecutionMode::Local {
-        vec![(3, SockType::Stream), (4, SockType::SeqPacket)]
-    } else {
-        vec![(3, SockType::SeqPacket)]
-    };
-    validate_systemd_descriptor_environment(&named_descriptors)?;
-    let observed = observed_layout(mode.ordinal(), &typed_descriptors)?;
+    let (observed, descriptors) = take_systemd_descriptors(mode.ordinal(), &expected_descriptors)?;
     if fd_layout_digest(&observed)? != parameters.expected_fd_layout_digest {
         return Err("observed descriptor layout does not match LPV1".to_owned());
     }
 
+    let mut descriptors = descriptors.into_iter();
     let (proxy, release) = if mode == ExecutionMode::Local {
-        (Some(take_inherited_fd(3)?), take_inherited_fd(4)?)
+        let proxy = descriptors
+            .next()
+            .ok_or_else(|| "Local proxy descriptor is absent".to_owned())?;
+        let release = descriptors
+            .next()
+            .ok_or_else(|| "Local release descriptor is absent".to_owned())?;
+        (Some(proxy), release)
     } else {
-        (None, take_inherited_fd(3)?)
+        let release = descriptors
+            .next()
+            .ok_or_else(|| "release descriptor is absent".to_owned())?;
+        (None, release)
     };
     let provider_credentials =
         getsockopt(&release, sockopt::PeerCredentials).map_err(display_error)?;
@@ -974,9 +981,7 @@ fn run_adapter(arguments: &[String]) -> Result<(), String> {
         return Err("adapter environment was not empty".to_owned());
     }
     let descriptors = open_non_stdio_descriptors()?;
-    if mode == ExecutionMode::Local
-        && (descriptors != vec![3] || socket_type(3)? != SockType::Stream)
-    {
+    if mode == ExecutionMode::Local && descriptors != vec![3] {
         return Err(format!(
             "adapter descriptor set is not exactly FD 3: {descriptors:?}"
         ));
@@ -1090,39 +1095,52 @@ fn ensure_native_elf(header: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_systemd_descriptor_environment(expected: &[(RawFd, &str)]) -> Result<(), String> {
-    let listen_pid = std::env::var("LISTEN_PID")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok());
-    let listen_fds = std::env::var("LISTEN_FDS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok());
-    if listen_pid != Some(std::process::id()) || listen_fds != Some(expected.len()) {
+fn take_systemd_descriptors(
+    mode: u8,
+    expected: &[(RawFd, &str, SockType)],
+) -> Result<(FdLayout, Vec<OwnedFd>), String> {
+    let received = sd_listen_fds::get();
+    for variable in ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"] {
+        std::env::remove_var(variable);
+    }
+    let received = received.map_err(display_error)?;
+    if received.len() != expected.len() {
         return Err("systemd descriptor count or PID mismatch".to_owned());
     }
-    let names = std::env::var("LISTEN_FDNAMES").map_err(display_error)?;
-    if names.split(':').ne(expected.iter().map(|(_, name)| *name)) {
-        return Err("systemd descriptor names or order mismatch".to_owned());
+
+    let open = open_non_stdio_descriptors()?;
+    if open != expected.iter().map(|(fd, _, _)| *fd).collect::<Vec<_>>() {
+        return Err(format!("unexpected inherited descriptors: {open:?}"));
     }
-    Ok(())
+    validate_taken_descriptors(mode, received, expected)
 }
 
-fn observed_layout(mode: u8, expected: &[(RawFd, SockType)]) -> Result<FdLayout, String> {
-    let descriptors = open_non_stdio_descriptors()?;
-    if descriptors != expected.iter().map(|(fd, _)| *fd).collect::<Vec<_>>() {
-        return Err(format!("unexpected inherited descriptors: {descriptors:?}"));
-    }
+fn validate_taken_descriptors(
+    mode: u8,
+    descriptors: Vec<(Option<String>, sd_listen_fds::OwnedFd)>,
+    expected: &[(RawFd, &str, SockType)],
+) -> Result<(FdLayout, Vec<OwnedFd>), String> {
     let mut entries = Vec::new();
-    for &(descriptor, expected_type) in expected {
-        if socket_type(descriptor)? != expected_type {
-            return Err(format!("descriptor {descriptor} has the wrong socket type"));
+    let mut owned = Vec::new();
+    for ((name, descriptor), &(expected_fd, expected_name, expected_type)) in
+        descriptors.into_iter().zip(expected)
+    {
+        let descriptor = descriptor.into_std();
+        if descriptor.as_raw_fd() != expected_fd || name.as_deref() != Some(expected_name) {
+            return Err("systemd descriptor names, order, or numbers mismatch".to_owned());
+        }
+        if socket_type(&descriptor)? != expected_type {
+            return Err(format!(
+                "descriptor {expected_fd} has the wrong socket type"
+            ));
         }
         entries.push((
-            u64::try_from(descriptor).map_err(display_error)?,
+            u64::try_from(expected_fd).map_err(display_error)?,
             u8::from(expected_type != SockType::Stream),
         ));
+        owned.push(descriptor);
     }
-    Ok(FdLayout { mode, entries })
+    Ok((FdLayout { mode, entries }, owned))
 }
 
 fn open_non_stdio_descriptors() -> Result<Vec<RawFd>, String> {
@@ -1136,31 +1154,12 @@ fn open_non_stdio_descriptors() -> Result<Vec<RawFd>, String> {
     Ok((3..upper).filter(|&fd| descriptor_is_open(fd)).collect())
 }
 
-#[allow(unsafe_code)]
 fn descriptor_is_open(descriptor: RawFd) -> bool {
-    // SAFETY: the borrow lives only for this fcntl call. An arbitrary numeric
-    // descriptor is permitted; EBADF is precisely how the complete scan marks
-    // a closed slot.
-    let borrowed = unsafe { BorrowedFd::borrow_raw(descriptor) };
-    fcntl(borrowed, FcntlArg::F_GETFD).is_ok()
+    std::fs::read_link(format!("/proc/self/fd/{descriptor}")).is_ok()
 }
 
-#[allow(unsafe_code)]
-fn take_inherited_fd(descriptor: RawFd) -> Result<OwnedFd, String> {
-    if !descriptor_is_open(descriptor) {
-        return Err(format!("inherited descriptor {descriptor} is closed"));
-    }
-    // SAFETY: descriptor topology was exhaustively validated and this function
-    // is called exactly once for each inherited descriptor, transferring its
-    // ownership to the returned OwnedFd.
-    Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
-}
-
-#[allow(unsafe_code)]
-fn socket_type(descriptor: RawFd) -> Result<SockType, String> {
-    // SAFETY: this non-owning borrow is bounded to getsockopt.
-    let borrowed = unsafe { BorrowedFd::borrow_raw(descriptor) };
-    getsockopt(&borrowed, sockopt::SockType).map_err(display_error)
+fn socket_type(descriptor: &OwnedFd) -> Result<SockType, String> {
+    getsockopt(descriptor, sockopt::SockType).map_err(display_error)
 }
 
 fn set_close_on_exec(descriptor: &OwnedFd, close: bool) -> Result<(), String> {
@@ -1760,28 +1759,32 @@ fn wait_for_terminal_status(unit: &str) -> Result<i32, String> {
     Err("transient unit did not terminate".to_owned())
 }
 
-fn flattened_system_service_syscalls() -> Result<Vec<String>, String> {
-    let output = Command::new("systemd-analyze")
-        .args(["syscall-filter", "@system-service"])
-        .output()
-        .map_err(display_error)?;
-    if !output.status.success() {
-        return Err("failed to flatten @system-service".to_owned());
+fn flattened_release_syscalls() -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for group in ["@system-service", "@network-io"] {
+        let output = Command::new("systemd-analyze")
+            .args(["syscall-filter", group])
+            .output()
+            .map_err(display_error)?;
+        if !output.status.success() {
+            return Err(format!("failed to flatten {group}"));
+        }
+        names.extend(
+            String::from_utf8(output.stdout)
+                .map_err(display_error)?
+                .lines()
+                .map(str::trim)
+                .filter(|line| {
+                    !line.is_empty()
+                        && !line.starts_with('#')
+                        && !line.starts_with('@')
+                        && line
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                })
+                .map(str::to_owned),
+        );
     }
-    let mut names = String::from_utf8(output.stdout)
-        .map_err(display_error)?
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !line.starts_with('#')
-                && !line.starts_with('@')
-                && line
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        })
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
     if names.is_empty() {

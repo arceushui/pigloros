@@ -27,6 +27,7 @@ nix = { version = "=0.31.3", default-features = false, features = [
   "uio",
 ] }
 rtnetlink = "=0.23.0"
+sd-listen-fds = "=0.2.0"
 tokio = { version = "=1.53.1", features = [
   "macros",
   "rt-multi-thread",

@@ -18,7 +18,6 @@ reconcile_provider_mounts() {
 }
 
 cleanup() {
-  systemd-analyze log-level info >/dev/null 2>&1 || true
   systemctl stop "$unit_name" >/dev/null 2>&1 || true
   systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
   reconcile_provider_mounts
@@ -164,7 +163,6 @@ systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
 # StartTransientUnit call, observes ReadyV1 while the adapter is blocked, then
 # releases the held native ELF. The adapter proves that only its Local proxy
 # survives as FD 3.
-systemd-analyze log-level debug
 "$static_prototype" --release-barrier-proof \
   "--root-image=$image_path" \
   "--root-hash-file=$work_dir/sim1.roothash" \
