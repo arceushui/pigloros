@@ -67,6 +67,8 @@ pub const FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD: usize = 3;
 pub const OBLIGATION_SET_POLICY_FIELD: usize = 4;
 pub const OBLIGATION_SET_TRUST_FIELD: usize = 5;
 
+type VerifiedTopologyObservation = (Vec<(TimelineId, ErasureReferenceV1)>, Vec<TimelineId>);
+
 /// Configuration for the host side of the public coordinator fixture.
 #[derive(Clone)]
 pub struct PublicCoordinatorPortConfig {
@@ -292,8 +294,7 @@ pub struct PublicCoordinatorPort {
     dispatch_calls: Rc<RefCell<u64>>,
     operation_fault_hits: Rc<Cell<u64>>,
     allow_overbound_recovery_errors: bool,
-    topology_observation:
-        Rc<RefCell<Option<(Vec<(TimelineId, ErasureReferenceV1)>, Vec<TimelineId>)>>>,
+    topology_observation: Rc<RefCell<Option<VerifiedTopologyObservation>>>,
     topology_manifest_override: Rc<RefCell<Option<ErasureReferenceV1>>>,
     config: PublicCoordinatorPortConfig,
 }
