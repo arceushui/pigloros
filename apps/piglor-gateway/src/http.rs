@@ -1290,6 +1290,15 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(missing["error"], "authorization unavailable");
 
+        let request = Request::builder()
+            .method("GET")
+            .uri("/v1/timelines/not-a-timeline/events?limit=1")
+            .header("x-piglor-actor-entity", actor.to_string())
+            .body(Body::empty())
+            .test_ok();
+        let response = app.clone().oneshot(request).await.test_ok();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
         let wrong = EntityId::new().to_string();
         let request = Request::builder()
             .method("GET")

@@ -3006,6 +3006,19 @@ mod tests {
                 .await,
             Err(GatewayError::InvalidId(_))
         ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    timeline_id,
+                    &EntityId::new().to_string(),
+                    EVENT_TYPE_ACTION,
+                    payload,
+                    "world.action.submit",
+                    "boundary-denied-actor",
+                )
+                .await,
+            Err(GatewayError::AuthorizationDenied)
+        ));
         let malformed_payload = serde_json::json!({"malformed": true});
         assert!(matches!(
             gateway
@@ -3016,6 +3029,20 @@ mod tests {
                     &malformed_payload,
                     "world.action.submit",
                     "boundary-malformed-payload",
+                )
+                .await,
+            Err(GatewayError::ActionRejected(_))
+        ));
+        let oversized_payload = serde_json::json!({"data": "x".repeat(5000)});
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    timeline_id,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &oversized_payload,
+                    "world.action.submit",
+                    "boundary-oversized-payload",
                 )
                 .await,
             Err(GatewayError::ActionRejected(_))
@@ -3073,6 +3100,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authority_bound_gateway_maps_action_append_failures() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            Box::new(ScriptedStore {
+                mode: ScriptMode::FailAppend,
+            }),
+            [body],
+            crate::authorization::test_authorization_for(actor),
+        );
+        let timeline_id = TimelineId::new().to_string();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+        assert!(matches!(
+            gateway
+                .submit_json_action(
+                    &timeline_id,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "world.action.submit",
+                )
+                .await,
+            Err(GatewayError::Store(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    &timeline_id,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "world.action.submit",
+                    "append-failure",
+                )
+                .await,
+            Err(GatewayError::Store(_))
+        ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
     async fn authority_bound_gateway_protects_reads_without_enumerating_missing_actor() {
         let actor = EntityId::new();
         let authorization = crate::authorization::test_authorization_for(actor);
@@ -3098,6 +3175,16 @@ mod tests {
             .await
             .test_err();
         assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        let invalid_timeline = gateway
+            .read_events_page_authorized(
+                "not-a-timeline",
+                0,
+                1,
+                GatewayAuthorizationRequest::read(actor, timeline.id(), 0, 1, WallTime::now()),
+            )
+            .await
+            .test_err();
+        assert!(matches!(invalid_timeline, GatewayError::InvalidId(_)));
         for (from_position, limit) in [(1, 1), (0, 2)] {
             let mismatched_range = gateway
                 .read_events_page_authorized(
