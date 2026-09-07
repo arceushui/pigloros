@@ -196,19 +196,30 @@ async fn list_events(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let q = parse_events_query(raw_query.as_deref())?;
+    let q = match parse_events_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(error) => return Err(error),
+    };
     let page = if state.gateway.has_authorization() {
-        read_authorized_events(&state.gateway, &id, &q, &headers).await?
+        match read_authorized_events(&state.gateway, &id, &q, &headers).await {
+            Ok(page) => page,
+            Err(error) => return Err(error),
+        }
     } else {
-        state
+        match state
             .gateway
             .read_events_page(&id, q.from_seq, q.limit)
-            .await?
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => return Err(error),
+        }
     };
-    Ok(Json(bounded_events_response(
-        page,
-        MAX_EVENTS_RESPONSE_BYTES,
-    )?))
+    let response = match bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES) {
+        Ok(response) => response,
+        Err(error) => return Err(error),
+    };
+    Ok(Json(response))
 }
 
 async fn read_authorized_events(
@@ -217,12 +228,18 @@ async fn read_authorized_events(
     query: &EventsQuery,
     headers: &HeaderMap,
 ) -> Result<EventPage, GatewayError> {
-    let actor = headers
+    let actor = match headers
         .get("x-piglor-actor-entity")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| crate::parse_entity_id(value).ok())
-        .ok_or(GatewayError::AuthorizationUnavailable)?;
-    let target_timeline = crate::parse_timeline_id(timeline_id)?;
+    {
+        Some(actor) => actor,
+        None => return Err(GatewayError::AuthorizationUnavailable),
+    };
+    let target_timeline = match crate::parse_timeline_id(timeline_id) {
+        Ok(timeline) => timeline,
+        Err(error) => return Err(error),
+    };
     gateway
         .read_events_page_authorized(
             timeline_id,
