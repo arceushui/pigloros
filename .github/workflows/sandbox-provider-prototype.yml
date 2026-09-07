@@ -134,6 +134,7 @@ jobs:
           cargo fmt --check
           cargo check --locked
           cargo clippy --locked -- -D warnings
+          cargo test --locked
           cargo deny --locked check 2>&1 | tee cargo-deny.txt
 
       - name: Verify effective MSRV

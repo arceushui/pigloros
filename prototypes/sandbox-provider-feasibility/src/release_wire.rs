@@ -450,6 +450,50 @@ mod tests {
     }
 
     #[test]
+    fn fd_layout_requires_ordered_unique_descriptors_and_closed_roles() {
+        let valid = FdLayout {
+            mode: 0,
+            entries: vec![(3, 0), (4, 1)],
+        };
+        assert!(encode_fd_layout(&valid).is_ok());
+        assert!(encode_fd_layout(&FdLayout {
+            mode: 0,
+            entries: vec![(4, 1), (3, 0)],
+        })
+        .is_err());
+        assert!(encode_fd_layout(&FdLayout {
+            mode: 0,
+            entries: vec![(3, 2)],
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn canonical_ready_round_trip() {
+        let ready = Ready {
+            attempt_id: [1; 16],
+            nonce: [2; 32],
+            invocation_id: [3; 16],
+            launcher_digest: [4; 32],
+            launcher_identity: FdIdentity {
+                mount_id: 5,
+                inode: 6,
+            },
+            sim1_digest: [7; 32],
+            adapter_digest: [8; 32],
+            adapter_identity: FdIdentity {
+                mount_id: 9,
+                inode: 10,
+            },
+            launch_parameter_digest: [11; 32],
+            expected_fd_layout_digest: [12; 32],
+            observed_fd_layout_digest: [12; 32],
+        };
+        let encoded = encode_ready(&ready).expect("encode ReadyV1");
+        assert_eq!(decode_ready(&encoded), Ok(ready));
+    }
+
+    #[test]
     fn signed_release_round_trip() {
         let signing_key = proof_signing_key();
         let release = Release {
@@ -473,6 +517,12 @@ mod tests {
         assert_eq!(
             verify_release_signature(digest, signature, &signing_key.verifying_key()),
             Ok(())
+        );
+        let mut changed_signature = signature;
+        changed_signature[0] ^= 1;
+        assert!(
+            verify_release_signature(digest, changed_signature, &signing_key.verifying_key())
+                .is_err()
         );
     }
 }

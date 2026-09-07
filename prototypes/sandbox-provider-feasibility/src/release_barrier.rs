@@ -3,7 +3,7 @@
 use crate::release_wire::{
     decode_launch_parameters, decode_release, encode_launch_parameters, encode_ready,
     fd_layout_digest, launch_parameter_digest, proof_digest, proof_signing_key, ready_digest,
-    FdIdentity, FdLayout, LaunchParameters, Ready, Release,
+    verify_release_signature, FdIdentity, FdLayout, LaunchParameters, Ready, Release,
 };
 use nix::{
     fcntl::{fcntl, AtFlags, FcntlArg, FdFlag},
@@ -23,7 +23,7 @@ use std::{
     io::{IoSliceMut, Read as _, Seek as _, SeekFrom},
     os::{
         fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd},
-        unix::fs::OpenOptionsExt as _,
+        unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     },
     path::{Component, Path},
     process::Command,
@@ -286,6 +286,12 @@ async fn complete_release(
         runtime_key_id: "adr069-proof-runtime-key".to_owned(),
     };
     let release_bytes = crate::release_wire::encode_release(&release, &proof_signing_key())?;
+    let (_, release_digest, release_signature) = decode_release(&release_bytes)?;
+    verify_release_signature(
+        release_digest,
+        release_signature,
+        &proof_signing_key().verifying_key(),
+    )?;
     send_packet(release_socket.as_raw_fd(), &release_bytes)?;
 
     let mut marker = [0_u8; 64];
@@ -337,7 +343,7 @@ fn run_launcher(arguments: &[String]) -> Result<(), String> {
     }
     drop(release);
     set_close_on_exec(&proxy, false)?;
-    exec_adapter(adapter, &parameters.adapter_arguments)
+    exec_adapter(&adapter, &parameters.adapter_arguments)
 }
 
 fn run_adapter() -> Result<(), String> {
@@ -480,11 +486,7 @@ fn observed_layout(mode: u8, expected: &[(RawFd, SockType)]) -> Result<FdLayout,
         }
         entries.push((
             u64::try_from(descriptor).map_err(display_error)?,
-            if expected_type == SockType::Stream {
-                0
-            } else {
-                1
-            },
+            u8::from(expected_type != SockType::Stream),
         ));
     }
     Ok(FdLayout { mode, entries })
@@ -539,7 +541,7 @@ fn set_close_on_exec(descriptor: &OwnedFd, close: bool) -> Result<(), String> {
         .map_err(display_error)
 }
 
-fn exec_adapter(adapter: File, arguments: &[String]) -> Result<(), String> {
+fn exec_adapter(adapter: &File, arguments: &[String]) -> Result<(), String> {
     let arguments = arguments
         .iter()
         .map(|value| CString::new(value.as_bytes()).map_err(display_error))
@@ -547,7 +549,7 @@ fn exec_adapter(adapter: File, arguments: &[String]) -> Result<(), String> {
     let empty_path = CString::new("").map_err(display_error)?;
     let empty_environment: Vec<CString> = Vec::new();
     execveat(
-        &adapter,
+        adapter,
         &empty_path,
         &arguments,
         &empty_environment,
@@ -559,26 +561,27 @@ fn exec_adapter(adapter: File, arguments: &[String]) -> Result<(), String> {
 
 fn receive_ready(socket: &OwnedFd) -> Result<(Vec<u8>, u32), String> {
     let mut bytes = vec![0_u8; MAX_PACKET];
-    let mut iov = [IoSliceMut::new(&mut bytes)];
     let mut control = nix::cmsg_space!(nix::sys::socket::UnixCredentials);
-    let message = recvmsg::<()>(
-        socket.as_raw_fd(),
-        &mut iov,
-        Some(&mut control),
-        MsgFlags::empty(),
-    )
-    .map_err(display_error)?;
-    if message.flags.contains(MsgFlags::MSG_TRUNC) || message.bytes == 0 {
-        return Err("ReadyV1 packet is empty or truncated".to_owned());
-    }
-    let mut credential_pid = None;
-    for control_message in message.cmsgs().map_err(display_error)? {
-        if let ControlMessageOwned::ScmCredentials(credentials) = control_message {
-            credential_pid = u32::try_from(credentials.pid()).ok();
+    let (count, credential_pid) = {
+        let mut iov = [IoSliceMut::new(&mut bytes)];
+        let message = recvmsg::<()>(
+            socket.as_raw_fd(),
+            &mut iov,
+            Some(&mut control),
+            MsgFlags::empty(),
+        )
+        .map_err(display_error)?;
+        if message.flags.contains(MsgFlags::MSG_TRUNC) || message.bytes == 0 {
+            return Err("ReadyV1 packet is empty or truncated".to_owned());
         }
-    }
-    let count = message.bytes;
-    drop(message);
+        let mut credential_pid = None;
+        for control_message in message.cmsgs().map_err(display_error)? {
+            if let ControlMessageOwned::ScmCredentials(credentials) = control_message {
+                credential_pid = u32::try_from(credentials.pid()).ok();
+            }
+        }
+        (message.bytes, credential_pid)
+    };
     bytes.truncate(count);
     Ok((
         bytes,
@@ -711,8 +714,6 @@ fn validate_namespaces(main_pid: u32) -> Result<(), String> {
 }
 
 fn validate_ready_executables(main_pid: u32, ready: &Ready) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt as _;
-
     let expected_digest = digest_file(&std::env::current_exe().map_err(display_error)?)?;
     let process_executable = Path::new("/proc").join(main_pid.to_string()).join("exe");
     let observed_digest = digest_file(&process_executable)?;
