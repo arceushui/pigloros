@@ -1059,7 +1059,7 @@ fn containment_gate_covers_public_error_codes_and_safe_scope_paths() -> Result<(
         ErasureContainmentErrorV1::RecoveryUnavailable.to_string(),
         "erasure containment error 1"
     );
-    let _: ErasureContainmentGateV1 = Default::default();
+    let _: ErasureContainmentGateV1 = ErasureContainmentGateV1::default();
 
     let gate = ErasureContainmentGateV1::new();
     let timeline = TimelineId::new();
