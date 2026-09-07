@@ -81,6 +81,10 @@ cargo llvm-cov --workspace --all-features --locked --summary-only \
   --fail-under-regions 99 \
   -- --include-ignored
 if command -v covgate >/dev/null 2>&1; then
+  if [[ "$(covgate --version)" != "covgate 0.2.0" ]]; then
+    echo "ERROR: covgate 0.2.0 is required for the new-code coverage gate" >&2
+    exit 1
+  fi
   coverage_json="$(mktemp)"
   cargo llvm-cov report --json --output-path "$coverage_json"
   covgate check "$coverage_json" \

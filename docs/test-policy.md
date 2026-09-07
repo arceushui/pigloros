@@ -18,7 +18,7 @@ Shared reference for humans and agents.
 | Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
-| Coverage | `cargo llvm-cov` with `--include-ignored` + `covgate` | At least 99% lines + 99% regions for the whole workspace and added Rust code |
+| Coverage | `cargo llvm-cov` with `--include-ignored` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
 | Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 for Rust-affecting changes |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
