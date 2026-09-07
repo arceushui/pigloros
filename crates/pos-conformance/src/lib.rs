@@ -7051,7 +7051,8 @@ pub mod tests {
         let left = evidence();
         let mut right = left.clone();
         assert_eq!(compare(&left, &right)?.divergence, DivergenceClassV1::None);
-        right.authoritative_events[0].payload_digest = [2; 32];
+        right.authoritative_events[2].payload_digest = [8; 32];
+        right.host_closure.closure_payload_digest = [8; 32];
         let comparison = compare(&left, &right)?;
         assert!(!comparison.equal);
         assert_eq!(
@@ -7103,7 +7104,7 @@ pub mod tests {
             DivergenceClassV1::Projections
         );
         right = left;
-        right.causal_trace[0].effect_seq += 1;
+        right.causal_trace[0].relation = "derived".to_owned();
         assert_eq!(
             compare(&evidence(), &right)?.divergence,
             DivergenceClassV1::CausalTrace
@@ -7121,7 +7122,28 @@ pub mod tests {
             DivergenceClassV1::Observability
         );
         right = left.clone();
-        right.participant_views[0].hidden_event_types.clear();
+        right.participant_views[0]
+            .visible_event_types
+            .push("proof.agent.reaction.v1".to_owned());
+        right.participant_views[0]
+            .hidden_event_types
+            .retain(|event_type| event_type != "proof.agent.reaction.v1");
+        right.participant_views[0]
+            .visible_events
+            .push(ParticipantEventV1 {
+                seq: 2,
+                event_type: "proof.agent.reaction.v1".to_owned(),
+                payload_digest: [2; 32],
+            });
+        right.contract.knowledge_snapshots[0]
+            .visible_event_seqs
+            .push(2);
+        right.contract.knowledge_snapshots[0]
+            .visible_event_digests
+            .push([2; 32]);
+        right.contract.knowledge_snapshots[0]
+            .hidden_event_types
+            .clear();
         assert_eq!(
             compare(&left, &right)?.divergence,
             DivergenceClassV1::Observability
@@ -7913,6 +7935,15 @@ pub mod tests {
                 ),
             ];
             counterfactual.recomputed_event_seqs = vec![society_event.seq];
+            with_intervention
+                .contract
+                .counterfactual
+                .refresh_digest()
+                .unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!(
+                        "counterfactual fixture digest failed: {error}"
+                    )))
+                });
             assert_eq!(verify_wave8_contract(&with_intervention), Ok(()));
             assert_eq!(
                 verify_counterfactual_fork(&fork_baseline, &with_intervention, "world.action.v1"),
