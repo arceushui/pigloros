@@ -1,4 +1,4 @@
-//! Hosted-only release-barrier proof for ADR-069 revision 19.
+//! Hosted-only release-barrier proof for ADR-069.
 
 use crate::release_wire::{
     decode_launch_parameters, decode_release, encode_launch_parameters, encode_ready,
@@ -566,19 +566,33 @@ fn mount_verified_image(
         "read provider image mount",
     )?;
     let mount_fields = mount_readback.split_whitespace().collect::<Vec<_>>();
-    if mount_fields.len() != 4
-        || !mount_fields[0].starts_with("/dev/mapper/")
-        || !mount_fields[2].split(',').any(|option| option == "ro")
-    {
-        return Err("provider image mount source or flags mismatch".to_owned());
+    if mount_fields.len() != 4 || !mount_fields[2].split(',').any(|option| option == "ro") {
+        return Err(format!(
+            "provider image mount source or flags mismatch: {mount_readback}"
+        ));
     }
     let root_device = mount_fields[0].to_owned();
     let root_major_minor = mount_fields[3].to_owned();
-    let mapper_name = root_device
-        .strip_prefix("/dev/mapper/")
-        .ok_or_else(|| "provider root is not a device-mapper source".to_owned())?;
+    let mapper_name = if let Some(name) = root_device.strip_prefix("/dev/mapper/") {
+        name.to_owned()
+    } else if root_device.starts_with("/dev/dm-") {
+        command_output(
+            Command::new("dmsetup").args([
+                "info",
+                "--noheadings",
+                "--columns",
+                "--output=name",
+                root_device.as_str(),
+            ]),
+            "resolve mounted device-mapper name",
+        )?
+    } else {
+        return Err(format!(
+            "provider root is not a device-mapper source: {root_device}"
+        ));
+    };
     let mapper_table = command_output(
-        Command::new("dmsetup").args(["table", "--showkeys", mapper_name]),
+        Command::new("dmsetup").args(["table", "--showkeys", mapper_name.as_str()]),
         "read exact dm-verity mapping",
     )?;
     let table_fields = mapper_table.split_whitespace().collect::<Vec<_>>();
