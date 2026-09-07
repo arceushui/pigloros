@@ -97,7 +97,6 @@ const fn observation(result: SubjectResult) -> SubjectObservation {
     SubjectObservation {
         result,
         usage: usage(),
-        sandbox_receipt_digest: None,
     }
 }
 

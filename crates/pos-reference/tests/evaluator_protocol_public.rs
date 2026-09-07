@@ -80,30 +80,6 @@ struct PassingAdapter {
     output: Vec<u8>,
 }
 
-struct ReceiptAdapter {
-    subject_digest: [u8; 32],
-    output: Vec<u8>,
-    receipt_digest: [u8; 32],
-}
-
-impl SubjectAdapter for ReceiptAdapter {
-    fn kind(&self) -> SubjectAdapterKind {
-        SubjectAdapterKind::ExportedArtifact
-    }
-
-    fn subject_artifact_digest(&self) -> [u8; 32] {
-        self.subject_digest
-    }
-
-    fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
-        Ok(SubjectObservation {
-            result: SubjectResult::Output(self.output.clone()),
-            usage: ResourceUsage::default(),
-            sandbox_receipt_digest: Some(self.receipt_digest),
-        })
-    }
-}
-
 impl SubjectAdapter for PassingAdapter {
     fn kind(&self) -> SubjectAdapterKind {
         SubjectAdapterKind::ExportedArtifact
@@ -117,7 +93,6 @@ impl SubjectAdapter for PassingAdapter {
         Ok(SubjectObservation {
             result: SubjectResult::Output(self.output.clone()),
             usage: ResourceUsage::default(),
-            sandbox_receipt_digest: None,
         })
     }
 }
@@ -145,41 +120,6 @@ fn valid_report() -> TestResult<ConformanceReport> {
         &mut adapter,
     )?
     .report)
-}
-
-#[test]
-fn sandboxed_case_provenance_is_the_validated_receipt_digest() -> TestResult {
-    let corpus = support::corpus()?;
-    let receipt_digest = [91; 32];
-    let mut adapter = ReceiptAdapter {
-        subject_digest: corpus.subject_digest,
-        output: corpus.expected_output,
-        receipt_digest,
-    };
-    let report = evaluate(
-        &corpus.request,
-        &corpus.archive,
-        &corpus.trust_policy,
-        &evaluator_identity()?,
-        &mut adapter,
-    )?
-    .report;
-    assert!(report
-        .cases
-        .iter()
-        .all(|case| case.provenance_digest == receipt_digest));
-    adapter.receipt_digest = [0; 32];
-    assert_eq!(
-        evaluate(
-            &corpus.request,
-            &corpus.archive,
-            &corpus.trust_policy,
-            &evaluator_identity()?,
-            &mut adapter,
-        ),
-        Err(EvaluatorError::SandboxReceipt)
-    );
-    Ok(())
 }
 
 fn reseal(report: &mut ConformanceReport) -> TestResult {
