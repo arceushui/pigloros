@@ -830,9 +830,17 @@ fn exercise_scalar_boundaries<T, E>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
     let mut evidence = public_evidence_fixture();
+    configure_intervention_events(&mut evidence);
+    configure_failed_atomicity(&mut evidence);
+    configure_counterfactual_intervention(&mut evidence);
+    evidence
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn configure_intervention_events(evidence: &mut MoatProofEvidenceV1) {
     evidence.manifest.fork_cut_seq = Some(1);
     evidence.authoritative_events[1].tick = 2;
-    evidence.authoritative_events[1].event_type = "world.action.v1".to_owned();
+    "world.action.v1".clone_into(&mut evidence.authoritative_events[1].event_type);
     evidence.authoritative_events[1].payload_digest = [24; 32];
     let mut closure = evidence.authoritative_events.pop().unwrap_or_else(|| {
         std::panic::resume_unwind(Box::new("closure Event fixture is absent"))
@@ -848,7 +856,7 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
     closure.seq = 4;
     closure.tick = 3;
     evidence.authoritative_events.push(closure);
-    evidence.causal_trace[0].relation = "intervention_to_physics".to_owned();
+    "intervention_to_physics".clone_into(&mut evidence.causal_trace[0].relation);
     evidence.causal_trace.push(CausalTraceEntryV1 {
         cause_seq: 2,
         effect_seq: 3,
@@ -856,7 +864,7 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
         visibility: "public".to_owned(),
         dependency_class: DependencyClassV1::EndogenousRecomputed,
     });
-    evidence.participant_views[0].hidden_event_types[1] = "world.action.v1".to_owned();
+    "world.action.v1".clone_into(&mut evidence.participant_views[0].hidden_event_types[1]);
     evidence.participant_views[0]
         .hidden_event_types
         .push("society.signal".to_owned());
@@ -864,6 +872,10 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
         vec!["world.action.v1".to_owned(), "society.signal".to_owned()];
     evidence.host_closure.effective_after_seq = 4;
     evidence.host_closure.closure_event_seq = 4;
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn configure_failed_atomicity(evidence: &mut MoatProofEvidenceV1) {
     evidence.plugin_failures = vec![
         PluginFailureV1 {
             plugin: "crashing-plugin".to_owned(),
@@ -910,22 +922,30 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
             failure_class: Some(PluginFailureClassV1::ResourceExhaustion),
         },
     ];
-    let action_node = DependencyNodeV1 {
-        tick: 2,
-        scheduler_position: 0,
-        owner_id: "agent".to_owned(),
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn dependency_node(
+    tick: u64,
+    scheduler_position: u32,
+    owner_id: &str,
+    event_type: &str,
+    artifact_digest: [u8; 32],
+) -> DependencyNodeV1 {
+    DependencyNodeV1 {
+        tick,
+        scheduler_position,
+        owner_id: owner_id.to_owned(),
         output_ordinal: 0,
-        schema_id: schema_id_for_event_type("world.action.v1"),
-        artifact_digest: [24; 32],
-    };
-    let society_node = DependencyNodeV1 {
-        tick: 2,
-        scheduler_position: 3,
-        owner_id: "society".to_owned(),
-        output_ordinal: 0,
-        schema_id: schema_id_for_event_type("society.signal"),
-        artifact_digest: [27; 32],
-    };
+        schema_id: schema_id_for_event_type(event_type),
+        artifact_digest,
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn configure_counterfactual_intervention(evidence: &mut MoatProofEvidenceV1) {
+    let action_node = dependency_node(2, 0, "agent", "world.action.v1", [24; 32]);
+    let society_node = dependency_node(2, 3, "society", "society.signal", [27; 32]);
     let observation_node = evidence.contract.counterfactual.dependencies[0]
         .consumer
         .clone();
@@ -962,14 +982,7 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
         ),
         dependency(
             action_node.clone(),
-            DependencyNodeV1 {
-                tick: 1,
-                scheduler_position: 1,
-                owner_id: "body".to_owned(),
-                output_ordinal: 0,
-                schema_id: schema_id_for_event_type("world.observation.v1"),
-                artifact_digest: [1; 32],
-            },
+            dependency_node(1, 1, "body", "world.observation.v1", [1; 32]),
             DependencyClassV1::InterventionAssigned,
         ),
         dependency(
@@ -1002,7 +1015,6 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
     }];
     counterfactual.recomputed_event_seqs = vec![3];
     ok(counterfactual.refresh_digest());
-    evidence
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
