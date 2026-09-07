@@ -313,3 +313,55 @@ fn registrations_record_every_pre_erasure_policy_fact() {
         ArtifactTransitionRuleV1::RedactViews
     );
 }
+
+#[test]
+fn authoritative_release_requires_the_exact_registered_class_and_digest() {
+    let retained = input(
+        ErasureArtifactClassV1::ReproManifest,
+        1,
+        ArtifactOptionalityV1::Required,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let erased = input(
+        ErasureArtifactClassV1::ForkOrSnapshot,
+        2,
+        ArtifactOptionalityV1::Required,
+        ArtifactTransitionRuleV1::Remove,
+        ArtifactStateV1::Erased,
+    );
+    let evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[retained, erased],
+    )
+    .expect("distinct registered artifacts should evaluate");
+
+    assert_eq!(
+        evaluation.require_authoritative_use(
+            ErasureArtifactClassV1::ReproManifest,
+            reference(1),
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        evaluation.require_authoritative_use(
+            ErasureArtifactClassV1::ForkOrSnapshot,
+            reference(2),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        evaluation.require_authoritative_use(
+            ErasureArtifactClassV1::TimelineReplay,
+            reference(1),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        evaluation.require_authoritative_use(
+            ErasureArtifactClassV1::ReproManifest,
+            reference(9),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+}

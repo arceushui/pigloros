@@ -128,6 +128,8 @@ pub struct ArtifactClaimInputV1 {
 /// Deterministic result for one registered artifact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EvaluatedArtifactClaimV1 {
+    /// Closed class of the registered artifact.
+    pub artifact_class: ErasureArtifactClassV1,
     /// Registered artifact identity.
     pub artifact_digest: ErasureReferenceV1,
     /// Claim before evaluation.
@@ -149,6 +151,29 @@ pub struct ReplayClaimEvaluationV1 {
     pub redaction_state: ArtifactRedactionStateV1,
     /// Per-artifact results in canonical `(class, digest)` order.
     pub artifacts: Vec<EvaluatedArtifactClaimV1>,
+}
+
+impl ReplayClaimEvaluationV1 {
+    /// Require a registered artifact to remain eligible as authoritative input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErasureErrorV1::PolicyConflict`] when the artifact is absent,
+    /// erased, structurally retained, or quarantined by invalidation.
+    pub fn require_authoritative_use(
+        &self,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_digest: ErasureReferenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.artifact_class == artifact_class
+                    && artifact.artifact_digest == artifact_digest
+            })
+            .filter(|artifact| artifact.authoritative_use_permitted)
+            .map_or(Err(ErasureErrorV1::PolicyConflict), |_| Ok(()))
+    }
 }
 
 /// Sole host-owned policy evaluator for ADR-060 artifact claims.
@@ -230,6 +255,7 @@ impl ReplayClaimEvaluatorV1 {
                     redaction_state = redaction_state.max(artifact_redaction);
                 }
                 EvaluatedArtifactClaimV1 {
+                    artifact_class: input.registration.artifact_class,
                     artifact_digest: input.registration.artifact_digest,
                     from: input.current_claim,
                     to,
