@@ -763,11 +763,14 @@ fn capability_removal_after_staging_aborts_without_append() {
         .read(timeline.id(), SeqRange::all())
         .test_ok()
         .is_empty());
-    let state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(state.aborts, 1);
-    assert_eq!(state.commits, 0);
+    let (aborts, commits) = {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.aborts, state.commits)
+    };
+    assert_eq!(aborts, 1);
+    assert_eq!(commits, 0);
 }
 
 #[test]
