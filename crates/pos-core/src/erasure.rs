@@ -1,8 +1,7 @@
 //! ADR-060's payload-free ERQ1, ERS1, and ERC1 public contracts.
 //!
-//! This module deliberately excludes storage implementations, key destruction,
-//! artifact work, backup inventory, and replay evaluation. Those operations
-//! belong to the adapters and follow-up tickets named by ADR-060.
+//! Storage and byte destruction remain adapter concerns. This facade also
+//! exposes the host-owned artifact-registration and ReplayClaim policy seam.
 
 use std::{
     cmp::Ordering,
@@ -3136,6 +3135,12 @@ pub trait ErasureRecoveryErrorQueryV1 {
 
 mod receipt;
 pub use receipt::target_closure_digest;
+mod artifact;
+pub use artifact::{
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+};
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
     inventories_match_frozen_obligations,
