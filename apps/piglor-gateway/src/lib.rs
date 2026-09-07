@@ -553,17 +553,19 @@ pub struct Gateway {
     pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     authorization: Option<Arc<GatewayAuthorization>>,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     action_principal: Option<ActionPrincipal>,
 }
 
 /// Authenticated principal configuration for human action submission.
 #[derive(Clone)]
+#[cfg(test)]
 pub struct ActionPrincipal {
     entity_id: EntityId,
     capabilities: Vec<Kind>,
 }
 
+#[cfg(test)]
 impl ActionPrincipal {
     /// Create a principal with its already-authenticated entity and capabilities.
     #[must_use]
@@ -1098,6 +1100,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1127,6 +1130,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1156,6 +1160,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            #[cfg(test)]
             action_principal: Some(principal),
         }
         .schedule_startup_consent_cleanup()
@@ -1190,6 +1195,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: Some(Arc::new(authorization)),
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1222,6 +1228,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1255,6 +1262,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1284,6 +1292,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()

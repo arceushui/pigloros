@@ -253,7 +253,7 @@ fn request_http_blocking_with_actor(
         .map_or_else(|| Ok(Vec::new()), |value| serde_json::to_vec(&value))
         .test_ok()?;
     let actor_header = actor.map_or_else(String::new, |actor| {
-        format!("x-piglor-actor-entity: {actor}\\r\\n")
+        format!("x-piglor-actor-entity: {actor}\r\n")
     });
     let mut stream = TcpStream::connect(address).test_ok()?;
     stream
