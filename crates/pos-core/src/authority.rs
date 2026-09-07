@@ -11,8 +11,17 @@ use ciborium::Value;
 
 use crate::{CanonicalBytes, EntityId, Hash, PluginId, Seq, TimelineId, WallTime};
 
+mod knowledge;
 mod persistence;
 
+pub use knowledge::{
+    AiGoalPolicyRevisionV1, BeliefRecordDraftV1, BeliefRecordV1, ConfidenceV1,
+    KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationArtifactV1,
+    ObservationRecordDraftV1, ObservationRecordV1, ObservationSnapshotDraftV1,
+    ObservationSnapshotV1, ObservationStatusV1, PreferenceValueRevisionV1,
+    MAX_KNOWLEDGE_SNAPSHOT_BYTES, MAX_KNOWLEDGE_SNAPSHOT_RECORDS, MAX_OBSERVATION_ARTIFACT_BYTES,
+    MAX_OBSERVATION_RECORD_BYTES, MAX_OBSERVATION_SNAPSHOT_BYTES, MAX_OBSERVATION_SNAPSHOT_RECORDS,
+};
 pub use persistence::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,

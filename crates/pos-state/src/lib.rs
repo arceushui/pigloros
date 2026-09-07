@@ -15,10 +15,12 @@
 use std::collections::{BTreeSet, HashMap};
 
 use pos_core::{
-    AuthorizationDecisionV1, AuthorizationRequestV1, ConsentEvidenceV1,
-    ConsentRevocationFoldListener, ConsentRevokedV1, EntityId, Event, Hash, PersistedAuthorityV1,
+    AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
+    CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
+    Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
     Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
-    EVENT_TYPE_CONSENT_REVOKED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 
 // ---------------------------------------------------------------------------
@@ -263,6 +265,7 @@ impl Reducer for EntityStateProjection {
 struct Slot {
     reducer: Box<dyn Reducer>,
     registry: StateRegistry,
+    observation_policy: Option<ProjectionObservationPolicyV1>,
 }
 
 /// A named registry of [`Reducer`] implementations backed by per-name [`StateRegistry`]s.
@@ -299,13 +302,40 @@ impl ProjectionRegistry {
     /// If a reducer with the same name was already registered it is replaced and
     /// its accumulated state is cleared.
     pub fn register(&mut self, name: &str, reducer: Box<dyn Reducer>) {
-        // Remove any previous entry with the same name.
-        self.slots.retain(|(n, _)| n != name);
+        self.register_with_policy(name, reducer, None);
+    }
+
+    /// Register a named reducer with immutable host observation policy.
+    ///
+    /// # Errors
+    /// Returns a closed validation error when the policy is incomplete or
+    /// noncanonical.
+    pub fn register_observable(
+        &mut self,
+        name: &str,
+        reducer: Box<dyn Reducer>,
+        policy: ProjectionObservationPolicyV1,
+    ) -> Result<(), AuthorityErrorV1> {
+        if name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES {
+            return Err(AuthorityErrorV1::FieldOutOfBounds);
+        }
+        self.register_with_policy(name, reducer, Some(policy));
+        Ok(())
+    }
+
+    fn register_with_policy(
+        &mut self,
+        name: &str,
+        reducer: Box<dyn Reducer>,
+        observation_policy: Option<ProjectionObservationPolicyV1>,
+    ) {
+        self.slots.retain(|(registered, _)| registered != name);
         self.slots.push((
             name.to_owned(),
             Slot {
                 reducer,
                 registry: StateRegistry::new(),
+                observation_policy,
             },
         ));
     }
@@ -356,6 +386,145 @@ impl ProjectionRegistry {
             .iter()
             .find(|(n, _)| n == name)
             .and_then(|(_, slot)| slot.registry.get(entity))
+    }
+
+    /// Materialize exactly one host-authorized participant observation.
+    ///
+    /// Authorization is validated before projection lookup. The returned OBS1
+    /// owns only canonical value bytes and provenance; it exposes neither this
+    /// registry nor a `State`/`Event` handle. State for every other subject and
+    /// reducer is therefore outside the derivation's data dependencies.
+    ///
+    /// # Errors
+    /// Returns a closed authority error when the decision is denied, does not
+    /// exactly bind the request, lacks participant/Plugin installation identity,
+    /// or the requested materialization cannot form a valid bounded OBS1.
+    pub fn materialize_authorized_observation(
+        &self,
+        request: &AuthorizationRequestV1,
+        decision: &AuthorizationDecisionV1,
+        authority: &PersistedAuthorityV1,
+        authority_registry: &AuthorityRegistrySnapshotV1,
+        authority_position: Seq,
+        context: &ProjectionObservationContextV1,
+    ) -> Result<AuthorizedObservationV1, AuthorityErrorV1> {
+        authority
+            .validate_observation_authorization(
+                request,
+                decision,
+                authority_registry,
+                authority_position,
+            )
+            .and_then(|()| self.materialize_authorized_projection(request, decision, context))
+            .map(|snapshot| AuthorizedObservationV1 {
+                snapshot,
+                request: request.clone(),
+                decision: decision.clone(),
+            })
+    }
+
+    fn materialize_authorized_projection(
+        &self,
+        request: &AuthorizationRequestV1,
+        decision: &AuthorizationDecisionV1,
+        context: &ProjectionObservationContextV1,
+    ) -> Result<ObservationSnapshotV1, AuthorityErrorV1> {
+        if context.reducer.is_empty() || context.reducer.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES
+        {
+            return Err(AuthorityErrorV1::FieldOutOfBounds);
+        }
+        if request.resource().strip_prefix("projection.") != Some(context.reducer.as_str()) {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        }
+        let Some(subject_id) = request.subject_id() else {
+            return Err(AuthorityErrorV1::ConsentMissing);
+        };
+        let Some(participant_id) = request.participant_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let Some(plugin_id) = request.plugin_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let Some(installation_id) = request.installation_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let Some(slot) = self
+            .slots
+            .iter()
+            .find_map(|(name, slot)| (name == &context.reducer).then_some(slot))
+        else {
+            return Err(AuthorityErrorV1::SourceUnavailable);
+        };
+        let Some(policy) = slot.observation_policy.as_ref() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        slot.registry
+            .get(&subject_id)
+            .map(|state| canonical_state_artifact(state, policy.permitted_fields()))
+            .transpose()
+            .and_then(|artifact| {
+                let (status, artifact_digest, projection_digest, source_digest, artifacts) =
+                    artifact.map_or_else(
+                        || {
+                            (
+                                ObservationStatusV1::NotObserved,
+                                None,
+                                None,
+                                absence_source_digest(context, subject_id),
+                                Vec::new(),
+                            )
+                        },
+                        |artifact| {
+                            let digest = artifact.digest();
+                            (
+                                ObservationStatusV1::Present,
+                                Some(digest),
+                                Some(digest),
+                                digest,
+                                vec![artifact],
+                            )
+                        },
+                    );
+                ObservationRecordV1::try_from_draft(ObservationRecordDraftV1 {
+                    participant_id,
+                    resource: request.resource().to_owned(),
+                    data_category: request.data_category().to_owned(),
+                    status,
+                    artifact_digest,
+                    source_timeline: context.timeline_id,
+                    source_position: context.observed_through,
+                    schema: policy.schema().to_owned(),
+                    source_digest,
+                    projection_digest,
+                    provenance_digest: policy.digest(),
+                    minimization_revision: policy.minimization_revision(),
+                })
+                .and_then(|record| {
+                    ObservationSnapshotV1::try_from_draft(ObservationSnapshotDraftV1 {
+                        principal: decision.principal().clone(),
+                        participant_id,
+                        plugin_id,
+                        installation_id,
+                        timeline_id: context.timeline_id,
+                        observed_through: context.observed_through,
+                        authority_timeline: decision.authority_timeline(),
+                        authority_position: decision.at_position(),
+                        authorization_request_digest: request.binding_digest(),
+                        authorization_decision_digest: decision.decision_digest(),
+                        grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
+                        consent_policy_revision: decision.consent_policy_revision(),
+                        capability_policy_revision: decision.capability_policy_revision(),
+                        revocation_epoch: request.revocation_epoch(),
+                        visibility_policy_revision: policy.visibility_policy_revision(),
+                        schema_revision: policy.schema_revision(),
+                        minimization_revision: policy.minimization_revision(),
+                        records: vec![record],
+                        artifacts,
+                        prior_snapshot_digest: context.prior_snapshot_digest,
+                        provenance_digest: policy.digest(),
+                    })
+                })
+            })
     }
 
     /// Return the names of all registered reducers in insertion order.
@@ -442,6 +611,243 @@ impl ProjectionRegistry {
             }
         }
         None
+    }
+}
+
+/// Host-materialized observation carrying the authority evidence used to derive it.
+///
+/// The private fields make this the admission token for participant execution:
+/// callers may inspect or clone a materialized observation, but only this crate
+/// can create one from protected `Projection` state.
+///
+/// ```compile_fail
+/// use pos_core::{AuthorizationDecisionV1, AuthorizationRequestV1, ObservationSnapshotV1};
+/// use pos_state::AuthorizedObservationV1;
+///
+/// fn forge(
+///     snapshot: ObservationSnapshotV1,
+///     request: AuthorizationRequestV1,
+///     decision: AuthorizationDecisionV1,
+/// ) -> AuthorizedObservationV1 {
+///     AuthorizedObservationV1 { snapshot, request, decision }
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedObservationV1 {
+    snapshot: ObservationSnapshotV1,
+    request: AuthorizationRequestV1,
+    decision: AuthorizationDecisionV1,
+}
+
+impl AuthorizedObservationV1 {
+    /// Return the minimized immutable OBS1 snapshot.
+    #[must_use]
+    pub const fn snapshot(&self) -> &ObservationSnapshotV1 {
+        &self.snapshot
+    }
+
+    /// Re-evaluate consent, capability, delegation, and revocation evidence at
+    /// the current authority boundary.
+    ///
+    /// # Errors
+    /// Returns a closed authority error when any current evidence differs from
+    /// the evidence that authorized materialization.
+    pub fn revalidate(
+        &self,
+        authority: &PersistedAuthorityV1,
+        registry: &AuthorityRegistrySnapshotV1,
+        at_position: Seq,
+    ) -> Result<(), AuthorityErrorV1> {
+        authority.validate_observation_authorization(
+            &self.request,
+            &self.decision,
+            registry,
+            at_position,
+        )
+    }
+}
+
+impl std::ops::Deref for AuthorizedObservationV1 {
+    type Target = ObservationSnapshotV1;
+
+    fn deref(&self) -> &Self::Target {
+        self.snapshot()
+    }
+}
+
+/// Host-owned inputs required to materialize one Projection observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectionObservationContextV1 {
+    pub timeline_id: TimelineId,
+    pub observed_through: Seq,
+    pub reducer: String,
+    pub prior_snapshot_digest: Option<Hash>,
+}
+
+fn absence_source_digest(context: &ProjectionObservationContextV1, subject_id: EntityId) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.ProjectionObservationAbsence.v1\0");
+    hasher.update(&context.timeline_id.inner().to_bytes());
+    hasher.update(&subject_id.inner().to_bytes());
+    hasher.update(&context.observed_through.as_u64().to_be_bytes());
+    hasher.update(blake3::hash(context.reducer.as_bytes()).as_bytes());
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Immutable host policy installed at the same composition seam as a Reducer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectionObservationPolicyV1 {
+    permitted_fields: Vec<String>,
+    schema: String,
+    visibility_policy_revision: Hash,
+    schema_revision: Hash,
+    minimization_revision: Hash,
+    digest: Hash,
+}
+
+impl ProjectionObservationPolicyV1 {
+    /// Validate and bind the complete policy used for observation materialization.
+    ///
+    /// # Errors
+    /// Returns a closed validation error for empty, oversized, duplicate, or
+    /// noncanonical policy fields.
+    pub fn try_new(
+        permitted_fields: Vec<String>,
+        schema: String,
+        visibility_policy_revision: Hash,
+        schema_revision: Hash,
+        minimization_revision: Hash,
+    ) -> Result<Self, AuthorityErrorV1> {
+        validate_observation_policy_fields(&permitted_fields, &schema).and_then(|()| {
+            if [
+                visibility_policy_revision,
+                schema_revision,
+                minimization_revision,
+            ]
+            .contains(&Hash::zero())
+            {
+                return Err(AuthorityErrorV1::ProvenanceMissing);
+            }
+            let digest = observation_policy_digest(
+                &permitted_fields,
+                &schema,
+                visibility_policy_revision,
+                schema_revision,
+                minimization_revision,
+            );
+            Ok(Self {
+                permitted_fields,
+                schema,
+                visibility_policy_revision,
+                schema_revision,
+                minimization_revision,
+                digest,
+            })
+        })
+    }
+
+    fn permitted_fields(&self) -> &[String] {
+        &self.permitted_fields
+    }
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    const fn visibility_policy_revision(&self) -> Hash {
+        self.visibility_policy_revision
+    }
+
+    const fn schema_revision(&self) -> Hash {
+        self.schema_revision
+    }
+
+    const fn minimization_revision(&self) -> Hash {
+        self.minimization_revision
+    }
+
+    const fn digest(&self) -> Hash {
+        self.digest
+    }
+}
+
+fn validate_observation_policy_fields(
+    permitted_fields: &[String],
+    schema: &str,
+) -> Result<(), AuthorityErrorV1> {
+    if schema.is_empty()
+        || schema.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES
+        || permitted_fields.is_empty()
+        || permitted_fields.len() > MAX_OBSERVATION_SNAPSHOT_RECORDS
+        || permitted_fields
+            .iter()
+            .any(|field| field.is_empty() || field.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES)
+    {
+        return Err(AuthorityErrorV1::FieldOutOfBounds);
+    }
+    if permitted_fields.windows(2).any(|pair| pair[0] >= pair[1]) {
+        Err(AuthorityErrorV1::NonCanonicalOrder)
+    } else {
+        Ok(())
+    }
+}
+
+fn observation_policy_digest(
+    permitted_fields: &[String],
+    schema: &str,
+    visibility_policy_revision: Hash,
+    schema_revision: Hash,
+    minimization_revision: Hash,
+) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.ProjectionObservationPolicy.v1\0");
+    digest_text(&mut hasher, schema);
+    for field in permitted_fields {
+        digest_text(&mut hasher, field);
+    }
+    hasher.update(visibility_policy_revision.as_bytes());
+    hasher.update(schema_revision.as_bytes());
+    hasher.update(minimization_revision.as_bytes());
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn digest_text(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(blake3::hash(value.as_bytes()).as_bytes());
+}
+
+fn canonical_state_artifact(
+    state: &State,
+    permitted_fields: &[String],
+) -> Result<ObservationArtifactV1, AuthorityErrorV1> {
+    let value = serde_json::Value::Object(
+        permitted_fields
+            .iter()
+            .filter_map(|key| {
+                state
+                    .fields
+                    .get(key)
+                    .map(|value| (key.clone(), canonical_json(value)))
+            })
+            .collect(),
+    );
+    serde_json::to_vec(&value)
+        .map(CanonicalBytes::from_vec)
+        .map_err(|_| AuthorityErrorV1::InvalidEncoding)
+        .and_then(ObservationArtifactV1::try_new)
+}
+
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_json(value)))
+                .collect(),
+        ),
+        value => value.clone(),
     }
 }
 
