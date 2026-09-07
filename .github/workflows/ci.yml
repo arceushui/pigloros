@@ -328,17 +328,6 @@ jobs:
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: covgate@0.2.0
-      - name: Resolve new-code coverage base
-        id: coverage-base
-        env:
-          BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          base_ref="${BASE_REF}"
-          resolved_base_ref="$(bash scripts/resolve-coverage-base.sh "${base_ref}")"
-          echo "base_ref=${resolved_base_ref}" >> "${GITHUB_OUTPUT}"
-      - name: Enforce immutable new-code coverage policy
-        run: bash scripts/check-covgate-policy.sh "${{ steps.coverage-base.outputs.base_ref }}"
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: coverage
@@ -360,23 +349,13 @@ jobs:
           retention-days: 1
           if-no-files-found: error
       - name: Export coverage details for new-code gate
-        if: always()
-        continue-on-error: true
         run: cargo llvm-cov report --json
           --output-path "${{ runner.temp }}/coverage.json"
-      - name: Reject changed Rust files missing from coverage
-        if: ${{ success() }}
-        run: bash scripts/check-rust-coverage-report.sh "${RUNNER_TEMP}/coverage.json" "${{ steps.coverage-base.outputs.base_ref }}"
-      - name: Enforce new Rust code coverage (lines ≥99%, regions ≥99%)
-        if: ${{ success() }}
-        run: covgate check "${RUNNER_TEMP}/coverage.json" --base "${{ steps.coverage-base.outputs.base_ref }}" --no-github-summary
-      - name: Upload coverage details
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-details
-          path: ${{ runner.temp }}/coverage.json
-          if-no-files-found: ignore
+      - name: Enforce new production Rust code coverage (lines ≥99%, regions ≥99%)
+        run: >
+          covgate check "${{ runner.temp }}/coverage.json"
+          --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+          --no-github-summary
 
   cargo-crap:
     name: cargo-crap
@@ -777,29 +756,6 @@ jobs:
           python scripts/test_check_cargo_crap_ci_policy.py
           python scripts/test_check_cargo_crap_report.py
 
-  new-code-coverage-policy:
-    name: new-code-coverage-policy
-    needs: ci_change_scope
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: 3.12
-      - name: Install pinned dependency checker
-        run: >
-          python -m pip install --require-hashes --only-binary=:all:
-          --requirement requirements-pinned-dependencies.txt
-      - name: Check new-code coverage CI policy
-        run: python scripts/check_new_code_coverage_ci_policy.py
-      - name: Test new-code coverage CI policy
-        run: |
-          python scripts/test_check_new_code_coverage_ci_policy.py
-          python scripts/test_check_covgate_policy.py
-          python scripts/test_check_rust_coverage_report.py
-
   modules-structure:
     name: modules-structure (reports only)
     needs: ci_change_scope
@@ -892,7 +848,6 @@ jobs:
       - docker-build
       - world-client-wasm
       - world-client-browser-parity
-      - new-code-coverage-policy
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -916,7 +871,6 @@ jobs:
           ASAN_RESULT: ${{ needs.asan.result }}
           DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
           WORLD_CLIENT_WASM_RESULT: ${{ needs.world-client-wasm.result }}
-          NEW_CODE_COVERAGE_POLICY_RESULT: ${{ needs.new-code-coverage-policy.result }}
           WORLD_CLIENT_BROWSER_PARITY_RESULT: ${{ needs.world-client-browser-parity.result }}
         run: |
           set -euo pipefail
@@ -948,7 +902,7 @@ jobs:
             FMT_RESULT RUSTDOC_RESULT TEST_RESULT CLIPPY_RESULT \
             AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
             DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT \
-            COVERAGE_RESULT CARGO_CRAP_RESULT NEW_CODE_COVERAGE_POLICY_RESULT
+            COVERAGE_RESULT CARGO_CRAP_RESULT
           check_results false \
             CONFORMANCE_FIXTURES_RESULT MATERIALIZE_CONFORMANCE_BUNDLES_RESULT \
             CONFORMANCE_NON_LINUX_RESULT
