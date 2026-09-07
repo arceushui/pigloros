@@ -770,6 +770,9 @@ pub enum GatewayError {
     /// The provider-neutral host authorization decision denied the operation.
     #[error("authorization denied")]
     AuthorizationDenied,
+    /// The provider-neutral host authorization boundary is unavailable.
+    #[error("authorization unavailable")]
+    AuthorizationUnavailable,
     /// Consent payload did not meet its closed V1 contract.
     #[error(transparent)]
     ConsentCodec(#[from] ConsentCodecError),
@@ -1387,7 +1390,7 @@ impl Gateway {
 
     /// Return whether this Gateway has a provider-neutral host authorizer.
     #[must_use]
-    pub fn has_authorization(&self) -> bool {
+    pub const fn has_authorization(&self) -> bool {
         self.authorization.is_some()
     }
 
@@ -1663,6 +1666,11 @@ impl Gateway {
     /// The commit fence is held through the store read, so a host authority
     /// replacement cannot race a protected read.  The same seam is used for
     /// exports and other Gateway-owned projections as they are added.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::AuthorizationUnavailable`] or
+    /// [`GatewayError::AuthorizationDenied`] before delegating to the bounded
+    /// Timeline read errors.
     pub async fn read_events_page_authorized(
         &self,
         timeline_id: &str,
@@ -1671,14 +1679,14 @@ impl Gateway {
         request: GatewayAuthorizationRequest,
     ) -> Result<EventPage, GatewayError> {
         let Some(authorization) = self.authorization.as_ref() else {
-            return Err(GatewayError::ActionAuthorizationUnavailable);
+            return Err(GatewayError::AuthorizationUnavailable);
         };
-        let _fence = authorization.commit_fence().await;
-        authorization
-            .authorize(request)
-            .map_err(map_authorization_error)?;
+        let fence = authorization.commit_fence().await;
+        if let Err(error) = authorization.authorize(request) {
+            return Err(map_authorization_error(error));
+        }
         let page = self.read_events_page(timeline_id, from_seq, limit).await;
-        drop(_fence);
+        drop(fence);
         page
     }
 
@@ -1743,23 +1751,41 @@ impl Gateway {
         proposal: ProposedAction,
     ) -> Result<Event, GatewayError> {
         if let Some(authorization) = self.authorization.clone() {
-            let _fence = authorization.commit_fence().await;
-            authorization
+            let fence = authorization.commit_fence().await;
+            let decision = match authorization
                 .authorize(GatewayAuthorizationRequest::action(
                     proposal.actor_entity_id,
                     proposal.event_type.as_str(),
                     proposal.capability.as_str(),
                     WallTime::now(),
                 ))
-                .map_err(map_authorization_error)?;
-            let timeline = parse_timeline_id(timeline_id)?;
+                .map_err(map_authorization_error)
+            {
+                Ok(decision) => decision,
+                Err(error) => return Err(error),
+            };
+            let timeline = match parse_timeline_id(timeline_id) {
+                Ok(timeline) => timeline,
+                Err(error) => return Err(error),
+            };
             match self.store.timeline(timeline).await {
                 Ok(Some(_)) => {}
                 Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
                 Err(error) => return Err(error.into()),
             }
-            let draft = self.action_registry.submit_action(&proposal)?;
-            return self.append_draft(timeline, draft).await;
+            let draft = match self.action_registry.submit_action(&proposal) {
+                Ok(draft) => draft,
+                Err(error) => return Err(error.into()),
+            };
+            let event = match self.append_draft(timeline, draft).await {
+                Ok(event) => event,
+                Err(error) => return Err(error),
+            };
+            drop(fence);
+            authorization
+                .record_audit(decision.audit().with_event_id(event.id))
+                .await;
+            return Ok(event);
         }
         let Some(principal) = self.action_principal.as_ref() else {
             return Err(GatewayError::ActionAuthorizationUnavailable);
@@ -1823,33 +1849,58 @@ impl Gateway {
         ingress_id: &str,
     ) -> Result<IdentifiedAppend, GatewayError> {
         if let Some(authorization) = self.authorization.clone() {
-            let entity = parse_entity_id(entity_id)?;
-            let _fence = authorization.commit_fence().await;
-            authorization
+            let entity = match parse_entity_id(entity_id) {
+                Ok(entity) => entity,
+                Err(error) => return Err(error),
+            };
+            let fence = authorization.commit_fence().await;
+            let decision = match authorization
                 .authorize(GatewayAuthorizationRequest::action(
                     entity,
                     event_type,
                     capability,
                     WallTime::now(),
                 ))
-                .map_err(map_authorization_error)?;
-            let timeline = parse_timeline_id(timeline_id)?;
+                .map_err(map_authorization_error)
+            {
+                Ok(decision) => decision,
+                Err(error) => return Err(error),
+            };
+            let timeline = match parse_timeline_id(timeline_id) {
+                Ok(timeline) => timeline,
+                Err(error) => return Err(error),
+            };
             match self.store.timeline(timeline).await {
                 Ok(Some(_)) => {}
                 Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
                 Err(error) => return Err(error.into()),
             }
-            let proposal = ProposedAction::try_new(
+            let proposal = match ProposedAction::try_new(
                 Kind::new(event_type),
                 entity,
                 json_to_cbor(payload),
                 Kind::new(capability),
-            )?;
-            let draft = self.action_registry.submit_action(&proposal)?;
+            ) {
+                Ok(proposal) => proposal,
+                Err(error) => return Err(error.into()),
+            };
+            let draft = match self.action_registry.submit_action(&proposal) {
+                Ok(draft) => draft,
+                Err(error) => return Err(error.into()),
+            };
             drop(proposal);
-            return self
+            let result = match self
                 .append_identified_draft(timeline, draft, ingress_id)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => return Err(error),
+            };
+            drop(fence);
+            authorization
+                .record_audit(decision.audit().with_event_id(result.event.id))
                 .await;
+            return Ok(result);
         }
         let Some(principal) = self.action_principal.as_ref() else {
             return Err(GatewayError::ActionAuthorizationUnavailable);
@@ -2159,13 +2210,11 @@ fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) ->
     )
 }
 
-fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
+const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
     match error {
         GatewayAuthorizationError::AuthenticationUnavailable
         | GatewayAuthorizationError::RequestUnavailable
-        | GatewayAuthorizationError::AuthorityUnavailable => {
-            GatewayError::ActionAuthorizationUnavailable
-        }
+        | GatewayAuthorizationError::AuthorityUnavailable => GatewayError::AuthorizationUnavailable,
         GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
     }
 }
@@ -2752,6 +2801,7 @@ mod tests {
         let actor = EntityId::new();
         let body = EntityId::new();
         let authorization = crate::authorization::test_authorization_for(actor);
+        let audit_host = authorization.clone();
         let gateway = Gateway::new_with_world_bodies_and_authorization(
             open_store(StoreConfig::Memory).test_ok(),
             [body],
@@ -2778,6 +2828,11 @@ mod tests {
             .await
             .test_ok();
         assert_eq!(event.entity, actor);
+        let audits = audit_host.audits().await;
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].actor_entity_id(), actor);
+        assert_eq!(audits[0].event_id(), Some(event.id));
+        assert_eq!(audits[0].principal().trust_domain(), "gateway.test");
 
         let denied = gateway
             .submit_json_action(
@@ -2816,22 +2871,29 @@ mod tests {
         gateway.shutdown().await.test_ok();
     }
 
-    #[test]
-    fn authorization_error_mapping_is_stable_and_non_enumerating() {
-        for error in [
-            GatewayAuthorizationError::AuthenticationUnavailable,
-            GatewayAuthorizationError::RequestUnavailable,
-            GatewayAuthorizationError::AuthorityUnavailable,
-        ] {
-            assert!(matches!(
-                map_authorization_error(error),
-                GatewayError::ActionAuthorizationUnavailable
-            ));
-        }
-        assert!(matches!(
-            map_authorization_error(GatewayAuthorizationError::AuthorizationDenied),
-            GatewayError::AuthorizationDenied
-        ));
+    #[tokio::test]
+    async fn authority_unavailability_maps_through_the_public_read_seam() {
+        let actor = EntityId::new();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [],
+            crate::authorization::test_authorization_unavailable_for(actor),
+        );
+        let timeline = gateway
+            .create_timeline("authority-unavailable")
+            .await
+            .test_ok();
+        let error = gateway
+            .read_events_page_authorized(
+                &timeline.id().to_string(),
+                0,
+                1,
+                GatewayAuthorizationRequest::read(actor, WallTime::now()),
+            )
+            .await
+            .test_err();
+        assert!(matches!(error, GatewayError::AuthorizationUnavailable));
+        gateway.shutdown().await.test_ok();
     }
 
     struct TemporarySqliteFile {

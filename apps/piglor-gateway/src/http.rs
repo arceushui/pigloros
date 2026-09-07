@@ -196,14 +196,19 @@ async fn list_events(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let q = parse_events_query(raw_query.as_deref())?;
+    let q = match parse_events_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(error) => return Err(error),
+    };
     let page = if state.gateway.has_authorization() {
-        let actor = headers
+        let Some(actor) = headers
             .get("x-piglor-actor-entity")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| crate::parse_entity_id(value).ok())
-            .ok_or(GatewayError::ActionAuthorizationUnavailable)?;
-        state
+        else {
+            return Err(GatewayError::AuthorizationUnavailable);
+        };
+        match state
             .gateway
             .read_events_page_authorized(
                 &id,
@@ -211,17 +216,25 @@ async fn list_events(
                 q.limit,
                 crate::GatewayAuthorizationRequest::read(actor, WallTime::now()),
             )
-            .await?
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => return Err(error),
+        }
     } else {
-        state
+        match state
             .gateway
             .read_events_page(&id, q.from_seq, q.limit)
-            .await?
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => return Err(error),
+        }
     };
-    Ok(Json(bounded_events_response(
-        page,
-        MAX_EVENTS_RESPONSE_BYTES,
-    )?))
+    match bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES) {
+        Ok(response) => Ok(Json(response)),
+        Err(error) => Err(error),
+    }
 }
 
 fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayError> {
@@ -404,7 +417,9 @@ impl IntoResponse for GatewayError {
                 StatusCode::NOT_FOUND
             }
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::ActionAuthorizationUnavailable => StatusCode::UNAUTHORIZED,
+            Self::ActionAuthorizationUnavailable | Self::AuthorizationUnavailable => {
+                StatusCode::UNAUTHORIZED
+            }
             Self::StoreExecutorClosed
             | Self::StoreExecutorDeadlineExceeded
             | Self::StoreExecutorUnhealthy
@@ -1263,10 +1278,7 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            missing["error"],
-            "human action authorization is unavailable"
-        );
+        assert_eq!(missing["error"], "authorization unavailable");
 
         let wrong = EntityId::new().to_string();
         let request = Request::builder()
@@ -1275,8 +1287,17 @@ osf_link = \"https://osf.io/example\"\n";
             .header("x-piglor-actor-entity", wrong)
             .body(Body::empty())
             .test_ok();
-        let response = app.oneshot(request).await.test_ok();
+        let response = app.clone().oneshot(request).await.test_ok();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/timelines/{id}/events?limit=1"))
+            .header("x-piglor-actor-entity", actor.to_string())
+            .body(Body::empty())
+            .test_ok();
+        let response = app.oneshot(request).await.test_ok();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1357,6 +1378,7 @@ osf_link = \"https://osf.io/example\"\n";
                     consent_history_locks: crate::new_consent_history_locks(),
                     pending_consent_cleanup: crate::new_pending_consent_cleanup(),
                     action_registry: crate::gateway_action_registry(),
+                    authorization: None,
                     action_principal: None,
                 },
                 ledger_view: LedgerView::default(),

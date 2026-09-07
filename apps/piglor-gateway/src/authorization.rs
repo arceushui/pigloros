@@ -8,8 +8,8 @@
 use pos_core::{
     AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, Hash,
-    PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, EventId,
+    Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
@@ -48,7 +48,7 @@ pub enum GatewayAuthenticationError {
 /// Implementations establish a validated [`AuthenticatedPrincipalResultV1`]
 /// and do not evaluate capability, consent, delegation, or revocation policy.
 /// A deployment may bind the adapter to local or Air-Gapped input without
-/// selecting WebAuthn, JWT, OAuth, or a hosted identity provider here.
+/// selecting `WebAuthn`, `JWT`, `OAuth`, or a hosted identity provider here.
 pub trait GatewayAuthenticationAdapter: Send + Sync {
     /// Establish minimized Principal evidence for one operation.
     ///
@@ -69,7 +69,7 @@ pub struct LocalAuthenticationAdapter {
 
 impl LocalAuthenticationAdapter {
     #[must_use]
-    pub fn new(evidence: AuthenticatedPrincipalResultV1) -> Self {
+    pub const fn new(evidence: AuthenticatedPrincipalResultV1) -> Self {
         Self { evidence }
     }
 }
@@ -95,7 +95,7 @@ pub struct AirGappedAuthenticationAdapter {
 
 impl AirGappedAuthenticationAdapter {
     #[must_use]
-    pub fn new(evidence: AuthenticatedPrincipalResultV1) -> Self {
+    pub const fn new(evidence: AuthenticatedPrincipalResultV1) -> Self {
         Self { evidence }
     }
 }
@@ -231,6 +231,7 @@ pub struct GatewayAuthorizationAudit {
     actor_entity_id: EntityId,
     request_digest: Hash,
     decision_digest: Hash,
+    event_id: Option<EventId>,
 }
 
 impl GatewayAuthorizationAudit {
@@ -252,6 +253,17 @@ impl GatewayAuthorizationAudit {
     #[must_use]
     pub const fn decision_digest(&self) -> Hash {
         self.decision_digest
+    }
+
+    #[must_use]
+    pub const fn event_id(&self) -> Option<EventId> {
+        self.event_id
+    }
+
+    #[must_use]
+    pub const fn with_event_id(mut self, event_id: EventId) -> Self {
+        self.event_id = Some(event_id);
+        self
     }
 }
 
@@ -306,11 +318,12 @@ impl GatewayAuthorizationDecision {
             actor_entity_id: self.decision.actor_entity_id(),
             request_digest: self.decision.request_digest(),
             decision_digest: self.decision.decision_digest(),
+            event_id: None,
         }
     }
 
     #[must_use]
-    pub fn request(&self) -> &GatewayAuthorizationRequest {
+    pub const fn request(&self) -> &GatewayAuthorizationRequest {
         &self.request
     }
 }
@@ -322,6 +335,7 @@ pub struct GatewayAuthorization {
     authority: Arc<RwLock<PersistedAuthorityV1>>,
     registry: AuthorityRegistrySnapshotV1,
     commit_lock: Arc<Mutex<()>>,
+    audits: Arc<Mutex<Vec<GatewayAuthorizationAudit>>>,
 }
 
 impl GatewayAuthorization {
@@ -337,6 +351,7 @@ impl GatewayAuthorization {
             authority: Arc::new(RwLock::new(authority)),
             registry,
             commit_lock: Arc::new(Mutex::new(())),
+            audits: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -344,54 +359,83 @@ impl GatewayAuthorization {
     ///
     /// A denied decision remains available to callers that need a typed audit
     /// outcome.  Use [`Self::authorize`] for a stable fail-closed result.
+    ///
+    /// # Errors
+    /// Returns a stable authentication, authority-state, or request-validation
+    /// error when the host cannot establish a complete decision.
     pub fn evaluate(
         &self,
         request: GatewayAuthorizationRequest,
     ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
         let operation_binding = operation_binding(&request);
-        let authenticated = self
-            .adapter
+        self.adapter
             .authenticate(&GatewayAuthenticationRequest { operation_binding })
-            .map_err(|_| GatewayAuthorizationError::AuthenticationUnavailable)?;
-        let authority = self
-            .authority
-            .read()
-            .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)?
-            .clone();
-        let core_request = core_request(&request, &authenticated, &authority, &self.registry)
-            .map_err(|_| GatewayAuthorizationError::RequestUnavailable)?;
-        let decision =
-            AuthorityEvaluatorV1::authorize(&core_request, authority.chain(), &self.registry);
-        Ok(GatewayAuthorizationDecision {
-            request,
-            authenticated,
-            decision,
-        })
+            .map_err(|_| GatewayAuthorizationError::AuthenticationUnavailable)
+            .and_then(|authenticated| {
+                self.authority
+                    .read()
+                    .map(|authority| authority.clone())
+                    .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
+                    .and_then(|authority| {
+                        core_request(&request, &authenticated, &authority, &self.registry)
+                            .map_err(|_| GatewayAuthorizationError::RequestUnavailable)
+                            .map(|core_request| GatewayAuthorizationDecision {
+                                request,
+                                authenticated,
+                                decision: AuthorityEvaluatorV1::authorize(
+                                    &core_request,
+                                    authority.chain(),
+                                    &self.registry,
+                                ),
+                            })
+                    })
+            })
     }
 
     /// Evaluate and require an active authorization decision.
+    ///
+    /// # Errors
+    /// Returns a stable authorization-denied error or one of the host
+    /// authentication, authority-state, or request-validation errors.
     pub fn authorize(
         &self,
         request: GatewayAuthorizationRequest,
     ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
-        let decision = self.evaluate(request)?;
-        if decision.is_allowed() {
-            Ok(decision)
-        } else {
-            Err(GatewayAuthorizationError::AuthorizationDenied)
-        }
+        self.evaluate(request).and_then(|decision| {
+            if decision.is_allowed() {
+                Ok(decision)
+            } else {
+                Err(GatewayAuthorizationError::AuthorizationDenied)
+            }
+        })
     }
 
     /// Replace the pinned authority snapshot at a host-controlled fence.
     ///
     /// The same commit lock used by Gateway appends prevents an update from
     /// racing a final authorization check and append.
-    pub async fn replace_authority(&self, authority: PersistedAuthorityV1) {
+    pub async fn replace_authority(
+        &self,
+        authority: PersistedAuthorityV1,
+    ) -> Result<(), GatewayAuthorizationError> {
         let _guard = self.commit_lock.lock().await;
-        let write_result = self.authority.write();
-        if let Ok(mut current) = write_result {
-            *current = authority;
-        }
+        self.authority
+            .write()
+            .map(|mut current| {
+                *current = authority;
+            })
+            .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
+    }
+
+    /// Retain one accepted action's minimized authorization audit.
+    pub async fn record_audit(&self, audit: GatewayAuthorizationAudit) {
+        self.audits.lock().await.push(audit);
+    }
+
+    /// Return the minimized authorization audits retained by this Gateway host.
+    #[must_use]
+    pub async fn audits(&self) -> Vec<GatewayAuthorizationAudit> {
+        self.audits.lock().await.clone()
     }
 
     /// Acquire the append fence used by the Gateway before a final recheck.
@@ -478,13 +522,18 @@ pub(crate) fn test_authorization_for(actor: EntityId) -> GatewayAuthorization {
 }
 
 #[cfg(test)]
+pub(crate) fn test_authorization_unavailable_for(actor: EntityId) -> GatewayAuthorization {
+    tests::fixture_authorization_unavailable_with_actor(actor)
+}
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
         AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthorityGranteeV1,
         AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, CapabilityGrantDraftV1,
-        CapabilityScopeDraftV1, PrincipalRefV1,
+        CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, PrincipalRefV1,
     };
 
     trait TestOk<T> {
@@ -530,9 +579,9 @@ mod tests {
         let registry_digest = hash(3);
         let policy_revision = hash(4);
         let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-            resources: vec!["world.action".to_owned()],
-            actions: vec!["world.action.submit".to_owned()],
-            purposes: vec!["action".to_owned()],
+            resources: vec!["timeline.events".to_owned(), "world.action".to_owned()],
+            actions: vec!["read".to_owned(), "world.action.submit".to_owned()],
+            purposes: vec!["action".to_owned(), "read".to_owned()],
             audiences: vec!["gateway".to_owned()],
             actor_entity_ids: vec![actor],
             subject_ids: Vec::new(),
@@ -595,6 +644,17 @@ mod tests {
         fixture_with_actor(actor).authorization
     }
 
+    pub(super) fn fixture_authorization_unavailable_with_actor(
+        actor: EntityId,
+    ) -> GatewayAuthorization {
+        let fixture = fixture_with_actor(actor);
+        GatewayAuthorization::new(
+            Arc::new(RejectingAdapter),
+            fixture.authority,
+            fixture.authorization.registry.clone(),
+        )
+    }
+
     fn action(fixture: &Fixture) -> GatewayAuthorizationRequest {
         GatewayAuthorizationRequest::action(
             fixture.actor,
@@ -635,7 +695,7 @@ mod tests {
         let fixture = fixture();
         let authorization = GatewayAuthorization::new(
             Arc::new(RejectingAdapter),
-            fixture.authority,
+            fixture.authority.clone(),
             fixture.authorization.registry.clone(),
         );
         assert_eq!(
@@ -669,7 +729,7 @@ mod tests {
             Arc::new(AirGappedAuthenticationAdapter::new(
                 fixture.authenticated.clone(),
             )),
-            fixture.authority,
+            fixture.authority.clone(),
             fixture.authorization.registry.clone(),
         );
         let local_decision = local.authorize(action(&fixture)).test_ok();
@@ -714,20 +774,25 @@ mod tests {
         let replacement = fixture.authority.clone();
         let authorization = fixture.authorization.clone();
         let task = tokio::spawn(async move {
-            authorization.replace_authority(replacement).await;
+            authorization.replace_authority(replacement).await.test_ok();
         });
         assert!(!task.is_finished());
         drop(guard);
         assert!(task.await.is_ok());
     }
 
-    #[test]
-    fn operation_binding_excludes_payload_values() {
+    #[tokio::test]
+    async fn poisoned_authority_update_fails_closed() {
         let fixture = fixture();
-        let mut first = action(&fixture);
-        let mut second = first.clone();
-        first.data_category = "one".to_owned();
-        second.data_category = "two".to_owned();
-        assert_ne!(operation_binding(&first), operation_binding(&second));
+        let authorization = fixture.authorization.clone();
+        let authority = Arc::clone(&authorization.authority);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = authority.write().test_ok();
+            panic!("poison authority lock");
+        }));
+        assert_eq!(
+            authorization.replace_authority(fixture.authority).await,
+            Err(GatewayAuthorizationError::AuthorityUnavailable)
+        );
     }
 }
