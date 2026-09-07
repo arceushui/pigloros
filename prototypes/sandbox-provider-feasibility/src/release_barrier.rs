@@ -1702,7 +1702,7 @@ fn descriptor_property(
             // Unix descriptor precedes its activation name.
             StructureBuilder::new()
                 .add_field(ZbusValue::Fd(descriptor.into()))
-                .append_field(descriptor_name)
+                .append_field(descriptor_name.into())
                 .build()
                 .map_err(display_error)
         });
