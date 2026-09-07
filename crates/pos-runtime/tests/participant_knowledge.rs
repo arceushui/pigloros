@@ -403,7 +403,31 @@ struct DriverState {
 struct ParticipantDriver {
     state: Arc<Mutex<DriverState>>,
     entity: EntityId,
+    event_type: Kind,
     ambient_subscription: Option<pos_runtime::ProjectionKey>,
+}
+
+struct ForeignEventOwner {
+    id: PluginId,
+}
+
+impl Plugin for ForeignEventOwner {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "foreign-event-owner"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("foreign.owned")],
+            owned_entity_kinds: Vec::new(),
+            has_driver: false,
+            has_reducer: false,
+        }
+    }
 }
 
 struct RejectedDriver {
@@ -471,7 +495,7 @@ impl Driver for ParticipantDriver {
         }
         Ok(StepOutput::new(vec![EventDraft::new(
             self.entity,
-            Kind::new("participant.planned"),
+            self.event_type.clone(),
             CanonicalBytes::from_static(b"planned"),
         )]))
     }
@@ -496,6 +520,7 @@ fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<Driv
     let driver = ParticipantDriver {
         state: Arc::clone(&state),
         entity: EntityId::new(),
+        event_type: Kind::new("participant.planned"),
         ambient_subscription: ambient.then(|| pos_runtime::ProjectionKey::new(EntityId::new())),
     };
     let mut registry = PluginRegistry::new();
@@ -1020,6 +1045,55 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
             1
         );
     }
+}
+
+#[test]
+fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
+    let fixture = fixture();
+    let state = Arc::new(Mutex::new(DriverState::default()));
+    let driver = ParticipantDriver {
+        state: Arc::clone(&state),
+        entity: EntityId::new(),
+        event_type: Kind::new("foreign.owned"),
+        ambient_subscription: None,
+    };
+    let mut registry = PluginRegistry::new();
+    registry
+        .register(
+            &TestPlugin {
+                id: fixture.plugin_id,
+            },
+            None,
+            Some(Box::new(driver)),
+        )
+        .test_ok();
+    registry
+        .register(
+            &ForeignEventOwner {
+                id: PluginId::new(),
+            },
+            None,
+            None,
+        )
+        .test_ok();
+
+    assert_eq!(
+        authority_error(registry.stage_authorized_driver(
+            fixture.plugin_id,
+            fixture.timeline_id,
+            fixture.observation.clone(),
+            &fixture.knowledge,
+            &current_authority(&fixture),
+            &fixture.authority_registry,
+            Seq::from_u64(10),
+        )),
+        AuthorityErrorV1::UnauthorizedSource
+    );
+    let state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(state.aborts, 1);
+    assert_eq!(state.commits, 0);
 }
 
 #[test]
