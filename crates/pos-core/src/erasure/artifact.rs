@@ -60,8 +60,24 @@ pub enum ArtifactStateV1 {
     Retained,
     /// The registered transition rule was applied successfully.
     TransitionApplied,
-    /// Required bytes, schema, key, parent cut, runtime, or output are absent.
-    Missing,
+    /// The parent Timeline cut is unavailable.
+    MissingParentCut,
+    /// A frozen exogenous input is unavailable.
+    MissingFrozenInput,
+    /// A required role-separated key is unavailable.
+    MissingKey,
+    /// A required schema or upcaster is unavailable.
+    MissingSchema,
+    /// A required Plugin artifact is unavailable.
+    MissingPlugin,
+    /// A required model artifact is unavailable.
+    MissingModel,
+    /// A required runtime artifact is unavailable.
+    MissingRuntime,
+    /// A required authoritative output is unavailable.
+    MissingRequiredOutput,
+    /// The registered artifact was erased rather than structurally retained.
+    Erased,
     /// Immutable bytes remain for audit but their generation is quarantined.
     Invalidated,
 }
@@ -160,7 +176,16 @@ impl ReplayClaimEvaluatorV1 {
                     ArtifactStateV1::TransitionApplied => {
                         input.registration.transition_rule.claim()
                     }
-                    ArtifactStateV1::Missing | ArtifactStateV1::Invalidated => {
+                    ArtifactStateV1::MissingParentCut
+                    | ArtifactStateV1::MissingFrozenInput
+                    | ArtifactStateV1::MissingKey
+                    | ArtifactStateV1::MissingSchema
+                    | ArtifactStateV1::MissingPlugin
+                    | ArtifactStateV1::MissingModel
+                    | ArtifactStateV1::MissingRuntime
+                    | ArtifactStateV1::MissingRequiredOutput
+                    | ArtifactStateV1::Erased
+                    | ArtifactStateV1::Invalidated => {
                         ErasureReplayClaimV1::UnverifiableArtifactsMissing
                     }
                 };

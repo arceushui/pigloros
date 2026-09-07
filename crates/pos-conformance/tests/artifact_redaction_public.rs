@@ -59,7 +59,7 @@ fn public_artifacts_consume_the_host_evaluation_without_strengthening() {
         ),
         (
             ArtifactTransitionRuleV1::PreserveExact,
-            ArtifactStateV1::Missing,
+            ArtifactStateV1::MissingRequiredOutput,
         ),
         (
             ArtifactTransitionRuleV1::PreserveExact,

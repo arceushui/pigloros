@@ -127,7 +127,7 @@ fn export_takes_the_weakest_required_member_and_ignores_optional_absence() {
                 2,
                 ArtifactOptionalityV1::Optional,
                 ArtifactTransitionRuleV1::Remove,
-                ArtifactStateV1::Missing,
+                ArtifactStateV1::Erased,
             ),
             input(
                 ErasureArtifactClassV1::TimelineReplay,
@@ -149,8 +149,19 @@ fn export_takes_the_weakest_required_member_and_ignores_optional_absence() {
 }
 
 #[test]
-fn missing_or_invalidated_required_artifacts_are_unverifiable_and_not_authoritative() {
-    for state in [ArtifactStateV1::Missing, ArtifactStateV1::Invalidated] {
+fn every_missing_prerequisite_and_quarantined_artifact_is_unverifiable() {
+    for state in [
+        ArtifactStateV1::MissingParentCut,
+        ArtifactStateV1::MissingFrozenInput,
+        ArtifactStateV1::MissingKey,
+        ArtifactStateV1::MissingSchema,
+        ArtifactStateV1::MissingPlugin,
+        ArtifactStateV1::MissingModel,
+        ArtifactStateV1::MissingRuntime,
+        ArtifactStateV1::MissingRequiredOutput,
+        ArtifactStateV1::Erased,
+        ArtifactStateV1::Invalidated,
+    ] {
         let evaluation = ReplayClaimEvaluatorV1::evaluate(
             ErasureReplayClaimV1::Exact,
             &[input(
