@@ -4896,3 +4896,67 @@ use evidence::{
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "erasure_tests.rs"]
 pub mod tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(on))]
+mod coverage_paths {
+    use super::*;
+
+    const fn reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    fn frozen_state() -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
+        let request = ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: reference(1),
+            subject: reference(2),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(7)],
+            requester: reference(3),
+            authorization: reference(4),
+            policy: reference(5),
+            request_position: 9,
+            horizon_position: 10,
+            provenance: reference(6),
+        })?;
+        let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: reference(1),
+            scope_members: vec![reference(7)],
+            target_closure: reference(8),
+            lineage_rule: Some(reference(9)),
+        })?;
+        let state = ErasureStateV1 {
+            request: reference(1),
+            lifecycle: ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            coordinator: reference(2),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            previous_state: Some(reference(3)),
+            provenance: reference(4),
+            state_digest: reference(5),
+        };
+        Ok(ErasureVerifiedStateV1::from_parts(
+            reference(6),
+            request,
+            state,
+            Some(scope),
+            Vec::new(),
+        ))
+    }
+
+    #[test]
+    fn frozen_scope_calls_the_verified_state_permission_check() -> Result<(), ErasureErrorV1> {
+        let gate = ErasureContainmentGateV1::new();
+        let timeline = TimelineId::new();
+        gate.publish_verified_state(frozen_state()?);
+        gate.bind_timeline(timeline, reference(7))
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        assert_eq!(
+            gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+        Ok(())
+    }
+}

@@ -1062,3 +1062,44 @@ mod shutdown_signal_tests {
         super::shutdown_signal_from(async { Ok(()) }).await;
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(on))]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[test]
+    fn serve_startup_covers_memory_and_owntracks_gate_bindings(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let owner_key = directory.path().join("owner.key");
+        owntracks::create_or_load_owner_key(&owner_key)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        runtime.block_on(serve_with_owntracks(
+            "127.0.0.1:0".parse()?,
+            Some(database.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "database path is not UTF-8",
+                )
+            })?),
+            Some(&owner_key),
+            async {},
+            LedgerView::default(),
+            LedgerWriteMode::Disabled,
+        ))?;
+        runtime.block_on(serve_with_owntracks(
+            "127.0.0.1:0".parse()?,
+            None,
+            None,
+            async {},
+            LedgerView::default(),
+            LedgerWriteMode::Disabled,
+        ))?;
+        Ok(())
+    }
+}

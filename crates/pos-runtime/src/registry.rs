@@ -5229,3 +5229,53 @@ mod erasure_gate_coverage {
         assert!(registry.clone_erasure_gate().is_some());
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(on))]
+mod erasure_gate_error_paths {
+    use super::*;
+    use pos_core::ids::TimelineId;
+
+    #[test]
+    fn missing_and_rejecting_gates_are_reported_at_each_runtime_fence() {
+        let timeline = TimelineId::new();
+        let mut missing = PluginRegistry::new().without_erasure_gate();
+        assert!(matches!(
+            missing.with_erasure_fence(timeline, ErasureProtectedOperationV1::Snapshot, |_| Ok::<
+                (),
+                RuntimeError,
+            >(
+                ()
+            ),),
+            Err(RuntimeError::ErasureOperationUnavailable)
+        ));
+        assert!(matches!(
+            missing.with_erasure_mut_fence(
+                timeline,
+                ErasureProtectedOperationV1::PluginInput,
+                |_| Ok::<(), RuntimeError>(()),
+            ),
+            Err(RuntimeError::ErasureOperationUnavailable)
+        ));
+
+        let rejecting = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let mut bound = PluginRegistry::new().with_erasure_gate(rejecting);
+        assert!(matches!(
+            bound.with_erasure_fence(timeline, ErasureProtectedOperationV1::Snapshot, |_| Ok::<
+                (),
+                RuntimeError,
+            >(
+                ()
+            ),),
+            Err(RuntimeError::ErasureContainment(_))
+        ));
+        assert!(matches!(
+            bound.with_erasure_mut_fence(
+                timeline,
+                ErasureProtectedOperationV1::PluginInput,
+                |_| Ok::<(), RuntimeError>(()),
+            ),
+            Err(RuntimeError::ErasureContainment(_))
+        ));
+    }
+}

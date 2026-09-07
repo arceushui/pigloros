@@ -6152,9 +6152,52 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
+    use pos_store::{open_store, StoreConfig};
+    use std::error::Error;
+    use std::sync::Arc;
+
+    struct MissingVerifiedStateQuery;
+
+    impl ErasureVerifiedStateQueryV1 for MissingVerifiedStateQuery {
+        fn verified_state(
+            &mut self,
+            _request: ErasureReferenceV1,
+        ) -> Result<Option<pos_core::ErasureVerifiedStateV1>, pos_core::ErasureErrorV1> {
+            Ok(None)
+        }
+    }
 
     #[test]
     fn action_registry_entrypoint_builds_the_gateway_registry() {
         assert_eq!(gateway_action_registry().driver_count(), 0);
+    }
+
+    #[test]
+    fn erasure_gate_constructors_cover_binding_success_and_recovery_failure(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let gateway =
+            Gateway::new_with_erasure_gate(open_store(StoreConfig::Memory)?, Arc::clone(&gate))?;
+        drop(gateway);
+
+        let owner_key = OwnTracksOwnerKey([7; 32]);
+        let owntracks = Gateway::new_with_owntracks_ingress_and_erasure_gate(
+            pos_store::sqlite::SqliteStore::open_in_memory()?,
+            &owner_key,
+            gate,
+        )?;
+        assert!(owntracks.owntracks_enabled);
+        drop(owntracks);
+
+        let mut query = MissingVerifiedStateQuery;
+        let recovery = Gateway::new_with_verified_erasure_state(
+            open_store(StoreConfig::Memory)?,
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+            &mut query,
+            ErasureReferenceV1::from_digest([1; 32]),
+            &[],
+        );
+        assert!(recovery.is_err());
+        Ok(())
     }
 }

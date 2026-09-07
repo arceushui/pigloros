@@ -1816,6 +1816,21 @@ mod tests {
             )
             .is_err());
 
+        let blocked_gate = Arc::new(ErasureContainmentGateV1::new());
+        blocked_gate.block_timeline(timeline);
+        let blocked = ProjectionRegistry::new().with_erasure_gate(blocked_gate);
+        assert_eq!(
+            blocked.materialize_authorized_observation(
+                &fixture.request,
+                &fixture.decision,
+                &fixture.authority,
+                &authority_registry,
+                Seq::ZERO,
+                &context,
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+
         let unbound = ProjectionRegistry::new().without_erasure_gate();
         assert_eq!(
             unbound.materialize_authorized_observation(
