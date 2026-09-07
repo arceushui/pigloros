@@ -447,10 +447,35 @@ mod extra_tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId},
-        Event, Reducer, State,
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+        ReplayClaimEvaluatorV1, State,
     };
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
+
+    const SNAPSHOT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([41; 32]);
+
+    fn snapshot_evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
+        ReplayClaimEvaluatorV1::evaluate(
+            ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::ForkOrSnapshot,
+                    SNAPSHOT_DIGEST,
+                    ArtifactDataClassV1::PrivateSubjectData,
+                    Some(ErasureKeyRoleV1::DataEncryption),
+                    ErasureReferenceV1::from_digest([42; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::Remove,
+                ),
+                current_claim: ErasureReplayClaimV1::Exact,
+                state,
+            }],
+        )
+        .test_ok()
+    }
 
     struct ReadFailStore;
 

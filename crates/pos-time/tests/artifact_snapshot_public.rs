@@ -8,6 +8,20 @@ use pos_state::ProjectionRegistry;
 use pos_store::{open_store, StoreConfig};
 use pos_time::{snapshot, verify_snapshot_consistency, SnapshotError};
 
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected artifact snapshot fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
 struct NoopReducer;
 
 impl Reducer for NoopReducer {
@@ -37,7 +51,7 @@ fn evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
             state,
         }],
     )
-    .expect("a unique snapshot artifact should evaluate")
+    .test_ok()
 }
 
 fn registry() -> ProjectionRegistry {
@@ -48,13 +62,10 @@ fn registry() -> ProjectionRegistry {
 
 #[test]
 fn snapshot_verification_requires_authoritative_artifact_evidence() {
-    let mut store = open_store(StoreConfig::Memory).expect("memory store should open");
-    let timeline = store
-        .create_timeline("artifact-snapshot")
-        .expect("timeline should be created");
+    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let timeline = store.create_timeline("artifact-snapshot").test_ok();
     let mut capture_registry = registry();
-    let snapshot = snapshot(store.as_ref(), timeline.id(), &mut capture_registry)
-        .expect("snapshot should be captured");
+    let snapshot = snapshot(store.as_ref(), timeline.id(), &mut capture_registry).test_ok();
 
     let mut retained_registry = registry();
     verify_snapshot_consistency(
@@ -64,7 +75,7 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
         SNAPSHOT_DIGEST,
         &evaluation(ArtifactStateV1::Retained),
     )
-    .expect("retained snapshot should remain authoritative");
+    .test_ok();
 
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
         let mut rejected_registry = registry();
