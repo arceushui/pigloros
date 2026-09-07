@@ -41,11 +41,16 @@
 
               environment.systemPackages = [
                 prototype
+                pkgs.b3sum
                 pkgs.cryptsetup
                 pkgs.curl
+                pkgs.erofs-utils
                 pkgs.iproute2
                 pkgs.jq
+                pkgs.lvm2
+                pkgs.nix
                 pkgs.nftables
+                pkgs.openssl
                 pkgs.util-linux
               ];
 
@@ -118,6 +123,36 @@
               assert "typed-default-drop-allow-read-back-delete-ok" in initial, initial
               assert "retained-fd-full-set-child-exit-drop-ok" in initial, initial
               assert "host-capability-present" in initial, initial
+
+              machine.copy_from_host(
+                  "${./prove-sim1-image.sh}",
+                  "/tmp/prove-sim1-image.sh",
+              )
+              sim1 = machine.succeed(
+                  "chmod 0755 /tmp/prove-sim1-image.sh && "
+                  "STATIC_TRUE=${pkgs.pkgsStatic.busybox}/bin/true "
+                  "/tmp/prove-sim1-image.sh"
+              ).strip()
+              print(f"PINNED_SIM1_PROOF;{sim1}")
+              assert "valid_signature=provider-verified" in sim1, sim1
+              assert "valid_image=activated-and-executed" in sim1, sim1
+              assert "invalid_root_hash=rejected" in sim1, sim1
+              assert "invalid_signature=rejected-before-unit" in sim1, sim1
+              assert "residual_mount=absent" in sim1, sim1
+              machine.copy_from_machine(
+                  "/tmp/pigloros-sim1-evidence",
+                  "sim1-evidence",
+              )
+
+              machine.succeed(
+                  "nix --extra-experimental-features nix-command "
+                  "path-info --json --recursive /run/current-system "
+                  ">/tmp/guest-runtime-closure.json"
+              )
+              machine.copy_from_machine(
+                  "/tmp/guest-runtime-closure.json",
+                  "runtime-identity",
+              )
 
               namespace = machine.succeed(
                   "sandbox-provider-feasibility --namespace-entry-lifecycle"

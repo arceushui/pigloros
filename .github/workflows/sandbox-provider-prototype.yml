@@ -65,6 +65,16 @@ jobs:
           test "$(grep -c 'PINNED_CLEANUP_SAMPLE;' pinned-host-profile.txt)" -eq 90
           test "$(grep -c 'PINNED_LIFECYCLE_SAMPLE;' pinned-host-profile.txt)" -eq 30
           grep -q 'PINNED_LIFECYCLE_P95;samples=30' pinned-host-profile.txt
+          grep -q 'PINNED_SIM1_PROOF;' pinned-host-profile.txt
+          grep -q 'valid_signature=provider-verified' pinned-host-profile.txt
+          grep -q 'valid_image=activated-and-executed' pinned-host-profile.txt
+          grep -q 'invalid_root_hash=rejected' pinned-host-profile.txt
+          grep -q 'invalid_signature=rejected-before-unit' pinned-host-profile.txt
+          cp -RL result/sim1-evidence pinned-sim1-evidence
+          cp -RL result/runtime-identity pinned-runtime-identity
+          test "$(find pinned-runtime-identity -name guest-runtime-closure.json -print -quit)"
+          test "$(jq 'length' "$(find pinned-runtime-identity \
+            -name guest-runtime-closure.json -print -quit)")" -gt 100
       - name: Record pinned VM build closure
         working-directory: prototypes/sandbox-provider-feasibility
         run: |
@@ -81,6 +91,8 @@ jobs:
             prototypes/sandbox-provider-feasibility/pinned-flake-metadata.json
             prototypes/sandbox-provider-feasibility/pinned-host-build-closure.txt
             prototypes/sandbox-provider-feasibility/pinned-host-profile.txt
+            prototypes/sandbox-provider-feasibility/pinned-runtime-identity/
+            prototypes/sandbox-provider-feasibility/pinned-sim1-evidence/
           if-no-files-found: error
           retention-days: 14
 
