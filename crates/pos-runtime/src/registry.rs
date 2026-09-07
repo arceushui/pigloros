@@ -1404,7 +1404,7 @@ impl PluginRegistry {
             observed_through,
             selection,
             committed_events,
-            operation,
+            &operation,
         )
     }
 
@@ -1414,7 +1414,7 @@ impl PluginRegistry {
         observed_through: Seq,
         selection: AnchoredSelection,
         committed_events: &[Event],
-        operation: OperationContext,
+        operation: &OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.with_erasure_mut_fence(
             timeline,
@@ -1533,6 +1533,40 @@ impl PluginRegistry {
             plugin_id,
             timeline,
         } = target;
+        self.ensure_live_execution()?;
+        self.ensure_no_pending_step()?;
+        observation
+            .revalidate(authority, authority_registry, authority_position)
+            .map_err(RuntimeError::Authority)?;
+        let snapshot = observation
+            .authoritative_snapshot(artifact_evaluation)
+            .map_err(RuntimeError::Authority)?;
+        knowledge
+            .validate_observation_snapshot(snapshot)
+            .map_err(RuntimeError::Authority)?;
+        let mut observation = Some(observation);
+        return self.with_erasure_mut_fence(
+            timeline,
+            ErasureProtectedOperationV1::PluginInput,
+            |registry| {
+                let Some(observation) = observation.take() else {
+                    return Err(RuntimeError::ErasureOperationUnavailable);
+                };
+                registry.stage_authorized_driver_after_fence(
+                    plugin_id,
+                    timeline,
+                    observation,
+                    snapshot,
+                    knowledge,
+                )
+            },
+        );
+        /*
+<<<<<<< HEAD
+        let AuthorizedDriverTargetV1 {
+            plugin_id,
+            timeline,
+        } = target;
         self.ensure_live_execution()
             .and_then(|()| self.ensure_no_pending_step())
             .and_then(|()| {
@@ -1575,8 +1609,35 @@ impl PluginRegistry {
                         )
                     },
 >>>>>>> 6e340f50 ([#186] Fence runtime and fail closed at gateway startup)
+=======
+        self.ensure_live_execution()?;
+        self.ensure_no_pending_step()?;
+        observation
+            .revalidate(authority, authority_registry, authority_position)
+            .map_err(RuntimeError::Authority)?;
+        knowledge
+            .validate_observation_snapshot(observation.snapshot())
+            .map_err(RuntimeError::Authority)?;
+        let mut observation = Some(observation);
+        self.with_erasure_mut_fence(
+            timeline,
+            ErasureProtectedOperationV1::PluginInput,
+            |registry| {
+                let Some(observation) = observation.take() else {
+                    return Err(RuntimeError::ErasureOperationUnavailable);
+                };
+                registry.stage_authorized_driver_after_fence(
+                    plugin_id,
+                    timeline,
+                    observation,
+                    knowledge,
+>>>>>>> 0bb810aa ([#186] Resolve hosted lint findings in fenced runtime)
                 )
-            })
+            },
+        )
+    }
+
+        */
     }
 
     fn stage_authorized_driver_after_fence(

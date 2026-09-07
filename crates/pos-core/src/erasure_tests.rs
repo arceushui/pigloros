@@ -934,7 +934,7 @@ fn containment_gate_does_not_downgrade_a_frozen_state() -> Result<(), ErasureErr
 }
 
 #[test]
-fn containment_gate_allows_nested_store_fences() -> Result<(), ErasureErrorV1> {
+fn containment_gate_allows_nested_store_fences() {
     let gate = ErasureContainmentGateV1::new();
     let timeline = TimelineId::new();
     let mut invoked = false;
@@ -951,7 +951,6 @@ fn containment_gate_allows_nested_store_fences() -> Result<(), ErasureErrorV1> {
         Ok(())
     );
     assert!(invoked);
-    Ok(())
 }
 
 #[test]
