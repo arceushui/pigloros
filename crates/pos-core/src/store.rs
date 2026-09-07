@@ -1028,15 +1028,14 @@ pub fn export_timeline_raw(
             )
         })
         .and_then(|mut export| {
-            export.timeline.meta.fork_point.map_or_else(
-                || Ok(export),
-                |(parent, at_seq)| {
-                    store.chain_hash_at(parent, at_seq).map(|parent_hash| {
-                        export.parent_fork_hash = Some(parent_hash);
-                        export
-                    })
-                },
-            )
+            if let Some((parent, at_seq)) = export.timeline.meta.fork_point {
+                store.chain_hash_at(parent, at_seq).map(|parent_hash| {
+                    export.parent_fork_hash = Some(parent_hash);
+                    export
+                })
+            } else {
+                Ok(export)
+            }
         })
 }
 
