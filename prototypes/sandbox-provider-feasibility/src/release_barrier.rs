@@ -2045,16 +2045,17 @@ async fn validate_requested_readback(
     {
         return Err("RootDirectory readback mismatch".to_owned());
     }
-    for omitted in [
-        "RootImage",
-        "RootHash",
-        "RootHashSignature",
-        "RootImagePolicy",
-    ] {
+    for omitted in ["RootImage", "RootHash", "RootHashSignature"] {
         if !unit_property(unit, omitted)?.trim().is_empty() {
             return Err(format!("{omitted} was delegated to the transient unit"));
         }
     }
+    // systemd exposes its effective RootImagePolicy default even when no
+    // RootImage was supplied. It is inert here: the empty image properties
+    // above and exact RootDirectory/mount checks below prove that activation
+    // remained provider-owned.
+    let root_image_policy = unit_property(unit, "RootImagePolicy")?;
+    println!("transient_image_delegation=absent;effective_root_image_policy={root_image_policy}");
     let main_pid = wait_for_main_pid(unit)?;
     let mountinfo =
         std::fs::read_to_string(format!("/proc/{main_pid}/mountinfo")).map_err(display_error)?;
