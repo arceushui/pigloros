@@ -1006,6 +1006,7 @@ impl PluginRegistry {
     }
 
     fn new_with_mode(run_mode: RunMode, composition_mode: PluginExecutionModeV1) -> Self {
+        let erasure_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
         let mut schemas = SchemaRegistry::new();
         // Auto-register the Recorder's internal event type so that
         // Recorder::to_draft() output passes SchemaRegistry::validate().
@@ -1023,7 +1024,7 @@ impl PluginRegistry {
             plugins: IndexMap::new(),
             approver_map: IndexMap::new(),
             schemas,
-            projections: ProjectionRegistry::new(),
+            projections: ProjectionRegistry::new().with_erasure_gate(Arc::clone(&erasure_gate)),
             pending_step: None,
             run_mode,
             composition_mode,
@@ -1033,7 +1034,7 @@ impl PluginRegistry {
             // caller binds a durable authority. This default fails closed for
             // protected drafts instead of exposing an unguarded public path.
             consent_gate: Some(Arc::new(ConsentAuthority::new())),
-            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new())),
+            erasure_gate: Some(erasure_gate),
         }
     }
 
