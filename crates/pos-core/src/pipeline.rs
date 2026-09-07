@@ -37,6 +37,8 @@ pub enum PipelineContractErrorV1 {
     InvalidDraft,
     #[error("committed Event batch does not match the admitted draft batch")]
     CommittedBatchMismatch,
+    #[error("committed Timeline does not match the admitted observation Timeline")]
+    CommittedTimelineMismatch,
     #[error("committed Event batch is not in contiguous Timeline Order")]
     NonContiguousCommit,
     #[error("committed Event identities are invalid or duplicated")]
@@ -488,24 +490,35 @@ pub struct PipelineCommitReceiptV1 {
 }
 
 impl PipelineCommitReceiptV1 {
-    /// Bind a validated admission basis to the exact committed Events returned by the store.
+    /// Bind a validated admission basis to the exact Timeline and Events returned by the store.
     ///
     /// # Errors
-    /// Returns a closed error when identity, content, count, or Timeline Order is invalid.
+    /// Returns a closed error when Timeline, identity, content, count, or Timeline Order is invalid.
     pub fn try_from_committed_events(
         basis: &PipelineAdmissionBasisV1,
+        committed_timeline_id: TimelineId,
         events: &[Event],
     ) -> Result<Self, PipelineContractErrorV1> {
-        if events.len() != basis.batch.drafts.len() || digest_events(events) != basis.batch.digest {
+        if committed_timeline_id != basis.attempt.observation.timeline_id {
+            return Err(PipelineContractErrorV1::CommittedTimelineMismatch);
+        }
+        if events.len() != basis.batch.drafts.len()
+            || events
+                .iter()
+                .zip(&basis.batch.drafts)
+                .any(|(event, draft)| !committed_event_matches_draft(event, draft))
+        {
             return Err(PipelineContractErrorV1::CommittedBatchMismatch);
         }
-        if events.windows(2).any(|pair| {
-            pair[0]
-                .seq
-                .as_u64()
-                .checked_add(1)
-                .is_none_or(|next| next != pair[1].seq.as_u64())
-        }) {
+        if events.first().is_some_and(|event| event.seq == Seq::ZERO)
+            || events.windows(2).any(|pair| {
+                pair[0]
+                    .seq
+                    .as_u64()
+                    .checked_add(1)
+                    .is_none_or(|next| next != pair[1].seq.as_u64())
+            })
+        {
             return Err(PipelineContractErrorV1::NonContiguousCommit);
         }
         let mut identities = HashSet::with_capacity(events.len());
@@ -517,7 +530,7 @@ impl PipelineCommitReceiptV1 {
         }
         Ok(Self {
             attempt_id: basis.attempt.attempt_id,
-            timeline_id: basis.attempt.observation.timeline_id,
+            timeline_id: committed_timeline_id,
             draft_batch_digest: basis.batch.digest,
             committed_events: events
                 .iter()
@@ -571,6 +584,18 @@ fn invalid_draft(draft: &EventDraft) -> bool {
     draft.entity.inner() == Ulid::nil() || draft.event_type.as_str().is_empty()
 }
 
+fn committed_event_matches_draft(event: &Event, draft: &EventDraft) -> bool {
+    event.entity == draft.entity
+        && event.event_type == draft.event_type
+        && event.payload == draft.payload
+        && event.causation_id == draft.causation_id
+        && event.correlation_id == draft.correlation_id
+        && event.schema_version == draft.schema_version
+        && draft
+            .wall_time
+            .is_none_or(|expected| event.wall_time == expected)
+}
+
 fn draft_content_bytes(draft: &EventDraft) -> usize {
     16usize
         .saturating_add(draft.event_type.as_str().len())
@@ -578,6 +603,7 @@ fn draft_content_bytes(draft: &EventDraft) -> usize {
         .saturating_add(16)
         .saturating_add(16)
         .saturating_add(4)
+        .saturating_add(draft.wall_time.map_or(0, |_| 8))
 }
 
 fn digest_drafts(drafts: &[EventDraft]) -> Hash {
@@ -593,24 +619,7 @@ fn digest_drafts(drafts: &[EventDraft]) -> Hash {
             draft.causation_id,
             draft.correlation_id,
             draft.schema_version.as_u32(),
-        );
-    }
-    Hash::from_bytes(*hasher.finalize().as_bytes())
-}
-
-fn digest_events(events: &[Event]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"PiglorOS.PipelineDraftBatch.v1\0");
-    hasher.update(&usize_bytes(events.len()));
-    for event in events {
-        digest_intent(
-            &mut hasher,
-            event.entity.inner().to_bytes(),
-            event.event_type.as_str(),
-            event.payload.as_slice(),
-            event.causation_id,
-            event.correlation_id,
-            event.schema_version.as_u32(),
+            draft.wall_time,
         );
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
@@ -624,6 +633,7 @@ fn digest_intent(
     causation_id: Option<EventId>,
     correlation_id: Option<crate::CorrelationId>,
     schema_version: u32,
+    wall_time: Option<crate::WallTime>,
 ) {
     hasher.update(&entity);
     digest_bytes(hasher, event_type.as_bytes());
@@ -631,6 +641,15 @@ fn digest_intent(
     digest_optional_ulid(hasher, causation_id.map(|id| id.inner().to_bytes()));
     digest_optional_ulid(hasher, correlation_id.map(|id| id.inner().to_bytes()));
     hasher.update(&schema_version.to_be_bytes());
+    match wall_time {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.as_micros().to_be_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
 }
 
 fn digest_bytes(hasher: &mut blake3::Hasher, value: &[u8]) {

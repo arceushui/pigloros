@@ -298,7 +298,9 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
     );
     let events = vec![committed(&drafts[0], 40, 9), committed(&drafts[1], 41, 10)];
     let receipt = ok(PipelineCommitReceiptV1::try_from_committed_events(
-        &basis, &events,
+        &basis,
+        timeline(1),
+        &events,
     ));
     assert_eq!(receipt.attempt_id(), basis.attempt().attempt_id());
     assert_eq!(receipt.timeline_id(), timeline(1));
@@ -317,19 +319,19 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
     let mut changed = events.clone();
     changed[1].payload = CanonicalBytes::from_static(b"changed");
     assert_eq!(
-        PipelineCommitReceiptV1::try_from_committed_events(&basis, &changed),
+        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &changed),
         Err(PipelineContractErrorV1::CommittedBatchMismatch)
     );
     let mut non_contiguous = events.clone();
     non_contiguous[1].seq = Seq::from_u64(11);
     assert_eq!(
-        PipelineCommitReceiptV1::try_from_committed_events(&basis, &non_contiguous),
+        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &non_contiguous),
         Err(PipelineContractErrorV1::NonContiguousCommit)
     );
     let mut duplicate_id = events;
     duplicate_id[1].id = duplicate_id[0].id;
     assert_eq!(
-        PipelineCommitReceiptV1::try_from_committed_events(&basis, &duplicate_id),
+        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &duplicate_id),
         Err(PipelineContractErrorV1::InvalidCommittedIdentity)
     );
 }
@@ -391,28 +393,69 @@ fn getter_contracts_return_exact_bound_values() {
 }
 
 #[test]
-fn receipt_rejects_count_mismatch_and_nil_identity() {
+fn receipt_rejects_timeline_count_identity_and_zero_order() {
     let source = draft(b"a");
-    let basis = basis(
+    let single_event_basis = basis(
         PipelineIngressV1::ScheduledAiDriver,
         TentativePipelineResultV1::AiProviderValidation(ok(PipelineEvidenceRefV1::try_new(hash(
             20,
         )))),
         vec![source.clone()],
     );
+    let committed_event = committed(&source, 39, 8);
     assert_eq!(
-        PipelineCommitReceiptV1::try_from_committed_events(&basis, &[]),
+        PipelineCommitReceiptV1::try_from_committed_events(
+            &single_event_basis,
+            timeline(2),
+            &[committed_event],
+        ),
+        Err(PipelineContractErrorV1::CommittedTimelineMismatch)
+    );
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_committed_events(&single_event_basis, timeline(1), &[]),
         Err(PipelineContractErrorV1::CommittedBatchMismatch)
     );
     let nil = committed(&source, 0, 8);
     assert_eq!(
-        PipelineCommitReceiptV1::try_from_committed_events(&basis, &[nil]),
+        PipelineCommitReceiptV1::try_from_committed_events(
+            &single_event_basis,
+            timeline(1),
+            &[nil],
+        ),
         Err(PipelineContractErrorV1::InvalidCommittedIdentity)
+    );
+
+    let zero_seq = committed(&source, 40, 0);
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_committed_events(
+            &single_event_basis,
+            timeline(1),
+            &[zero_seq],
+        ),
+        Err(PipelineContractErrorV1::NonContiguousCommit)
+    );
+
+    let second_source = draft(b"b");
+    let two_event_basis = basis(
+        PipelineIngressV1::ScheduledAiDriver,
+        TentativePipelineResultV1::AiProviderValidation(ok(PipelineEvidenceRefV1::try_new(hash(
+            21,
+        )))),
+        vec![source.clone(), second_source.clone()],
+    );
+    let leading_zero = [committed(&source, 41, 0), committed(&second_source, 42, 1)];
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_committed_events(
+            &two_event_basis,
+            timeline(1),
+            &leading_zero,
+        ),
+        Err(PipelineContractErrorV1::NonContiguousCommit)
     );
 }
 
 #[test]
-fn draft_digest_binds_optional_ids_and_schema_without_wall_clock_authority() {
+fn draft_digest_binds_optional_ids_schema_and_explicit_wall_time() {
     let base = draft(b"a");
     let original = ok(PipelineDraftBatchV1::try_new(vec![base.clone()]));
     let mut without_cause = base.clone();
@@ -426,7 +469,38 @@ fn draft_digest_binds_optional_ids_and_schema_without_wall_clock_authority() {
 
     let mut with_wall_time = base;
     with_wall_time.wall_time = Some(WallTime::from_micros(999));
-    let with_wall_time = ok(PipelineDraftBatchV1::try_new(vec![with_wall_time]));
-    assert_eq!(original.digest(), with_wall_time.digest());
+    let with_wall_time_batch = ok(PipelineDraftBatchV1::try_new(vec![with_wall_time.clone()]));
+    assert_ne!(original.digest(), with_wall_time_batch.digest());
+    assert_eq!(
+        with_wall_time_batch.content_bytes(),
+        original.content_bytes() + 8
+    );
+
+    let with_wall_time_basis = basis(
+        PipelineIngressV1::HumanProposedAction,
+        TentativePipelineResultV1::HumanDomainApproval(ok(PipelineEvidenceRefV1::try_new(hash(
+            22,
+        )))),
+        vec![with_wall_time.clone()],
+    );
+    let matching = Event {
+        wall_time: WallTime::from_micros(999),
+        ..committed(&with_wall_time, 50, 9)
+    };
+    assert!(PipelineCommitReceiptV1::try_from_committed_events(
+        &with_wall_time_basis,
+        timeline(1),
+        &[matching],
+    )
+    .is_ok());
+    let mismatched = committed(&with_wall_time, 51, 9);
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_committed_events(
+            &with_wall_time_basis,
+            timeline(1),
+            &[mismatched],
+        ),
+        Err(PipelineContractErrorV1::CommittedBatchMismatch)
+    );
     assert_eq!(SchemaVersion::V1.as_u32(), 1);
 }
