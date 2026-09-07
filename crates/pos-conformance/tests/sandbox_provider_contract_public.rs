@@ -239,6 +239,15 @@ const fn receipt_authority() -> ReceiptAuthorityV1 {
     }
 }
 
+const fn operation_authority() -> RequestAuthorityV1 {
+    RequestAuthorityV1 {
+        request_id: [1; 16],
+        apt1_digest: digest(2),
+        policy_epoch: 3,
+        nonce: [4; 16],
+    }
+}
+
 #[test]
 fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
     let key = signing_key();
@@ -437,14 +446,9 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
 }
 
 #[test]
-fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
+fn describe_operation_round_trips_and_binds_response() -> TestResult {
     let key = signing_key();
-    let authority = RequestAuthorityV1 {
-        request_id: [1; 16],
-        apt1_digest: digest(2),
-        policy_epoch: 3,
-        nonce: [4; 16],
-    };
+    let authority = operation_authority();
     let describe = SandboxDescribeRequestV1 {
         authority: authority.clone(),
         request_digest: [0; 32],
@@ -468,15 +472,21 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         signature: [0; 64],
     }
     .sign(&key)?;
-    let described_bytes = described.to_canonical_cbor()?;
+    let response_bytes = described.to_canonical_cbor()?;
     described.validate_for_request(&describe)?;
     described.verify_signature(&key.verifying_key())?;
-    independent::SandboxDescribeResponse::from_canonical_cbor(&described_bytes)?
+    independent::SandboxDescribeResponse::from_canonical_cbor(&response_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("sdy1", &described_bytes)?;
+    publish_vector("sdy1", &response_bytes)?;
+    Ok(())
+}
 
+#[test]
+fn cancel_operation_round_trips_and_binds_response() -> TestResult {
+    let key = signing_key();
+    let authority = operation_authority();
     let cancel = SandboxCancelRequestV1 {
-        authority: authority.clone(),
+        authority,
         attempt_id: [8; 16],
         agr1_digest: digest(9),
         request_digest: [0; 32],
@@ -486,7 +496,7 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
     independent::SandboxCancelRequest::from_canonical_cbor(&cancel_bytes)?;
     publish_vector("scq1", &cancel_bytes)?;
     let cancelled = SandboxCancelResponseV1 {
-        request_id: authority.request_id,
+        request_id: cancel.authority.request_id,
         attempt_id: cancel.attempt_id,
         result: SandboxCancelResultV1::CancelledAndCleaned,
         spy1_digest: digest(10),
@@ -495,18 +505,23 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         signature: [0; 64],
     }
     .sign(&key)?;
-    let cancelled_bytes = cancelled.to_canonical_cbor()?;
+    let response_bytes = cancelled.to_canonical_cbor()?;
     cancelled.validate_for_request(&cancel)?;
     assert_eq!(
-        SandboxCancelResponseV1::from_canonical_cbor(&cancelled_bytes)?,
+        SandboxCancelResponseV1::from_canonical_cbor(&response_bytes)?,
         cancelled
     );
-    independent::SandboxCancelResponse::from_canonical_cbor(&cancelled_bytes)?
+    independent::SandboxCancelResponse::from_canonical_cbor(&response_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("scy1", &cancelled_bytes)?;
+    publish_vector("scy1", &response_bytes)?;
+    Ok(())
+}
 
+#[test]
+fn reconcile_and_local_error_operations_round_trip() -> TestResult {
+    let key = signing_key();
     let reconcile = SandboxReconcileRequestV1 {
-        authority,
+        authority: operation_authority(),
         attempt_id: [8; 16],
         agr1_digest: digest(9),
         request_digest: [0; 32],
@@ -525,15 +540,15 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         signature: [0; 64],
     }
     .sign(&key)?;
-    let reconciled_bytes = reconciled.to_canonical_cbor()?;
+    let response_bytes = reconciled.to_canonical_cbor()?;
     reconciled.validate_for_request(&reconcile)?;
     assert_eq!(
-        SandboxReconcileResponseV1::from_canonical_cbor(&reconciled_bytes)?,
+        SandboxReconcileResponseV1::from_canonical_cbor(&response_bytes)?,
         reconciled
     );
-    independent::SandboxReconcileResponse::from_canonical_cbor(&reconciled_bytes)?
+    independent::SandboxReconcileResponse::from_canonical_cbor(&response_bytes)?
         .verify_signature(&key.verifying_key())?;
-    publish_vector("sry1", &reconciled_bytes)?;
+    publish_vector("sry1", &response_bytes)?;
 
     let local_error = SandboxLocalErrorV1 {
         operation: Some(SandboxProviderOperationV1::Execute),
