@@ -26,7 +26,7 @@ use std::{
         fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd},
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     },
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::Duration,
@@ -49,8 +49,21 @@ struct DescriptorSet {
 struct ImageAuthority {
     root_image: String,
     root_hash: Vec<u8>,
-    root_signature: Vec<u8>,
     sim1_digest: [u8; 32],
+}
+
+struct MountedImage {
+    root: PathBuf,
+}
+
+impl Drop for MountedImage {
+    fn drop(&mut self) {
+        let root = self.root.to_string_lossy().into_owned();
+        let _ = Command::new("systemd-dissect")
+            .args(["--umount", root.as_str()])
+            .status();
+        let _ = std::fs::remove_dir(&self.root);
+    }
 }
 
 struct LaunchRecord {
@@ -249,6 +262,7 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
     }
     let image = load_image_authority(arguments)?;
     let launch = build_launch_record(mode, image.sim1_digest)?;
+    let mounted_image = mount_verified_image(&image, &launch.parameters.attempt_id)?;
     let channels = create_provider_channels(mode)?;
 
     let executable = std::env::current_exe().map_err(display_error)?;
@@ -273,9 +287,7 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         .collect();
     let properties = transient_properties(
         &executable,
-        &image.root_image,
-        image.root_hash,
-        image.root_signature,
+        &mounted_image.root,
         &launch.encoded_hex,
         mode,
         extra_descriptors,
@@ -296,6 +308,7 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         &launch.encoded,
         &channels.provider_release,
         channels.provider_proxy.as_ref(),
+        &mounted_image.root,
         mode,
         proof_case,
     )
@@ -450,9 +463,64 @@ fn load_image_authority(arguments: &[String]) -> Result<ImageAuthority, String> 
     Ok(ImageAuthority {
         root_image: root_image.to_owned(),
         root_hash,
-        root_signature: std::fs::read(signature_path).map_err(display_error)?,
         sim1_digest: digest_file(Path::new(root_image))?,
     })
+}
+
+fn mount_verified_image(
+    image: &ImageAuthority,
+    attempt_id: &[u8; 16],
+) -> Result<MountedImage, String> {
+    let root = PathBuf::from(format!("/run/pigloros-sim1-{}", hex::encode(attempt_id)));
+    std::fs::create_dir(&root).map_err(display_error)?;
+    let root_hash = format!("--root-hash={}", hex::encode(&image.root_hash));
+    let root_path = root.to_string_lossy().into_owned();
+    let output = Command::new("systemd-dissect")
+        .args([
+            "--mount",
+            "--read-only",
+            root_hash.as_str(),
+            image.root_image.as_str(),
+            root_path.as_str(),
+        ])
+        .output()
+        .map_err(display_error)?;
+    if !output.status.success() {
+        let _ = std::fs::remove_dir(&root);
+        return Err(format!(
+            "provider dm-verity activation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let mounted = MountedImage { root };
+    let mount_options = Command::new("findmnt")
+        .args([
+            "--noheadings",
+            "--output=OPTIONS",
+            "--target",
+            root_path.as_str(),
+        ])
+        .output()
+        .map_err(display_error)?;
+    let mapper_table = Command::new("dmsetup")
+        .args(["table", "--showkeys"])
+        .output()
+        .map_err(display_error)?;
+    if !mount_options.status.success()
+        || !String::from_utf8_lossy(&mount_options.stdout)
+            .trim()
+            .split(',')
+            .any(|option| option == "ro")
+        || !mapper_table.status.success()
+        || !String::from_utf8_lossy(&mapper_table.stdout).contains(&hex::encode(&image.root_hash))
+    {
+        return Err("provider dm-verity mount readback mismatch".to_owned());
+    }
+    println!(
+        "provider_image_activation=verified-before-private-ipc;root_hash={}",
+        hex::encode(&image.root_hash)
+    );
+    Ok(mounted)
 }
 
 fn descriptor_set(
@@ -535,9 +603,7 @@ fn ensure_no_adapter_marker(proxy_socket: &OwnedFd) -> Result<(), String> {
 
 fn transient_properties(
     executable: &Path,
-    root_image: &str,
-    root_hash: Vec<u8>,
-    root_signature: Vec<u8>,
+    root_directory: &Path,
     parameter_hex: &str,
     mode: ExecutionMode,
     extra_descriptors: Vec<(String, ZbusOwnedFd)>,
@@ -564,10 +630,7 @@ fn transient_properties(
             "ExecStart",
             vec![(RELEASE_LAUNCHER.to_owned(), launcher_arguments, false)],
         )?,
-        property("RootImage", root_image.to_owned())?,
-        property("RootHash", root_hash)?,
-        property("RootHashSignature", root_signature)?,
-        property("RootImagePolicy", "root=verity+signed+read-only-on:=absent")?,
+        property("RootDirectory", root_directory.display().to_string())?,
         // systemd v260.2 consumes bind mounts as a(ssbt): source,
         // destination, ignore-missing, and mount flags.
         property("BindReadOnlyPaths", bind)?,
@@ -623,6 +686,7 @@ async fn complete_release(
     encoded_parameters: &[u8],
     release_socket: &OwnedFd,
     proxy_socket: Option<&OwnedFd>,
+    root_directory: &Path,
     mode: ExecutionMode,
     proof_case: ProofCase,
 ) -> Result<(), String> {
@@ -630,7 +694,7 @@ async fn complete_release(
     let ready = crate::release_wire::decode_ready(&ready_bytes)?;
     let (main_pid, _namespace_descriptors) =
         validate_ready_state(unit, parameters, encoded_parameters, &ready, credential_pid)?;
-    validate_requested_readback(unit, parameters, mode)?;
+    validate_requested_readback(unit, parameters, root_directory, mode)?;
     let network = configure_network(main_pid, parameters.attempt_id, mode)?;
     if let Some(proxy_socket) = proxy_socket {
         ensure_adapter_blocked(proxy_socket)?;
@@ -1597,11 +1661,11 @@ fn validate_ready_executables(main_pid: u32, ready: &Ready) -> Result<(), String
 fn validate_requested_readback(
     unit: &str,
     parameters: &LaunchParameters,
+    root_directory: &Path,
     mode: ExecutionMode,
 ) -> Result<(), String> {
     let properties = [
         ("Type", "exec"),
-        ("RootImagePolicy", "root=verity+signed+read-only-on:=absent"),
         ("DynamicUser", "yes"),
         ("NoNewPrivileges", "yes"),
         ("PrivateDevices", "yes"),
@@ -1615,6 +1679,9 @@ fn validate_requested_readback(
         if unit_property(unit, name)?.trim() != expected {
             return Err(format!("{name} readback mismatch"));
         }
+    }
+    if unit_property(unit, "RootDirectory")?.trim() != root_directory.to_string_lossy().as_ref() {
+        return Err("RootDirectory readback mismatch".to_owned());
     }
     let command = unit_property(unit, "ExecStart")?;
     if !command.contains(RELEASE_LAUNCHER)

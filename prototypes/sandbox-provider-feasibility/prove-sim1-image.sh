@@ -9,10 +9,19 @@ readonly unit_name=pigloros-sim1-proof.service
 readonly static_true=${STATIC_TRUE:?STATIC_TRUE must name the static adapter executable}
 readonly static_prototype=${STATIC_PROTOTYPE:?STATIC_PROTOTYPE must name the static proof executable}
 
+reconcile_provider_mounts() {
+  for mounted_root in /run/pigloros-sim1-*; do
+    test -d "$mounted_root" || continue
+    systemd-dissect --umount "$mounted_root" >/dev/null 2>&1 || true
+    rmdir "$mounted_root" >/dev/null 2>&1 || true
+  done
+}
+
 cleanup() {
   systemd-analyze log-level info >/dev/null 2>&1 || true
   systemctl stop "$unit_name" >/dev/null 2>&1 || true
   systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
+  reconcile_provider_mounts
   rm -rf "$work_dir"
 }
 trap cleanup EXIT
@@ -165,6 +174,8 @@ systemd-analyze log-level debug
   | tee "$evidence_dir/release-barrier.txt"
 grep -F 'release_barrier=typed-local-release-ok' \
   "$evidence_dir/release-barrier.txt"
+grep -F 'provider_image_activation=verified-before-private-ipc' \
+  "$evidence_dir/release-barrier.txt"
 grep -F 'fd3=proxy-only;fd4=closed-before-adapter' \
   "$evidence_dir/release-barrier.txt"
 
@@ -241,6 +252,7 @@ test "$(systemctl show "$provider_death_unit" \
   --property=ExecMainStatus --value)" -ne 0
 systemctl stop "$provider_death_unit" >/dev/null 2>&1 || true
 systemctl reset-failed "$provider_death_unit" >/dev/null 2>&1 || true
+reconcile_provider_mounts
 printf '%s\n' \
   'provider_death=release-endpoint-closed' \
   'adapter=unexecuted' \
