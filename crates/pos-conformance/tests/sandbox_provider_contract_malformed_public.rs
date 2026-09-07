@@ -8,7 +8,7 @@ use pos_conformance::{
 };
 use pos_reference::sandbox_provider_protocol as independent;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Clone, Copy)]
 enum Record {
@@ -161,15 +161,15 @@ fn collect_paths(value: &Value, arrays: &mut Vec<Vec<usize>>, scalars: &mut Vec<
     visit(value, &mut Vec::new(), arrays, scalars);
 }
 
-fn value_at_mut<'a>(value: &'a mut Value, path: &[usize]) -> &'a mut Value {
+fn value_at_mut<'a>(value: &'a mut Value, path: &[usize]) -> Option<&'a mut Value> {
     let mut current = value;
     for index in path {
         let Value::Array(values) = current else {
-            panic!("collected path must remain an array path");
+            return None;
         };
-        current = &mut values[*index];
+        current = values.get_mut(*index)?;
     }
-    current
+    Some(current)
 }
 
 fn scalar_replacements(value: &Value) -> Vec<Value> {
@@ -219,13 +219,17 @@ fn producer_and_independent_decoders_reject_every_scalar_mutation() -> TestResul
         let mut scalars = Vec::new();
         collect_paths(&original, &mut arrays, &mut scalars);
         for path in scalars {
-            let original_scalar = value_at_mut(&mut original.clone(), &path).clone();
+            let mut scalar_source = original.clone();
+            let original_scalar = value_at_mut(&mut scalar_source, &path)
+                .ok_or("collected scalar path must resolve")?
+                .clone();
             for replacement in scalar_replacements(&original_scalar) {
                 if replacement == original_scalar {
                     continue;
                 }
                 let mut mutated = original.clone();
-                *value_at_mut(&mut mutated, &path) = replacement;
+                *value_at_mut(&mut mutated, &path).ok_or("collected scalar path must resolve")? =
+                    replacement;
                 assert_rejected(record, &mutated, &format!("scalar path {path:?}"))?;
                 exercised += 1;
             }
@@ -244,13 +248,16 @@ fn producer_and_independent_decoders_reject_every_array_boundary_mutation() -> T
         let mut scalars = Vec::new();
         collect_paths(&original, &mut arrays, &mut scalars);
         for path in arrays {
-            let Value::Array(original_values) = value_at_mut(&mut original.clone(), &path).clone()
-            else {
-                unreachable!("collected array path must resolve to an array");
+            let mut array_source = original.clone();
+            let original_values = match value_at_mut(&mut array_source, &path)
+                .ok_or("collected array path must resolve")?
+            {
+                Value::Array(values) => values.clone(),
+                _ => return Err("collected array path must resolve to an array".into()),
             };
             let mut longer = original.clone();
-            let Value::Array(values) = value_at_mut(&mut longer, &path) else {
-                unreachable!("collected array path must resolve to an array");
+            let Some(Value::Array(values)) = value_at_mut(&mut longer, &path) else {
+                return Err("collected array path must resolve to an array".into());
             };
             values.push(Value::Null);
             assert_rejected(record, &longer, &format!("long array path {path:?}"))?;
@@ -258,8 +265,8 @@ fn producer_and_independent_decoders_reject_every_array_boundary_mutation() -> T
 
             if !original_values.is_empty() {
                 let mut shorter = original.clone();
-                let Value::Array(values) = value_at_mut(&mut shorter, &path) else {
-                    unreachable!("collected array path must resolve to an array");
+                let Some(Value::Array(values)) = value_at_mut(&mut shorter, &path) else {
+                    return Err("collected array path must resolve to an array".into());
                 };
                 values.pop();
                 assert_rejected(record, &shorter, &format!("short array path {path:?}"))?;
