@@ -54,7 +54,7 @@ while IFS= read -r path; do
   ' "$coverage_report" >/dev/null; then
     missing+=("$path")
   fi
-done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR "$base_ref" HEAD -- '*.rs')
+done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR "$base_ref" -- '*.rs')
 
 if ((${#missing[@]} > 0)); then
   printf 'Changed Rust files missing positive LLVM coverage totals:\n' >&2

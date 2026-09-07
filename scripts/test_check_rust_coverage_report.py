@@ -84,6 +84,25 @@ class RustCoverageReportTests(unittest.TestCase):
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_unstaged_change_is_checked_against_current_head(self) -> None:
+        source = self.repo / "src" / "lib.rs"
+        source.write_text("pub fn value() -> u8 { 3 }\n", encoding="utf-8")
+        self.base = run(["git", "rev-parse", "HEAD"], self.repo).stdout.strip()
+        self.report.write_text('{"data": []}\n', encoding="utf-8")
+        result = self.check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("src/lib.rs", result.stderr)
+
+    def test_staged_change_is_checked_against_current_head(self) -> None:
+        source = self.repo / "src" / "lib.rs"
+        source.write_text("pub fn value() -> u8 { 4 }\n", encoding="utf-8")
+        run(["git", "add", "src/lib.rs"], self.repo)
+        self.base = run(["git", "rev-parse", "HEAD"], self.repo).stdout.strip()
+        self.report.write_text('{"data": []}\n', encoding="utf-8")
+        result = self.check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("src/lib.rs", result.stderr)
+
     def test_similarly_named_path_does_not_satisfy_changed_file(self) -> None:
         self.write_report(
             [

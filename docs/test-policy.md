@@ -51,7 +51,9 @@ DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
 Before running the diff gate, CI and `scripts/ci.sh` fail closed if any changed
 Rust source file is absent from the LLVM coverage report or has no positive
 line/region total; this prevents unsupported or target-specific files from
-receiving an empty 100% result.
+receiving an empty 100% result. The shared checker compares the supplied base
+to the current working tree, so local staged and unstaged tracked Rust edits
+are checked with the same change-set scope as `covgate`.
 
 ## Change-risk policy
 
