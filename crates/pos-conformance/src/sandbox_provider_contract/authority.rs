@@ -120,8 +120,8 @@ impl SandboxProviderManifestV1 {
     ///
     /// # Errors
     /// Returns a closed contract error for every malformed or noncanonical input.
-    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxContractErrorV1> {
-        let value = decode(bytes)?;
+    pub fn from_canonical_cbor(encoded: &[u8]) -> Result<Self, SandboxContractErrorV1> {
+        let value = decode(encoded)?;
         let fields = array::<3>(&value)?;
         let unsigned = array::<18>(&fields[0])?;
         validate_magic(unsigned, SPM1)?;
@@ -511,8 +511,8 @@ impl SignedImageManifestV1 {
     ///
     /// # Errors
     /// Returns a closed contract error for every malformed or noncanonical input.
-    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxContractErrorV1> {
-        let value = decode(bytes)?;
+    pub fn from_canonical_cbor(encoded: &[u8]) -> Result<Self, SandboxContractErrorV1> {
+        let value = decode(encoded)?;
         let fields = array::<3>(&value)?;
         let unsigned = array::<20>(&fields[0])?;
         validate_magic(unsigned, SIM1)?;

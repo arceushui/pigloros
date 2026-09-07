@@ -1026,7 +1026,7 @@ fn decode_uint_list(value: &Value) -> Result<Vec<u64>, SandboxContractErrorV1> {
         .collect()
 }
 
-const fn nonzero_optional(value: Option<[u8; 32]>) -> bool {
+fn nonzero_optional(value: Option<[u8; 32]>) -> bool {
     matches!(value, Some(digest) if digest != [0; 32])
 }
 
