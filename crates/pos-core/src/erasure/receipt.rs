@@ -348,27 +348,7 @@ impl ErasureReceiptV1 {
     ///
     /// Returns a closed error for incomplete or conflicting terminal evidence.
     pub fn new(mut input: ErasureReceiptInputV1) -> Result<Self, ErasureErrorV1> {
-        if !matches!(
-            input.lifecycle,
-            ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
-        ) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if input.acknowledgements.len() > ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT
-            || input.frozen_targets.len() > ERASURE_MAX_INVENTORY_RESULTS
-            || inventories_exceed_bound(&input.inventories)
-        {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if input.issue_position < input.freeze_position {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if !inventory_transitions_preserve_or_weaken(&input.inventories) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if !receipt_claim_matches_inventory(&input) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
+        validate_receipt_preconditions(&input)?;
         sort_inventories(&mut input.inventories);
         if !inventory_categories_match(&input.inventories) {
             return Err(ErasureErrorV1::ScopeInvalid);
@@ -720,6 +700,44 @@ fn transition_is_monotonic(state: &ErasureStateV1, change: &ErasureStateTransiti
 
 fn receipt_claim_matches_inventory(input: &ErasureReceiptInputV1) -> bool {
     input.replay_claim == inventory_replay_claim(&input.inventories)
+}
+
+fn validate_receipt_preconditions(input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+    validate_terminal_receipt_lifecycle(input.lifecycle)?;
+    validate_receipt_bounds(input)?;
+    validate_receipt_claim_policy(input)
+}
+
+fn validate_terminal_receipt_lifecycle(
+    lifecycle: ErasureLifecycleV1,
+) -> Result<(), ErasureErrorV1> {
+    if !matches!(
+        lifecycle,
+        ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
+    ) {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    Ok(())
+}
+
+fn validate_receipt_bounds(input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+    if input.acknowledgements.len() > ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT
+        || input.frozen_targets.len() > ERASURE_MAX_INVENTORY_RESULTS
+        || inventories_exceed_bound(&input.inventories)
+    {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    Ok(())
+}
+
+fn validate_receipt_claim_policy(input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+    if input.issue_position < input.freeze_position
+        || !inventory_transitions_preserve_or_weaken(&input.inventories)
+        || !receipt_claim_matches_inventory(input)
+    {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    Ok(())
 }
 
 /// Compute the canonical digest for an exact sorted freeze target closure.

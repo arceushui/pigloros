@@ -1874,7 +1874,12 @@ pub mod strict_codec {
         if !structural_trace.is_empty() {
             fields.insert(
                 6,
-                Value::Array(structural_trace.iter().map(encode_structural_trace).collect()),
+                Value::Array(
+                    structural_trace
+                        .iter()
+                        .map(encode_structural_trace)
+                        .collect(),
+                ),
             );
         }
     }
@@ -1885,9 +1890,7 @@ pub mod strict_codec {
         decode_evidence_fields(fields)
     }
 
-    fn decode_evidence_fields(
-        fields: &[Value],
-    ) -> Result<MoatProofEvidenceV1, StrictCborError> {
+    fn decode_evidence_fields(fields: &[Value]) -> Result<MoatProofEvidenceV1, StrictCborError> {
         if !matches!(fields.len(), 11 | 12) {
             return Err(StrictCborError::ArrayLength {
                 field: "evidence".to_owned(),
@@ -4672,10 +4675,7 @@ fn verify_causal_trace(
     }
 }
 
-fn event_causation_is_valid(
-    events: &[AuthoritativeEventV1],
-    sequences: &BTreeSet<u64>,
-) -> bool {
+fn event_causation_is_valid(events: &[AuthoritativeEventV1], sequences: &BTreeSet<u64>) -> bool {
     !events.iter().any(|event| {
         event.causation_seq.is_some_and(|cause_seq| {
             cause_seq >= event.seq
@@ -5265,34 +5265,41 @@ fn validate_conformance_case<'a>(
     case: &'a CaseOutcomeV1,
     case_keys: &mut BTreeSet<(&'a str, ExecutionModeV1, ClaimLayerV1, [u8; 32])>,
 ) -> Result<(), EvidenceError> {
-    if !case_keys.insert((
+    let unique = case_keys.insert((
         case.case_id.as_str(),
         case.mode,
         case.claim_layer,
         case.fixture_digest,
-    )) || case.case_id.trim().is_empty()
-        || case.case_id.len() > 128
-        || case.fixture_digest == [0; 32]
-        || case.execution_profile_digest == [0; 32]
-        || case.provenance_digest == [0; 32]
-        || case
+    ));
+    if unique && valid_conformance_case_identity(case) && valid_conformance_case_outcome(case) {
+        Ok(())
+    } else {
+        Err(EvidenceError::InvalidConformanceReport)
+    }
+}
+
+fn valid_conformance_case_identity(case: &CaseOutcomeV1) -> bool {
+    !case.case_id.trim().is_empty()
+        && case.case_id.len() <= 128
+        && case.fixture_digest != [0; 32]
+        && case.execution_profile_digest != [0; 32]
+        && case.provenance_digest != [0; 32]
+        && case
             .first_coordinate
             .as_ref()
-            .is_some_and(|coordinate| coordinate.len() > 128)
-        || !valid_conformance_case_result(case)
-        || !valid_redacted_case(case)
-        || (matches!(
+            .is_none_or(|coordinate| coordinate.len() <= 128)
+}
+
+fn valid_conformance_case_outcome(case: &CaseOutcomeV1) -> bool {
+    valid_conformance_case_result(case)
+        && valid_redacted_case(case)
+        && !(matches!(
             case.redaction_state,
             RedactionStateV1::None | RedactionStateV1::RedactedViews
         ) && case.outcome != CaseOutcomeStatusV1::Pass
             && !unavailable_due_to_missing_aggregate(case)
             && case.expected_digest == case.actual_digest
             && case.expected_error == case.actual_error)
-    {
-        Err(EvidenceError::InvalidConformanceReport)
-    } else {
-        Ok(())
-    }
 }
 
 fn unavailable_due_to_missing_aggregate(case: &CaseOutcomeV1) -> bool {
