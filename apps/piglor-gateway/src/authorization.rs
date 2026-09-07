@@ -548,10 +548,12 @@ fn core_request(
         .authority_timeline
         .unwrap_or_else(|| leaf.issuance_timeline());
     let at_position = request.at_position.max(authority.head_position());
-    let capability_policy_revision =
-        nonzero_or(request.capability_policy_revision, leaf.policy_revision());
+    let capability_policy_revision = fallback_to_grant_policy_revision(
+        request.capability_policy_revision,
+        leaf.policy_revision(),
+    );
     let consent_policy_revision =
-        nonzero_or(request.consent_policy_revision, leaf.policy_revision());
+        fallback_to_grant_policy_revision(request.consent_policy_revision, leaf.policy_revision());
     AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
         authenticated: authenticated.clone(),
         actor_entity_id: request.actor_entity_id,
@@ -582,7 +584,7 @@ fn core_request(
     })
 }
 
-fn nonzero_or(value: Hash, fallback: Hash) -> Hash {
+fn fallback_to_grant_policy_revision(value: Hash, fallback: Hash) -> Hash {
     if value == Hash::zero() {
         fallback
     } else {
@@ -627,6 +629,34 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
     }
     hasher.update(&request.at_time.as_micros().to_be_bytes());
     hasher.update(&request.at_position.as_u64().to_be_bytes());
+    digest_optional_fixed(&mut hasher, request.authority_timeline.map(timeline_bytes));
+    digest_optional_fixed(&mut hasher, request.consent_timeline.map(timeline_bytes));
+    digest_optional_fixed(
+        &mut hasher,
+        request
+            .consent_at_position
+            .map(Seq::as_u64)
+            .map(u64::to_be_bytes),
+    );
+    hasher.update(&request.use_count.to_be_bytes());
+    hasher.update(&request.budget.to_be_bytes());
+    hasher.update(request.consent_policy_revision.as_bytes());
+    hasher.update(request.capability_policy_revision.as_bytes());
+    hasher.update(&[u8::from(request.revocation_state_current)]);
+    digest_consent(&mut hasher, &request.consent);
+    hasher.update(
+        &u64::try_from(request.environment_constraints.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for constraint in &request.environment_constraints {
+        hasher.update(
+            &u64::try_from(constraint.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        hasher.update(constraint.as_bytes());
+    }
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -663,6 +693,31 @@ const fn role_code(value: AuthorityRoleV1) -> u8 {
         AuthorityRoleV1::Actor => 0,
         AuthorityRoleV1::Approver => 1,
         AuthorityRoleV1::Evaluator => 2,
+    }
+}
+
+fn digest_consent(hasher: &mut blake3::Hasher, consent: &ConsentEvidenceV1) {
+    match consent {
+        ConsentEvidenceV1::NotRequired => {
+            hasher.update(&[0]);
+        }
+        ConsentEvidenceV1::Resolved { grants } => {
+            hasher.update(&[1]);
+            hasher.update(
+                &u64::try_from(grants.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            for grant in grants {
+                hasher.update(grant.binding_digest().as_bytes());
+            }
+        }
+        ConsentEvidenceV1::Missing => {
+            hasher.update(&[2]);
+        }
+        ConsentEvidenceV1::Indeterminate => {
+            hasher.update(&[3]);
+        }
     }
 }
 
@@ -977,6 +1032,46 @@ mod tests {
         request.at_position = Seq::from_u64(1);
         variants.push(request);
 
+        let mut request = action(&fixture);
+        request.authority_timeline = Some(TimelineId::new());
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.consent_timeline = Some(TimelineId::new());
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.consent_at_position = Some(Seq::from_u64(2));
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.use_count = 2;
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.budget = 2;
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.revocation_state_current = false;
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.consent = ConsentEvidenceV1::Resolved { grants: Vec::new() };
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.consent = ConsentEvidenceV1::Missing;
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.consent = ConsentEvidenceV1::Indeterminate;
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.environment_constraints = vec!["air-gapped".to_owned()];
+        variants.push(request);
+
         for variant in variants {
             assert_ne!(baseline, operation_binding(&variant));
         }
@@ -1042,6 +1137,21 @@ mod tests {
         assert!(!GatewayAuthorizationError::AuthorizationDenied
             .to_string()
             .contains(&decision.actor_entity_id().to_string()));
+    }
+
+    #[test]
+    fn subject_bound_request_requires_resolved_consent() {
+        let fixture = fixture();
+        let mut request = action(&fixture);
+        request.subject_id = Some(fixture.actor);
+        request.consent_timeline = Some(fixture.target_timeline);
+        request.consent_at_position = Some(Seq::from_u64(1));
+        let decision = fixture.authorization.evaluate(request).test_ok();
+        assert!(!decision.is_allowed());
+        assert_eq!(
+            decision.decision().error(),
+            Some(AuthorityErrorV1::ConsentMissing)
+        );
     }
 
     #[test]

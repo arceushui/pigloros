@@ -1584,7 +1584,9 @@ impl Gateway {
     /// exhausted; otherwise it is the inclusive sequence of the first omitted Event.
     ///
     /// # Errors
-    /// Returns [`GatewayError::InvalidId`], [`GatewayError::InvalidPageLimit`], or
+    /// Returns [`GatewayError::AuthorizationUnavailable`] when this Gateway
+    /// has a configured authorization boundary; otherwise returns
+    /// [`GatewayError::InvalidId`], [`GatewayError::InvalidPageLimit`], or
     /// [`GatewayError::Store`].
     ///
     /// ```no_run
@@ -1597,6 +1599,19 @@ impl Gateway {
     /// # }
     /// ```
     pub async fn read_events_page(
+        &self,
+        timeline_id: &str,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<EventPage, GatewayError> {
+        if self.authorization.is_some() {
+            return Err(GatewayError::AuthorizationUnavailable);
+        }
+        self.read_events_page_unchecked(timeline_id, from_seq, limit)
+            .await
+    }
+
+    async fn read_events_page_unchecked(
         &self,
         timeline_id: &str,
         from_seq: u64,
@@ -1705,7 +1720,9 @@ impl Gateway {
         if let Err(error) = authorization.authorize(request) {
             return Err(map_authorization_error(error));
         }
-        let page = self.read_events_page(timeline_id, from_seq, limit).await;
+        let page = self
+            .read_events_page_unchecked(timeline_id, from_seq, limit)
+            .await;
         drop(fence);
         page
     }
@@ -3223,6 +3240,22 @@ mod tests {
             authorization,
         );
         let timeline = gateway.create_timeline("authority-read").await.test_ok();
+        let unguarded_page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_err();
+        assert!(matches!(
+            unguarded_page,
+            GatewayError::AuthorizationUnavailable
+        ));
+        let unguarded_compatibility = gateway
+            .read_events_from(&timeline.id().to_string(), 0)
+            .await
+            .test_err();
+        assert!(matches!(
+            unguarded_compatibility,
+            GatewayError::AuthorizationUnavailable
+        ));
         let denied = gateway
             .read_events_page_authorized(
                 &timeline.id().to_string(),
