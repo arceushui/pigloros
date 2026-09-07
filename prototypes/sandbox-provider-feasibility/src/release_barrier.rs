@@ -19,6 +19,7 @@ use nix::{
     unistd::execveat,
 };
 use std::{
+    collections::HashSet,
     ffi::CString,
     fs::{File, OpenOptions},
     io::{IoSliceMut, Read as _, Seek as _, SeekFrom, Write as _},
@@ -1761,34 +1762,57 @@ fn wait_for_terminal_status(unit: &str) -> Result<i32, String> {
 
 fn flattened_release_syscalls() -> Result<Vec<String>, String> {
     let mut names = Vec::new();
-    for group in ["@system-service", "@network-io"] {
+    let mut pending = vec!["@system-service".to_owned()];
+    let mut visited = HashSet::new();
+    while let Some(group) = pending.pop() {
+        if !visited.insert(group.clone()) {
+            continue;
+        }
         let output = Command::new("systemd-analyze")
-            .args(["syscall-filter", group])
+            .env("SYSTEMD_COLORS", "0")
+            .args(["syscall-filter", group.as_str()])
             .output()
             .map_err(display_error)?;
         if !output.status.success() {
             return Err(format!("failed to flatten {group}"));
         }
-        names.extend(
-            String::from_utf8(output.stdout)
-                .map_err(display_error)?
-                .lines()
-                .map(str::trim)
-                .filter(|line| {
-                    !line.is_empty()
-                        && !line.starts_with('#')
-                        && !line.starts_with('@')
-                        && line
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                })
-                .map(str::to_owned),
-        );
+        for line in String::from_utf8(output.stdout)
+            .map_err(display_error)?
+            .lines()
+            .map(str::trim)
+            .map(|line| line.trim_start_matches("\u{1b}[0m"))
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            if line.starts_with('@') {
+                if line != group {
+                    pending.push(line.to_owned());
+                }
+            } else if line
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                names.push(line.to_owned());
+            }
+        }
     }
     names.sort_unstable();
     names.dedup();
-    if names.is_empty() {
-        return Err("flattened syscall set is empty".to_owned());
+    for required in [
+        "execveat",
+        "getsockopt",
+        "poll",
+        "recvmsg",
+        "sendto",
+        "socket",
+    ] {
+        if names
+            .binary_search_by(|name| name.as_str().cmp(required))
+            .is_err()
+        {
+            return Err(format!(
+                "flattened @system-service omits required syscall {required}"
+            ));
+        }
     }
     Ok(names)
 }
