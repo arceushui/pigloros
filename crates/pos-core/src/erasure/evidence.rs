@@ -1233,6 +1233,20 @@ pub(super) fn inventory_transitions_preserve_or_weaken(
             .preserves_or_weakens(entry.transition.to)
     })
 }
+
+pub(super) fn inventory_replay_claim(
+    inventories: &ErasureReceiptInventoriesV1,
+) -> ErasureReplayClaimV1 {
+    inventories
+        .artifacts
+        .iter()
+        .chain(&inventories.keys)
+        .chain(&inventories.replicas)
+        .chain(&inventories.backups)
+        .fold(ErasureReplayClaimV1::Exact, |claim, entry| {
+            claim.weakened_to(entry.transition.to)
+        })
+}
 pub(super) fn inventories_are_within_closure(
     frozen_targets: &[ErasureRequiredTargetV1],
     inventories: &ErasureReceiptInventoriesV1,

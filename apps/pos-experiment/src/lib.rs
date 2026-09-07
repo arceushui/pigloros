@@ -13,7 +13,7 @@ use pos_core::{
     clock::WallTime,
     crypto::Hash,
     event::{EventDraft, Kind},
-    ids::EntityId,
+    ids::{EntityId, TimelineId},
     ConsentAuthority, ConsentCapabilityToken, ConsentGate, ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
@@ -2107,6 +2107,35 @@ fn backtest_metrics(
     (train_avg, eval_avg, persistence_lift, lift_vs_persistence)
 }
 
+fn compute_retained_calibration_report(
+    store: &dyn pos_core::store::EventStore,
+    timeline: TimelineId,
+    chain_head: Hash,
+) -> Result<pos_plugin_eval::CalibrationReport, ExperimentError> {
+    let artifact_digest = pos_core::ErasureReferenceV1::from_digest(*chain_head.as_bytes());
+    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                pos_core::ErasureArtifactClassV1::CalibrationReport,
+                artifact_digest,
+                pos_core::ArtifactDataClassV1::AggregateData,
+                None,
+                pos_core::ErasureReferenceV1::from_digest(
+                    *blake3::hash(b"pos-plugin-eval").as_bytes(),
+                ),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))?;
+    pos_plugin_eval::compute_report(store, timeline, artifact_digest, &evaluation)
+        .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))
+}
+
 impl BacktestRunner {
     /// Create a new backtest runner.
     ///
@@ -2208,8 +2237,7 @@ impl BacktestRunner {
             store_config,
         )?;
 
-        let eval_report = pos_plugin_eval::compute_report(store, eval_tl_id)
-            .map_err(|e| ExperimentError::Store(pos_core::CoreError::Storage(e.to_string())))?;
+        let eval_report = compute_retained_calibration_report(store, eval_tl_id, eval_chain_head)?;
 
         Ok(BacktestResult {
             train_result,
@@ -3939,7 +3967,34 @@ mod tests {
         );
         let mut replayed = pos_state::ProjectionRegistry::new();
         replayed.register("interleaving", Box::new(CountReducer));
-        pos_time::replay(store.as_ref(), timeline, &mut replayed).test_ok();
+        let replay_digest = pos_core::ErasureReferenceV1::from_digest(
+            *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
+        );
+        let replay_evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[pos_core::ArtifactClaimInputV1 {
+                registration: pos_core::RegisteredArtifactV1::new(
+                    pos_core::ErasureArtifactClassV1::TimelineReplay,
+                    replay_digest,
+                    pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                    None,
+                    pos_core::ErasureReferenceV1::from_digest([244; 32]),
+                    pos_core::ArtifactOptionalityV1::Required,
+                    pos_core::ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state: pos_core::ArtifactStateV1::Retained,
+            }],
+        )
+        .test_ok();
+        pos_time::replay(
+            store.as_ref(),
+            timeline,
+            &mut replayed,
+            replay_digest,
+            &replay_evaluation,
+        )
+        .test_ok();
         drop(store);
         assert!(replayed.state_for(&entity).is_some());
     }

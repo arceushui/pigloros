@@ -1,8 +1,7 @@
 //! ADR-060's payload-free ERQ1, ERS1, and ERC1 public contracts.
 //!
-//! This module deliberately excludes storage implementations, key destruction,
-//! artifact work, backup inventory, and replay evaluation. Those operations
-//! belong to the adapters and follow-up tickets named by ADR-060.
+//! Storage and byte destruction remain adapter concerns. This facade also
+//! exposes the host-owned artifact-registration and `ReplayClaim` policy seam.
 
 use std::{
     cmp::Ordering,
@@ -2434,6 +2433,16 @@ impl ErasureReplayClaimV1 {
     const fn preserves_or_weakens(self, next: Self) -> bool {
         self.rank() <= next.rank()
     }
+
+    /// Apply a candidate claim while preserving the one-way degradation rule.
+    #[must_use]
+    pub const fn weakened_to(self, candidate: Self) -> Self {
+        if self.preserves_or_weakens(candidate) {
+            candidate
+        } else {
+            self
+        }
+    }
 }
 
 /// Closed artifact classes recorded by ERC1 without carrying artifact bytes.
@@ -3136,6 +3145,12 @@ pub trait ErasureRecoveryErrorQueryV1 {
 
 mod receipt;
 pub use receipt::target_closure_digest;
+mod artifact;
+pub use artifact::{
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
+    ArtifactStateV1, ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+};
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
     inventories_match_frozen_obligations,

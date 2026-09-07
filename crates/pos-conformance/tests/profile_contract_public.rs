@@ -1527,6 +1527,188 @@ fn public_report_validation_and_encoding_cover_empty_and_large_boundaries(
 }
 
 #[test]
+fn conformance_report_applies_structural_erasure_without_reconstructing_case_evidence() -> TestResult
+{
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let mut report = report_with_cases(2)?;
+    let evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([21; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                Some(ErasureKeyRoleV1::DataEncryption),
+                ErasureReferenceV1::from_digest([22; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::RetainStructure,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::TransitionApplied,
+        }],
+    )?;
+
+    report.apply_artifact_evaluation(&evaluation)?;
+    assert_eq!(report.replay_claim, ReplayClaimV1::StructuralOnly);
+    assert_eq!(report.redaction_state, RedactionStateV1::StructuralOnly);
+    assert_eq!(report.passed, 0);
+    assert_eq!(report.unavailable, 2);
+    for case in &report.cases {
+        assert_eq!(case.outcome, CaseOutcomeStatusV1::Unavailable);
+        assert_eq!(case.replay_claim, ReplayClaimV1::StructuralOnly);
+        assert_eq!(case.redaction_state, RedactionStateV1::StructuralOnly);
+        assert!(case.first_coordinate.is_none());
+        assert!(case.expected_digest.is_none());
+        assert!(case.actual_digest.is_none());
+        assert!(case.expected_error.is_none());
+        assert!(case.actual_error.is_none());
+    }
+    report.validate()?;
+    Ok(())
+}
+
+#[test]
+fn missing_required_member_removes_unverifiable_comparison_material() -> TestResult {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1,
+        RegisteredArtifactV1,
+    };
+
+    let mut report = report_with_cases(1)?;
+    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([31; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([32; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::Remove,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::Erased,
+        }],
+    )?;
+
+    report.apply_artifact_evaluation(&evaluation)?;
+
+    assert_eq!(
+        report.replay_claim,
+        ReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(report.redaction_state, RedactionStateV1::EvidenceMissing);
+    assert_eq!(report.cases[0].outcome, CaseOutcomeStatusV1::Unavailable);
+    assert!(report.cases[0].first_coordinate.is_none());
+    assert!(report.cases[0].expected_digest.is_none());
+    assert!(report.cases[0].actual_digest.is_none());
+    report.validate()?;
+    Ok(())
+}
+
+#[test]
+fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestResult {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1,
+        RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let mut report = report_with_cases(1)?;
+    report.cases[0].replay_claim = ReplayClaimV1::IncompatibleProfile;
+    report.replay_claim = ReplayClaimV1::IncompatibleProfile;
+    report.report_digest = report.digest()?;
+    let mut retained_report = report.clone();
+    let mut missing_report = report.clone();
+
+    let retained_evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::IncompatibleProfile,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([29; 32]),
+                ArtifactDataClassV1::PublicRecord,
+                None,
+                ErasureReferenceV1::from_digest([30; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: ErasureReplayClaimV1::IncompatibleProfile,
+            state: ArtifactStateV1::Retained,
+        }],
+    )?;
+    retained_report.apply_artifact_evaluation(&retained_evaluation)?;
+    assert_eq!(
+        retained_report.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(retained_report.redaction_state, RedactionStateV1::None);
+    assert_eq!(retained_report.cases[0].outcome, CaseOutcomeStatusV1::Pass);
+    retained_report.validate()?;
+
+    let evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::IncompatibleProfile,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([31; 32]),
+                ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                ErasureReferenceV1::from_digest([32; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::RetainStructure,
+            ),
+            current_claim: ErasureReplayClaimV1::IncompatibleProfile,
+            state: ArtifactStateV1::TransitionApplied,
+        }],
+    )?;
+
+    report.apply_artifact_evaluation(&evaluation)?;
+    assert_eq!(report.replay_claim, ReplayClaimV1::IncompatibleProfile);
+    assert_eq!(report.redaction_state, RedactionStateV1::StructuralOnly);
+    report.validate()?;
+
+    let missing_evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::IncompatibleProfile,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([33; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([34; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::Remove,
+            ),
+            current_claim: ErasureReplayClaimV1::IncompatibleProfile,
+            state: ArtifactStateV1::Erased,
+        }],
+    )?;
+    missing_report.apply_artifact_evaluation(&missing_evaluation)?;
+    assert_eq!(
+        missing_report.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(
+        missing_report.redaction_state,
+        RedactionStateV1::EvidenceMissing
+    );
+    assert_eq!(
+        missing_report.cases[0].outcome,
+        CaseOutcomeStatusV1::Unavailable
+    );
+    missing_report.validate()?;
+    Ok(())
+}
+
+#[test]
 fn public_conformance_report_rejects_trailing_cbor_items() -> Result<(), Box<dyn std::error::Error>>
 {
     let report = report_with_cases(1)?;

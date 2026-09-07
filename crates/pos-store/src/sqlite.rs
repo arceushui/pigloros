@@ -5317,10 +5317,34 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::GeoLocationAdmissionFenceV1,
         ids::{EntityId, EventId},
-        store::{EventReadBounds, SeqRange},
+        store::{EventReadBounds, SeqRange, TimelineExport},
         CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     };
+
+    fn authorized_export_timeline(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        pos_core::store::export_timeline(
+            store,
+            id,
+            crate::TEST_EXPORT_DIGEST,
+            &crate::test_export_evaluation(),
+        )
+    }
+
+    fn authorized_export_timeline_own(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        pos_core::store::export_timeline_own(
+            store,
+            id,
+            crate::TEST_EXPORT_DIGEST,
+            &crate::test_export_evaluation(),
+        )
+    }
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -9807,7 +9831,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_timeline_with_id_preserves_identity_sqlite() {
-        use pos_core::store::{export_timeline, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = new_store();
         let tl = src.create_timeline("shared").test_ok();
@@ -9818,7 +9842,7 @@ mod tests {
                 &[make_draft(entity, b"one"), make_draft(entity, b"two")],
             )
             .test_ok();
-        let export = export_timeline(&src, tl.id()).test_ok();
+        let export = authorized_export_timeline(&src, tl.id()).test_ok();
         let original_tl_id = tl.id();
         let original_ids: Vec<_> = committed.iter().map(|e| e.id).collect();
 
@@ -10126,7 +10150,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_timeline_with_id_rolls_back_on_append_fail_sqlite() {
-        use pos_core::store::{export_timeline, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
         let mut src = new_store();
         let tl = src.create_timeline("shared").test_ok();
         let entity = EntityId::new();
@@ -10139,7 +10163,7 @@ mod tests {
             )],
         )
         .test_ok();
-        let mut export = export_timeline(&src, tl.id()).test_ok();
+        let mut export = authorized_export_timeline(&src, tl.id()).test_ok();
         export.events[0].payload_hash = pos_core::Hash::from_bytes([1u8; 32]);
         let mut dst = new_store();
         let err = import_timeline_with_id(&mut dst, export).test_err();
@@ -10371,7 +10395,7 @@ mod tests {
     #[test]
     fn append_committed_preserves_optional_ids() {
         use pos_core::ids::CorrelationId;
-        use pos_core::store::{export_timeline, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = new_store();
         let tl = src.create_timeline("shared").test_ok();
@@ -10382,7 +10406,7 @@ mod tests {
         assert_eq!(drafts[1].causation_id, None);
         assert_eq!(drafts[1].correlation_id, None);
         src.append(tl.id(), &drafts).test_ok();
-        let export = export_timeline(&src, tl.id()).test_ok();
+        let export = authorized_export_timeline(&src, tl.id()).test_ok();
         assert!(export.events[0].causation_id.is_some());
         assert!(export.events[0].correlation_id.is_some());
         assert_eq!(export.events[1].causation_id, None);
@@ -10954,7 +10978,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_own_fork_roundtrip_sqlite() {
-        use pos_core::store::{export_timeline_own, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = new_store();
         let root = src.create_timeline("root").test_ok();
@@ -10966,10 +10990,16 @@ mod tests {
             .test_ok();
 
         let mut dst = new_store();
-        import_timeline_with_id(&mut dst, export_timeline_own(&src, root.id()).test_ok()).test_ok();
-        let imported =
-            import_timeline_with_id(&mut dst, export_timeline_own(&src, child.id()).test_ok())
-                .test_ok();
+        import_timeline_with_id(
+            &mut dst,
+            authorized_export_timeline_own(&src, root.id()).test_ok(),
+        )
+        .test_ok();
+        let imported = import_timeline_with_id(
+            &mut dst,
+            authorized_export_timeline_own(&src, child.id()).test_ok(),
+        )
+        .test_ok();
         assert_eq!(
             imported.meta.fork_point,
             Some((root.id(), Seq::from_u64(1)))
@@ -10997,7 +11027,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn identity_import_preserves_optional_name_none_sqlite() {
-        use pos_core::store::{export_timeline_own, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = new_store();
         let mut meta = TimelineMeta::root("named");
@@ -11007,9 +11037,11 @@ mod tests {
         assert!(created.meta.name.is_none());
 
         let mut dst = new_store();
-        let imported =
-            import_timeline_with_id(&mut dst, export_timeline_own(&src, created.id()).test_ok())
-                .test_ok();
+        let imported = import_timeline_with_id(
+            &mut dst,
+            authorized_export_timeline_own(&src, created.id()).test_ok(),
+        )
+        .test_ok();
         assert!(imported.meta.name.is_none());
     }
 

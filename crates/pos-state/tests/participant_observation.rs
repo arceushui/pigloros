@@ -5,12 +5,13 @@ use pos_core::{
     AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1,
-    DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationStatusV1,
-    PersistedAuthorityV1, PluginId, PrincipalRefV1, Reducer, SchemaVersion, Seq, State, TimelineId,
-    WallTime, MAX_OBSERVATION_SNAPSHOT_RECORDS,
+    DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationSnapshotV1,
+    ObservationStatusV1, PersistedAuthorityV1, PluginId, PrincipalRefV1, Reducer, SchemaVersion,
+    Seq, State, TimelineId, WallTime, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 use pos_state::{
-    ProjectionObservationContextV1, ProjectionObservationPolicyV1, ProjectionRegistry,
+    AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
+    ProjectionRegistry,
 };
 use std::fmt::Debug;
 
@@ -34,6 +35,41 @@ impl<T> TestOk<T> for Option<T> {
 
 const fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
+}
+
+fn observation_evaluation(
+    observation: &AuthorizedObservationV1,
+    transition_rule: pos_core::ArtifactTransitionRuleV1,
+    state: pos_core::ArtifactStateV1,
+) -> pos_core::ReplayClaimEvaluationV1 {
+    let artifact_digest =
+        pos_core::ErasureReferenceV1::from_digest(*observation.artifact_digest().as_bytes());
+    pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+                artifact_digest,
+                pos_core::ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                pos_core::ErasureReferenceV1::from_digest([244; 32]),
+                pos_core::ArtifactOptionalityV1::Required,
+                transition_rule,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state,
+        }],
+    )
+    .test_ok()
+}
+
+fn retained_observation(observation: &AuthorizedObservationV1) -> &ObservationSnapshotV1 {
+    let evaluation = observation_evaluation(
+        observation,
+        pos_core::ArtifactTransitionRuleV1::PreserveExact,
+        pos_core::ArtifactStateV1::Retained,
+    );
+    observation.authoritative_snapshot(&evaluation).test_ok()
 }
 
 fn authenticated_principal(principal: PrincipalRefV1) -> AuthenticatedPrincipalResultV1 {
@@ -429,6 +465,8 @@ fn authorized_materialization_ignores_every_other_subject() {
             &context(timeline_id),
         )
         .test_ok();
+    let first_snapshot = retained_observation(&first_snapshot);
+    let second_snapshot = retained_observation(&second_snapshot);
 
     assert_eq!(first_snapshot.participant_id(), fixture.participant_id);
     assert_eq!(first_snapshot.plugin_id(), fixture.plugin_id);
@@ -442,6 +480,96 @@ fn authorized_materialization_ignores_every_other_subject() {
     assert_eq!(
         record.provenance_digest(),
         first_snapshot.provenance_digest()
+    );
+}
+
+#[test]
+fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let fixture = authority_fixture();
+    let subject = fixture.request.subject_id().test_ok();
+    let mut registry = ProjectionRegistry::new();
+    register_profile(&mut registry, Box::new(CountReducer));
+    registry.fold_events(&[event(subject, 1)]);
+    let observation = registry
+        .materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            &fixture.registry,
+            Seq::from_u64(10),
+            &context(TimelineId::new()),
+        )
+        .test_ok();
+    let snapshot_evaluation = observation_evaluation(
+        &observation,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let erased_snapshot_evaluation = observation_evaluation(
+        &observation,
+        ArtifactTransitionRuleV1::Remove,
+        ArtifactStateV1::Erased,
+    );
+    assert_eq!(
+        observation
+            .authoritative_snapshot(&erased_snapshot_evaluation)
+            .err(),
+        Some(pos_core::AuthorityErrorV1::SourceUnavailable)
+    );
+    let digest = observation
+        .authoritative_snapshot(&snapshot_evaluation)
+        .test_ok()
+        .records()[0]
+        .artifact_digest()
+        .test_ok();
+    let evaluate = |state| {
+        ReplayClaimEvaluatorV1::evaluate(
+            ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::ForkOrSnapshot,
+                    ErasureReferenceV1::from_digest(*digest.as_bytes()),
+                    ArtifactDataClassV1::PrivateSubjectData,
+                    Some(ErasureKeyRoleV1::DataEncryption),
+                    ErasureReferenceV1::from_digest([71; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::Remove,
+                ),
+                current_claim: ErasureReplayClaimV1::Exact,
+                state,
+            }],
+        )
+        .test_ok()
+    };
+
+    let retained = evaluate(ArtifactStateV1::Retained);
+    assert_eq!(
+        observation
+            .authoritative_artifact(digest, &retained)
+            .test_ok()
+            .bytes()
+            .as_slice(),
+        br#"{"count":1}"#
+    );
+    for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
+        assert_eq!(
+            observation
+                .authoritative_artifact(digest, &evaluate(state))
+                .err(),
+            Some(pos_core::AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    let unknown = hash_from_repeated_byte(99);
+    assert_eq!(
+        observation.authoritative_artifact(unknown, &retained).err(),
+        Some(pos_core::AuthorityErrorV1::SourceUnavailable)
     );
 }
 
@@ -504,6 +632,7 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
             &context(timeline_id),
         )
         .test_ok();
+    let snapshot = retained_observation(&snapshot);
     let record = &snapshot.records()[0];
     assert_eq!(record.status(), ObservationStatusV1::NotObserved);
     assert_eq!(record.artifact_digest(), None);
@@ -522,6 +651,7 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
             },
         )
         .test_ok();
+    let later = retained_observation(&later);
     assert_ne!(record.source_digest(), later.records()[0].source_digest());
 }
 
@@ -549,6 +679,7 @@ fn materialization_canonicalizes_nested_projection_values() {
             &context(TimelineId::new()),
         )
         .test_ok();
+    let snapshot = retained_observation(&snapshot);
     let digest = snapshot.records()[0].artifact_digest().test_ok();
     assert_eq!(
         snapshot.artifact(digest).test_ok().bytes().as_slice(),
@@ -805,6 +936,8 @@ fn prior_observation_snapshot_changes_snapshot_digest_not_policy_provenance() {
             },
         )
         .test_ok();
+    let without_prior = retained_observation(&without_prior);
+    let with_prior = retained_observation(&with_prior);
 
     assert_eq!(with_prior.prior_snapshot_digest(), Some(prior_digest));
     assert_ne!(with_prior.digest(), without_prior.digest());

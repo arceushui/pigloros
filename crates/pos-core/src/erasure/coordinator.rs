@@ -1,5 +1,6 @@
 //! Public coordinator operations over bounded recovered state.
 
+use super::evidence::inventory_replay_claim;
 use super::RecoveredErasureV1;
 use super::{
     acknowledgement_inventory_reference, acknowledgements_close_frozen_obligations,
@@ -1073,6 +1074,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if record.active.is_none() {
             return self.finalize_exact_retry(&record, input);
         }
+        input.replay_claim = inventory_replay_claim(&input.inventories);
         let terminal = terminal_attempt(request, &record, &input)?;
         let TerminalAttemptV1 {
             admission,
