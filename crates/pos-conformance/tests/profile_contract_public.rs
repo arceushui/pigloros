@@ -1527,12 +1527,12 @@ fn public_report_validation_and_encoding_cover_empty_and_large_boundaries(
 }
 
 #[test]
-fn conformance_report_applies_structural_erasure_without_reconstructing_case_evidence() -> TestResult {
+fn conformance_report_applies_structural_erasure_without_reconstructing_case_evidence() -> TestResult
+{
     use pos_core::{
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1,
-        ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
-        ReplayClaimEvaluatorV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
     };
 
     let mut report = report_with_cases(2)?;
@@ -1577,8 +1577,8 @@ fn conformance_report_applies_structural_erasure_without_reconstructing_case_evi
 fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestResult {
     use pos_core::{
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1,
-        ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1,
+        RegisteredArtifactV1, ReplayClaimEvaluatorV1,
     };
 
     let mut report = report_with_cases(1)?;

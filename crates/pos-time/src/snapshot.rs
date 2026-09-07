@@ -51,6 +51,9 @@ pub fn snapshot(
 /// Error type for snapshot consistency checks.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
+    /// ADR-060 no longer permits the snapshot as authoritative state.
+    #[error("snapshot artifact is unavailable for authoritative use")]
+    ArtifactUnavailable,
     /// A store I/O error occurred.
     #[error("store error: {0}")]
     Store(#[from] CoreError),
@@ -80,7 +83,15 @@ pub fn verify_snapshot_consistency(
     store: &dyn EventStore,
     snap: &Snapshot,
     registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
 ) -> Result<(), SnapshotError> {
+    evaluation
+        .require_authoritative_use(
+            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+            artifact_digest,
+        )
+        .map_err(|_| SnapshotError::ArtifactUnavailable)?;
     // --- 1. Read events -------------------------------------------------------
     let tail_range = SeqRange::from_seq(snap.at_seq.next());
     let tail_events = store.read(snap.timeline, tail_range)?;
@@ -160,7 +171,10 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
-        Event, Reducer, State,
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+        ReplayClaimEvaluatorV1, State,
     };
     use pos_state::{EntityStateProjection, ProjectionRegistry};
     use pos_store::{open_store, StoreConfig};
@@ -208,6 +222,28 @@ mod tests {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    const SNAPSHOT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([42; 32]);
+
+    fn snapshot_evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
+        ReplayClaimEvaluatorV1::evaluate(
+            ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1 {
+                    artifact_class: ErasureArtifactClassV1::ForkOrSnapshot,
+                    artifact_digest: SNAPSHOT_DIGEST,
+                    data_class: ArtifactDataClassV1::PrivateSubjectData,
+                    key_role: Some(ErasureKeyRoleV1::DataEncryption),
+                    owner: ErasureReferenceV1::from_digest([43; 32]),
+                    optionality: ArtifactOptionalityV1::Required,
+                    transition_rule: ArtifactTransitionRuleV1::Remove,
+                },
+                current_claim: ErasureReplayClaimV1::Exact,
+                state,
+            }],
+        )
+        .test_ok()
+    }
 
     struct CountReducer;
 
@@ -287,7 +323,14 @@ mod tests {
         let snap = snapshot(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         let mut verify_reg = make_registry();
-        verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg).test_ok();
+        verify_snapshot_consistency(
+            store.as_ref(),
+            &snap,
+            &mut verify_reg,
+            SNAPSHOT_DIGEST,
+            &snapshot_evaluation(ArtifactStateV1::Retained),
+        )
+        .test_ok();
     }
 
     #[test]
@@ -310,7 +353,14 @@ mod tests {
 
         // Consistency should hold: snapshot(3) + tail(2) == full replay(5).
         let mut verify_reg = make_registry();
-        verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg).test_ok();
+        verify_snapshot_consistency(
+            store.as_ref(),
+            &snap,
+            &mut verify_reg,
+            SNAPSHOT_DIGEST,
+            &snapshot_evaluation(ArtifactStateV1::Retained),
+        )
+        .test_ok();
     }
 
     #[test]
@@ -553,7 +603,13 @@ mod extra_tests {
         // Now the snapshot registry state (2 events) differs from a full replay (1 event).
         // verify_snapshot_consistency must detect the inconsistency.
         let mut verify_reg = make_registry();
-        let result = verify_snapshot_consistency(store.as_ref(), &snap, &mut verify_reg);
+        let result = verify_snapshot_consistency(
+            store.as_ref(),
+            &snap,
+            &mut verify_reg,
+            SNAPSHOT_DIGEST,
+            &snapshot_evaluation(ArtifactStateV1::Retained),
+        );
         assert!(
             result.is_err(),
             "corrupted snapshot should fail consistency check"
@@ -570,7 +626,14 @@ mod extra_tests {
             registry: HashMap::new(),
         };
         let mut reg = make_registry();
-        let err = verify_snapshot_consistency(&store, &snap, &mut reg).test_err();
+        let err = verify_snapshot_consistency(
+            &store,
+            &snap,
+            &mut reg,
+            SNAPSHOT_DIGEST,
+            &snapshot_evaluation(ArtifactStateV1::Retained),
+        )
+        .test_err();
         assert!(matches!(err, SnapshotError::Store(_)));
     }
 
@@ -584,7 +647,14 @@ mod extra_tests {
             registry: HashMap::new(),
         };
         let mut reg = make_registry();
-        let err = verify_snapshot_consistency(&store, &snap, &mut reg).test_err();
+        let err = verify_snapshot_consistency(
+            &store,
+            &snap,
+            &mut reg,
+            SNAPSHOT_DIGEST,
+            &snapshot_evaluation(ArtifactStateV1::Retained),
+        )
+        .test_err();
         assert!(matches!(err, SnapshotError::Store(_)));
     }
 }

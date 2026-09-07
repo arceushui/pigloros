@@ -646,6 +646,28 @@ impl AuthorizedObservationV1 {
         &self.snapshot
     }
 
+    /// Release one snapshot artifact only when ADR-060 still permits authoritative use.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityErrorV1::SourceUnavailable`] when the artifact is
+    /// erased, invalidated, structurally retained, absent from the evaluation,
+    /// or absent from this observation snapshot.
+    pub fn authoritative_artifact(
+        &self,
+        digest: Hash,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) -> Result<&ObservationArtifactV1, AuthorityErrorV1> {
+        evaluation
+            .require_authoritative_use(
+                pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+                pos_core::ErasureReferenceV1::from_digest(*digest.as_bytes()),
+            )
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        self.snapshot
+            .artifact(digest)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
+    }
+
     /// Re-evaluate consent, capability, delegation, and revocation evidence at
     /// the current authority boundary.
     ///

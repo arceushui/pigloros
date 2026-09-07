@@ -446,6 +446,73 @@ fn authorized_materialization_ignores_every_other_subject() {
 }
 
 #[test]
+fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let fixture = authority_fixture();
+    let subject = fixture.request.subject_id().test_ok();
+    let mut registry = ProjectionRegistry::new();
+    register_profile(&mut registry, Box::new(CountReducer));
+    registry.fold_events(&[event(subject, 1)]);
+    let observation = registry
+        .materialize_authorized_observation(
+            &fixture.request,
+            &fixture.decision,
+            &fixture.authority,
+            &fixture.registry,
+            Seq::from_u64(10),
+            &context(TimelineId::new()),
+        )
+        .test_ok();
+    let digest = observation.records()[0].artifact_digest().test_ok();
+    let evaluate = |state| {
+        ReplayClaimEvaluatorV1::evaluate(
+            ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1 {
+                    artifact_class: ErasureArtifactClassV1::ForkOrSnapshot,
+                    artifact_digest: ErasureReferenceV1::from_digest(*digest.as_bytes()),
+                    data_class: ArtifactDataClassV1::PrivateSubjectData,
+                    key_role: Some(ErasureKeyRoleV1::DataEncryption),
+                    owner: ErasureReferenceV1::from_digest([71; 32]),
+                    optionality: ArtifactOptionalityV1::Required,
+                    transition_rule: ArtifactTransitionRuleV1::Remove,
+                },
+                current_claim: ErasureReplayClaimV1::Exact,
+                state,
+            }],
+        )
+        .test_ok()
+    };
+
+    let retained = evaluate(ArtifactStateV1::Retained);
+    assert_eq!(
+        observation
+            .authoritative_artifact(digest, &retained)
+            .test_ok()
+            .bytes()
+            .as_slice(),
+        br#"{"count":1}"#
+    );
+    for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
+        assert!(matches!(
+            observation.authoritative_artifact(digest, &evaluate(state)),
+            Err(pos_core::AuthorityErrorV1::SourceUnavailable)
+        ));
+    }
+
+    let unknown = hash_from_repeated_byte(99);
+    assert!(matches!(
+        observation.authoritative_artifact(unknown, &retained),
+        Err(pos_core::AuthorityErrorV1::SourceUnavailable)
+    ));
+}
+
+#[test]
 fn materialization_fails_closed_before_reading_without_active_exact_authorization() {
     let fixture = authority_fixture();
     let unrelated = authority_fixture();
