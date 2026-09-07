@@ -1148,7 +1148,7 @@ impl MemoryStore {
 
     fn visible_timeline_for_read(
         &self,
-        candidate: Timeline,
+        candidate: &Timeline,
     ) -> Result<Option<Timeline>, CoreError> {
         let timeline = candidate.id();
         self.with_erasure_read_filter(timeline, ErasureProtectedOperationV1::Read, |store| {
@@ -2660,7 +2660,7 @@ impl EventStore for MemoryStore {
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
         self.timelines
             .values()
-            .map(|state| self.visible_timeline_for_read(state.timeline.clone()))
+            .map(|state| self.visible_timeline_for_read(&state.timeline))
             .collect::<Result<Vec<_>, _>>()
             .map(|timelines| timelines.into_iter().flatten().collect())
     }
