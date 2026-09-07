@@ -543,24 +543,7 @@ impl EvaluatorRequestV1 {
     ///
     /// Returns a closed safe error when a request identity or output cap is invalid.
     pub fn validate(&self) -> Result<(), ConformanceContractError> {
-        if self.request_id == [0; 16]
-            || zero_digest(&self.conformance_profile_digest)
-            || zero_digest(&self.fixture_bundle_digest)
-            || zero_digest(&self.subject_artifact_digest)
-            || zero_digest(&self.execution_profile_digest)
-            || zero_digest(&self.trust_policy_snapshot_digest)
-            || zero_digest(&self.evaluator_protocol_digest)
-            || zero_digest(&self.evaluator_hard_caps_digest)
-            || zero_digest(&self.output_capability.capability_digest)
-            || self.output_capability.report_bytes_limit == 0
-            || self.output_capability.report_bytes_limit > MAX_PROFILE_BYTES as u64
-            || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
-            || self.output_capability.capability_digest != self.expected_output_capability_digest()
-            || self
-                .sandbox_requirement
-                .as_ref()
-                .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
-        {
+        if evaluator_request_fields_out_of_bounds(self) {
             return Err(ConformanceContractError::FieldOutOfBounds);
         }
         validate_identity(&self.implementation).and_then(|()| {
@@ -736,6 +719,27 @@ impl EvaluatorRequestV1 {
             &encode_request(self, false),
         )
     }
+}
+
+fn evaluator_request_fields_out_of_bounds(request: &EvaluatorRequestV1) -> bool {
+    request.request_id == [0; 16]
+        || zero_digest(&request.conformance_profile_digest)
+        || zero_digest(&request.fixture_bundle_digest)
+        || zero_digest(&request.subject_artifact_digest)
+        || zero_digest(&request.execution_profile_digest)
+        || zero_digest(&request.trust_policy_snapshot_digest)
+        || zero_digest(&request.evaluator_protocol_digest)
+        || zero_digest(&request.evaluator_hard_caps_digest)
+        || zero_digest(&request.output_capability.capability_digest)
+        || request.output_capability.report_bytes_limit == 0
+        || request.output_capability.report_bytes_limit > MAX_PROFILE_BYTES as u64
+        || request.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
+        || request.output_capability.capability_digest
+            != request.expected_output_capability_digest()
+        || request
+            .sandbox_requirement
+            .as_ref()
+            .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
 }
 
 fn valid_sandbox_requirement(requirement: &SandboxRequirementV1) -> bool {

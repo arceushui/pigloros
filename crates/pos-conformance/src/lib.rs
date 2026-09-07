@@ -4112,6 +4112,7 @@ pub mod strict_codec {
         {
             return Err(StrictCborError::UnsupportedVersion);
         }
+        let [passed, failed, skipped, unavailable, not_applicable] = decode_report_counts(fields)?;
         Ok(ConformanceReportV1 {
             report_id: bytes(&fields[2], "report_id")?,
             subject_artifact_digest: bytes(&fields[3], "report_subject")?,
@@ -4128,30 +4129,11 @@ pub mod strict_codec {
                 .iter()
                 .map(decode_case)
                 .collect::<Result<Vec<_>, _>>()?,
-            passed: u32::try_from(uint_value(&fields[14], "report_passed")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "report_passed".to_owned(),
-                }
-            })?,
-            failed: u32::try_from(uint_value(&fields[15], "report_failed")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "report_failed".to_owned(),
-                }
-            })?,
-            skipped: u32::try_from(uint_value(&fields[16], "report_skipped")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "report_skipped".to_owned(),
-                }
-            })?,
-            unavailable: u32::try_from(uint_value(&fields[17], "report_unavailable")?).map_err(
-                |_| StrictCborError::InvalidField {
-                    field: "report_unavailable".to_owned(),
-                },
-            )?,
-            not_applicable: u32::try_from(uint_value(&fields[18], "report_not_applicable")?)
-                .map_err(|_| StrictCborError::InvalidField {
-                    field: "report_not_applicable".to_owned(),
-                })?,
+            passed,
+            failed,
+            skipped,
+            unavailable,
+            not_applicable,
             replay_claim: decode_replay_claim(&fields[19])?,
             redaction_state: decode_redaction_state(&fields[20])?,
             limitations_digest: bytes(&fields[21], "report_limitations")?,
@@ -4161,6 +4143,25 @@ pub mod strict_codec {
             )?,
             report_digest: bytes(&fields[23], "report_digest")?,
         })
+    }
+
+    fn decode_report_counts(fields: &[Value]) -> Result<[u32; 5], StrictCborError> {
+        let names = [
+            "report_passed",
+            "report_failed",
+            "report_skipped",
+            "report_unavailable",
+            "report_not_applicable",
+        ];
+        let mut counts = [0_u32; 5];
+        for ((count, value), name) in counts.iter_mut().zip(&fields[14..19]).zip(names) {
+            *count = u32::try_from(uint_value(value, name)?).map_err(|_| {
+                StrictCborError::InvalidField {
+                    field: name.to_owned(),
+                }
+            })?;
+        }
+        Ok(counts)
     }
 
     fn encode_plugin_boundary(boundary: &PluginBoundaryV1) -> Value {

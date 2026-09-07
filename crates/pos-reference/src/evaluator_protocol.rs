@@ -128,21 +128,7 @@ impl EvaluationRequest {
         if text(&fields[0])? != "EVR1" || uint(&fields[1])? != 1 {
             return Err(ProtocolError::UnsupportedVersion);
         }
-        let request = Self {
-            request_id: fixed_bytes(&fields[2])?,
-            profile_digest: fixed_bytes(&fields[3])?,
-            fixture_bundle_digest: fixed_bytes(&fields[4])?,
-            subject_adapter: SubjectAdapterKind::from_code(uint(&fields[5])?)?,
-            subject_artifact_digest: fixed_bytes(&fields[6])?,
-            implementation: decode_identity(&fields[7])?,
-            execution_profile_digest: fixed_bytes(&fields[8])?,
-            trust_policy_snapshot_digest: fixed_bytes(&fields[9])?,
-            output_capability: decode_output_capability(&fields[10])?,
-            evaluator_protocol_digest: fixed_bytes(&fields[11])?,
-            evaluator_hard_caps_digest: fixed_bytes(&fields[12])?,
-            sandbox_requirement: decode_sandbox_requirement(&fields[13])?,
-            request_digest: fixed_bytes(&fields[14])?,
-        };
+        let request = decode_evaluation_request(fields)?;
         request.validate().map(|()| request)
     }
 
@@ -190,30 +176,7 @@ impl EvaluationRequest {
 
     fn validate(&self) -> Result<(), ProtocolError> {
         validate_identity(&self.implementation)?;
-        let digests = [
-            self.profile_digest,
-            self.fixture_bundle_digest,
-            self.subject_artifact_digest,
-            self.execution_profile_digest,
-            self.trust_policy_snapshot_digest,
-            self.output_capability.capability_digest,
-            self.evaluator_protocol_digest,
-            self.evaluator_hard_caps_digest,
-            self.request_digest,
-        ];
-        if self.request_id == [0; 16]
-            || digests.contains(&[0; 32])
-            || self.output_capability.report_bytes_limit == 0
-            || self.output_capability.report_bytes_limit > 16 * 1024 * 1024
-            || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
-        {
-            return Err(ProtocolError::FieldOutOfBounds);
-        }
-        if self
-            .sandbox_requirement
-            .as_ref()
-            .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
-        {
+        if evaluation_request_fields_out_of_bounds(self) {
             return Err(ProtocolError::FieldOutOfBounds);
         }
         if self.output_capability.capability_digest != self.expected_output_capability_digest()?
@@ -223,6 +186,47 @@ impl EvaluationRequest {
         }
         Ok(())
     }
+}
+
+fn decode_evaluation_request(fields: &[Value]) -> Result<EvaluationRequest, ProtocolError> {
+    Ok(EvaluationRequest {
+        request_id: fixed_bytes(&fields[2])?,
+        profile_digest: fixed_bytes(&fields[3])?,
+        fixture_bundle_digest: fixed_bytes(&fields[4])?,
+        subject_adapter: SubjectAdapterKind::from_code(uint(&fields[5])?)?,
+        subject_artifact_digest: fixed_bytes(&fields[6])?,
+        implementation: decode_identity(&fields[7])?,
+        execution_profile_digest: fixed_bytes(&fields[8])?,
+        trust_policy_snapshot_digest: fixed_bytes(&fields[9])?,
+        output_capability: decode_output_capability(&fields[10])?,
+        evaluator_protocol_digest: fixed_bytes(&fields[11])?,
+        evaluator_hard_caps_digest: fixed_bytes(&fields[12])?,
+        sandbox_requirement: decode_sandbox_requirement(&fields[13])?,
+        request_digest: fixed_bytes(&fields[14])?,
+    })
+}
+
+fn evaluation_request_fields_out_of_bounds(request: &EvaluationRequest) -> bool {
+    let digests = [
+        request.profile_digest,
+        request.fixture_bundle_digest,
+        request.subject_artifact_digest,
+        request.execution_profile_digest,
+        request.trust_policy_snapshot_digest,
+        request.output_capability.capability_digest,
+        request.evaluator_protocol_digest,
+        request.evaluator_hard_caps_digest,
+        request.request_digest,
+    ];
+    request.request_id == [0; 16]
+        || digests.contains(&[0; 32])
+        || request.output_capability.report_bytes_limit == 0
+        || request.output_capability.report_bytes_limit > 16 * 1024 * 1024
+        || request.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
+        || request
+            .sandbox_requirement
+            .as_ref()
+            .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
 }
 
 /// Independently declared evaluator/reviewer separation evidence.
