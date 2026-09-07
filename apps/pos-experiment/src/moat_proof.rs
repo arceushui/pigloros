@@ -2014,6 +2014,46 @@ impl Driver for ProofSocietyDriver {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn divergence_variants(baseline: &MoatProofEvidenceV1) -> Vec<MoatProofEvidenceV1> {
+    let mut variants = vec![baseline.clone()];
+    let mut metadata = baseline.clone();
+    metadata.manifest.seed += 1;
+    variants.push(metadata);
+
+    let mut events = baseline.clone();
+    let closure_seq = events.host_closure.closure_event_seq;
+    let Some(closure_event) = events
+        .authoritative_events
+        .iter_mut()
+        .find(|event| event.seq == closure_seq)
+    else {
+        std::panic::resume_unwind(Box::new("closure Event fixture is absent"));
+    };
+    closure_event.payload_digest = [9; 32];
+    events.host_closure.closure_payload_digest = [9; 32];
+    variants.push(events);
+
+    let mut projections = baseline.clone();
+    projections.projections[0].state = serde_json::json!({"changed": true});
+    variants.push(projections);
+
+    let mut trace = baseline.clone();
+    let relation = if trace.causal_trace[0].relation == "derived" {
+        "physical_to_agent"
+    } else {
+        "derived"
+    };
+    relation.clone_into(&mut trace.causal_trace[0].relation);
+    variants.push(trace);
+
+    let mut observability = baseline.clone();
+    observability.uncertainty[0].confidence = 0.5;
+    variants.push(observability);
+    variants
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -2087,36 +2127,7 @@ mod tests {
             .run()
             .test_ok();
         let baseline = report.baseline;
-        let mut variants = Vec::new();
-
-        variants.push(baseline.clone());
-        let mut metadata = baseline.clone();
-        metadata.manifest.seed += 1;
-        variants.push(metadata);
-        let mut events = baseline.clone();
-        let closure_seq = events.host_closure.closure_event_seq;
-        events
-            .authoritative_events
-            .iter_mut()
-            .find(|event| event.seq == closure_seq)
-            .test_ok()
-            .payload_digest = [9; 32];
-        events.host_closure.closure_payload_digest = [9; 32];
-        variants.push(events);
-        let mut projections = baseline.clone();
-        projections.projections[0].state = serde_json::json!({"changed": true});
-        variants.push(projections);
-        let mut trace = baseline.clone();
-        let relation = if trace.causal_trace[0].relation == "derived" {
-            "physical_to_agent"
-        } else {
-            "derived"
-        };
-        relation.clone_into(&mut trace.causal_trace[0].relation);
-        variants.push(trace);
-        let mut observability = baseline.clone();
-        observability.uncertainty[0].confidence = 0.5;
-        variants.push(observability);
+        let variants = divergence_variants(&baseline);
 
         for variant in &variants {
             let expected = compare(&baseline, variant).test_ok();
@@ -2521,37 +2532,7 @@ mod coverage_entrypoints {
         let run = test_ok(MoatProofRun::new(input(), ExecutionModeV1::Local));
         let report = test_ok(run.run());
         let baseline = report.baseline;
-        let mut variants = vec![baseline.clone()];
-
-        let mut metadata = baseline.clone();
-        metadata.manifest.seed += 1;
-        variants.push(metadata);
-        let mut events = baseline.clone();
-        let closure_seq = events.host_closure.closure_event_seq;
-        let Some(closure_event) = events
-            .authoritative_events
-            .iter_mut()
-            .find(|event| event.seq == closure_seq)
-        else {
-            std::panic::resume_unwind(Box::new("closure Event fixture is absent"));
-        };
-        closure_event.payload_digest = [9; 32];
-        events.host_closure.closure_payload_digest = [9; 32];
-        variants.push(events);
-        let mut projections = baseline.clone();
-        projections.projections[0].state = serde_json::json!({"changed": true});
-        variants.push(projections);
-        let mut trace = baseline.clone();
-        let relation = if trace.causal_trace[0].relation == "derived" {
-            "physical_to_agent"
-        } else {
-            "derived"
-        };
-        relation.clone_into(&mut trace.causal_trace[0].relation);
-        variants.push(trace);
-        let mut observability = baseline.clone();
-        observability.uncertainty[0].confidence = 0.5;
-        variants.push(observability);
+        let variants = divergence_variants(&baseline);
 
         for variant in &variants {
             let expected = test_ok(compare(&baseline, variant));
