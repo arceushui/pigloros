@@ -495,11 +495,6 @@ impl ProjectionRegistry {
                     }
                 })
         })
-        /*
->>>>>>> 6e340f50 ([#186] Fence runtime and fail closed at gateway startup)
-    }
-
-        */
     }
 
     fn materialize_authorized_projection(
