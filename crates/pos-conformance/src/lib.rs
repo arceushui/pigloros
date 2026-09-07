@@ -222,6 +222,15 @@ impl ReplayClaimV1 {
 }
 
 impl RedactionStateV1 {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::RedactedViews => 1,
+            Self::StructuralOnly => 2,
+            Self::EvidenceMissing => 3,
+        }
+    }
+
     /// Apply host-owned artifact redaction independently of profile support.
     #[must_use]
     pub const fn after_artifact_evaluation(
@@ -234,7 +243,7 @@ impl RedactionStateV1 {
             pos_core::ArtifactRedactionStateV1::StructuralOnly => Self::StructuralOnly,
             pos_core::ArtifactRedactionStateV1::EvidenceMissing => Self::EvidenceMissing,
         };
-        if self >= evaluated {
+        if self.rank() >= evaluated.rank() {
             self
         } else {
             evaluated

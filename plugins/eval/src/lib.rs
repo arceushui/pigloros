@@ -172,7 +172,10 @@ pub struct CalibrationReport {
 
 impl CalibrationReport {
     /// Consume the host-owned artifact evaluation without strengthening this report.
-    pub fn apply_artifact_evaluation(&mut self, evaluation: &pos_core::ReplayClaimEvaluationV1) {
+    pub const fn apply_artifact_evaluation(
+        &mut self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) {
         self.replay_claim = self.replay_claim.weakened_to(evaluation.replay_claim);
     }
 }
