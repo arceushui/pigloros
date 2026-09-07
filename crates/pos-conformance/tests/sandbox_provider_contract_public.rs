@@ -17,6 +17,18 @@ use pos_reference::sandbox_provider_protocol as independent;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+fn publish_vector(name: &str, bytes: &[u8]) -> TestResult {
+    let Some(root) = std::env::var_os("SANDBOX_PROVIDER_VECTOR_OUTPUT") else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&root)?;
+    std::fs::write(
+        std::path::Path::new(&root).join(format!("{name}.cbor")),
+        bytes,
+    )?;
+    Ok(())
+}
+
 const X86_ROOT: [u8; 16] = [
     0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84, 0xb7, 0x09,
 ];
@@ -231,29 +243,32 @@ const fn receipt_authority() -> ReceiptAuthorityV1 {
 fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
     let key = signing_key();
     let manifest = manifest().sign(&key)?;
+    let manifest_bytes = manifest.to_canonical_cbor()?;
     assert_eq!(
-        SandboxProviderManifestV1::from_canonical_cbor(&manifest.to_canonical_cbor()?)?,
+        SandboxProviderManifestV1::from_canonical_cbor(&manifest_bytes)?,
         manifest
     );
     manifest.verify_signature(&key.verifying_key())?;
-    independent::SandboxProviderManifest::from_canonical_cbor(&manifest.to_canonical_cbor()?)?
+    independent::SandboxProviderManifest::from_canonical_cbor(&manifest_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("spm1", &manifest_bytes)?;
 
     let policy = launch_policy().seal()?;
-    assert_eq!(
-        LaunchPolicyV1::from_canonical_cbor(&policy.to_canonical_cbor()?)?,
-        policy
-    );
-    independent::LaunchPolicy::from_canonical_cbor(&policy.to_canonical_cbor()?)?;
+    let policy_bytes = policy.to_canonical_cbor()?;
+    assert_eq!(LaunchPolicyV1::from_canonical_cbor(&policy_bytes)?, policy);
+    independent::LaunchPolicy::from_canonical_cbor(&policy_bytes)?;
+    publish_vector("lps1", &policy_bytes)?;
 
     let image = image_manifest().sign(&key)?;
+    let image_bytes = image.to_canonical_cbor()?;
     assert_eq!(
-        SignedImageManifestV1::from_canonical_cbor(&image.to_canonical_cbor()?)?,
+        SignedImageManifestV1::from_canonical_cbor(&image_bytes)?,
         image
     );
     image.verify_signature(&key.verifying_key())?;
-    independent::SignedImageManifest::from_canonical_cbor(&image.to_canonical_cbor()?)?
+    independent::SignedImageManifest::from_canonical_cbor(&image_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("sim1", &image_bytes)?;
     Ok(())
 }
 
@@ -285,11 +300,13 @@ fn authority_contracts_reject_order_digest_and_partition_changes() {
 #[test]
 fn execute_and_admission_contracts_round_trip_and_reject_gaps() -> TestResult {
     let request = execute_request()?.seal()?;
+    let request_bytes = request.to_canonical_cbor()?;
     assert_eq!(
-        SandboxExecuteRequestV1::from_canonical_cbor(&request.to_canonical_cbor()?)?,
+        SandboxExecuteRequestV1::from_canonical_cbor(&request_bytes)?,
         request
     );
-    independent::SandboxExecuteRequest::from_canonical_cbor(&request.to_canonical_cbor()?)?;
+    independent::SandboxExecuteRequest::from_canonical_cbor(&request_bytes)?;
+    publish_vector("spx1", &request_bytes)?;
     let mut gap = execute_request()?;
     gap.network_plans[1] = network_plan(2)?;
     assert_eq!(gap.seal(), Err(SandboxContractErrorV1::InconsistentFields));
@@ -312,13 +329,12 @@ fn execute_and_admission_contracts_round_trip_and_reject_gaps() -> TestResult {
         signature: [0; 64],
     }
     .sign(&key)?;
-    assert_eq!(
-        AdmissionGrantV1::from_canonical_cbor(&grant.to_canonical_cbor()?)?,
-        grant
-    );
+    let grant_bytes = grant.to_canonical_cbor()?;
+    assert_eq!(AdmissionGrantV1::from_canonical_cbor(&grant_bytes)?, grant);
     grant.verify_signature(&key.verifying_key())?;
-    independent::AdmissionGrant::from_canonical_cbor(&grant.to_canonical_cbor()?)?
+    independent::AdmissionGrant::from_canonical_cbor(&grant_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("agr1", &grant_bytes)?;
     Ok(())
 }
 
@@ -342,13 +358,15 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         signature: [0; 64],
     }
     .sign(&key)?;
+    let result_bytes = result.to_canonical_cbor()?;
     assert_eq!(
-        SandboxProviderResultV1::from_canonical_cbor(&result.to_canonical_cbor()?)?,
+        SandboxProviderResultV1::from_canonical_cbor(&result_bytes)?,
         result
     );
     result.verify_signature(&key.verifying_key())?;
-    independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?
+    independent::SandboxProviderResult::from_canonical_cbor(&result_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("spy1", &result_bytes)?;
 
     let mut invalid_union = result;
     invalid_union.output = None;
@@ -369,12 +387,14 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         signature: [0; 64],
     }
     .sign(&key)?;
+    let error_bytes = error.to_canonical_cbor()?;
     assert_eq!(
-        SandboxProviderErrorV1::from_canonical_cbor(&error.to_canonical_cbor()?)?,
+        SandboxProviderErrorV1::from_canonical_cbor(&error_bytes)?,
         error
     );
-    independent::SandboxProviderError::from_canonical_cbor(&error.to_canonical_cbor()?)?
+    independent::SandboxProviderError::from_canonical_cbor(&error_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("spe1", &error_bytes)?;
 
     let receipt = SandboxProviderReceiptV1 {
         attempt_id: [2; 16],
@@ -397,13 +417,15 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         signature: [0; 64],
     }
     .sign(&key)?;
+    let receipt_bytes = receipt.to_canonical_cbor()?;
     assert_eq!(
-        SandboxProviderReceiptV1::from_canonical_cbor(&receipt.to_canonical_cbor()?)?,
+        SandboxProviderReceiptV1::from_canonical_cbor(&receipt_bytes)?,
         receipt
     );
     receipt.verify_signature(&key.verifying_key())?;
-    independent::SandboxProviderReceipt::from_canonical_cbor(&receipt.to_canonical_cbor()?)?
+    independent::SandboxProviderReceipt::from_canonical_cbor(&receipt_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("spr1", &receipt_bytes)?;
 
     let mut release_without_ready = receipt;
     release_without_ready.ready1_digest = None;
@@ -428,11 +450,13 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         request_digest: [0; 32],
     }
     .seal()?;
+    let describe_bytes = describe.to_canonical_cbor()?;
     assert_eq!(
-        SandboxDescribeRequestV1::from_canonical_cbor(&describe.to_canonical_cbor()?)?,
+        SandboxDescribeRequestV1::from_canonical_cbor(&describe_bytes)?,
         describe
     );
-    independent::SandboxDescribeRequest::from_canonical_cbor(&describe.to_canonical_cbor()?)?;
+    independent::SandboxDescribeRequest::from_canonical_cbor(&describe_bytes)?;
+    publish_vector("sdq1", &describe_bytes)?;
     let described = SandboxDescribeResponseV1 {
         request_id: authority.request_id,
         spm1_digest: digest(5),
@@ -444,10 +468,12 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         signature: [0; 64],
     }
     .sign(&key)?;
+    let described_bytes = described.to_canonical_cbor()?;
     described.validate_for_request(&describe)?;
     described.verify_signature(&key.verifying_key())?;
-    independent::SandboxDescribeResponse::from_canonical_cbor(&described.to_canonical_cbor()?)?
+    independent::SandboxDescribeResponse::from_canonical_cbor(&described_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("sdy1", &described_bytes)?;
 
     let cancel = SandboxCancelRequestV1 {
         authority: authority.clone(),
@@ -456,7 +482,9 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         request_digest: [0; 32],
     }
     .seal()?;
-    independent::SandboxCancelRequest::from_canonical_cbor(&cancel.to_canonical_cbor()?)?;
+    let cancel_bytes = cancel.to_canonical_cbor()?;
+    independent::SandboxCancelRequest::from_canonical_cbor(&cancel_bytes)?;
+    publish_vector("scq1", &cancel_bytes)?;
     let cancelled = SandboxCancelResponseV1 {
         request_id: authority.request_id,
         attempt_id: cancel.attempt_id,
@@ -467,13 +495,15 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         signature: [0; 64],
     }
     .sign(&key)?;
+    let cancelled_bytes = cancelled.to_canonical_cbor()?;
     cancelled.validate_for_request(&cancel)?;
     assert_eq!(
-        SandboxCancelResponseV1::from_canonical_cbor(&cancelled.to_canonical_cbor()?)?,
+        SandboxCancelResponseV1::from_canonical_cbor(&cancelled_bytes)?,
         cancelled
     );
-    independent::SandboxCancelResponse::from_canonical_cbor(&cancelled.to_canonical_cbor()?)?
+    independent::SandboxCancelResponse::from_canonical_cbor(&cancelled_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("scy1", &cancelled_bytes)?;
 
     let reconcile = SandboxReconcileRequestV1 {
         authority,
@@ -482,7 +512,9 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         request_digest: [0; 32],
     }
     .seal()?;
-    independent::SandboxReconcileRequest::from_canonical_cbor(&reconcile.to_canonical_cbor()?)?;
+    let reconcile_bytes = reconcile.to_canonical_cbor()?;
+    independent::SandboxReconcileRequest::from_canonical_cbor(&reconcile_bytes)?;
+    publish_vector("srq1", &reconcile_bytes)?;
     let reconciled = SandboxReconcileResponseV1 {
         request_id: reconcile.authority.request_id,
         attempt_id: reconcile.attempt_id,
@@ -493,13 +525,15 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         signature: [0; 64],
     }
     .sign(&key)?;
+    let reconciled_bytes = reconciled.to_canonical_cbor()?;
     reconciled.validate_for_request(&reconcile)?;
     assert_eq!(
-        SandboxReconcileResponseV1::from_canonical_cbor(&reconciled.to_canonical_cbor()?)?,
+        SandboxReconcileResponseV1::from_canonical_cbor(&reconciled_bytes)?,
         reconciled
     );
-    independent::SandboxReconcileResponse::from_canonical_cbor(&reconciled.to_canonical_cbor()?)?
+    independent::SandboxReconcileResponse::from_canonical_cbor(&reconciled_bytes)?
         .verify_signature(&key.verifying_key())?;
+    publish_vector("sry1", &reconciled_bytes)?;
 
     let local_error = SandboxLocalErrorV1 {
         operation: Some(SandboxProviderOperationV1::Execute),
@@ -507,10 +541,12 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         code: SandboxLocalErrorCodeV1::ControlChannelUnavailable,
         safe_detail: Some("selector socket unavailable".to_owned()),
     };
+    let local_error_bytes = local_error.to_canonical_cbor()?;
     assert_eq!(
-        SandboxLocalErrorV1::from_canonical_cbor(&local_error.to_canonical_cbor()?)?,
+        SandboxLocalErrorV1::from_canonical_cbor(&local_error_bytes)?,
         local_error
     );
-    independent::SandboxLocalError::from_canonical_cbor(&local_error.to_canonical_cbor()?)?;
+    independent::SandboxLocalError::from_canonical_cbor(&local_error_bytes)?;
+    publish_vector("sle1", &local_error_bytes)?;
     Ok(())
 }
