@@ -630,7 +630,14 @@ fn gateway_action_registry_with_authority(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Arc<PluginRegistry> {
-    let mut registry = PluginRegistry::new();
+    Arc::new(gateway_action_registry_builder(bodies, authority))
+}
+
+fn gateway_action_registry_builder(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+) -> PluginRegistry {
+    let mut registry = PluginRegistry::new().without_erasure_gate();
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
@@ -642,12 +649,12 @@ fn gateway_action_registry_with_authority(
         [Kind::new(EVENT_TYPE_ACTION)],
     );
     if registration.is_err() {
-        return Arc::new(PluginRegistry::new());
+        return PluginRegistry::new().without_erasure_gate();
     }
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
     }
-    Arc::new(registry)
+    registry
 }
 
 fn gateway_action_registry_with_authority_and_erasure_gate(
@@ -655,11 +662,9 @@ fn gateway_action_registry_with_authority_and_erasure_gate(
     authority: Option<ConsentAuthority>,
     gate: Arc<dyn ErasureGate>,
 ) -> Arc<PluginRegistry> {
-    let mut registry = gateway_action_registry_with_authority(bodies, authority);
-    Arc::get_mut(&mut registry)
-        .expect("new action registry must be uniquely owned before Gateway startup")
-        .bind_erasure_gate(gate);
-    registry
+    let mut registry = gateway_action_registry_builder(bodies, authority);
+    registry.bind_erasure_gate(gate);
+    Arc::new(registry)
 }
 
 /// Resource bounds applied by the local-first Gateway process.
