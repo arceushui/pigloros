@@ -138,6 +138,14 @@ pub enum GatewayAuthorizationError {
 /// inferred from the Principal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayAuthorizationRequest {
+    /// The Timeline targeted by this protected operation, when applicable.
+    /// Target coordinates are part of the host operation binding and are not
+    /// inferred from the Principal or capability strings.
+    pub target_timeline: Option<TimelineId>,
+    /// First Timeline position targeted by a protected read, when applicable.
+    pub target_from_position: Option<Seq>,
+    /// Number of Timeline records targeted by a protected read, when applicable.
+    pub target_limit: Option<usize>,
     pub actor_entity_id: EntityId,
     pub subject_id: Option<EntityId>,
     pub participant_id: Option<EntityId>,
@@ -164,17 +172,34 @@ pub struct GatewayAuthorizationRequest {
 }
 
 impl GatewayAuthorizationRequest {
+    /// Return whether this request is bound to the exact protected read target.
+    #[must_use]
+    pub const fn targets_read(
+        &self,
+        target_timeline: TimelineId,
+        from_position: u64,
+        limit: usize,
+    ) -> bool {
+        self.target_timeline == Some(target_timeline)
+            && self.target_from_position == Some(Seq::from_u64(from_position))
+            && self.target_limit == Some(limit)
+    }
+
     /// Build an action request whose resource is the event type and whose action
     /// is the exact capability string later checked by `ActionApprover`.
     #[must_use]
     pub fn action(
         actor_entity_id: EntityId,
+        target_timeline: TimelineId,
         event_type: impl Into<String>,
         capability: impl Into<String>,
         at_time: WallTime,
     ) -> Self {
         let event_type = event_type.into();
         Self {
+            target_timeline: Some(target_timeline),
+            target_from_position: None,
+            target_limit: None,
             actor_entity_id,
             subject_id: None,
             participant_id: None,
@@ -203,8 +228,17 @@ impl GatewayAuthorizationRequest {
 
     /// Build a timeline read request for the protected Gateway read seam.
     #[must_use]
-    pub fn read(actor_entity_id: EntityId, at_time: WallTime) -> Self {
+    pub fn read(
+        actor_entity_id: EntityId,
+        target_timeline: TimelineId,
+        from_position: u64,
+        limit: usize,
+        at_time: WallTime,
+    ) -> Self {
         Self {
+            target_timeline: Some(target_timeline),
+            target_from_position: Some(Seq::from_u64(from_position)),
+            target_limit: Some(limit),
             actor_entity_id,
             subject_id: None,
             participant_id: None,
@@ -238,6 +272,7 @@ pub struct GatewayAuthorizationAudit {
     principal: PrincipalRefV1,
     actor_entity_id: EntityId,
     request_digest: Hash,
+    operation_binding: Hash,
     decision_digest: Hash,
     event_id: Option<EventId>,
 }
@@ -256,6 +291,11 @@ impl GatewayAuthorizationAudit {
     #[must_use]
     pub const fn request_digest(&self) -> Hash {
         self.request_digest
+    }
+
+    #[must_use]
+    pub const fn operation_binding(&self) -> Hash {
+        self.operation_binding
     }
 
     #[must_use]
@@ -281,6 +321,7 @@ pub struct GatewayAuthorizationDecision {
     request: GatewayAuthorizationRequest,
     authenticated: AuthenticatedPrincipalResultV1,
     decision: AuthorizationDecisionV1,
+    operation_binding: Hash,
 }
 
 impl GatewayAuthorizationDecision {
@@ -320,11 +361,17 @@ impl GatewayAuthorizationDecision {
     }
 
     #[must_use]
+    pub const fn operation_binding(&self) -> Hash {
+        self.operation_binding
+    }
+
+    #[must_use]
     pub fn audit(&self) -> GatewayAuthorizationAudit {
         GatewayAuthorizationAudit {
             principal: self.decision.principal().clone(),
             actor_entity_id: self.decision.actor_entity_id(),
             request_digest: self.decision.request_digest(),
+            operation_binding: self.operation_binding,
             decision_digest: self.decision.decision_digest(),
             event_id: None,
         }
@@ -395,6 +442,7 @@ impl GatewayAuthorization {
                                     authority.chain(),
                                     &self.registry,
                                 ),
+                                operation_binding,
                             })
                     })
             })
@@ -518,6 +566,9 @@ fn nonzero_or(value: Hash, fallback: Hash) -> Hash {
 fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.GatewayAuthorizationRequest.v1\0");
+    digest_optional_timeline(&mut hasher, request.target_timeline);
+    digest_optional_seq(&mut hasher, request.target_from_position);
+    digest_optional_usize(&mut hasher, request.target_limit);
     hasher.update(request.actor_entity_id.to_string().as_bytes());
     for value in [
         request.resource.as_str(),
@@ -530,6 +581,36 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
         hasher.update(value.as_bytes());
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn digest_optional_timeline(hasher: &mut blake3::Hasher, value: Option<TimelineId>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.inner().to_bytes());
+        }
+        None => hasher.update(&[0]),
+    }
+}
+
+fn digest_optional_seq(hasher: &mut blake3::Hasher, value: Option<Seq>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.as_u64().to_be_bytes());
+        }
+        None => hasher.update(&[0]),
+    }
+}
+
+fn digest_optional_usize(hasher: &mut blake3::Hasher, value: Option<usize>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&u64::try_from(value).unwrap_or(u64::MAX).to_be_bytes());
+        }
+        None => hasher.update(&[0]),
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +659,7 @@ mod tests {
         authorization: GatewayAuthorization,
         authenticated: AuthenticatedPrincipalResultV1,
         actor: EntityId,
+        target_timeline: TimelineId,
         authority: PersistedAuthorityV1,
         revoked_authority: PersistedAuthorityV1,
     }
@@ -675,6 +757,7 @@ mod tests {
             authorization,
             authenticated,
             actor,
+            target_timeline: authority_timeline,
             authority,
             revoked_authority,
         }
@@ -691,7 +774,7 @@ mod tests {
         GatewayAuthorization::new(
             Arc::new(RejectingAdapter),
             fixture.authority,
-            fixture.authorization.registry.clone(),
+            fixture.authorization.registry,
         )
     }
 
@@ -702,6 +785,7 @@ mod tests {
     fn action(fixture: &Fixture) -> GatewayAuthorizationRequest {
         GatewayAuthorizationRequest::action(
             fixture.actor,
+            fixture.target_timeline,
             "world.action",
             "world.action.submit",
             WallTime::from_micros(10),
@@ -783,6 +867,24 @@ mod tests {
     }
 
     #[test]
+    fn operation_binding_includes_the_exact_protected_target() {
+        let fixture = fixture();
+        let first = fixture.authorization.evaluate(action(&fixture)).test_ok();
+        let mut second_request = action(&fixture);
+        second_request.target_timeline = Some(TimelineId::new());
+        let second = fixture.authorization.evaluate(second_request).test_ok();
+        assert_ne!(
+            first.operation_binding(),
+            second.operation_binding(),
+            "a different target Timeline must not reuse an authorization binding"
+        );
+        assert_ne!(
+            first.audit().operation_binding(),
+            second.audit().operation_binding()
+        );
+    }
+
+    #[test]
     fn denied_decision_does_not_enumerate_principal_or_entity() {
         let fixture = fixture();
         let mut request = action(&fixture);
@@ -830,10 +932,11 @@ mod tests {
         let fixture = fixture();
         let authorization = fixture.authorization.clone();
         let authority = Arc::clone(&authorization.authority);
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = authority.write().test_ok();
             panic!("poison authority lock");
-        }));
+        }))
+        .is_err());
         assert_eq!(
             authorization.replace_authority(fixture.authority).await,
             Err(GatewayAuthorizationError::AuthorityUnavailable)

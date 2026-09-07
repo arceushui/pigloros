@@ -208,13 +208,23 @@ async fn list_events(
         else {
             return Err(GatewayError::AuthorizationUnavailable);
         };
+        let target_timeline = match crate::parse_timeline_id(&id) {
+            Ok(timeline) => timeline,
+            Err(error) => return Err(error),
+        };
         match state
             .gateway
             .read_events_page_authorized(
                 &id,
                 q.from_seq,
                 q.limit,
-                crate::GatewayAuthorizationRequest::read(actor, WallTime::now()),
+                crate::GatewayAuthorizationRequest::read(
+                    actor,
+                    target_timeline,
+                    q.from_seq,
+                    q.limit,
+                    WallTime::now(),
+                ),
             )
             .await
         {

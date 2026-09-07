@@ -576,14 +576,6 @@ impl ActionPrincipal {
         }
     }
 
-    pub(crate) const fn entity_id(&self) -> EntityId {
-        self.entity_id
-    }
-
-    pub(crate) fn capabilities(&self) -> &[Kind] {
-        &self.capabilities
-    }
-
     #[cfg(test)]
     fn authorizes(&self, proposal: &ProposedAction) -> Result<(), ActionRejected> {
         if proposal.actor_entity_id != self.entity_id {
@@ -1699,6 +1691,13 @@ impl Gateway {
         let Some(authorization) = self.authorization.as_ref() else {
             return Err(GatewayError::AuthorizationUnavailable);
         };
+        let target_timeline = match parse_timeline_id(timeline_id) {
+            Ok(timeline) => timeline,
+            Err(error) => return Err(error),
+        };
+        if !request.targets_read(target_timeline, from_seq, limit) {
+            return Err(GatewayError::AuthorizationDenied);
+        }
         let fence = authorization.commit_fence().await;
         if let Err(error) = authorization.authorize(request) {
             return Err(map_authorization_error(error));
@@ -1769,10 +1768,15 @@ impl Gateway {
         proposal: ProposedAction,
     ) -> Result<Event, GatewayError> {
         if let Some(authorization) = self.authorization.clone() {
+            let timeline = match parse_timeline_id(timeline_id) {
+                Ok(timeline) => timeline,
+                Err(error) => return Err(error),
+            };
             let fence = authorization.commit_fence().await;
             let decision = match authorization
                 .authorize(GatewayAuthorizationRequest::action(
                     proposal.actor_entity_id,
+                    timeline,
                     proposal.event_type.as_str(),
                     proposal.capability.as_str(),
                     WallTime::now(),
@@ -1780,10 +1784,6 @@ impl Gateway {
                 .map_err(map_authorization_error)
             {
                 Ok(decision) => decision,
-                Err(error) => return Err(error),
-            };
-            let timeline = match parse_timeline_id(timeline_id) {
-                Ok(timeline) => timeline,
                 Err(error) => return Err(error),
             };
             match self.store.timeline(timeline).await {
@@ -1868,6 +1868,10 @@ impl Gateway {
         ingress_id: &str,
     ) -> Result<IdentifiedAppend, GatewayError> {
         if let Some(authorization) = self.authorization.clone() {
+            let timeline = match parse_timeline_id(timeline_id) {
+                Ok(timeline) => timeline,
+                Err(error) => return Err(error),
+            };
             let entity = match parse_entity_id(entity_id) {
                 Ok(entity) => entity,
                 Err(error) => return Err(error),
@@ -1876,6 +1880,7 @@ impl Gateway {
             let decision = match authorization
                 .authorize(GatewayAuthorizationRequest::action(
                     entity,
+                    timeline,
                     event_type,
                     capability,
                     WallTime::now(),
@@ -1883,10 +1888,6 @@ impl Gateway {
                 .map_err(map_authorization_error)
             {
                 Ok(decision) => decision,
-                Err(error) => return Err(error),
-            };
-            let timeline = match parse_timeline_id(timeline_id) {
-                Ok(timeline) => timeline,
                 Err(error) => return Err(error),
             };
             match self.store.timeline(timeline).await {
@@ -2883,7 +2884,21 @@ mod tests {
             .await
             .test_err();
         assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        let mismatched_target = gateway
+            .read_events_page_authorized(
+                &timeline.id().to_string(),
+                0,
+                1,
+                GatewayAuthorizationRequest::read(actor, TimelineId::new(), 0, 1, WallTime::now()),
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            mismatched_target,
+            GatewayError::AuthorizationDenied
+        ));
         gateway.shutdown().await.test_ok();
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -2901,12 +2916,19 @@ mod tests {
                 &timeline.id().to_string(),
                 0,
                 1,
-                GatewayAuthorizationRequest::read(EntityId::new(), WallTime::now()),
+                GatewayAuthorizationRequest::read(
+                    EntityId::new(),
+                    timeline.id(),
+                    0,
+                    1,
+                    WallTime::now(),
+                ),
             )
             .await
             .test_err();
         assert!(matches!(denied, GatewayError::AuthorizationDenied));
         gateway.shutdown().await.test_ok();
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -2926,12 +2948,13 @@ mod tests {
                 &timeline.id().to_string(),
                 0,
                 1,
-                GatewayAuthorizationRequest::read(actor, WallTime::now()),
+                GatewayAuthorizationRequest::read(actor, timeline.id(), 0, 1, WallTime::now()),
             )
             .await
             .test_err();
         assert!(matches!(error, GatewayError::AuthorizationUnavailable));
         gateway.shutdown().await.test_ok();
+        drop(gateway);
     }
 
     struct TemporarySqliteFile {
