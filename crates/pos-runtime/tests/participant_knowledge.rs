@@ -271,6 +271,25 @@ fn fixture() -> Fixture {
     fixture_with_timeline(TimelineId::new())
 }
 
+fn empty_profile_projections() -> ProjectionRegistry {
+    let mut projections = ProjectionRegistry::new();
+    projections
+        .register_observable(
+            "profile",
+            Box::new(EmptyReducer),
+            ProjectionObservationPolicyV1::try_new(
+                vec!["count".to_owned()],
+                "profile.v1".to_owned(),
+                hash_from_repeated_byte(18),
+                hash_from_repeated_byte(19),
+                hash_from_repeated_byte(15),
+            )
+            .test_ok(),
+        )
+        .test_ok();
+    projections
+}
+
 fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
     let ids = FixtureIds {
         principal: PrincipalRefV1::try_new([1; 16], "host.test").test_ok(),
@@ -326,21 +345,7 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
     let chain = pos_core::DelegationChainV1::try_from_grants(vec![grant.clone()]).test_ok();
     let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &authority_registry);
     assert!(decision.is_allowed());
-    let mut projections = ProjectionRegistry::new();
-    projections
-        .register_observable(
-            "profile",
-            Box::new(EmptyReducer),
-            ProjectionObservationPolicyV1::try_new(
-                vec!["count".to_owned()],
-                "profile.v1".to_owned(),
-                hash_from_repeated_byte(18),
-                hash_from_repeated_byte(19),
-                hash_from_repeated_byte(15),
-            )
-            .test_ok(),
-        )
-        .test_ok();
+    let projections = empty_profile_projections();
     let observation = projections
         .materialize_authorized_observation(
             &request,
@@ -1034,11 +1039,14 @@ fn erased_observation_between_stage_and_commit_aborts_without_appending() {
         .read(timeline.id(), SeqRange::all())
         .test_ok()
         .is_empty());
-    let state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(state.aborts, 1);
-    assert_eq!(state.commits, 0);
+    let (aborts, commits) = {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.aborts, state.commits)
+    };
+    assert_eq!(aborts, 1);
+    assert_eq!(commits, 0);
 }
 
 #[test]
