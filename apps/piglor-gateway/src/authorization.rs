@@ -465,16 +465,34 @@ impl GatewayAuthorization {
 /// Adapt the pre-ADR-059 constructor configuration onto the host authority
 /// seam. This preserves source compatibility while ensuring that the old
 /// constructor no longer installs a Gateway-local entity/capability bypass.
+/// Empty capability input becomes a fail-closed authority that denies all
+/// operations. Any failure in the fixed compatibility record invariants aborts
+/// construction rather than exposing an unprotected Gateway.
 pub(crate) fn legacy_authorization_for(
     actor: EntityId,
     capabilities: impl IntoIterator<Item = String>,
-) -> Option<GatewayAuthorization> {
+) -> GatewayAuthorization {
     let mut actions: Vec<String> = capabilities.into_iter().collect();
     actions.sort_unstable();
     actions.dedup();
-    if actions.is_empty() {
-        return None;
+    let has_action_capability = !actions.is_empty();
+    if has_action_capability {
+        actions.push("read".to_owned());
+        actions.sort_unstable();
+        actions.dedup();
+    } else {
+        actions.push("__no_capability__".to_owned());
     }
+    let resources = if has_action_capability {
+        vec!["timeline.events".to_owned(), "world.action".to_owned()]
+    } else {
+        vec!["__no_resource__".to_owned()]
+    };
+    let purposes = if has_action_capability {
+        vec!["action".to_owned(), "read".to_owned()]
+    } else {
+        vec!["__no_purpose__".to_owned()]
+    };
     let mut principal_id = [0_u8; 16];
     principal_id.copy_from_slice(&blake3::hash(&actor.inner().to_bytes()).as_bytes()[..16]);
     PrincipalRefV1::try_new(principal_id, "gateway.legacy")
@@ -496,9 +514,9 @@ pub(crate) fn legacy_authorization_for(
                     let policy_revision = Hash::from_bytes([4; 32]);
                     let scope =
                         pos_core::CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-                            resources: vec!["world.action".to_owned()],
+                            resources,
                             actions,
-                            purposes: vec!["action".to_owned()],
+                            purposes,
                             audiences: vec!["gateway".to_owned()],
                             actor_entity_ids: vec![actor],
                             subject_ids: Vec::new(),
@@ -567,6 +585,7 @@ pub(crate) fn legacy_authorization_for(
                 })
             })
         })
+        .expect("legacy compatibility authority construction invariant")
 }
 
 fn core_request(

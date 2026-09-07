@@ -1152,12 +1152,7 @@ impl Gateway {
                 .iter()
                 .map(|capability| capability.as_str().to_owned()),
         );
-        match authorization {
-            Some(authorization) => {
-                Self::new_with_world_bodies_and_authorization(store, bodies, authorization)
-            }
-            None => Self::new_with_world_bodies(store, bodies),
-        }
+        Self::new_with_world_bodies_and_authorization(store, bodies, authorization)
     }
 
     #[cfg(test)]
@@ -2938,6 +2933,16 @@ mod tests {
             .await
             .test_ok();
         assert_eq!(event.entity, actor);
+        let page = gateway
+            .read_events_page_authorized(
+                &timeline.id().to_string(),
+                0,
+                1,
+                GatewayAuthorizationRequest::read(actor, WallTime::now()),
+            )
+            .await
+            .test_ok();
+        assert_eq!(page.events.len(), 1);
         gateway.shutdown().await.test_ok();
 
         let unavailable = Gateway::new_with_world_bodies_and_principal(
@@ -2945,7 +2950,7 @@ mod tests {
             [body],
             ActionPrincipal::new(actor, std::iter::empty()),
         );
-        assert!(!unavailable.has_authorization());
+        assert!(unavailable.has_authorization());
         let timeline = unavailable
             .create_timeline("compatibility-unavailable")
             .await
@@ -2960,10 +2965,7 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(
-            error,
-            GatewayError::ActionAuthorizationUnavailable
-        ));
+        assert!(matches!(error, GatewayError::AuthorizationDenied));
         unavailable.shutdown().await.test_ok();
     }
 
