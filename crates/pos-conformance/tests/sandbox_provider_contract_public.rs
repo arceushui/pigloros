@@ -344,7 +344,7 @@ fn authority_contracts_cover_every_architecture_and_execution_mode() -> TestResu
 }
 
 #[test]
-fn authority_contracts_reject_order_digest_and_partition_changes() {
+fn authority_contracts_reject_order_digest_and_partition_changes() -> TestResult {
     let key = signing_key();
     let mut unordered = manifest();
     unordered.capabilities.reverse();
@@ -366,6 +366,34 @@ fn authority_contracts_reject_order_digest_and_partition_changes() {
         invalid_image.sign(&key),
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
+
+    let mut unordered_network = launch_policy();
+    unordered_network
+        .network_capabilities
+        .push(unordered_network.network_capabilities[0].clone());
+    assert_eq!(
+        unordered_network.seal(),
+        Err(SandboxContractErrorV1::NonCanonicalOrder)
+    );
+
+    let manifest = manifest().sign(&key)?;
+    let bytes = manifest.to_canonical_cbor()?;
+    let decoded = independent::SandboxProviderManifest::from_canonical_cbor(&bytes)?;
+    let mut invalid_capability = decoded.clone();
+    invalid_capability.capabilities[0].capability_id.clear();
+    assert_eq!(
+        invalid_capability.verify_signature(&key.verifying_key()),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+    let mut unordered_architectures = decoded;
+    unordered_architectures
+        .architectures
+        .push(independent::SandboxArchitecture::X86_64);
+    assert_eq!(
+        unordered_architectures.verify_signature(&key.verifying_key()),
+        Err(independent::SandboxProviderProtocolError::NonCanonicalOrder)
+    );
+    Ok(())
 }
 
 #[test]
@@ -615,6 +643,31 @@ fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestR
     );
     independent::SandboxProviderError::from_canonical_cbor(&bytes)?
         .verify_signature(&key.verifying_key())?;
+
+    let mut nul_detail = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
+    nul_detail.safe_detail = Some("unsafe\0detail".to_owned());
+    assert_eq!(
+        nul_detail.sign(&key),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+    let mut orphaned_digest = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
+    orphaned_digest.request_id = None;
+    assert_eq!(
+        orphaned_digest.sign(&key),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+    Ok(())
+}
+
+#[test]
+fn control_document_limit_is_enforced_after_field_validation() -> TestResult {
+    let mut request = execute_request()?;
+    request.adapter_input.bytes = vec![0; 16 * 1024 * 1024];
+    request.adapter_input.digest = *blake3::hash(&request.adapter_input.bytes).as_bytes();
+    assert_eq!(
+        request.seal(),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
     Ok(())
 }
 

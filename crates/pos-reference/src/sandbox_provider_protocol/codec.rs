@@ -100,11 +100,7 @@ pub(super) fn encode(value: &Value) -> Result<Vec<u8>, SandboxProviderProtocolEr
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)
         .map_err(|_| SandboxProviderProtocolError::InvalidEncoding)?;
-    if bytes.len() > MAX_DOCUMENT_BYTES {
-        Err(SandboxProviderProtocolError::FieldOutOfBounds)
-    } else {
-        Ok(bytes)
-    }
+    Ok(bytes)
 }
 
 pub(super) fn preflight(bytes: &[u8]) -> Result<(), SandboxProviderProtocolError> {
@@ -390,12 +386,6 @@ pub(super) fn usize_u64(value: usize) -> Result<u64, SandboxProviderProtocolErro
 pub(super) fn validate_identifier_order(
     values: &[String],
 ) -> Result<(), SandboxProviderProtocolError> {
-    if values
-        .iter()
-        .any(|value| value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES)
-    {
-        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
-    }
     if values
         .windows(2)
         .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())

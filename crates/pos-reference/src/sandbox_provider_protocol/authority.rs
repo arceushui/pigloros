@@ -283,13 +283,6 @@ impl LaunchPolicy {
         {
             return Err(SandboxProviderProtocolError::NonCanonicalOrder);
         }
-        if self
-            .network_capabilities
-            .iter()
-            .any(|capability| !valid_network_capability(capability))
-        {
-            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
-        }
         require_canonical_order(
             &self
                 .network_capabilities
@@ -571,14 +564,6 @@ fn network_capability_value(value: &NetworkCapability) -> Value {
         uint_value(value.request_maximum),
         uint_value(value.response_maximum),
     ])
-}
-
-fn valid_network_capability(value: &NetworkCapability) -> bool {
-    valid_identifier(&value.capability_id)
-        && matches!(value.address.len(), 4 | 16)
-        && value.destination_port != 0
-        && (1..=MAX_INPUT_BYTES_U64).contains(&value.request_maximum)
-        && (1..=MAX_INPUT_BYTES_U64).contains(&value.response_maximum)
 }
 
 fn decode_partitions(

@@ -143,6 +143,40 @@ fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
     Ok(bytes)
 }
 
+fn refresh_record_digest(value: &mut Value, magic: &str) -> TestResult {
+    let Value::Array(wrapper) = value else {
+        return Err("record wrapper must be an array".into());
+    };
+    let unsigned = wrapper.first().ok_or("record must have an unsigned body")?;
+    let unsigned_bytes = encode_value(unsigned)?;
+    let mut preimage = Vec::with_capacity(magic.len() + unsigned_bytes.len() + 13);
+    preimage.extend_from_slice(b"PiglorOS.");
+    preimage.extend_from_slice(magic.as_bytes());
+    preimage.extend_from_slice(b".v1\0");
+    preimage.extend_from_slice(&unsigned_bytes);
+    *wrapper.get_mut(1).ok_or("record must have a digest")? =
+        Value::Bytes(blake3::hash(&preimage).as_bytes().to_vec());
+    Ok(())
+}
+
+fn refresh_inline_digest(value: &mut Value, magic: &str) -> TestResult {
+    let Value::Array(fields) = value else {
+        return Err("inline record must be an array".into());
+    };
+    let digest_index = fields
+        .len()
+        .checked_sub(1)
+        .ok_or("inline record is empty")?;
+    let unsigned_bytes = encode_value(&Value::Array(fields[..digest_index].to_vec()))?;
+    let mut preimage = Vec::with_capacity(magic.len() + unsigned_bytes.len() + 13);
+    preimage.extend_from_slice(b"PiglorOS.");
+    preimage.extend_from_slice(magic.as_bytes());
+    preimage.extend_from_slice(b".v1\0");
+    preimage.extend_from_slice(&unsigned_bytes);
+    fields[digest_index] = Value::Bytes(blake3::hash(&preimage).as_bytes().to_vec());
+    Ok(())
+}
+
 fn collect_paths(value: &Value, arrays: &mut Vec<Vec<usize>>, scalars: &mut Vec<Vec<usize>>) {
     fn visit(
         value: &Value,
@@ -191,6 +225,7 @@ fn scalar_replacements(value: &Value) -> Vec<Value> {
         Value::Text(_) => [
             Value::Text(String::new()),
             Value::Text("x".repeat(129)),
+            Value::Text("x".repeat(256)),
             Value::Bytes(vec![0]),
         ]
         .into(),
@@ -370,6 +405,7 @@ fn every_decoder_rejects_non_record_and_trailing_frames() -> TestResult {
             Vec::new(),
             vec![0x9f, 0xff],
             vec![0x81, 0x18, 0x01],
+            vec![0x99, 0x01, 0x01],
             too_deep.clone(),
             {
                 let mut trailing = record.bytes().to_vec();
@@ -382,6 +418,73 @@ fn every_decoder_rejects_non_record_and_trailing_frames() -> TestResult {
         }
         assert!(!record.producer_accepts(&oversized));
         assert!(!record.independent_accepts(&oversized));
+    }
+    Ok(())
+}
+
+#[test]
+fn decoders_reject_semantically_invalid_self_digested_collections() -> TestResult {
+    let mut lps1 = decode_value(Record::Lps1.bytes())?;
+    let network =
+        value_at_mut(&mut lps1, &[0, 6]).ok_or("LPS1 network capability list must exist")?;
+    let Value::Array(network) = network else {
+        return Err("LPS1 network capabilities must be an array".into());
+    };
+    let duplicate = network
+        .first()
+        .ok_or("LPS1 vector must have a capability")?
+        .clone();
+    network.push(duplicate);
+    refresh_record_digest(&mut lps1, "LPS1")?;
+    assert_rejected(Record::Lps1, &lps1, "duplicate network capability")?;
+
+    let mut spx1 = decode_value(Record::Spx1.bytes())?;
+    let capabilities =
+        value_at_mut(&mut spx1, &[0, 19]).ok_or("SPX1 capability list must exist")?;
+    let Value::Array(capabilities) = capabilities else {
+        return Err("SPX1 capabilities must be an array".into());
+    };
+    let duplicate = capabilities
+        .first()
+        .ok_or("SPX1 vector must have a capability")?
+        .clone();
+    capabilities.push(duplicate);
+    refresh_record_digest(&mut spx1, "SPX1")?;
+    assert_rejected(Record::Spx1, &spx1, "duplicate capability identifier")?;
+
+    let mut occurrence_gap = decode_value(Record::Spx1.bytes())?;
+    *value_at_mut(&mut occurrence_gap, &[0, 21, 1, 3])
+        .ok_or("second NXP1 occurrence must exist")? = Value::Integer(0.into());
+    let nested =
+        value_at_mut(&mut occurrence_gap, &[0, 21, 1]).ok_or("second NXP1 record must exist")?;
+    refresh_inline_digest(nested, "NXP1")?;
+    refresh_record_digest(&mut occurrence_gap, "SPX1")?;
+    assert_rejected(
+        Record::Spx1,
+        &occurrence_gap,
+        "repeated exchange occurrence",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn signed_error_decoders_reject_nul_detail_and_orphaned_digest() -> TestResult {
+    for (path, replacement, name) in [
+        (
+            vec![0, 7],
+            Value::Text("unsafe\0detail".to_owned()),
+            "NUL-containing safe detail",
+        ),
+        (
+            vec![0, 3],
+            Value::Null,
+            "request digest without request identity",
+        ),
+    ] {
+        let mut spe1 = decode_value(Record::Spe1.bytes())?;
+        *value_at_mut(&mut spe1, &path).ok_or("SPE1 field must exist")? = replacement;
+        refresh_record_digest(&mut spe1, "SPE1")?;
+        assert_rejected(Record::Spe1, &spe1, name)?;
     }
     Ok(())
 }

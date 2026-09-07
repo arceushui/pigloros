@@ -8,6 +8,7 @@ mod authority;
 mod codec;
 mod operations;
 mod protocol;
+mod provenance;
 
 pub use authority::{
     LaunchPolicyV1, PartitionDescriptorV1, PartitionRoleV1, Pkcs7ProofV1,

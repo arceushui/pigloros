@@ -1149,10 +1149,9 @@ impl SandboxProviderErrorV1 {
             || self.request_id == Some([0; 16])
             || self.request_digest == Some([0; 32])
             || self.attempt_id == Some([0; 16])
-            || self
-                .safe_detail
-                .as_ref()
-                .is_some_and(|value| value.is_empty() || value.len() > MAX_SAFE_DETAIL_BYTES)
+            || self.safe_detail.as_ref().is_some_and(|value| {
+                value.is_empty() || value.len() > MAX_SAFE_DETAIL_BYTES || value.contains('\0')
+            })
             || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
