@@ -7,8 +7,8 @@ use pos_core::{
     CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
     ConsentGrantRefV1, ConsentGrantStatusV1, EntityId, Event, EventDraft, Hash, Kind,
     KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationSnapshotV1,
-    PersistedAuthorityV1, Plugin, PluginId, PrincipalRefV1, Reducer, Seq, State, TimelineId,
-    WallTime,
+    PersistedAuthorityV1, Plugin, PluginId, PrincipalRefV1, Reducer, Seq, SeqRange, State,
+    TimelineId, WallTime,
 };
 use pos_runtime::{Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput};
 use pos_state::{
@@ -61,6 +61,7 @@ struct Fixture {
     host: AuthorityPersistenceHostV1,
     authority_registry: AuthorityRegistrySnapshotV1,
     authentication_binding: Hash,
+    consent_binding: Hash,
     grant: CapabilityGrantV1,
     plugin_id: PluginId,
     timeline_id: TimelineId,
@@ -326,6 +327,7 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
         host,
         authority_registry,
         authentication_binding,
+        consent_binding: consent.binding_digest(),
         grant,
         plugin_id: ids.plugin_id,
         timeline_id: ids.timeline_id,
@@ -519,6 +521,16 @@ fn registry_without_consent(fixture: &Fixture) -> AuthorityRegistrySnapshotV1 {
         vec![fixture.authentication_binding],
         vec![fixture.grant.binding_digest().test_ok()],
         Vec::new(),
+    )
+    .test_ok()
+}
+
+fn registry_without_capability(fixture: &Fixture) -> AuthorityRegistrySnapshotV1 {
+    AuthorityRegistrySnapshotV1::try_new(
+        fixture.authority_registry.registry_digest(),
+        vec![fixture.authentication_binding],
+        Vec::new(),
+        vec![fixture.consent_binding],
     )
     .test_ok()
 }
@@ -725,6 +737,37 @@ fn consent_revocation_after_staging_aborts_before_append() {
     };
     assert_eq!(aborts, 1);
     assert_eq!(commits, 0);
+}
+
+#[test]
+fn capability_removal_after_staging_aborts_without_append() {
+    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let timeline = store
+        .create_timeline("authorized-capability-loss")
+        .test_ok();
+    let fixture = fixture_with_timeline(timeline.id());
+    let (mut registry, state) = registry(&fixture, false);
+    let drafts = stage_current(&mut registry, &fixture).test_ok();
+
+    assert_eq!(
+        authority_error(registry.append_and_commit_authorized_step_at(
+            store.as_mut(),
+            &drafts,
+            &current_authority(&fixture),
+            &registry_without_capability(&fixture),
+            Seq::from_u64(10),
+        )),
+        AuthorityErrorV1::CapabilityMissing
+    );
+    assert!(store
+        .read(timeline.id(), SeqRange::all())
+        .test_ok()
+        .is_empty());
+    let state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(state.aborts, 1);
+    assert_eq!(state.commits, 0);
 }
 
 #[test]

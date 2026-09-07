@@ -7,8 +7,8 @@ use pos_core::{
     ConfidenceV1, EntityId, Hash, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1,
     MemoryPolicyRevisionV1, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PluginId,
-    PreferenceValueRevisionV1, PrincipalRefV1, Seq, TimelineId, MAX_KNOWLEDGE_SNAPSHOT_RECORDS,
-    MAX_OBSERVATION_ARTIFACT_BYTES,
+    PreferenceValueRevisionV1, PrincipalRefV1, Seq, TimelineId, MAX_AUTHORITY_TEXT_BYTES,
+    MAX_KNOWLEDGE_SNAPSHOT_RECORDS, MAX_OBSERVATION_ARTIFACT_BYTES,
 };
 use ulid::Ulid;
 
@@ -296,6 +296,7 @@ fn record_draft(
 
 struct AuthorityFenceFixture {
     snapshot: ObservationSnapshotV1,
+    snapshot_draft: ObservationSnapshotDraftV1,
     state: AuthorityPersistenceStateV1,
     host: AuthorityPersistenceHostV1,
     grant: CapabilityGrantV1,
@@ -378,7 +379,8 @@ fn authority_fence_fixture(snapshot_epoch: u64) -> AuthorityFenceFixture {
     snapshot_draft.capability_policy_revision = policy_revision;
     snapshot_draft.revocation_epoch = snapshot_epoch;
     AuthorityFenceFixture {
-        snapshot: ObservationSnapshotV1::try_from_draft(snapshot_draft).test_ok(),
+        snapshot: ObservationSnapshotV1::try_from_draft(snapshot_draft.clone()).test_ok(),
+        snapshot_draft,
         state,
         host,
         grant,
@@ -448,6 +450,64 @@ fn observation_snapshot_rejects_stale_or_newly_revoked_authority() {
             .validate_authority_fence(&revoked_authority, Seq::from_u64(11)),
         Err(pos_core::AuthorityErrorV1::RevokedAtFence)
     );
+}
+
+#[test]
+fn observation_fence_rejects_changed_grant_chain_bindings() {
+    let fixture = authority_fence_fixture(0);
+    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
+    let mut draft = fixture.snapshot_draft;
+    draft.grant_chain_bindings = vec![hash_from_repeated_byte(99)];
+    let changed = ObservationSnapshotV1::try_from_draft(draft).test_ok();
+
+    assert_eq!(
+        changed.validate_authority_fence(&authority, Seq::from_u64(10)),
+        Err(AuthorityErrorV1::DelegationInvalid)
+    );
+}
+
+#[test]
+fn observation_fence_rejects_a_changed_authority_timeline() {
+    let fixture = authority_fence_fixture(0);
+    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
+    let mut draft = fixture.snapshot_draft;
+    draft.authority_timeline = TimelineId::from_ulid(Ulid::from(99_u128));
+    let changed = ObservationSnapshotV1::try_from_draft(draft).test_ok();
+
+    assert_eq!(
+        changed.validate_authority_fence(&authority, Seq::from_u64(10)),
+        Err(AuthorityErrorV1::DelegationInvalid)
+    );
+}
+
+#[test]
+fn observation_fence_rejects_each_changed_leaf_identity() {
+    let fixture = authority_fence_fixture(0);
+    let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
+    for mutate in [
+        |draft: &mut ObservationSnapshotDraftV1| {
+            draft.principal = PrincipalRefV1::try_new([99; 16], "host.test").test_ok();
+        },
+        |draft: &mut ObservationSnapshotDraftV1| {
+            draft.plugin_id = PluginId::from_ulid(Ulid::from(99_u128));
+        },
+        |draft: &mut ObservationSnapshotDraftV1| draft.installation_id = [99; 16],
+        |draft: &mut ObservationSnapshotDraftV1| {
+            draft.participant_id = EntityId::from_ulid(Ulid::from(99_u128));
+            draft.records.clear();
+        },
+        |draft: &mut ObservationSnapshotDraftV1| {
+            draft.capability_policy_revision = hash_from_repeated_byte(99);
+        },
+    ] {
+        let mut draft = fixture.snapshot_draft.clone();
+        mutate(&mut draft);
+        let changed = ObservationSnapshotV1::try_from_draft(draft).test_ok();
+        assert_eq!(
+            changed.validate_authority_fence(&authority, Seq::from_u64(10)),
+            Err(AuthorityErrorV1::DelegationInvalid)
+        );
+    }
 }
 
 #[test]
@@ -1423,4 +1483,93 @@ fn knowledge_snapshot_decoder_rejects_each_malformed_belief_field() {
             "belief field {index} must retain its canonical type"
         );
     }
+}
+
+fn observation_without_records() -> ObservationSnapshotV1 {
+    ObservationSnapshotV1::try_from_draft(observation_snapshot_draft(Vec::new(), Vec::new()))
+        .test_ok()
+}
+
+fn knowledge_anchored_to(observation: &ObservationSnapshotV1) -> KnowledgeSnapshotDraftV1 {
+    let mut draft = knowledge_draft(observation.participant_id(), Vec::new(), Vec::new());
+    draft.principal = observation.principal().clone();
+    draft.timeline_id = observation.timeline_id();
+    draft.observed_through = observation.observed_through();
+    draft.observation_snapshot_digest = observation.digest();
+    draft
+}
+
+#[test]
+fn knowledge_anchor_rejects_a_changed_principal_with_the_same_observation_digest() {
+    let observation = observation_without_records();
+    let mut draft = knowledge_anchored_to(&observation);
+    draft.principal = PrincipalRefV1::try_new([99; 16], "host.test").test_ok();
+    let knowledge = KnowledgeSnapshotV1::try_from_draft(draft).test_ok();
+
+    assert_eq!(
+        knowledge.validate_observation_snapshot(&observation),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+}
+
+#[test]
+fn knowledge_anchor_rejects_a_changed_participant_with_the_same_observation_digest() {
+    let observation = observation_without_records();
+    let mut draft = knowledge_anchored_to(&observation);
+    draft.participant_id = EntityId::from_ulid(Ulid::from(99_u128));
+    let knowledge = KnowledgeSnapshotV1::try_from_draft(draft).test_ok();
+
+    assert_eq!(
+        knowledge.validate_observation_snapshot(&observation),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+}
+
+#[test]
+fn knowledge_anchor_rejects_a_changed_timeline_with_the_same_observation_digest() {
+    let observation = observation_without_records();
+    let mut draft = knowledge_anchored_to(&observation);
+    draft.timeline_id = TimelineId::from_ulid(Ulid::from(99_u128));
+    let knowledge = KnowledgeSnapshotV1::try_from_draft(draft).test_ok();
+
+    assert_eq!(
+        knowledge.validate_observation_snapshot(&observation),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+}
+
+#[test]
+fn knowledge_anchor_rejects_a_changed_position_with_the_same_observation_digest() {
+    let observation = observation_without_records();
+    let mut draft = knowledge_anchored_to(&observation);
+    draft.observed_through = Seq::from_u64(observation.observed_through().as_u64() + 1);
+    let knowledge = KnowledgeSnapshotV1::try_from_draft(draft).test_ok();
+
+    assert_eq!(
+        knowledge.validate_observation_snapshot(&observation),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+}
+
+#[test]
+fn knowledge_snapshot_rejects_encoded_size_over_two_mebibytes_within_record_limit() {
+    let participant_id = EntityId::from_ulid(Ulid::from(1_u128));
+    let records = (0..MAX_KNOWLEDGE_SNAPSHOT_RECORDS)
+        .map(|index| {
+            let mut draft = record_draft(ObservationStatusV1::NotObserved, None);
+            draft.source_position = Seq::from_u64(u64::try_from(index).test_ok());
+            draft.resource = "r".repeat(MAX_AUTHORITY_TEXT_BYTES);
+            draft.data_category = "d".repeat(MAX_AUTHORITY_TEXT_BYTES);
+            draft.schema = "s".repeat(MAX_AUTHORITY_TEXT_BYTES);
+            ObservationRecordV1::try_from_draft(draft).test_ok()
+        })
+        .collect::<Vec<_>>();
+    let mut draft = knowledge_draft(participant_id, records, Vec::new());
+    draft.observed_through =
+        Seq::from_u64(u64::try_from(MAX_KNOWLEDGE_SNAPSHOT_RECORDS - 1).test_ok());
+
+    assert_eq!(
+        KnowledgeSnapshotV1::try_from_draft(draft),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
 }
