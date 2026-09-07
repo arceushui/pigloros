@@ -946,9 +946,7 @@ fn dependency_node(
 fn configure_counterfactual_intervention(evidence: &mut MoatProofEvidenceV1) {
     let action_node = dependency_node(2, 0, "agent", "world.action.v1", [24; 32]);
     let society_node = dependency_node(2, 3, "society", "society.signal", [27; 32]);
-    let observation_node = evidence.contract.counterfactual.dependencies[0]
-        .consumer
-        .clone();
+    let observation_node = dependency_node(1, 1, "body", "world.observation.v1", [1; 32]);
     let zero_node = evidence.contract.counterfactual.dependencies[0]
         .source
         .clone();

@@ -7194,7 +7194,7 @@ pub mod tests {
             DivergenceClassV1::Observability
         );
         right = left;
-        right.host_closure.halted_at_tick_boundary = false;
+        "other-subject".clone_into(&mut right.host_closure.subject);
         assert_eq!(
             compare(&evidence(), &right)?.divergence,
             DivergenceClassV1::Observability
