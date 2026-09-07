@@ -1157,6 +1157,7 @@ impl MemoryStore {
             )
             .map(|visible| visible.then_some(candidate.clone()))
         })
+        .map(Option::flatten)
     }
 
     fn timeline_visible_for_read(&self, timeline: TimelineId) -> Result<bool, CoreError> {
