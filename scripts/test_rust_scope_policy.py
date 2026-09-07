@@ -39,10 +39,10 @@ EXPECTED_SCOPE_SCOPED_CI_RESULTS = (
     "WORLD_CLIENT_BROWSER_PARITY_RESULT",
     "COVERAGE_RESULT",
     "CARGO_CRAP_RESULT",
+    "MATERIALIZE_CONFORMANCE_BUNDLES_RESULT",
 )
 EXPECTED_UNCONDITIONAL_CI_RESULTS = (
     "CONFORMANCE_FIXTURES_RESULT",
-    "MATERIALIZE_CONFORMANCE_BUNDLES_RESULT",
     "CONFORMANCE_NON_LINUX_RESULT",
 )
 
@@ -152,6 +152,18 @@ class RustScopePolicyTests(unittest.TestCase):
         self.assertIn('"${RUST_SCOPE_RESULT}" == "false"', run)
         self.assertIn('"${result}" == "skipped"', run)
         self.assertIn('"${SCOPE_JOB_RESULT}" != "success"', run)
+
+    def test_conformance_materialization_honors_rust_scope(self) -> None:
+        workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
+        with workflow_path.open(encoding="utf-8") as stream:
+            workflow = yaml.safe_load(stream)
+        materialization = workflow["jobs"]["materialize-conformance-bundles"]
+        self.assertIn("ci_change_scope", materialization["needs"])
+        self.assertEqual(
+            materialization["if"],
+            "${{ needs.ci_change_scope.outputs.rust == 'true' || "
+            "github.event_name != 'pull_request' }}",
+        )
 
 
 if __name__ == "__main__":
