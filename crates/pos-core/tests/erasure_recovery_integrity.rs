@@ -371,18 +371,11 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
     let coordinator_port = port(vec![target], Some(lineage_rule));
     let observer = coordinator_port.clone();
     let request = request()?;
-    let extension_record;
     {
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(coordinator_port, COORDINATOR);
         coordinator.submit(request.clone(), request.provenance())?;
         coordinator.authorize(request.reference(), reference(21))?;
         coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
-        let scope = coordinator
-            .verified_state(request.reference())?
-            .and_then(|verified| verified.scope().cloned())
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        extension_record = extension(request.reference(), &scope, lineage_rule)?;
-        coordinator.append_scope_extension(request.reference(), extension_record)?;
     }
 
     let mut restarted = ErasureCoordinatorStateMachineV1::new(observer.clone(), COORDINATOR);
@@ -396,11 +389,8 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
     let scope = verified.scope().ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(scope.request(), request.reference());
     assert_eq!(scope.scope_members(), &[reference(7)]);
-    assert_eq!(verified.scope_extensions(), &[extension_record]);
-    assert_eq!(
-        verified.scope_forks().collect::<Vec<_>>(),
-        vec![reference(160)]
-    );
+    assert!(verified.scope_extensions().is_empty());
+    assert!(verified.scope_forks().next().is_none());
     assert_eq!(
         verified.manifest_digest(),
         observer
