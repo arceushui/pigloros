@@ -1557,11 +1557,11 @@ impl PluginRegistry {
                     plugin_id,
                     timeline,
                     observation,
-                    snapshot,
+                    &snapshot,
                     knowledge,
                 )
             },
-        );
+        )
     }
 
     fn stage_authorized_driver_after_fence(
