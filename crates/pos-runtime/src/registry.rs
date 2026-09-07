@@ -1396,7 +1396,8 @@ impl PluginRegistry {
     /// the work can only cross the matching fresh authority fence.
     ///
     /// # Errors
-    /// Returns a closed authority error for mismatched or ambient inputs, or a
+    /// Returns [`RuntimeError::ModeMismatch`] when the registry is in Replay
+    /// mode, a closed authority error for mismatched or ambient inputs, or a
     /// Driver/resource error when staging fails.
     pub fn stage_authorized_driver(
         &mut self,
@@ -1750,8 +1751,9 @@ impl PluginRegistry {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::PendingDriverStep`] if a transaction is active,
-    /// or the first Driver-specific durable-history validation error.
+    /// Returns [`RuntimeError::ModeMismatch`] when the registry is in Replay
+    /// mode, [`RuntimeError::PendingDriverStep`] if a transaction is active, or
+    /// the first Driver-specific durable-history validation error.
     pub fn restore_driver_state(
         &mut self,
         timeline_segments: &[TimelineHistorySegment],
