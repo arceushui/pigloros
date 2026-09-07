@@ -4,16 +4,26 @@
 //! Gateway owns construction of the authority request and delegates the policy
 //! decision to the provider-neutral `pos-core` evaluator.  No credential,
 //! bearer value, or provider-specific policy is retained here.
+//!
+//! The public seam implements the accepted [ADR-059 composition](https://redmine.piglor.com/projects/pigloros/wiki/ADR-059_Participant_Knowledge_Observation_and_Structured_Causal_Trace)
+//! tracked by Redmine #180; the wiki page remains canonical.
 
 use pos_core::{
-    AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, EventId,
-    Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+    AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1,
+    CapabilityGrantDraftV1, CapabilityScopeDraftV1, ConsentEvidenceV1, EntityId, EventId, Hash,
+    PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, RwLock},
+};
 use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
+
+const MAX_AUTHORIZATION_AUDITS: usize = 1_024;
 
 /// Opaque, non-secret context supplied to one authentication adapter call.
 ///
@@ -261,7 +271,7 @@ impl GatewayAuthorizationAudit {
     }
 
     #[must_use]
-    pub const fn with_event_id(mut self, event_id: EventId) -> Self {
+    pub(crate) const fn with_event_id(mut self, event_id: EventId) -> Self {
         self.event_id = Some(event_id);
         self
     }
@@ -335,7 +345,7 @@ pub struct GatewayAuthorization {
     authority: Arc<RwLock<PersistedAuthorityV1>>,
     registry: AuthorityRegistrySnapshotV1,
     commit_lock: Arc<Mutex<()>>,
-    audits: Arc<Mutex<Vec<GatewayAuthorizationAudit>>>,
+    audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
 }
 
 impl GatewayAuthorization {
@@ -351,7 +361,7 @@ impl GatewayAuthorization {
             authority: Arc::new(RwLock::new(authority)),
             registry,
             commit_lock: Arc::new(Mutex::new(())),
-            audits: Arc::new(Mutex::new(Vec::new())),
+            audits: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -428,20 +438,131 @@ impl GatewayAuthorization {
     }
 
     /// Retain one accepted action's minimized authorization audit.
-    pub async fn record_audit(&self, audit: GatewayAuthorizationAudit) {
-        self.audits.lock().await.push(audit);
+    pub(crate) async fn record_audit(&self, audit: GatewayAuthorizationAudit) {
+        let mut audits = self.audits.lock().await;
+        if audits.len() >= MAX_AUTHORIZATION_AUDITS {
+            audits.pop_front();
+        }
+        audits.push_back(audit);
     }
 
     /// Return the minimized authorization audits retained by this Gateway host.
     #[must_use]
     pub async fn audits(&self) -> Vec<GatewayAuthorizationAudit> {
-        self.audits.lock().await.clone()
+        self.audits.lock().await.iter().cloned().collect()
     }
 
     /// Acquire the append fence used by the Gateway before a final recheck.
     pub(crate) async fn commit_fence(&self) -> OwnedMutexGuard<()> {
         Arc::clone(&self.commit_lock).lock_owned().await
     }
+}
+
+/// Adapt the pre-ADR-059 constructor configuration onto the host authority
+/// seam. This preserves source compatibility while ensuring that the old
+/// constructor no longer installs a Gateway-local entity/capability bypass.
+pub(crate) fn legacy_authorization_for(
+    actor: EntityId,
+    capabilities: impl IntoIterator<Item = String>,
+) -> Option<GatewayAuthorization> {
+    let mut actions: Vec<String> = capabilities.into_iter().collect();
+    actions.sort_unstable();
+    actions.dedup();
+    if actions.is_empty() {
+        return None;
+    }
+    let mut principal_id = [0_u8; 16];
+    principal_id.copy_from_slice(&blake3::hash(&actor.inner().to_bytes()).as_bytes()[..16]);
+    PrincipalRefV1::try_new(principal_id, "gateway.legacy")
+        .ok()
+        .and_then(|principal| {
+            AssuranceLevelV1::try_new(1).ok().and_then(|assurance| {
+                AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+                    principal: principal.clone(),
+                    adapter_id: "legacy-static".to_owned(),
+                    assurance,
+                    issued_at: WallTime::now(),
+                    expires_at: WallTime::from_micros(u64::MAX),
+                    binding_digest: Hash::from_bytes([2; 32]),
+                })
+                .ok()
+                .and_then(|authenticated| {
+                    let authority_timeline = TimelineId::new();
+                    let registry_digest = Hash::from_bytes([3; 32]);
+                    let policy_revision = Hash::from_bytes([4; 32]);
+                    let scope =
+                        pos_core::CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+                            resources: vec!["world.action".to_owned()],
+                            actions,
+                            purposes: vec!["action".to_owned()],
+                            audiences: vec!["gateway".to_owned()],
+                            actor_entity_ids: vec![actor],
+                            subject_ids: Vec::new(),
+                            participant_ids: Vec::new(),
+                            plugin_id: None,
+                            principal_roles: vec![AuthorityRoleV1::Actor],
+                            max_uses: u64::MAX,
+                            budget: u64::MAX,
+                            environment_constraints: Vec::new(),
+                        })
+                        .ok();
+                    scope
+                        .and_then(|scope| {
+                            pos_core::CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+                                grant_id: Hash::from_bytes([5; 32]),
+                                grantor: principal.clone(),
+                                grantee: AuthorityGranteeV1::Principal(principal),
+                                trust_domain: "gateway.legacy".to_owned(),
+                                scope,
+                                valid_from_position: Seq::from_u64(1),
+                                valid_until_position: Seq::from_u64(u64::MAX),
+                                parent_grant_id: None,
+                                delegation_depth: 0,
+                                max_delegation_depth: 0,
+                                permitted_delegate_classes: Vec::new(),
+                                consent_references: Vec::new(),
+                                policy_revision,
+                                issuance_timeline: authority_timeline,
+                                issuance_seq: Seq::from_u64(1),
+                                revocation_epoch: 0,
+                                revocation_fence: None,
+                                authority_registry_digest: registry_digest,
+                            })
+                            .ok()
+                        })
+                        .and_then(|grant| {
+                            grant.binding_digest().ok().and_then(|grant_binding| {
+                                AuthorityRegistrySnapshotV1::try_new(
+                                    registry_digest,
+                                    vec![authenticated.registry_binding_digest()],
+                                    vec![grant_binding],
+                                    Vec::new(),
+                                )
+                                .ok()
+                                .and_then(|registry| {
+                                    let host = AuthorityPersistenceHostV1::new(&registry);
+                                    host.authorize_grant(&grant).ok().and_then(|permit| {
+                                        let mut state = AuthorityPersistenceStateV1::new();
+                                        state
+                                            .issue_grant(permit, grant.clone())
+                                            .ok()
+                                            .and_then(|_| state.resolve(grant.grant_id()).ok())
+                                            .map(|authority| {
+                                                GatewayAuthorization::new(
+                                                    Arc::new(LocalAuthenticationAdapter::new(
+                                                        authenticated,
+                                                    )),
+                                                    authority,
+                                                    registry,
+                                                )
+                                            })
+                                    })
+                                })
+                            })
+                        })
+                })
+            })
+        })
 }
 
 fn core_request(
@@ -527,13 +648,19 @@ pub(crate) fn test_authorization_unavailable_for(actor: EntityId) -> GatewayAuth
 }
 
 #[cfg(test)]
+pub(crate) fn test_revoked_authority_for(actor: EntityId) -> PersistedAuthorityV1 {
+    tests::fixture_revoked_authority_with_actor(actor)
+}
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{
         AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthorityGranteeV1,
         AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, CapabilityGrantDraftV1,
-        CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, PrincipalRefV1,
+        CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+        CapabilityScopeDraftV1, CapabilityScopeV1, PrincipalRefV1,
     };
 
     trait TestOk<T> {
@@ -557,6 +684,7 @@ mod tests {
         authenticated: AuthenticatedPrincipalResultV1,
         actor: EntityId,
         authority: PersistedAuthorityV1,
+        revoked_authority: PersistedAuthorityV1,
     }
 
     fn fixture() -> Fixture {
@@ -627,6 +755,22 @@ mod tests {
             .issue_grant(host.authorize_grant(&grant).test_ok(), grant.clone())
             .test_ok();
         let authority = state.resolve(grant.grant_id()).test_ok();
+        let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+            grant_id: grant.grant_id(),
+            authority_timeline,
+            fence_position: Seq::from_u64(2),
+            revocation_epoch: 1,
+            policy_revision,
+            authority_registry_digest: registry_digest,
+        })
+        .test_ok();
+        state
+            .revoke_grant(
+                host.authorize_revocation(&grant, &revocation).test_ok(),
+                revocation,
+            )
+            .test_ok();
+        let revoked_authority = state.resolve(grant.grant_id()).test_ok();
         let authorization = GatewayAuthorization::new(
             Arc::new(LocalAuthenticationAdapter::new(authenticated.clone())),
             authority.clone(),
@@ -637,6 +781,7 @@ mod tests {
             authenticated,
             actor,
             authority,
+            revoked_authority,
         }
     }
 
@@ -653,6 +798,10 @@ mod tests {
             fixture.authority,
             fixture.authorization.registry.clone(),
         )
+    }
+
+    pub(super) fn fixture_revoked_authority_with_actor(actor: EntityId) -> PersistedAuthorityV1 {
+        fixture_with_actor(actor).revoked_authority
     }
 
     fn action(fixture: &Fixture) -> GatewayAuthorizationRequest {
@@ -793,6 +942,23 @@ mod tests {
         assert_eq!(
             authorization.replace_authority(fixture.authority).await,
             Err(GatewayAuthorizationError::AuthorityUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_audit_retention_is_bounded() {
+        let fixture = fixture();
+        let audit = fixture
+            .authorization
+            .evaluate(action(&fixture))
+            .test_ok()
+            .audit();
+        for _ in 0..=MAX_AUTHORIZATION_AUDITS {
+            fixture.authorization.record_audit(audit.clone()).await;
+        }
+        assert_eq!(
+            fixture.authorization.audits().await.len(),
+            MAX_AUTHORIZATION_AUDITS
         );
     }
 }

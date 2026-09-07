@@ -553,6 +553,7 @@ pub struct Gateway {
     pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     authorization: Option<Arc<GatewayAuthorization>>,
+    #[cfg_attr(not(test), allow(dead_code))]
     action_principal: Option<ActionPrincipal>,
 }
 
@@ -573,6 +574,15 @@ impl ActionPrincipal {
         }
     }
 
+    pub(crate) const fn entity_id(&self) -> EntityId {
+        self.entity_id
+    }
+
+    pub(crate) fn capabilities(&self) -> &[Kind] {
+        &self.capabilities
+    }
+
+    #[cfg(test)]
     fn authorizes(&self, proposal: &ProposedAction) -> Result<(), ActionRejected> {
         if proposal.actor_entity_id != self.entity_id {
             return Err(ActionRejected::InvalidActorEntityId);
@@ -1067,7 +1077,7 @@ impl Gateway {
     /// Wrap an existing store backend.
     ///
     /// Human action submission is intentionally disabled until the host supplies
-    /// both a World body catalogue and an authenticated [`ActionPrincipal`].
+    /// both a World body catalogue and a provider-neutral [`GatewayAuthorization`].
     #[must_use]
     pub fn new(store: Box<dyn EventStore>) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
@@ -1122,9 +1132,36 @@ impl Gateway {
         .schedule_startup_consent_cleanup()
     }
 
-    /// Wrap a store with World bodies and an authenticated action principal.
+    /// Wrap a store with World bodies and a compatibility principal configuration.
+    ///
+    /// The configuration is translated into the provider-neutral host authority
+    /// seam. It does not install the historical Gateway-local entity/capability
+    /// shortcut; new deployments should prefer
+    /// [`Self::new_with_world_bodies_and_authorization`].
     #[must_use]
     pub fn new_with_world_bodies_and_principal(
+        store: Box<dyn EventStore>,
+        bodies: impl IntoIterator<Item = EntityId>,
+        principal: ActionPrincipal,
+    ) -> Self {
+        let bodies: Vec<_> = bodies.into_iter().collect();
+        let authorization = crate::authorization::legacy_authorization_for(
+            principal.entity_id(),
+            principal
+                .capabilities()
+                .iter()
+                .map(|capability| capability.as_str().to_owned()),
+        );
+        match authorization {
+            Some(authorization) => {
+                Self::new_with_world_bodies_and_authorization(store, bodies, authorization)
+            }
+            None => Self::new_with_world_bodies(store, bodies),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_world_bodies_and_principal_for_test(
         store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
         principal: ActionPrincipal,
@@ -1787,24 +1824,25 @@ impl Gateway {
                 .await;
             return Ok(event);
         }
-        let Some(principal) = self.action_principal.as_ref() else {
-            return Err(GatewayError::ActionAuthorizationUnavailable);
-        };
-        principal.authorizes(&proposal)?;
-        let timeline = match parse_timeline_id(timeline_id) {
-            Ok(timeline) => timeline,
-            Err(error) => return Err(error),
-        };
-        match self.store.timeline(timeline).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
-            Err(error) => return Err(error.into()),
+        #[cfg(test)]
+        if let Some(principal) = self.action_principal.as_ref() {
+            principal.authorizes(&proposal)?;
+            let timeline = match parse_timeline_id(timeline_id) {
+                Ok(timeline) => timeline,
+                Err(error) => return Err(error),
+            };
+            match self.store.timeline(timeline).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
+                Err(error) => return Err(error.into()),
+            }
+            let draft = match self.action_registry.submit_action(&proposal) {
+                Ok(draft) => draft,
+                Err(error) => return Err(error.into()),
+            };
+            return self.append_draft(timeline, draft).await;
         }
-        let draft = match self.action_registry.submit_action(&proposal) {
-            Ok(draft) => draft,
-            Err(error) => return Err(error.into()),
-        };
-        self.append_draft(timeline, draft).await
+        Err(GatewayError::ActionAuthorizationUnavailable)
     }
 
     /// Submit a JSON action through the Gateway-owned action registry.
@@ -1902,41 +1940,43 @@ impl Gateway {
                 .await;
             return Ok(result);
         }
-        let Some(principal) = self.action_principal.as_ref() else {
-            return Err(GatewayError::ActionAuthorizationUnavailable);
-        };
-        let timeline = match parse_timeline_id(timeline_id) {
-            Ok(timeline) => timeline,
-            Err(error) => return Err(error),
-        };
-        match self.store.timeline(timeline).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
-            Err(error) => return Err(error.into()),
+        #[cfg(test)]
+        if let Some(principal) = self.action_principal.as_ref() {
+            let timeline = match parse_timeline_id(timeline_id) {
+                Ok(timeline) => timeline,
+                Err(error) => return Err(error),
+            };
+            match self.store.timeline(timeline).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
+                Err(error) => return Err(error.into()),
+            }
+            let entity = match parse_entity_id(entity_id) {
+                Ok(entity) => entity,
+                Err(error) => return Err(error),
+            };
+            let proposal = match ProposedAction::try_new(
+                Kind::new(event_type),
+                entity,
+                json_to_cbor(payload),
+                Kind::new(capability),
+            ) {
+                Ok(proposal) => proposal,
+                Err(error) => return Err(error.into()),
+            };
+            if let Err(error) = principal.authorizes(&proposal) {
+                return Err(error.into());
+            }
+            let draft = match self.action_registry.submit_action(&proposal) {
+                Ok(draft) => draft,
+                Err(error) => return Err(error.into()),
+            };
+            drop(proposal);
+            return self
+                .append_identified_draft(timeline, draft, ingress_id)
+                .await;
         }
-        let entity = match parse_entity_id(entity_id) {
-            Ok(entity) => entity,
-            Err(error) => return Err(error),
-        };
-        let proposal = match ProposedAction::try_new(
-            Kind::new(event_type),
-            entity,
-            json_to_cbor(payload),
-            Kind::new(capability),
-        ) {
-            Ok(proposal) => proposal,
-            Err(error) => return Err(error.into()),
-        };
-        if let Err(error) = principal.authorizes(&proposal) {
-            return Err(error.into());
-        }
-        let draft = match self.action_registry.submit_action(&proposal) {
-            Ok(draft) => draft,
-            Err(error) => return Err(error.into()),
-        };
-        drop(proposal);
-        self.append_identified_draft(timeline, draft, ingress_id)
-            .await
+        Err(GatewayError::ActionAuthorizationUnavailable)
     }
 
     /// Append an action using an opaque external ingress identity.
@@ -2754,7 +2794,7 @@ mod tests {
     async fn action_submission_covers_id_store_and_approver_boundaries() {
         let actor = EntityId::new();
         let body = EntityId::new();
-        let gateway = Gateway::new_with_world_bodies_and_principal(
+        let gateway = Gateway::new_with_world_bodies_and_principal_for_test(
             open_store(StoreConfig::Memory).test_ok(),
             [body],
             ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
@@ -2802,6 +2842,7 @@ mod tests {
         let body = EntityId::new();
         let authorization = crate::authorization::test_authorization_for(actor);
         let audit_host = authorization.clone();
+        let revoked_authority = crate::authorization::test_revoked_authority_for(actor);
         let gateway = Gateway::new_with_world_bodies_and_authorization(
             open_store(StoreConfig::Memory).test_ok(),
             [body],
@@ -2834,6 +2875,22 @@ mod tests {
         assert_eq!(audits[0].event_id(), Some(event.id));
         assert_eq!(audits[0].principal().trust_domain(), "gateway.test");
 
+        audit_host
+            .replace_authority(revoked_authority)
+            .await
+            .test_ok();
+        let revoked = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(revoked, GatewayError::AuthorizationDenied));
+
         let denied = gateway
             .submit_json_action(
                 &timeline.id().to_string(),
@@ -2846,6 +2903,68 @@ mod tests {
             .test_err();
         assert!(matches!(denied, GatewayError::AuthorizationDenied));
         gateway.shutdown().await.test_ok();
+    }
+
+    #[tokio::test]
+    async fn compatibility_principal_constructor_binds_the_host_authorizer() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let gateway = Gateway::new_with_world_bodies_and_principal(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
+        );
+        assert!(gateway.has_authorization());
+        let timeline = gateway
+            .create_timeline("compatibility-authority")
+            .await
+            .test_ok();
+        let event = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({
+                    "actor_entity_id": actor,
+                    "body_entity_id": body,
+                    "action_kind": "impulse",
+                    "params": [1],
+                    "action_scope": 0,
+                    "catalogue_version": 1,
+                    "tick": 1
+                }),
+                "world.action.submit",
+            )
+            .await
+            .test_ok();
+        assert_eq!(event.entity, actor);
+        gateway.shutdown().await.test_ok();
+
+        let unavailable = Gateway::new_with_world_bodies_and_principal(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            ActionPrincipal::new(actor, std::iter::empty()),
+        );
+        assert!(!unavailable.has_authorization());
+        let timeline = unavailable
+            .create_timeline("compatibility-unavailable")
+            .await
+            .test_ok();
+        let error = unavailable
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({}),
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            error,
+            GatewayError::ActionAuthorizationUnavailable
+        ));
+        unavailable.shutdown().await.test_ok();
     }
 
     #[tokio::test]
@@ -5315,7 +5434,7 @@ mod tests {
     async fn submit_proposed_action_approves_and_rejects() {
         let actor = EntityId::new();
         let body = EntityId::new();
-        let gw = Gateway::new_with_world_bodies_and_principal(
+        let gw = Gateway::new_with_world_bodies_and_principal_for_test(
             open_store(StoreConfig::Memory).test_ok(),
             [body],
             ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),

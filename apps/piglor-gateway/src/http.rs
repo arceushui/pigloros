@@ -489,7 +489,7 @@ mod tests {
     }
 
     fn test_app() -> Router {
-        let gw = Gateway::new_with_world_bodies_and_principal(
+        let gw = Gateway::new_with_world_bodies_and_principal_for_test(
             open_store(StoreConfig::Memory).test_ok(),
             [test_world_body()],
             test_action_principal(),
