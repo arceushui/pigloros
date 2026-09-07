@@ -775,12 +775,9 @@ fn validate_partitions(
 }
 
 const fn ranges_overlap(left: &PartitionDescriptorV1, right: &PartitionDescriptorV1) -> bool {
-    let Some(left_end) = left.start_bytes.checked_add(left.length_bytes) else {
-        return true;
-    };
-    let Some(right_end) = right.start_bytes.checked_add(right.length_bytes) else {
-        return true;
-    };
+    // `validate_partitions` proves both additions fit before checking pairs.
+    let left_end = left.start_bytes + left.length_bytes;
+    let right_end = right.start_bytes + right.length_bytes;
     left.start_bytes < right_end && right.start_bytes < left_end
 }
 

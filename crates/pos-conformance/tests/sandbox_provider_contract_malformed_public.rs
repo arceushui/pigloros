@@ -333,6 +333,16 @@ fn producer_and_independent_decoders_reject_every_array_boundary_mutation() -> T
                 assert_rejected(record, &shorter, &format!("short array path {path:?}"))?;
                 exercised += 1;
             }
+
+            let mut wrong_type = original.clone();
+            *value_at_mut(&mut wrong_type, &path).ok_or("collected array path must resolve")? =
+                Value::Null;
+            assert_rejected(
+                record,
+                &wrong_type,
+                &format!("non-array at array path {path:?}"),
+            )?;
+            exercised += 1;
         }
     }
     assert!(
@@ -344,6 +354,9 @@ fn producer_and_independent_decoders_reject_every_array_boundary_mutation() -> T
 
 #[test]
 fn every_decoder_rejects_non_record_and_trailing_frames() -> TestResult {
+    let oversized = vec![0_u8; 16 * 1024 * 1024 + 1];
+    let mut too_deep = vec![0x81; 34];
+    too_deep.push(0xf6);
     for record in Record::ALL {
         for value in [
             Value::Null,
@@ -353,14 +366,22 @@ fn every_decoder_rejects_non_record_and_trailing_frames() -> TestResult {
         ] {
             assert_rejected(record, &value, "non-record top-level value")?;
         }
-        for bytes in [Vec::new(), {
-            let mut trailing = record.bytes().to_vec();
-            trailing.push(0);
-            trailing
-        }] {
+        for bytes in [
+            Vec::new(),
+            vec![0x9f, 0xff],
+            vec![0x81, 0x18, 0x01],
+            too_deep.clone(),
+            {
+                let mut trailing = record.bytes().to_vec();
+                trailing.push(0);
+                trailing
+            },
+        ] {
             assert!(!record.producer_accepts(&bytes));
             assert!(!record.independent_accepts(&bytes));
         }
+        assert!(!record.producer_accepts(&oversized));
+        assert!(!record.independent_accepts(&oversized));
     }
     Ok(())
 }

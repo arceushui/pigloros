@@ -41,6 +41,15 @@ const X86_VERITY: [u8; 16] = [
 const X86_VERITY_SIGNATURE: [u8; 16] = [
     0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08, 0xb1, 0x76,
 ];
+const AARCH64_ROOT: [u8; 16] = [
+    0xb9, 0x21, 0xb0, 0x45, 0x1d, 0xf0, 0x41, 0xc3, 0xaf, 0x44, 0x4c, 0x6f, 0x28, 0x0d, 0x3f, 0xae,
+];
+const AARCH64_VERITY: [u8; 16] = [
+    0xdf, 0x33, 0x00, 0xce, 0xd6, 0x9f, 0x4c, 0x92, 0x97, 0x8c, 0x9b, 0xfb, 0x0f, 0x38, 0xd8, 0x20,
+];
+const AARCH64_VERITY_SIGNATURE: [u8; 16] = [
+    0x6d, 0xb6, 0x9d, 0xe6, 0x29, 0xf4, 0x47, 0x58, 0xa7, 0xa5, 0x96, 0x21, 0x90, 0xf0, 0x0c, 0xe3,
+];
 
 fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&[42; 32])
@@ -143,6 +152,15 @@ fn image_manifest() -> SignedImageManifestV1 {
         manifest_digest: [0; 32],
         signature: [0; 64],
     }
+}
+
+fn aarch64_image_manifest() -> SignedImageManifestV1 {
+    let mut image = image_manifest();
+    image.architecture = SandboxArchitectureV1::Aarch64;
+    image.partitions[0].partition_type_uuid = AARCH64_ROOT;
+    image.partitions[1].partition_type_uuid = AARCH64_VERITY;
+    image.partitions[2].partition_type_uuid = AARCH64_VERITY_SIGNATURE;
+    image
 }
 
 const fn partition(
@@ -281,6 +299,47 @@ fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
     independent::SignedImageManifest::from_canonical_cbor(&image_bytes)?
         .verify_signature(&key.verifying_key())?;
     publish_vector("sim1", &image_bytes)?;
+    Ok(())
+}
+
+#[test]
+fn authority_contracts_cover_every_architecture_and_execution_mode() -> TestResult {
+    let key = signing_key();
+    let mut dual_architecture = manifest();
+    dual_architecture
+        .architectures
+        .push(SandboxArchitectureV1::Aarch64);
+    let dual_architecture = dual_architecture.sign(&key)?;
+    let manifest_bytes = dual_architecture.to_canonical_cbor()?;
+    dual_architecture.verify_signature(&key.verifying_key())?;
+    independent::SandboxProviderManifest::from_canonical_cbor(&manifest_bytes)?
+        .verify_signature(&key.verifying_key())?;
+
+    let aarch64 = aarch64_image_manifest().sign(&key)?;
+    let image_bytes = aarch64.to_canonical_cbor()?;
+    assert_eq!(
+        SignedImageManifestV1::from_canonical_cbor(&image_bytes)?,
+        aarch64
+    );
+    independent::SignedImageManifest::from_canonical_cbor(&image_bytes)?
+        .verify_signature(&key.verifying_key())?;
+
+    for mode in [
+        ExecutionModeV1::Local,
+        ExecutionModeV1::AirGapped,
+        ExecutionModeV1::Replay,
+        ExecutionModeV1::Fork,
+    ] {
+        let mut policy = launch_policy();
+        policy.execution_mode = mode;
+        if mode != ExecutionModeV1::Local {
+            policy.network_capabilities.clear();
+        }
+        let policy = policy.seal()?;
+        let policy_bytes = policy.to_canonical_cbor()?;
+        assert_eq!(LaunchPolicyV1::from_canonical_cbor(&policy_bytes)?, policy);
+        independent::LaunchPolicy::from_canonical_cbor(&policy_bytes)?;
+    }
     Ok(())
 }
 
@@ -448,6 +507,117 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
     Ok(())
 }
 
+fn result_for_outcome(outcome: SandboxTerminalOutcomeV1) -> SandboxProviderResultV1 {
+    let admitted = matches!(
+        outcome,
+        SandboxTerminalOutcomeV1::Completed
+            | SandboxTerminalOutcomeV1::Cancelled
+            | SandboxTerminalOutcomeV1::UnavailableAfterAdmission
+    );
+    SandboxProviderResultV1 {
+        request_id: [1; 16],
+        attempt_id: [2; 16],
+        outcome,
+        output: (outcome == SandboxTerminalOutcomeV1::Completed).then(|| {
+            let bytes = b"terminal output".to_vec();
+            SandboxOutputV1 {
+                digest: *blake3::hash(&bytes).as_bytes(),
+                bytes,
+            }
+        }),
+        agr1_digest: admitted.then_some(digest(3)),
+        spr1_digest: admitted.then_some(digest(4)),
+        operational_events: vec![0],
+        runtime_attestation_key_id: "runtime-key".to_owned(),
+        result_digest: [0; 32],
+        signature: [0; 64],
+    }
+}
+
+#[test]
+fn terminal_results_round_trip_every_closed_outcome() -> TestResult {
+    let key = signing_key();
+    for outcome in [
+        SandboxTerminalOutcomeV1::Completed,
+        SandboxTerminalOutcomeV1::Cancelled,
+        SandboxTerminalOutcomeV1::UnavailableBeforeAdmission,
+        SandboxTerminalOutcomeV1::Rejected,
+        SandboxTerminalOutcomeV1::UnavailableAfterAdmission,
+    ] {
+        let result = result_for_outcome(outcome).sign(&key)?;
+        let bytes = result.to_canonical_cbor()?;
+        assert_eq!(
+            SandboxProviderResultV1::from_canonical_cbor(&bytes)?,
+            result
+        );
+        result.verify_signature(&key.verifying_key())?;
+        independent::SandboxProviderResult::from_canonical_cbor(&bytes)?
+            .verify_signature(&key.verifying_key())?;
+    }
+    Ok(())
+}
+
+fn error_for_code(code: SandboxProviderErrorCodeV1) -> SandboxProviderErrorV1 {
+    SandboxProviderErrorV1 {
+        operation: Some(1),
+        request_id: Some([1; 16]),
+        request_digest: Some(digest(2)),
+        attempt_id: Some([3; 16]),
+        code,
+        safe_detail: None,
+        runtime_attestation_key_id: "runtime-key".to_owned(),
+        error_digest: [0; 32],
+        signature: [0; 64],
+    }
+}
+
+#[test]
+fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestResult {
+    let key = signing_key();
+    for code in [
+        SandboxProviderErrorCodeV1::InvalidEncoding,
+        SandboxProviderErrorCodeV1::UnsupportedVersion,
+        SandboxProviderErrorCodeV1::FieldOutOfBounds,
+        SandboxProviderErrorCodeV1::NonCanonicalOrder,
+        SandboxProviderErrorCodeV1::DigestMismatch,
+        SandboxProviderErrorCodeV1::SignatureInvalid,
+        SandboxProviderErrorCodeV1::TrustRevoked,
+        SandboxProviderErrorCodeV1::AuthorityMismatch,
+        SandboxProviderErrorCodeV1::ProviderCapabilityMissing,
+        SandboxProviderErrorCodeV1::ImageIdentityMismatch,
+        SandboxProviderErrorCodeV1::SelfTestFailed,
+        SandboxProviderErrorCodeV1::SandboxUnavailable,
+        SandboxProviderErrorCodeV1::AdmissionBusy,
+        SandboxProviderErrorCodeV1::AuditUnavailable,
+        SandboxProviderErrorCodeV1::CleanupFailed,
+        SandboxProviderErrorCodeV1::UnknownAttempt,
+        SandboxProviderErrorCodeV1::RequestIdentityConflict,
+        SandboxProviderErrorCodeV1::AttemptInProgress,
+    ] {
+        let error = error_for_code(code).sign(&key)?;
+        let bytes = error.to_canonical_cbor()?;
+        assert_eq!(SandboxProviderErrorV1::from_canonical_cbor(&bytes)?, error);
+        error.verify_signature(&key.verifying_key())?;
+        independent::SandboxProviderError::from_canonical_cbor(&bytes)?
+            .verify_signature(&key.verifying_key())?;
+    }
+
+    let mut framing_error = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
+    framing_error.operation = None;
+    framing_error.request_id = None;
+    framing_error.request_digest = None;
+    framing_error.attempt_id = None;
+    let framing_error = framing_error.sign(&key)?;
+    let bytes = framing_error.to_canonical_cbor()?;
+    assert_eq!(
+        SandboxProviderErrorV1::from_canonical_cbor(&bytes)?,
+        framing_error
+    );
+    independent::SandboxProviderError::from_canonical_cbor(&bytes)?
+        .verify_signature(&key.verifying_key())?;
+    Ok(())
+}
+
 #[test]
 fn describe_operation_round_trips_and_binds_response() -> TestResult {
     let key = signing_key();
@@ -510,6 +680,7 @@ fn cancel_operation_round_trips_and_binds_response() -> TestResult {
     .sign(&key)?;
     let response_bytes = cancelled.to_canonical_cbor()?;
     cancelled.validate_for_request(&cancel)?;
+    cancelled.verify_signature(&key.verifying_key())?;
     assert_eq!(
         SandboxCancelResponseV1::from_canonical_cbor(&response_bytes)?,
         cancelled
@@ -545,6 +716,7 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
     .sign(&key)?;
     let response_bytes = reconciled.to_canonical_cbor()?;
     reconciled.validate_for_request(&reconcile)?;
+    reconciled.verify_signature(&key.verifying_key())?;
     assert_eq!(
         SandboxReconcileResponseV1::from_canonical_cbor(&response_bytes)?,
         reconciled
@@ -566,5 +738,85 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
     );
     independent::SandboxLocalError::from_canonical_cbor(&local_error_bytes)?;
     publish_vector("sle1", &local_error_bytes)?;
+    Ok(())
+}
+
+#[test]
+fn local_errors_round_trip_every_operation_and_failure_code() -> TestResult {
+    let operations = [
+        SandboxProviderOperationV1::Describe,
+        SandboxProviderOperationV1::Execute,
+        SandboxProviderOperationV1::Cancel,
+        SandboxProviderOperationV1::Reconcile,
+    ];
+    let codes = [
+        SandboxLocalErrorCodeV1::ProviderUnavailable,
+        SandboxLocalErrorCodeV1::ProviderIdentityInvalid,
+        SandboxLocalErrorCodeV1::PolicyUnavailable,
+        SandboxLocalErrorCodeV1::ControlChannelUnavailable,
+    ];
+    for (operation, code) in operations.into_iter().zip(codes) {
+        let error = SandboxLocalErrorV1 {
+            operation: Some(operation),
+            request_id: Some([1; 16]),
+            code,
+            safe_detail: None,
+        };
+        let bytes = error.to_canonical_cbor()?;
+        assert_eq!(SandboxLocalErrorV1::from_canonical_cbor(&bytes)?, error);
+        independent::SandboxLocalError::from_canonical_cbor(&bytes)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
+    let key = signing_key();
+    let describe = SandboxDescribeRequestV1 {
+        authority: operation_authority(),
+        request_digest: [0; 32],
+    }
+    .seal()?;
+    let mismatched_describe = SandboxDescribeResponseV1 {
+        request_id: [9; 16],
+        spm1_digest: digest(5),
+        provider_binary_digest: digest(6),
+        hcp1_digest: digest(7),
+        apt1_digest: describe.authority.apt1_digest,
+        runtime_attestation_key_id: "runtime-key".to_owned(),
+        response_digest: [0; 32],
+        signature: [0; 64],
+    }
+    .sign(&key)?;
+    assert_eq!(
+        mismatched_describe.validate_for_request(&describe),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+
+    let cancel = SandboxCancelRequestV1 {
+        authority: operation_authority(),
+        attempt_id: [8; 16],
+        agr1_digest: digest(9),
+        request_digest: [0; 32],
+    }
+    .seal()?;
+    let mismatched_cancel = SandboxCancelResponseV1 {
+        request_id: cancel.authority.request_id,
+        attempt_id: [9; 16],
+        result: SandboxCancelResultV1::AlreadyTerminal,
+        spy1_digest: digest(10),
+        runtime_attestation_key_id: "runtime-key".to_owned(),
+        response_digest: [0; 32],
+        signature: [0; 64],
+    }
+    .sign(&key)?;
+    let bytes = mismatched_cancel.to_canonical_cbor()?;
+    mismatched_cancel.verify_signature(&key.verifying_key())?;
+    independent::SandboxCancelResponse::from_canonical_cbor(&bytes)?
+        .verify_signature(&key.verifying_key())?;
+    assert_eq!(
+        mismatched_cancel.validate_for_request(&cancel),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
     Ok(())
 }
