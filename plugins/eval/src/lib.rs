@@ -387,7 +387,8 @@ fn compute_ece(bins: &[ReliabilityBin], total: u64) -> f64 {
 /// Read all events from the given timeline and compute a [`CalibrationReport`].
 ///
 /// # Errors
-/// Returns [`EvalError::Store`] if the store cannot be read, or
+/// Returns [`EvalError::ArtifactUnavailable`] when the report closure is not
+/// authoritative, [`EvalError::Store`] if the store cannot be read, or
 /// [`EvalError::Decode`] if a payload cannot be decoded.
 pub fn compute_report(
     store: &dyn EventStore,

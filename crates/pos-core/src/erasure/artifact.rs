@@ -255,7 +255,8 @@ impl ReplayClaimEvaluationV1 {
     /// # Errors
     ///
     /// Returns [`ErasureErrorV1::PolicyConflict`] when the artifact is absent,
-    /// erased, structurally retained, or quarantined by invalidation.
+    /// erased, structurally retained, quarantined by invalidation, or belongs
+    /// to an evaluation whose required closure is no longer authoritative.
     pub fn require_authoritative_use(
         &self,
         artifact_class: ErasureArtifactClassV1,

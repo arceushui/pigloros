@@ -15,7 +15,8 @@ use pos_state::ProjectionRegistry;
 /// Returns the events that were replayed so callers do not need a second read.
 ///
 /// # Errors
-/// Propagates [`CoreError`] from the underlying store.
+/// Returns [`CoreError::ArtifactUnavailable`] when the Timeline Replay is no
+/// longer authoritative; otherwise propagates [`CoreError`] from the store.
 pub fn replay(
     store: &dyn EventStore,
     timeline: TimelineId,
@@ -41,7 +42,8 @@ pub fn replay(
 /// Reads [`SeqRange::bounded`](`Seq::ZERO`, `at_seq`) and folds through `registry`.
 ///
 /// # Errors
-/// Propagates [`CoreError`] from the underlying store.
+/// Returns [`CoreError::ArtifactUnavailable`] when the Timeline Replay is no
+/// longer authoritative; otherwise propagates [`CoreError`] from the store.
 pub fn replay_at(
     store: &dyn EventStore,
     timeline: TimelineId,

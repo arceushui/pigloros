@@ -1435,7 +1435,7 @@ pub struct MoatProofEvidenceV1 {
     pub projections: Vec<ProjectionEvidenceV1>,
     pub causal_trace: Vec<CausalTraceEntryV1>,
     /// Payload-free causal identity used after structural redaction.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub structural_causal_trace: Vec<StructuralCausalTraceEntryV1>,
     pub uncertainty: Vec<UncertaintyV1>,
     pub participant_views: Vec<ParticipantViewV1>,

@@ -238,6 +238,12 @@ fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
     assert!(!json.contains("deleted-private-audience"));
     assert!(!String::from_utf8_lossy(&cbor).contains("deleted-subject-label"));
     assert!(!String::from_utf8_lossy(&cbor).contains("deleted-private-audience"));
+    assert_eq!(ok(MoatProofEvidenceV1::from_json(&json)), evidence);
+    assert_eq!(
+        ok(MoatProofEvidenceV1::from_canonical_cbor(&cbor)),
+        evidence
+    );
+    assert_eq!(verify_evidence(&evidence), Ok(()));
 }
 
 fn authorization_fixtures() -> (

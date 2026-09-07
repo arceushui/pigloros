@@ -948,7 +948,9 @@ fn persist_registry_after_timeline_creation<S: EventStore + ?Sized>(
 /// original ids, use [`export_timeline_own`].
 ///
 /// # Errors
-/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+/// Returns [`CoreError::ArtifactUnavailable`] when the evaluated export
+/// closure is not authoritative, or [`CoreError::TimelineNotFound`] if the
+/// timeline does not exist.
 pub fn export_timeline(
     store: &dyn EventStore,
     id: TimelineId,
@@ -986,7 +988,9 @@ pub fn export_timeline(
 /// [`export_timeline_cow`].
 ///
 /// # Errors
-/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+/// Returns [`CoreError::ArtifactUnavailable`] when the evaluated export
+/// closure is not authoritative, or [`CoreError::TimelineNotFound`] if the
+/// timeline does not exist.
 pub fn export_timeline_own(
     store: &dyn EventStore,
     id: TimelineId,
@@ -1010,7 +1014,9 @@ pub use export_timeline_own as export_timeline_cow;
 /// divergent parent history.
 ///
 /// # Errors
-/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+/// Returns [`CoreError::ArtifactUnavailable`] when the evaluated export
+/// closure is not authoritative, or [`CoreError::TimelineNotFound`] if the
+/// timeline does not exist.
 pub fn export_timeline_raw(
     store: &dyn EventStore,
     id: TimelineId,

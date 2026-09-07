@@ -631,7 +631,16 @@ fn authorized_driver_receives_only_the_bound_snapshot_and_requires_its_commit_fe
     let observed = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(observed.observed_digest, Some(fixture.observation.digest()));
+    assert_eq!(
+        observed.observed_digest,
+        Some(
+            fixture
+                .observation
+                .authoritative_snapshot(&observation_evaluation(&fixture.observation))
+                .test_ok()
+                .digest()
+        )
+    );
     assert_eq!(observed.knowledge_digest, Some(fixture.knowledge.digest()));
     assert!(!observed.saw_raw_state);
     assert!(!observed.saw_raw_events);

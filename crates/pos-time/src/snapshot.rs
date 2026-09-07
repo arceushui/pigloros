@@ -30,7 +30,8 @@ pub struct Snapshot {
 /// [`Snapshot`].
 ///
 /// # Errors
-/// Propagates [`CoreError`] from the underlying store.
+/// Returns [`CoreError::ArtifactUnavailable`] when snapshot creation is not
+/// authoritative; otherwise propagates [`CoreError`] from the store.
 pub fn snapshot(
     store: &dyn EventStore,
     timeline: TimelineId,

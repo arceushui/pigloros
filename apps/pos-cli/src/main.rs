@@ -854,6 +854,31 @@ fn open_memory_store() -> Result<Box<dyn pos_core::store::EventStore>, pos_core:
     open_store(StoreConfig::Memory)
 }
 
+#[cfg(test)]
+const TEST_EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
+    pos_core::ErasureReferenceV1::from_digest([231; 32]);
+
+#[cfg(test)]
+fn test_export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
+    pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                pos_core::ErasureArtifactClassV1::Export,
+                TEST_EXPORT_DIGEST,
+                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                pos_core::ErasureReferenceV1::from_digest([232; 32]),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+}
+
 fn parse_timeline_id(s: &str) -> Result<TimelineId, Box<dyn std::error::Error>> {
     let ulid = Ulid::from_string(s).map_err(|e| format!("invalid ULID '{s}': {e}"))?;
     Ok(TimelineId::from_ulid(ulid))
@@ -874,29 +899,6 @@ fn parse_seq(s: &str) -> Result<Seq, Box<dyn std::error::Error>> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    const EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
-        pos_core::ErasureReferenceV1::from_digest([231; 32]);
-
-    fn export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
-        pos_core::ReplayClaimEvaluatorV1::evaluate(
-            pos_core::ErasureReplayClaimV1::Exact,
-            &[pos_core::ArtifactClaimInputV1 {
-                registration: pos_core::RegisteredArtifactV1::new(
-                    pos_core::ErasureArtifactClassV1::Export,
-                    EXPORT_DIGEST,
-                    pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-                    None,
-                    pos_core::ErasureReferenceV1::from_digest([232; 32]),
-                    pos_core::ArtifactOptionalityV1::Required,
-                    pos_core::ArtifactTransitionRuleV1::PreserveExact,
-                ),
-                current_claim: pos_core::ErasureReplayClaimV1::Exact,
-                state: pos_core::ArtifactStateV1::Retained,
-            }],
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
-    }
-
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
@@ -1941,8 +1943,8 @@ mod main_coverage {
             let export = pos_core::store::export_timeline(
                 store.as_ref(),
                 tl.id(),
-                EXPORT_DIGEST,
-                &export_evaluation(),
+                TEST_EXPORT_DIGEST,
+                &test_export_evaluation(),
             )
             .test_ok();
             let mut mem = open_store(StoreConfig::Memory).test_ok();
