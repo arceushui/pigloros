@@ -1302,6 +1302,23 @@ impl PluginRegistry {
         operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_live_execution()?;
+        self.step_anchored_transaction_live(
+            timeline,
+            observed_through,
+            selection,
+            committed_events,
+            operation,
+        )
+    }
+
+    fn step_anchored_transaction_live(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        observed_through: Seq,
+        selection: AnchoredSelection,
+        committed_events: &[Event],
+        operation: OperationContext,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
@@ -1877,6 +1894,7 @@ impl PluginRegistry {
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
+        self.validate_registration_roles(&registration)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
@@ -1998,10 +2016,6 @@ impl PluginRegistry {
                     reason: format!("an action approver route already exists for '{kind}'"),
                 });
             }
-        }
-
-        if let Some(registration) = registration.as_ref() {
-            self.validate_registration_roles(registration)?;
         }
 
         // Register event type schemas
@@ -2148,6 +2162,14 @@ impl PluginRegistry {
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_live_execution()?;
+        self.tick_cadenced_live(timeline, now_ns)
+    }
+
+    fn tick_cadenced_live(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        now_ns: u128,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
@@ -2298,6 +2320,13 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_live_execution()?;
+        self.step_all_live(timeline)
+    }
+
+    fn step_all_live(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
