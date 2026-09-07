@@ -2208,8 +2208,34 @@ impl BacktestRunner {
             store_config,
         )?;
 
-        let eval_report = pos_plugin_eval::compute_report(store, eval_tl_id)
-            .map_err(|e| ExperimentError::Store(pos_core::CoreError::Storage(e.to_string())))?;
+        let calibration_digest =
+            pos_core::ErasureReferenceV1::from_digest(*eval_chain_head.as_bytes());
+        let calibration_evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[pos_core::ArtifactClaimInputV1 {
+                registration: pos_core::RegisteredArtifactV1::new(
+                    pos_core::ErasureArtifactClassV1::CalibrationReport,
+                    calibration_digest,
+                    pos_core::ArtifactDataClassV1::AggregateData,
+                    None,
+                    pos_core::ErasureReferenceV1::from_digest(
+                        *blake3::hash(b"pos-plugin-eval").as_bytes(),
+                    ),
+                    pos_core::ArtifactOptionalityV1::Required,
+                    pos_core::ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state: pos_core::ArtifactStateV1::Retained,
+            }],
+        )
+        .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))?;
+        let eval_report = pos_plugin_eval::compute_report(
+            store,
+            eval_tl_id,
+            calibration_digest,
+            &calibration_evaluation,
+        )
+        .map_err(|e| ExperimentError::Store(pos_core::CoreError::Storage(e.to_string())))?;
 
         Ok(BacktestResult {
             train_result,

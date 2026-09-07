@@ -157,6 +157,7 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
             visibility: "operator".to_owned(),
             dependency_class: DependencyClassV1::EndogenousRecomputed,
         }],
+        structural_causal_trace: Vec::new(),
         uncertainty: vec![UncertaintyV1 {
             label: "agent_confidence".to_owned(),
             lower: 0.4,
@@ -189,6 +190,54 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
         },
         contract: proof_contract_fixture(),
     }
+}
+
+#[test]
+fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1,
+        RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let mut evidence = public_evidence_fixture();
+    evidence.causal_trace[0].relation = "deleted-subject-label".to_owned();
+    evidence.causal_trace[0].visibility = "deleted-private-audience".to_owned();
+    let evaluation = ok(ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::CausalTrace,
+                ErasureReferenceV1::from_digest([71; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([72; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::RetainStructure,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::TransitionApplied,
+        }],
+    ));
+
+    evidence.apply_artifact_evaluation(&evaluation);
+
+    assert!(evidence.causal_trace.is_empty());
+    assert_eq!(evidence.structural_causal_trace.len(), 1);
+    assert_eq!(
+        evidence.manifest.replay_claim,
+        ReplayClaimV1::StructuralOnly
+    );
+    assert_eq!(
+        evidence.contract.counterfactual.replay_claim,
+        ReplayClaimV1::StructuralOnly
+    );
+    let json = ok(evidence.to_json());
+    let cbor = ok(evidence.to_canonical_cbor());
+    assert!(!json.contains("deleted-subject-label"));
+    assert!(!json.contains("deleted-private-audience"));
+    assert!(!String::from_utf8_lossy(&cbor).contains("deleted-subject-label"));
+    assert!(!String::from_utf8_lossy(&cbor).contains("deleted-private-audience"));
 }
 
 fn authorization_fixtures() -> (

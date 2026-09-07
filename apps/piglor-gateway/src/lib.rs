@@ -2237,6 +2237,29 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    const EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
+        pos_core::ErasureReferenceV1::from_digest([233; 32]);
+
+    fn export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
+        pos_core::ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[pos_core::ArtifactClaimInputV1 {
+                registration: pos_core::RegisteredArtifactV1::new(
+                    pos_core::ErasureArtifactClassV1::Export,
+                    EXPORT_DIGEST,
+                    pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                    None,
+                    pos_core::ErasureReferenceV1::from_digest([234; 32]),
+                    pos_core::ArtifactOptionalityV1::Required,
+                    pos_core::ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state: pos_core::ArtifactStateV1::Retained,
+            }],
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+    }
+
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
@@ -4149,7 +4172,13 @@ mod tests {
                 )],
             )
             .test_ok();
-        let export = export_timeline_own(source.as_ref(), timeline.id()).test_ok();
+        let export = export_timeline_own(
+            source.as_ref(),
+            timeline.id(),
+            EXPORT_DIGEST,
+            &export_evaluation(),
+        )
+        .test_ok();
 
         let destinations = [
             open_store(StoreConfig::Memory).test_ok(),
@@ -4193,7 +4222,13 @@ mod tests {
 
         let mut destination = open_store(StoreConfig::Memory).test_ok();
         for timeline in &timelines {
-            let export = export_timeline_own(source.as_ref(), timeline.id()).test_ok();
+            let export = export_timeline_own(
+                source.as_ref(),
+                timeline.id(),
+                EXPORT_DIGEST,
+                &export_evaluation(),
+            )
+            .test_ok();
             import_timeline_with_id(destination.as_mut(), export).test_ok();
         }
         let deepest = timelines.last().test_ok();

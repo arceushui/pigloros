@@ -629,6 +629,16 @@ pub struct ReproManifestV1 {
     pub budget_digest: [u8; 32],
 }
 
+impl ReproManifestV1 {
+    /// Apply the host-owned weakest required-member claim without strengthening.
+    pub const fn apply_artifact_evaluation(
+        &mut self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) {
+        self.replay_claim = self.replay_claim.after_artifact_evaluation(evaluation);
+    }
+}
+
 /// The Wave 8 compatibility descriptor for the Component boundary.
 ///
 /// This is deliberately the seam-level descriptor, not the Wave 9 signed
@@ -988,6 +998,16 @@ pub struct CounterfactualContractV1 {
     pub retained_exogenous_digests: Vec<[u8; 32]>,
     pub replay_claim: ReplayClaimV1,
     pub contract_digest: [u8; 32],
+}
+
+impl CounterfactualContractV1 {
+    /// Apply artifact loss to the counterfactual closure without strengthening.
+    pub const fn apply_artifact_evaluation(
+        &mut self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) {
+        self.replay_claim = self.replay_claim.after_artifact_evaluation(evaluation);
+    }
 }
 
 /// Atomicity evidence for one attempted Tick Boundary.
@@ -1414,6 +1434,9 @@ pub struct MoatProofEvidenceV1 {
     pub authoritative_events: Vec<AuthoritativeEventV1>,
     pub projections: Vec<ProjectionEvidenceV1>,
     pub causal_trace: Vec<CausalTraceEntryV1>,
+    /// Payload-free causal identity used after structural redaction.
+    #[serde(default)]
+    pub structural_causal_trace: Vec<StructuralCausalTraceEntryV1>,
     pub uncertainty: Vec<UncertaintyV1>,
     pub participant_views: Vec<ParticipantViewV1>,
     pub plugin_failures: Vec<PluginFailureV1>,
@@ -1534,6 +1557,31 @@ pub struct DivergenceReportV1 {
 }
 
 impl MoatProofEvidenceV1 {
+    /// Apply one host-owned artifact evaluation to every evidence closure.
+    pub fn apply_artifact_evaluation(
+        &mut self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) {
+        self.manifest.apply_artifact_evaluation(evaluation);
+        self.contract
+            .counterfactual
+            .apply_artifact_evaluation(evaluation);
+        if matches!(
+            self.manifest.replay_claim,
+            ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
+        ) || matches!(
+            RedactionStateV1::None.after_artifact_evaluation(evaluation),
+            RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
+        ) {
+            self.structural_causal_trace = self
+                .causal_trace
+                .iter()
+                .map(CausalTraceEntryV1::structural)
+                .collect();
+            self.causal_trace.clear();
+        }
+    }
+
     /// Serialize to the portable evidence envelope.
     ///
     /// # Errors
@@ -1753,8 +1801,9 @@ pub mod strict_codec {
         ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1, PluginFailureClassV1,
         PluginFailureV1, ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1,
         ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, SafeErrorCodeV1,
-        ScenarioRoomFixtureV1, SuffixInvalidationReasonV1, SuffixInvalidationV1, TickAtomicityV1,
-        UncertaintyV1, UnknownEdgePolicyV1, Value, VerificationErrorV1, VerificationOutcomeV1,
+        ScenarioRoomFixtureV1, StructuralCausalTraceEntryV1, SuffixInvalidationReasonV1,
+        SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1, Value,
+        VerificationErrorV1, VerificationOutcomeV1,
         VerificationResultV1, Wave8ProofContractV1, CONFORMANCE_REPORT_MAGIC_V1,
         DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1, EVIDENCE_FORMAT_V1,
         RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
@@ -1784,7 +1833,7 @@ pub mod strict_codec {
     pub(crate) fn encode_evidence(
         evidence: &MoatProofEvidenceV1,
     ) -> Result<Vec<u8>, StrictCborError> {
-        let root = Value::Array(vec![
+        let mut fields = vec![
             text(EVIDENCE_ENVELOPE_MAGIC_V1),
             uint(u64::from(EVIDENCE_FORMAT_V1)),
             encode_manifest(&evidence.manifest),
@@ -1820,13 +1869,34 @@ pub mod strict_codec {
             ),
             encode_host_closure(&evidence.host_closure),
             encode_contract(&evidence.contract),
-        ]);
+        ];
+        if !evidence.structural_causal_trace.is_empty() {
+            fields.insert(
+                6,
+                Value::Array(
+                    evidence
+                        .structural_causal_trace
+                        .iter()
+                        .map(encode_structural_trace)
+                        .collect(),
+                ),
+            );
+        }
+        let root = Value::Array(fields);
         encode_value(&root)
     }
 
     pub(crate) fn decode_evidence(bytes: &[u8]) -> Result<MoatProofEvidenceV1, StrictCborError> {
         let root = decode_value(bytes)?;
-        let fields = array(&root, "evidence", 11)?;
+        let fields = array_values(&root, "evidence")?;
+        if !matches!(fields.len(), 11 | 12) {
+            return Err(StrictCborError::ArrayLength {
+                field: "evidence".to_owned(),
+                expected: 11,
+            });
+        }
+        let structural = fields.len() == 12;
+        let offset = usize::from(structural);
         if string(&fields[0], "magic")? != EVIDENCE_ENVELOPE_MAGIC_V1
             || uint_value(&fields[1], "version")? != u64::from(EVIDENCE_FORMAT_V1)
         {
@@ -1838,11 +1908,16 @@ pub mod strict_codec {
             authoritative_events: decode_events(&fields[3])?,
             projections: decode_projections(&fields[4])?,
             causal_trace: decode_traces(&fields[5])?,
-            uncertainty: decode_uncertainty(&fields[6])?,
-            participant_views: decode_participant_views(&fields[7])?,
-            plugin_failures: decode_plugin_failures(&fields[8])?,
-            host_closure: decode_host_closure(&fields[9])?,
-            contract: decode_contract(&fields[10])?,
+            structural_causal_trace: if structural {
+                decode_structural_traces(&fields[6])?
+            } else {
+                Vec::new()
+            },
+            uncertainty: decode_uncertainty(&fields[6 + offset])?,
+            participant_views: decode_participant_views(&fields[7 + offset])?,
+            plugin_failures: decode_plugin_failures(&fields[8 + offset])?,
+            host_closure: decode_host_closure(&fields[9 + offset])?,
+            contract: decode_contract(&fields[10 + offset])?,
         })
     }
 
@@ -2868,6 +2943,30 @@ pub mod strict_codec {
             text(&trace.visibility),
             enum_dependency_class(trace.dependency_class),
         ])
+    }
+
+    fn encode_structural_trace(trace: &StructuralCausalTraceEntryV1) -> Value {
+        Value::Array(vec![
+            uint(trace.cause_seq),
+            uint(trace.effect_seq),
+            enum_dependency_class(trace.dependency_class),
+        ])
+    }
+
+    fn decode_structural_traces(
+        value: &Value,
+    ) -> Result<Vec<StructuralCausalTraceEntryV1>, StrictCborError> {
+        array_values(value, "structural_causal_trace")?
+            .iter()
+            .map(|value| {
+                let fields = array(value, "structural_causal_trace_entry", 3)?;
+                Ok(StructuralCausalTraceEntryV1 {
+                    cause_seq: uint_value(&fields[0], "cause_seq")?,
+                    effect_seq: uint_value(&fields[1], "effect_seq")?,
+                    dependency_class: decode_dependency_class(&fields[2])?,
+                })
+            })
+            .collect()
     }
 
     fn decode_trace(value: &Value) -> Result<CausalTraceEntryV1, StrictCborError> {
@@ -4489,6 +4588,8 @@ pub fn verify_evidence(evidence: &MoatProofEvidenceV1) -> Result<(), EvidenceErr
     verify_causal_trace(
         &evidence.authoritative_events,
         &evidence.causal_trace,
+        &evidence.structural_causal_trace,
+        evidence.manifest.replay_claim,
         &sequences,
     )?;
     verify_uncertainty(&evidence.uncertainty)?;
@@ -4546,6 +4647,8 @@ fn event_sequences(events: &[AuthoritativeEventV1]) -> Result<BTreeSet<u64>, Evi
 fn verify_causal_trace(
     events: &[AuthoritativeEventV1],
     trace: &[CausalTraceEntryV1],
+    structural_trace: &[StructuralCausalTraceEntryV1],
+    replay_claim: ReplayClaimV1,
     sequences: &BTreeSet<u64>,
 ) -> Result<(), EvidenceError> {
     if events.iter().any(|event| {
@@ -4557,7 +4660,13 @@ fn verify_causal_trace(
     }) {
         return Err(EvidenceError::InvalidCausalEdge);
     }
-    if trace.iter().any(|edge| {
+    let structurally_redacted = matches!(
+        replay_claim,
+        ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    if (structurally_redacted && !trace.is_empty())
+        || (!structurally_redacted && !structural_trace.is_empty())
+        || trace.iter().any(|edge| {
         edge.cause_seq >= edge.effect_seq
             || !sequences.contains(&edge.cause_seq)
             || !sequences.contains(&edge.effect_seq)
@@ -4576,10 +4685,17 @@ fn verify_causal_trace(
         .iter()
         .filter_map(|event| event.causation_seq.map(|cause| (cause, event.seq)))
         .collect::<BTreeSet<_>>();
-    let traced_edges = trace
-        .iter()
-        .map(|edge| (edge.cause_seq, edge.effect_seq))
-        .collect::<BTreeSet<_>>();
+    let traced_edges = if structurally_redacted {
+        structural_trace
+            .iter()
+            .map(|edge| (edge.cause_seq, edge.effect_seq))
+            .collect::<BTreeSet<_>>()
+    } else {
+        trace
+            .iter()
+            .map(|edge| (edge.cause_seq, edge.effect_seq))
+            .collect::<BTreeSet<_>>()
+    };
     if authoritative_edges == traced_edges {
         Ok(())
     } else {
@@ -5885,6 +6001,7 @@ pub mod tests {
                 visibility: "operator".to_owned(),
                 dependency_class: DependencyClassV1::EndogenousRecomputed,
             }],
+            structural_causal_trace: Vec::new(),
             uncertainty: vec![UncertaintyV1 {
                 label: "agent_confidence".to_owned(),
                 lower: 0.4,

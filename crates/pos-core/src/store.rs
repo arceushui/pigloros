@@ -952,7 +952,12 @@ fn persist_registry_after_timeline_creation<S: EventStore + ?Sized>(
 pub fn export_timeline(
     store: &dyn EventStore,
     id: TimelineId,
+    artifact_digest: crate::ErasureReferenceV1,
+    evaluation: &crate::ReplayClaimEvaluationV1,
 ) -> Result<TimelineExport, CoreError> {
+    evaluation
+        .require_authoritative_use(crate::ErasureArtifactClassV1::Export, artifact_digest)
+        .map_err(|_| CoreError::ArtifactUnavailable)?;
     let mut export =
         export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)?;
     let was_fork = export.timeline.meta.fork_point.take().is_some();
@@ -982,8 +987,10 @@ pub fn export_timeline(
 pub fn export_timeline_own(
     store: &dyn EventStore,
     id: TimelineId,
+    artifact_digest: crate::ErasureReferenceV1,
+    evaluation: &crate::ReplayClaimEvaluationV1,
 ) -> Result<TimelineExport, CoreError> {
-    export_timeline_raw(store, id)
+    export_timeline_raw(store, id, artifact_digest, evaluation)
 }
 
 /// Alias for [`export_timeline_own`] (copy-on-write / identity-preserving export).
@@ -1004,7 +1011,12 @@ pub use export_timeline_own as export_timeline_cow;
 pub fn export_timeline_raw(
     store: &dyn EventStore,
     id: TimelineId,
+    artifact_digest: crate::ErasureReferenceV1,
+    evaluation: &crate::ReplayClaimEvaluationV1,
 ) -> Result<TimelineExport, CoreError> {
+    evaluation
+        .require_authoritative_use(crate::ErasureArtifactClassV1::Export, artifact_digest)
+        .map_err(|_| CoreError::ArtifactUnavailable)?;
     let mut export = export_timeline_using(
         store.get_timeline(id),
         store.read_own(id, SeqRange::all()),
@@ -1342,6 +1354,80 @@ mod tests {
         timeline::{Timeline, TimelineMeta},
     };
     use std::fmt::Debug;
+
+    const EXPORT_DIGEST: crate::ErasureReferenceV1 =
+        crate::ErasureReferenceV1::from_digest([201; 32]);
+
+    fn export_evaluation() -> crate::ReplayClaimEvaluationV1 {
+        export_evaluation_for(
+            crate::ArtifactStateV1::Retained,
+            crate::ArtifactTransitionRuleV1::PreserveExact,
+        )
+    }
+
+    fn export_evaluation_for(
+        state: crate::ArtifactStateV1,
+        transition_rule: crate::ArtifactTransitionRuleV1,
+    ) -> crate::ReplayClaimEvaluationV1 {
+        crate::ReplayClaimEvaluatorV1::evaluate(
+            crate::ErasureReplayClaimV1::Exact,
+            &[crate::ArtifactClaimInputV1 {
+                registration: crate::RegisteredArtifactV1::new(
+                    crate::ErasureArtifactClassV1::Export,
+                    EXPORT_DIGEST,
+                    crate::ArtifactDataClassV1::StructuralAuditMetadata,
+                    None,
+                    crate::ErasureReferenceV1::from_digest([202; 32]),
+                    crate::ArtifactOptionalityV1::Required,
+                    transition_rule,
+                ),
+                current_claim: crate::ErasureReplayClaimV1::Exact,
+                state,
+            }],
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+    }
+
+    #[test]
+    fn export_rejects_erased_artifact_before_reading_store_bytes() {
+        let store = TrivialStore::new();
+        let evaluation = export_evaluation_for(
+            crate::ArtifactStateV1::Erased,
+            crate::ArtifactTransitionRuleV1::Remove,
+        );
+        assert!(matches!(
+            super::export_timeline(&store, TimelineId::new(), EXPORT_DIGEST, &evaluation,),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+    }
+
+    fn export_timeline(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        super::export_timeline(store, id, EXPORT_DIGEST, &export_evaluation())
+    }
+
+    fn export_timeline_raw(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        super::export_timeline_raw(store, id, EXPORT_DIGEST, &export_evaluation())
+    }
+
+    fn export_timeline_own(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        super::export_timeline_own(store, id, EXPORT_DIGEST, &export_evaluation())
+    }
+
+    fn export_timeline_cow(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        super::export_timeline_cow(store, id, EXPORT_DIGEST, &export_evaluation())
+    }
 
     trait TestResultExt<T, E> {
         fn test_err(self) -> Result<E, Box<dyn std::error::Error>>;

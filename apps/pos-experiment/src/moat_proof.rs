@@ -656,6 +656,7 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
         authoritative_events: event_summaries,
         projections: projection_evidence,
         causal_trace,
+        structural_causal_trace: Vec::new(),
         uncertainty,
         participant_views,
         plugin_failures: failure_probes.to_vec(),

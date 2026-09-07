@@ -2715,6 +2715,42 @@ mod tests {
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
     };
 
+    fn authorized_export_timeline(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        pos_core::store::export_timeline(
+            store,
+            id,
+            crate::TEST_EXPORT_DIGEST,
+            &crate::test_export_evaluation(),
+        )
+    }
+
+    fn authorized_export_timeline_own(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        pos_core::store::export_timeline_own(
+            store,
+            id,
+            crate::TEST_EXPORT_DIGEST,
+            &crate::test_export_evaluation(),
+        )
+    }
+
+    fn authorized_export_timeline_raw(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        pos_core::store::export_timeline_raw(
+            store,
+            id,
+            crate::TEST_EXPORT_DIGEST,
+            &crate::test_export_evaluation(),
+        )
+    }
+
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
@@ -4823,7 +4859,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_timeline_with_id_preserves_timeline_and_event_ids() {
-        use pos_core::store::{export_timeline, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = MemoryStore::new();
         let tl = src.create_timeline("shared").test_ok();
@@ -4834,7 +4870,7 @@ mod tests {
                 &[make_draft(entity, b"one"), make_draft(entity, b"two")],
             )
             .test_ok();
-        let export = export_timeline(&src, tl.id()).test_ok();
+        let export = authorized_export_timeline(&src, tl.id()).test_ok();
         let original_tl_id = tl.id();
         let original_event_ids: Vec<_> = committed.iter().map(|e| e.id).collect();
 
@@ -4948,13 +4984,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_timeline_with_id_rolls_back_create_on_append_fail() {
-        use pos_core::store::{export_timeline, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = MemoryStore::new();
         let tl = src.create_timeline("shared").test_ok();
         let entity = EntityId::new();
         let mut committed = src.append(tl.id(), &[make_draft(entity, b"one")]).test_ok();
-        let export = export_timeline(&src, tl.id()).test_ok();
+        let export = authorized_export_timeline(&src, tl.id()).test_ok();
         // Corrupt payload hash so append_committed fails after create.
         let mut bad_export = export;
         bad_export.events[0].payload_hash = pos_core::Hash::from_bytes([1u8; 32]);
@@ -5191,9 +5227,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_own_fork_roundtrip_preserves_cow() {
-        use pos_core::store::{
-            export_timeline, export_timeline_own, export_timeline_raw, import_timeline_with_id,
-        };
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = MemoryStore::new();
         let root = src.create_timeline("root").test_ok();
@@ -5208,13 +5242,13 @@ mod tests {
             .test_ok();
 
         // Logical export flattens fork meta.
-        let logical = export_timeline(&src, child.id()).test_ok();
+        let logical = authorized_export_timeline(&src, child.id()).test_ok();
         assert!(logical.timeline.meta.fork_point.is_none());
         assert_eq!(logical.events.len(), 2); // parent[..1] + child
 
         // Own export keeps CoW shape (`_raw` is a legacy alias of `_own`).
-        let own = export_timeline_own(&src, child.id()).test_ok();
-        let raw_alias = export_timeline_raw(&src, child.id()).test_ok();
+        let own = authorized_export_timeline_own(&src, child.id()).test_ok();
+        let raw_alias = authorized_export_timeline_raw(&src, child.id()).test_ok();
         assert_eq!(own.timeline.id(), raw_alias.timeline.id());
         assert_eq!(own.events.len(), raw_alias.events.len());
         assert_eq!(own.parent_fork_hash, raw_alias.parent_fork_hash);
@@ -5226,7 +5260,7 @@ mod tests {
         assert_eq!(own.events[0].payload.as_slice(), b"c1");
 
         let mut dst = MemoryStore::new();
-        let parent_export = export_timeline_own(&src, root.id()).test_ok();
+        let parent_export = authorized_export_timeline_own(&src, root.id()).test_ok();
         import_timeline_with_id(&mut dst, parent_export).test_ok();
         let imported = import_timeline_with_id(&mut dst, own).test_ok();
         assert_eq!(imported.id(), child.id());
@@ -5336,7 +5370,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn logical_fork_export_remints_ids_so_import_beside_parent_works() {
-        use pos_core::store::{export_timeline, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = MemoryStore::new();
         let root = src.create_timeline("root").test_ok();
@@ -5350,7 +5384,7 @@ mod tests {
         src.append(child.id(), &[make_draft(entity, b"c1")])
             .test_ok();
 
-        let logical = export_timeline(&src, child.id()).test_ok();
+        let logical = authorized_export_timeline(&src, child.id()).test_ok();
         assert!(logical.timeline.meta.fork_point.is_none());
         assert_eq!(logical.timeline.head, Seq::from_u64(2));
         let parent_ids: std::collections::HashSet<_> = src
@@ -5364,7 +5398,11 @@ mod tests {
         }
 
         let mut dst = MemoryStore::new();
-        import_timeline_with_id(&mut dst, export_timeline(&src, root.id()).test_ok()).test_ok();
+        import_timeline_with_id(
+            &mut dst,
+            authorized_export_timeline(&src, root.id()).test_ok(),
+        )
+        .test_ok();
         // Flattened child import must not collide with parent EventIds.
         import_timeline_with_id(&mut dst, logical).test_ok();
     }
@@ -5392,7 +5430,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_rejects_fork_parent_chain_hash_mismatch() {
-        use pos_core::store::{export_timeline_own, import_timeline_with_id};
+        use pos_core::store::import_timeline_with_id;
 
         let mut src = MemoryStore::new();
         let root = src.create_timeline("root").test_ok();
@@ -5403,13 +5441,13 @@ mod tests {
 
         let mut dst = MemoryStore::new();
         // Divergent parent with same id but different payload.
-        let mut parent_export = export_timeline_own(&src, root.id()).test_ok();
+        let mut parent_export = authorized_export_timeline_own(&src, root.id()).test_ok();
         parent_export.events[0].payload = CanonicalBytes::from_vec(b"OTHER".to_vec());
         parent_export.events[0].payload_hash =
             pos_crypto::chain::hash_payload(&parent_export.events[0].payload);
         import_timeline_with_id(&mut dst, parent_export).test_ok();
 
-        let child_export = export_timeline_own(&src, child.id()).test_ok();
+        let child_export = authorized_export_timeline_own(&src, child.id()).test_ok();
         assert!(child_export.parent_fork_hash.is_some());
         let err = import_timeline_with_id(&mut dst, child_export).test_err();
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("chain hash mismatch")));

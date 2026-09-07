@@ -366,7 +366,7 @@ fn authoritative_release_requires_the_exact_registered_class_and_digest() {
 
     assert_eq!(
         evaluation.require_authoritative_use(ErasureArtifactClassV1::ReproManifest, reference(1),),
-        Ok(())
+        Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
         evaluation.require_authoritative_use(ErasureArtifactClassV1::ForkOrSnapshot, reference(2),),
@@ -379,6 +379,13 @@ fn authoritative_release_requires_the_exact_registered_class_and_digest() {
     assert_eq!(
         evaluation.require_authoritative_use(ErasureArtifactClassV1::ReproManifest, reference(9),),
         Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let complete =
+        ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &[retained]).test_ok();
+    assert_eq!(
+        complete.require_authoritative_use(ErasureArtifactClassV1::ReproManifest, reference(1),),
+        Ok(())
     );
 }
 

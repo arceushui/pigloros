@@ -60,6 +60,31 @@ pub use pos_core::{
     PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1, WallTime,
 };
 
+#[cfg(test)]
+const TEST_EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
+    pos_core::ErasureReferenceV1::from_digest([211; 32]);
+
+#[cfg(test)]
+fn test_export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
+    pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                pos_core::ErasureArtifactClassV1::Export,
+                TEST_EXPORT_DIGEST,
+                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                pos_core::ErasureReferenceV1::from_digest([212; 32]),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+}
+
 /// Resolve a generic-adapter visibility check without exposing protected Timeline state.
 ///
 /// Both store backends use this concrete seam so that an unavailable presence marker
@@ -1020,7 +1045,13 @@ mod tests {
         src.append(tl.id(), &drafts).test_ok();
 
         // Export from source
-        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).test_ok();
+        let export = pos_core::store::export_timeline(
+            src.as_ref(),
+            tl.id(),
+            TEST_EXPORT_DIGEST,
+            &test_export_evaluation(),
+        )
+        .test_ok();
         assert_eq!(export.events.len(), 2);
 
         // Import into a fresh store — different backend, same data
@@ -1049,7 +1080,13 @@ mod tests {
         )
         .test_ok();
 
-        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).test_ok();
+        let export = pos_core::store::export_timeline(
+            src.as_ref(),
+            tl.id(),
+            TEST_EXPORT_DIGEST,
+            &test_export_evaluation(),
+        )
+        .test_ok();
 
         let mut dst = open_store(StoreConfig::SqliteInMemory).test_ok();
         let imported = pos_core::store::import_timeline(dst.as_mut(), export).test_ok();

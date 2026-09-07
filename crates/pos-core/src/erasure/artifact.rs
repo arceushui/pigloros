@@ -261,6 +261,13 @@ impl ReplayClaimEvaluationV1 {
         artifact_class: ErasureArtifactClassV1,
         artifact_digest: ErasureReferenceV1,
     ) -> Result<(), ErasureErrorV1> {
+        if matches!(
+            self.replay_claim,
+            ErasureReplayClaimV1::StructuralOnly
+                | ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        ) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         self.artifacts
             .iter()
             .find(|artifact| {
