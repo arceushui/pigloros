@@ -1529,6 +1529,8 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
         let r = GatewayError::Store(CoreError::Storage("boom".into())).into_response();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let r = GatewayError::Store(CoreError::ErasureContainmentUnavailable).into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::StoreExecutorClosed.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::LedgerWriteDisabled.into_response();

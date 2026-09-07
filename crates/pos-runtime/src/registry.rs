@@ -1545,18 +1545,14 @@ impl PluginRegistry {
         knowledge
             .validate_observation_snapshot(&snapshot)
             .map_err(RuntimeError::Authority)?;
-        let mut observation = Some(observation);
         self.with_erasure_mut_fence(
             timeline,
             ErasureProtectedOperationV1::PluginInput,
             |registry| {
-                let Some(observation) = observation.take() else {
-                    return Err(RuntimeError::ErasureOperationUnavailable);
-                };
                 registry.stage_authorized_driver_after_fence(
                     plugin_id,
                     timeline,
-                    observation,
+                    &observation,
                     &snapshot,
                     knowledge,
                 )
@@ -1568,7 +1564,7 @@ impl PluginRegistry {
         &mut self,
         plugin_id: PluginId,
         timeline: pos_core::ids::TimelineId,
-        observation: AuthorizedObservationV1,
+        observation: &AuthorizedObservationV1,
         snapshot: &pos_core::ObservationSnapshotV1,
         knowledge: &KnowledgeSnapshotV1,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
@@ -1632,7 +1628,7 @@ impl PluginRegistry {
             event_cursors: vec![(plugin_id, snapshot.observed_through())],
             operation: OperationContext::Public,
             authorized: Some(AuthorizedPendingStep {
-                observation,
+                observation: observation.clone(),
                 drafts: drafts.clone(),
             }),
         });
@@ -5218,5 +5214,17 @@ mod coverage_public_error_paths {
         assert!(public_append
             .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod erasure_gate_coverage {
+    use super::*;
+
+    #[test]
+    fn with_erasure_gate_binds_the_shared_gate() {
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        assert!(registry.clone_erasure_gate().is_some());
     }
 }

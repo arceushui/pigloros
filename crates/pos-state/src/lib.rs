@@ -1789,6 +1789,27 @@ mod tests {
 }
 
 #[cfg(test)]
+mod erasure_fence_coverage {
+    use super::*;
+
+    #[test]
+    fn erasure_fence_covers_bound_and_unbound_paths() {
+        let timeline = TimelineId::new();
+        let registry = ProjectionRegistry::new();
+        assert_eq!(
+            registry.with_erasure_fence(timeline, |_| Ok::<_, AuthorityErrorV1>(())),
+            Ok(())
+        );
+
+        let unbound = ProjectionRegistry::new().without_erasure_gate();
+        assert_eq!(
+            unbound.with_erasure_fence(timeline, |_| Ok::<_, AuthorityErrorV1>(())),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+}
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod extra_tests {
     use super::*;

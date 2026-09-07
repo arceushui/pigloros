@@ -127,9 +127,15 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
 }
 
 fn scope() -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
+    scope_with_members(vec![reference(7)])
+}
+
+fn scope_with_members(
+    scope_members: Vec<ErasureReferenceV1>,
+) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
-        scope_members: vec![reference(7)],
+        scope_members,
         target_closure: reference(8),
         lineage_rule: Some(reference(9)),
     })
@@ -990,6 +996,94 @@ fn containment_gate_rejects_duplicate_timeline_bindings() -> Result<(), ErasureE
         verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
     assert_eq!(
         gate.install_verified_state(state, &[(timeline, reference(7)), (timeline, reference(7))],),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_rejects_incomplete_and_conflicting_installations() -> Result<(), ErasureErrorV1>
+{
+    let timeline = TimelineId::new();
+    let other_timeline = TimelineId::new();
+
+    let gate = ErasureContainmentGateV1::new();
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?;
+    assert_eq!(
+        gate.install_verified_state(state.clone(), &[(timeline, reference(99))]),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(
+        gate.install_verified_state(state.clone(), &[]),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+
+    gate.install_verified_state(state, &[(timeline, reference(7))])
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    let submitted =
+        verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
+    assert_eq!(
+        gate.install_verified_state(submitted, &[(timeline, reference(7))]),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+
+    let conflicting_scope = scope_with_members(vec![reference(7), reference(8)])?;
+    let conflicting_state = verified_state_for_containment(
+        ErasureLifecycleV1::Submitted,
+        Some(conflicting_scope),
+        Vec::new(),
+    )?;
+    let fresh_gate = ErasureContainmentGateV1::new();
+    fresh_gate
+        .bind_timeline(timeline, reference(7))
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        fresh_gate.install_verified_state(
+            conflicting_state,
+            &[(timeline, reference(8)), (other_timeline, reference(7))],
+        ),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_covers_public_error_codes_and_safe_scope_paths() -> Result<(), ErasureErrorV1> {
+    assert_eq!(ErasureContainmentErrorV1::AccessFrozen.code(), 0);
+    assert_eq!(ErasureContainmentErrorV1::RecoveryUnavailable.code(), 1);
+    assert_eq!(
+        ErasureContainmentErrorV1::RecoveryUnavailable.to_string(),
+        "erasure containment error 1"
+    );
+    let _: ErasureContainmentGateV1 = Default::default();
+
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::Authorized,
+        Some(scope()?),
+        Vec::new(),
+    )?);
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::Submitted,
+        Some(scope()?),
+        Vec::new(),
+    )?);
+    gate.bind_timeline(timeline, reference(7))
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Ok(())
+    );
+
+    let invalid =
+        verified_state_for_containment(ErasureLifecycleV1::AccessFrozen, None, Vec::new())?;
+    assert_eq!(
+        invalid.permit_protected_operation(reference(7)),
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
     Ok(())
