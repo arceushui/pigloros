@@ -3693,7 +3693,7 @@ impl ErasureVerifiedTopologyObservationV1 {
     /// intentionally payload-free and only packages the host's already
     /// authenticated topology result.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         manifest_digest: ErasureReferenceV1,
         bindings: Vec<(TimelineId, ErasureReferenceV1)>,
         unaffected: Vec<TimelineId>,
