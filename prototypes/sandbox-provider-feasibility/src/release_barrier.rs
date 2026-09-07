@@ -41,6 +41,7 @@ const ADAPTER_PATH: &str = "/usr/bin/sandbox-provider-feasibility";
 const RELEASE_NAME: &str = "piglor-release-v1";
 const PROXY_NAME: &str = "piglor-host-service-v1";
 const MAX_PACKET: usize = 64 * 1024;
+const RELEASE_WAIT_TIMEOUT_SECS: i64 = 30;
 
 struct DescriptorSet {
     descriptors: Vec<(String, OwnedFd)>,
@@ -269,7 +270,7 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
     let image = load_image_authority(arguments)?;
     let launch = build_launch_record(mode, image.sim1_digest)?;
     let mounted_image = mount_verified_image(&image, &launch.parameters.attempt_id)?;
-    let channels = create_provider_channels(mode, proof_case)?;
+    let channels = create_provider_channels(mode)?;
 
     let executable = std::env::current_exe().map_err(display_error)?;
     ensure_static_native_elf(&executable)?;
@@ -404,10 +405,7 @@ fn build_launch_record(mode: ExecutionMode, sim1_digest: [u8; 32]) -> Result<Lau
     })
 }
 
-fn create_provider_channels(
-    mode: ExecutionMode,
-    proof_case: ProofCase,
-) -> Result<ProviderChannels, String> {
+fn create_provider_channels(mode: ExecutionMode) -> Result<ProviderChannels, String> {
     let (provider_proxy, launcher_proxy) = if mode == ExecutionMode::Local {
         let pair = socketpair(
             AddressFamily::Unix,
@@ -427,18 +425,10 @@ fn create_provider_channels(
         SockFlag::SOCK_CLOEXEC,
     )
     .map_err(display_error)?;
-    let launcher_timeout = if proof_case == ProofCase::ReleaseTimeout {
-        TimeVal::seconds(2)
-    } else {
-        // aarch64 hosted VMs run under TCG and may need several seconds to
-        // configure the Local veth after ReadyV1. The signed ReleaseV1
-        // deadline remains the authority once a packet is received.
-        TimeVal::seconds(30)
-    };
     setsockopt(
         &launcher_release,
         sockopt::ReceiveTimeout,
-        &launcher_timeout,
+        &TimeVal::seconds(RELEASE_WAIT_TIMEOUT_SECS),
     )
     .map_err(display_error)?;
     configure_provider_sockets(&provider_release, provider_proxy.as_ref())?;
@@ -747,7 +737,9 @@ async fn complete_release(
         return confirm_negative_termination(unit, required_proxy(proxy_socket)?);
     }
     if proof_case == ProofCase::ReleaseTimeout {
-        thread::sleep(Duration::from_millis(2_250));
+        thread::sleep(Duration::from_millis(
+            RELEASE_WAIT_TIMEOUT_SECS as u64 * 1_000 + 250,
+        ));
         return confirm_negative_termination(unit, required_proxy(proxy_socket)?);
     }
 
