@@ -708,7 +708,7 @@ fn validate_receipt_preconditions(input: &ErasureReceiptInputV1) -> Result<(), E
     validate_receipt_claim_policy(input)
 }
 
-fn validate_terminal_receipt_lifecycle(
+const fn validate_terminal_receipt_lifecycle(
     lifecycle: ErasureLifecycleV1,
 ) -> Result<(), ErasureErrorV1> {
     if !matches!(
@@ -720,7 +720,7 @@ fn validate_terminal_receipt_lifecycle(
     Ok(())
 }
 
-fn validate_receipt_bounds(input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+const fn validate_receipt_bounds(input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
     if input.acknowledgements.len() > ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT
         || input.frozen_targets.len() > ERASURE_MAX_INVENTORY_RESULTS
         || inventories_exceed_bound(&input.inventories)
