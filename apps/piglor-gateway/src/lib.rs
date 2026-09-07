@@ -3406,6 +3406,7 @@ mod tests {
             GatewayError::AuthorizationDenied
         ));
         action_only_gateway.shutdown().await.test_ok();
+        drop(action_only_gateway);
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -3439,6 +3440,7 @@ mod tests {
                 .test_err();
             assert_eq!(error.to_string(), "resource not found");
             gateway.shutdown().await.test_ok();
+            drop(gateway);
         }
 
         let missing = Gateway::new_with_world_bodies_and_authorization(
@@ -3460,6 +3462,7 @@ mod tests {
             .test_err();
         assert_eq!(missing_error.to_string(), "resource not found");
         missing.shutdown().await.test_ok();
+        drop(missing);
     }
 
     #[tokio::test]

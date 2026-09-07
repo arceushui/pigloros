@@ -1249,7 +1249,7 @@ mod tests {
         let stale = GatewayAuthorization::new_with_revocation_state(
             Arc::new(LocalAuthenticationAdapter::new(fixture.authenticated)),
             fixture.authority,
-            fixture.authorization.registry.clone(),
+            fixture.authorization.registry,
             false,
         );
         let decision = stale.evaluate(request).test_ok();
