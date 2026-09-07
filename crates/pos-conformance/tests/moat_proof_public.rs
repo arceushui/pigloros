@@ -933,6 +933,12 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     expect_err(&verify_evidence(&invalid_closure));
     let mut overstated_counterfactual = evidence.clone();
     overstated_counterfactual.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+    overstated_counterfactual.structural_causal_trace = overstated_counterfactual
+        .causal_trace
+        .iter()
+        .map(CausalTraceEntryV1::structural)
+        .collect();
+    overstated_counterfactual.causal_trace.clear();
     assert_eq!(
         verify_evidence(&overstated_counterfactual),
         Err(EvidenceError::InvalidDependencyGraph)
