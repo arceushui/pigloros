@@ -13,6 +13,8 @@ use pos_conformance::{
 };
 use sha2::{Digest, Sha256};
 
+use pos_reference::sandbox_provider_protocol as independent;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const X86_ROOT: [u8; 16] = [
@@ -234,12 +236,15 @@ fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
         manifest
     );
     manifest.verify_signature(&key.verifying_key())?;
+    independent::SandboxProviderManifest::from_canonical_cbor(&manifest.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
 
     let policy = launch_policy().seal()?;
     assert_eq!(
         LaunchPolicyV1::from_canonical_cbor(&policy.to_canonical_cbor()?)?,
         policy
     );
+    independent::LaunchPolicy::from_canonical_cbor(&policy.to_canonical_cbor()?)?;
 
     let image = image_manifest().sign(&key)?;
     assert_eq!(
@@ -247,6 +252,8 @@ fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
         image
     );
     image.verify_signature(&key.verifying_key())?;
+    independent::SignedImageManifest::from_canonical_cbor(&image.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
     Ok(())
 }
 
@@ -282,6 +289,7 @@ fn execute_and_admission_contracts_round_trip_and_reject_gaps() -> TestResult {
         SandboxExecuteRequestV1::from_canonical_cbor(&request.to_canonical_cbor()?)?,
         request
     );
+    independent::SandboxExecuteRequest::from_canonical_cbor(&request.to_canonical_cbor()?)?;
     let mut gap = execute_request()?;
     gap.network_plans[1] = network_plan(2)?;
     assert_eq!(gap.seal(), Err(SandboxContractErrorV1::InconsistentFields));
@@ -309,6 +317,8 @@ fn execute_and_admission_contracts_round_trip_and_reject_gaps() -> TestResult {
         grant
     );
     grant.verify_signature(&key.verifying_key())?;
+    independent::AdmissionGrant::from_canonical_cbor(&grant.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
     Ok(())
 }
 
@@ -337,6 +347,8 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         result
     );
     result.verify_signature(&key.verifying_key())?;
+    independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
 
     let mut invalid_union = result;
     invalid_union.output = None;
@@ -361,6 +373,8 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         SandboxProviderErrorV1::from_canonical_cbor(&error.to_canonical_cbor()?)?,
         error
     );
+    independent::SandboxProviderError::from_canonical_cbor(&error.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
 
     let receipt = SandboxProviderReceiptV1 {
         attempt_id: [2; 16],
@@ -388,6 +402,8 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         receipt
     );
     receipt.verify_signature(&key.verifying_key())?;
+    independent::SandboxProviderReceipt::from_canonical_cbor(&receipt.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
 
     let mut release_without_ready = receipt;
     release_without_ready.ready1_digest = None;
@@ -416,6 +432,7 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         SandboxDescribeRequestV1::from_canonical_cbor(&describe.to_canonical_cbor()?)?,
         describe
     );
+    independent::SandboxDescribeRequest::from_canonical_cbor(&describe.to_canonical_cbor()?)?;
     let described = SandboxDescribeResponseV1 {
         request_id: authority.request_id,
         spm1_digest: digest(5),
@@ -429,6 +446,8 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
     .sign(&key)?;
     described.validate_for_request(&describe)?;
     described.verify_signature(&key.verifying_key())?;
+    independent::SandboxDescribeResponse::from_canonical_cbor(&described.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
 
     let cancel = SandboxCancelRequestV1 {
         authority: authority.clone(),
@@ -437,6 +456,7 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         request_digest: [0; 32],
     }
     .seal()?;
+    independent::SandboxCancelRequest::from_canonical_cbor(&cancel.to_canonical_cbor()?)?;
     let cancelled = SandboxCancelResponseV1 {
         request_id: authority.request_id,
         attempt_id: cancel.attempt_id,
@@ -452,6 +472,8 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         SandboxCancelResponseV1::from_canonical_cbor(&cancelled.to_canonical_cbor()?)?,
         cancelled
     );
+    independent::SandboxCancelResponse::from_canonical_cbor(&cancelled.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
 
     let reconcile = SandboxReconcileRequestV1 {
         authority,
@@ -460,6 +482,7 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         request_digest: [0; 32],
     }
     .seal()?;
+    independent::SandboxReconcileRequest::from_canonical_cbor(&reconcile.to_canonical_cbor()?)?;
     let reconciled = SandboxReconcileResponseV1 {
         request_id: reconcile.authority.request_id,
         attempt_id: reconcile.attempt_id,
@@ -475,6 +498,8 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         SandboxReconcileResponseV1::from_canonical_cbor(&reconciled.to_canonical_cbor()?)?,
         reconciled
     );
+    independent::SandboxReconcileResponse::from_canonical_cbor(&reconciled.to_canonical_cbor()?)?
+        .verify_signature(&key.verifying_key())?;
 
     let local_error = SandboxLocalErrorV1 {
         operation: Some(SandboxProviderOperationV1::Execute),
