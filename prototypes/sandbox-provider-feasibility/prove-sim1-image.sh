@@ -10,6 +10,7 @@ readonly static_true=${STATIC_TRUE:?STATIC_TRUE must name the static adapter exe
 readonly static_prototype=${STATIC_PROTOTYPE:?STATIC_PROTOTYPE must name the static proof executable}
 
 cleanup() {
+  systemd-analyze log-level info >/dev/null 2>&1 || true
   systemctl stop "$unit_name" >/dev/null 2>&1 || true
   systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
   rm -rf "$work_dir"
@@ -154,6 +155,7 @@ systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
 # StartTransientUnit call, observes ReadyV1 while the adapter is blocked, then
 # releases the held native ELF. The adapter proves that only its Local proxy
 # survives as FD 3.
+systemd-analyze log-level debug
 "$static_prototype" --release-barrier-proof \
   "--root-image=$image_path" \
   "--root-hash-file=$work_dir/sim1.roothash" \
