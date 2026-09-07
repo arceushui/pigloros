@@ -2094,13 +2094,25 @@ mod tests {
         metadata.manifest.seed += 1;
         variants.push(metadata);
         let mut events = baseline.clone();
-        events.authoritative_events[0].payload_digest = [9; 32];
+        let closure_seq = events.host_closure.closure_event_seq;
+        events
+            .authoritative_events
+            .iter_mut()
+            .find(|event| event.seq == closure_seq)
+            .test_ok()
+            .payload_digest = [9; 32];
+        events.host_closure.closure_payload_digest = [9; 32];
         variants.push(events);
         let mut projections = baseline.clone();
         projections.projections[0].state = serde_json::json!({"changed": true});
         variants.push(projections);
         let mut trace = baseline.clone();
-        trace.causal_trace[0].relation.push_str("-changed");
+        let relation = if trace.causal_trace[0].relation == "derived" {
+            "physical_to_agent"
+        } else {
+            "derived"
+        };
+        relation.clone_into(&mut trace.causal_trace[0].relation);
         variants.push(trace);
         let mut observability = baseline.clone();
         observability.uncertainty[0].confidence = 0.5;
@@ -2515,13 +2527,27 @@ mod coverage_entrypoints {
         metadata.manifest.seed += 1;
         variants.push(metadata);
         let mut events = baseline.clone();
-        events.authoritative_events[0].payload_digest = [9; 32];
+        let closure_seq = events.host_closure.closure_event_seq;
+        let Some(closure_event) = events
+            .authoritative_events
+            .iter_mut()
+            .find(|event| event.seq == closure_seq)
+        else {
+            std::panic::resume_unwind(Box::new("closure Event fixture is absent"));
+        };
+        closure_event.payload_digest = [9; 32];
+        events.host_closure.closure_payload_digest = [9; 32];
         variants.push(events);
         let mut projections = baseline.clone();
         projections.projections[0].state = serde_json::json!({"changed": true});
         variants.push(projections);
         let mut trace = baseline.clone();
-        trace.causal_trace[0].relation.push_str("-changed");
+        let relation = if trace.causal_trace[0].relation == "derived" {
+            "physical_to_agent"
+        } else {
+            "derived"
+        };
+        relation.clone_into(&mut trace.causal_trace[0].relation);
         variants.push(trace);
         let mut observability = baseline.clone();
         observability.uncertainty[0].confidence = 0.5;
