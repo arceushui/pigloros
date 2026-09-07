@@ -43,12 +43,21 @@ pub enum ArtifactTransitionRuleV1 {
 }
 
 impl ArtifactTransitionRuleV1 {
-    const fn claim(self) -> ErasureReplayClaimV1 {
+    const fn disposition(self) -> (ErasureReplayClaimV1, ArtifactRedactionStateV1) {
         match self {
-            Self::PreserveExact => ErasureReplayClaimV1::Exact,
-            Self::RedactViews => ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-            Self::RetainStructure => ErasureReplayClaimV1::StructuralOnly,
-            Self::Remove => ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+            Self::PreserveExact => (ErasureReplayClaimV1::Exact, ArtifactRedactionStateV1::None),
+            Self::RedactViews => (
+                ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+                ArtifactRedactionStateV1::RedactedViews,
+            ),
+            Self::RetainStructure => (
+                ErasureReplayClaimV1::StructuralOnly,
+                ArtifactRedactionStateV1::StructuralOnly,
+            ),
+            Self::Remove => (
+                ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+                ArtifactRedactionStateV1::EvidenceMissing,
+            ),
         }
     }
 }
@@ -305,23 +314,9 @@ impl ReplayClaimEvaluatorV1 {
                     ArtifactStateV1::Retained => {
                         (input.current_claim, ArtifactRedactionStateV1::None)
                     }
-                    ArtifactStateV1::TransitionApplied => (
-                        input.registration.transition_rule.claim(),
-                        match input.registration.transition_rule {
-                            ArtifactTransitionRuleV1::PreserveExact => {
-                                ArtifactRedactionStateV1::None
-                            }
-                            ArtifactTransitionRuleV1::RedactViews => {
-                                ArtifactRedactionStateV1::RedactedViews
-                            }
-                            ArtifactTransitionRuleV1::RetainStructure => {
-                                ArtifactRedactionStateV1::StructuralOnly
-                            }
-                            ArtifactTransitionRuleV1::Remove => {
-                                ArtifactRedactionStateV1::EvidenceMissing
-                            }
-                        },
-                    ),
+                    ArtifactStateV1::TransitionApplied => {
+                        input.registration.transition_rule.disposition()
+                    }
                     ArtifactStateV1::MissingParentCut
                     | ArtifactStateV1::MissingFrozenInput
                     | ArtifactStateV1::MissingKey
@@ -336,9 +331,9 @@ impl ReplayClaimEvaluatorV1 {
                         ArtifactRedactionStateV1::EvidenceMissing,
                     ),
                 };
-                let to = weaker(input.current_claim, disposition_claim);
+                let to = input.current_claim.weakened_to(disposition_claim);
                 if input.registration.optionality == ArtifactOptionalityV1::Required {
-                    replay_claim = weaker(replay_claim, to);
+                    replay_claim = replay_claim.weakened_to(to);
                     redaction_state = redaction_state.weakened_to(artifact_redaction);
                 }
                 EvaluatedArtifactClaimV1 {
@@ -364,11 +359,4 @@ impl ReplayClaimEvaluatorV1 {
             artifacts,
         })
     }
-}
-
-const fn weaker(
-    current: ErasureReplayClaimV1,
-    candidate: ErasureReplayClaimV1,
-) -> ErasureReplayClaimV1 {
-    current.weakened_to(candidate)
 }

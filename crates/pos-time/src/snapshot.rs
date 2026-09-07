@@ -77,8 +77,9 @@ pub enum SnapshotError {
 /// and will be in the full-replay state when this function returns.
 ///
 /// # Errors
-/// Returns [`SnapshotError::Store`] on I/O failure or
-/// [`SnapshotError::Inconsistent`] if the states differ.
+/// Returns [`SnapshotError::ArtifactUnavailable`] when the registered snapshot
+/// may no longer be used authoritatively, [`SnapshotError::Store`] on I/O
+/// failure, or [`SnapshotError::Inconsistent`] if the states differ.
 pub fn verify_snapshot_consistency(
     store: &dyn EventStore,
     snap: &Snapshot,
@@ -91,42 +92,48 @@ pub fn verify_snapshot_consistency(
             pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
             artifact_digest,
         )
-        .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-    // --- 1. Read events -------------------------------------------------------
-    let tail_range = SeqRange::from_seq(snap.at_seq.next());
-    let tail_events = store.read(snap.timeline, tail_range)?;
-    let all_events = store.read(snap.timeline, SeqRange::all())?;
+        .map_err(|_| SnapshotError::ArtifactUnavailable)
+        .and_then(|()| {
+            let tail_range = SeqRange::from_seq(snap.at_seq.next());
+            store
+                .read(snap.timeline, tail_range)
+                .and_then(|tail_events| {
+                    store
+                        .read(snap.timeline, SeqRange::all())
+                        .map(|all_events| (tail_events, all_events))
+                })
+                .map_err(SnapshotError::from)
+        })
+        .and_then(|(tail_events, all_events)| {
+            let all_entities: Vec<EntityId> = all_events
+                .iter()
+                .map(|event| event.entity)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
 
-    // Collect all entity IDs seen across all events.
-    let all_entities: Vec<EntityId> = all_events
-        .iter()
-        .map(|e| e.entity)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+            registry.restore_from_snapshot(&snap.registry);
+            registry.fold_events(&tail_events);
+            let incremental_state = registry.state_snapshot();
 
-    // --- 2. Incremental path: snap.registry state + tail fold -----------------
-    registry.restore_from_snapshot(&snap.registry);
-    registry.fold_events(&tail_events);
-    let inc_state = registry.state_snapshot();
+            registry.clear_state();
+            registry.fold_events(&all_events);
+            let full_state = registry.state_snapshot();
 
-    // --- 3. Full replay path: clean slate + all events -----------------------
-    registry.clear_state();
-    registry.fold_events(&all_events);
-    let full_state = registry.state_snapshot();
-
-    // --- 4. Compare -----------------------------------------------------------
-    for entity in &all_entities {
-        for name in full_state.keys() {
-            let inc_reg = inc_state.get(name).cloned().unwrap_or_default();
-            let full_reg = full_state.get(name).cloned().unwrap_or_default();
-            if inc_reg.get_or_default(entity) != full_reg.get_or_default(entity) {
-                return Err(SnapshotError::Inconsistent { entity: *entity });
+            for entity in &all_entities {
+                for name in full_state.keys() {
+                    let incremental_registry =
+                        incremental_state.get(name).cloned().unwrap_or_default();
+                    let full_registry = full_state.get(name).cloned().unwrap_or_default();
+                    if incremental_registry.get_or_default(entity)
+                        != full_registry.get_or_default(entity)
+                    {
+                        return Err(SnapshotError::Inconsistent { entity: *entity });
+                    }
+                }
             }
-        }
-    }
-
-    Ok(())
+            Ok(())
+        })
 }
 
 #[cfg(test)]

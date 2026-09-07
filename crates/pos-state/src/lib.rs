@@ -662,10 +662,12 @@ impl AuthorizedObservationV1 {
                 pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
                 pos_core::ErasureReferenceV1::from_digest(*digest.as_bytes()),
             )
-            .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
-        self.snapshot
-            .artifact(digest)
-            .ok_or(AuthorityErrorV1::SourceUnavailable)
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+            .and_then(|()| {
+                self.snapshot
+                    .artifact(digest)
+                    .ok_or(AuthorityErrorV1::SourceUnavailable)
+            })
     }
 
     /// Re-evaluate consent, capability, delegation, and revocation evidence at

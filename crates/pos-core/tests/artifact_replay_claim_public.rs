@@ -276,7 +276,7 @@ fn empty_required_closure_preserves_the_enclosing_claim() {
 }
 
 #[test]
-fn public_claim_weakener_rejects_an_upgrade() {
+fn public_claim_weakener_preserves_or_degrades_the_current_claim() {
     assert_eq!(
         ErasureReplayClaimV1::StructuralOnly.weakened_to(ErasureReplayClaimV1::Exact),
         ErasureReplayClaimV1::StructuralOnly
@@ -288,7 +288,7 @@ fn public_claim_weakener_rejects_an_upgrade() {
 }
 
 #[test]
-fn public_redaction_weakener_rejects_restoration() {
+fn public_redaction_weakener_preserves_or_degrades_the_current_state() {
     assert_eq!(
         ArtifactRedactionStateV1::StructuralOnly.weakened_to(ArtifactRedactionStateV1::None),
         ArtifactRedactionStateV1::StructuralOnly

@@ -1277,46 +1277,60 @@ impl ConformanceReportV1 {
         &mut self,
         evaluation: &pos_core::ReplayClaimEvaluationV1,
     ) -> Result<(), EvidenceError> {
-        self.validate()?;
-        for case in &mut self.cases {
-            case.replay_claim = case
-                .replay_claim
-                .after_artifact_evaluation(evaluation);
-            case.redaction_state = case
-                .redaction_state
-                .after_artifact_evaluation(evaluation);
-            if matches!(
-                case.redaction_state,
-                RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
-            ) {
-                case.outcome = CaseOutcomeStatusV1::Unavailable;
-                case.first_coordinate = None;
-                case.expected_digest = None;
-                case.actual_digest = None;
-                case.expected_error = None;
-                case.actual_error = None;
+        self.validate().and_then(|()| {
+            for case in &mut self.cases {
+                case.replay_claim = case
+                    .replay_claim
+                    .after_artifact_evaluation(evaluation);
+                case.redaction_state = case
+                    .redaction_state
+                    .after_artifact_evaluation(evaluation);
+                if matches!(
+                    case.redaction_state,
+                    RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
+                ) {
+                    case.outcome = CaseOutcomeStatusV1::Unavailable;
+                    case.first_coordinate = None;
+                    case.expected_digest = None;
+                    case.actual_digest = None;
+                    case.expected_error = None;
+                    case.actual_error = None;
+                }
             }
-        }
 
-        self.passed = count_cases(&self.cases, CaseOutcomeStatusV1::Pass);
-        self.failed = count_cases(&self.cases, CaseOutcomeStatusV1::Fail);
-        self.skipped = count_cases(&self.cases, CaseOutcomeStatusV1::Skip);
-        self.unavailable = count_cases(&self.cases, CaseOutcomeStatusV1::Unavailable);
-        self.not_applicable = count_cases(&self.cases, CaseOutcomeStatusV1::NotApplicable);
-        self.replay_claim = self
-            .cases
-            .iter()
-            .map(|case| case.replay_claim)
-            .max()
-            .ok_or(EvidenceError::InvalidConformanceReport)?;
-        self.redaction_state = self
-            .cases
-            .iter()
-            .map(|case| case.redaction_state)
-            .max()
-            .ok_or(EvidenceError::InvalidConformanceReport)?;
-        self.report_digest = self.digest()?;
-        self.validate()
+            self.passed = count_cases(&self.cases, CaseOutcomeStatusV1::Pass);
+            self.failed = count_cases(&self.cases, CaseOutcomeStatusV1::Fail);
+            self.skipped = count_cases(&self.cases, CaseOutcomeStatusV1::Skip);
+            self.unavailable = count_cases(&self.cases, CaseOutcomeStatusV1::Unavailable);
+            self.not_applicable = count_cases(&self.cases, CaseOutcomeStatusV1::NotApplicable);
+
+            let replay_claim = self
+                .cases
+                .iter()
+                .map(|case| case.replay_claim)
+                .max()
+                .ok_or(EvidenceError::InvalidConformanceReport);
+            let redaction_state = self
+                .cases
+                .iter()
+                .map(|case| case.redaction_state)
+                .max()
+                .ok_or(EvidenceError::InvalidConformanceReport);
+
+            replay_claim
+                .and_then(|replay_claim| {
+                    redaction_state.map(|redaction_state| (replay_claim, redaction_state))
+                })
+                .and_then(|(replay_claim, redaction_state)| {
+                    self.replay_claim = replay_claim;
+                    self.redaction_state = redaction_state;
+                    self.digest()
+                })
+                .and_then(|report_digest| {
+                    self.report_digest = report_digest;
+                    self.validate()
+                })
+        })
     }
 
     /// Validate the complete public CNR1 record, including case shape,
