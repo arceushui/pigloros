@@ -18,14 +18,17 @@ use pos_reference::sandbox_provider_protocol as independent;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn publish_vector(name: &str, bytes: &[u8]) -> TestResult {
-    let Some(root) = std::env::var_os("SANDBOX_PROVIDER_VECTOR_OUTPUT") else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(&root)?;
-    std::fs::write(
-        std::path::Path::new(&root).join(format!("{name}.cbor")),
-        bytes,
-    )?;
+    let filename = format!("{name}.cbor");
+    let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("vectors/sandbox-provider-v1")
+        .join(&filename);
+    if std::fs::read(&committed)? != bytes {
+        return Err(format!("committed vector {} has drifted", committed.display()).into());
+    }
+    if let Some(root) = std::env::var_os("SANDBOX_PROVIDER_VECTOR_OUTPUT") {
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(std::path::Path::new(&root).join(filename), bytes)?;
+    }
     Ok(())
 }
 
