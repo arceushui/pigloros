@@ -4715,21 +4715,19 @@ pub trait ErasureCoordinatorPortV1:
     /// Recover the complete Timeline/Fork topology observation for one pinned
     /// manifest revision.
     ///
-    /// A production host must override this method for frozen/scoped state and
-    /// derive the result from the same durable snapshot/CAS revision as the
-    /// coordinator's recovered state. The default denies the newer capability
-    /// so a host cannot accidentally authorize from state-only recovery.
+    /// A production host must derive the result from the same durable
+    /// snapshot/CAS revision as the coordinator's recovered state. Requiring
+    /// every host implementation to provide this method prevents an omitted
+    /// topology resolver from being mistaken for an intentional policy choice.
     ///
     /// # Errors
     /// Returns a closed persistence, provenance, or authorization error when
     /// the topology cannot be verified.
     fn verified_topology_observation(
         &self,
-        _request: ErasureReferenceV1,
-        _manifest_digest: ErasureReferenceV1,
-    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        Ok(None)
-    }
+        request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1>;
 
     /// Authenticate a request before the state machine records it.
     ///

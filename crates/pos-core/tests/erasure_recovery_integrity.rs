@@ -529,6 +529,33 @@ fn verified_state_query_rejects_manifest_mismatched_topology_observation(
 }
 
 #[test]
+fn verified_state_query_propagates_topology_observation_failure() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let affected = TimelineId::new();
+    let coordinator_port =
+        port(vec![target], None).with_verified_topology(vec![(affected, reference(7))], Vec::new());
+    let request = request()?;
+    {
+        let mut coordinator =
+            ErasureCoordinatorStateMachineV1::new(coordinator_port.clone(), COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    }
+
+    let failing_observer = coordinator_port.with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::LoadManifest,
+        occurrence: 1,
+    });
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(failing_observer, COORDINATOR);
+    assert_eq!(
+        restarted.verified_state_with_topology(request.reference()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    Ok(())
+}
+
+#[test]
 fn legacy_recovery_query_denies_combined_default() -> Result<(), ErasureErrorV1> {
     let request = request()?;
     let mut coordinator =

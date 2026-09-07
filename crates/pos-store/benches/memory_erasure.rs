@@ -108,6 +108,14 @@ impl ErasureRecoveryAuthorizationVerifierV1 for BenchmarkErasureHost {
 }
 
 impl ErasureCoordinatorPortV1 for BenchmarkErasureHost {
+    fn verified_topology_observation(
+        &self,
+        _request: ErasureReferenceV1,
+        _manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        Ok(None)
+    }
+
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
