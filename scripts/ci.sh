@@ -74,14 +74,21 @@ cargo llvm-cov --workspace --all-features --locked --summary-only \
   --fail-under-regions 99 \
   -- --include-ignored
 if command -v covgate >/dev/null 2>&1; then
+  expected_covgate_config=$'[[gates]]\nname = "new-rust-code"\nfail-under-lines = 99\nfail-under-regions = 99'
+  if [[ ! -f "$ROOT/covgate.toml" || "$(<"$ROOT/covgate.toml")" != "$expected_covgate_config" ]]; then
+    echo "ERROR: covgate.toml must define the immutable 99% line and region policy" >&2
+    exit 1
+  fi
   coverage_json="$(mktemp)"
   cargo llvm-cov report --json --output-path "$coverage_json"
   covgate check "$coverage_json" \
-    --base "${DIFF_COVERAGE_BASE:-main}" \
+    --base "${DIFF_COVERAGE_BASE:-origin/main}" \
     --no-github-summary
   rm -f "$coverage_json"
 else
-  echo "WARNING: covgate not on PATH; install covgate 0.2.0 to run the new-code gate"
+  echo "ERROR: covgate 0.2.0 is required for the new-code coverage gate" >&2
+  echo "Install it with: cargo install covgate --version 0.2.0 --locked" >&2
+  exit 1
 fi
 
 echo "==> CI gates OK"

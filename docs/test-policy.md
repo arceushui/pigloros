@@ -31,12 +31,22 @@ reporting-tolerance only: all tests still run with `--include-ignored`, and
 production code or avoid writing a reachable behavior test.
 
 The same coverage job also runs `covgate` 0.2.0 against the exact pull-request
-base (or the previous commit on a push) using `covgate.toml`. It evaluates only
-the changed Rust diff and requires 99% line and 99% region coverage. `covgate`
-reads the detailed LLVM JSON report produced by the completed `cargo llvm-cov`
-run, so the diff gate and repository-wide gate use the same test execution and
-native coverage data. The local parity script runs this gate when `covgate` is
-installed; install it with `cargo install covgate --version 0.2.0 --locked`.
+base (or the previous commit on a push) using the immutable `covgate.toml`
+policy. CI rejects changes to that policy after it is established and requires
+99% line and 99% region coverage for the changed Rust diff. `covgate` reads the
+detailed LLVM JSON report produced by the completed `cargo llvm-cov` run, so the
+diff gate and repository-wide gate use the same test execution and native
+coverage data. Install the local tool with:
+
+```bash
+cargo install covgate --version 0.2.0 --locked
+```
+
+Then reproduce the gate against the exact pull-request base with:
+
+```bash
+DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
+```
 
 ## Change-risk policy
 
@@ -163,6 +173,9 @@ git config core.hooksPath .githooks
 
 # Full CI parity:
 ./scripts/ci.sh
+
+# Full CI parity for a pull request (use the exact base commit):
+DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
 ```
 
 ## cargo-deny ≠ source attributes
