@@ -1733,15 +1733,17 @@ impl Gateway {
         if let Err(error) = authorization.authorize(request) {
             return Err(map_authorization_error(error));
         }
-        let page = match self
-            .read_events_page_unchecked(timeline_id, from_seq, limit)
-            .await
-        {
-            Err(GatewayError::Store(CoreError::TimelineNotFound(_))) => {
-                Err(GatewayError::ResourceUnavailable)
-            }
-            result => result,
-        };
+        let page = normalize_protected_read_error(
+            match self
+                .read_events_page_unchecked(timeline_id, from_seq, limit)
+                .await
+            {
+                Err(GatewayError::Store(CoreError::TimelineNotFound(_))) => {
+                    Err(GatewayError::ResourceUnavailable)
+                }
+                result => result,
+            },
+        );
         drop(fence);
         page
     }
@@ -2513,6 +2515,19 @@ fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
         || pos_core::is_consent_event_type(event_type)
         || event_type.as_str().starts_with("timeline.fork.")
         || event_type.as_str().starts_with("retention.")
+}
+
+fn normalize_protected_read_error(
+    result: Result<EventPage, GatewayError>,
+) -> Result<EventPage, GatewayError> {
+    result.map_err(|error| match error {
+        GatewayError::EventPayloadTooLarge { .. }
+        | GatewayError::EventMetadataTooLarge { .. }
+        | GatewayError::ForkDepthTooLarge { .. }
+        | GatewayError::EventResponseTooLarge { .. }
+        | GatewayError::EventReadTimeExceeded { .. } => GatewayError::ResourceUnavailable,
+        error => error,
+    })
 }
 
 fn classify_owntracks_admission(
@@ -3426,6 +3441,33 @@ mod tests {
                 Box::new(ScriptedStore {
                     mode: ScriptMode::SubjectControlledRead(event_type),
                 }),
+                [],
+                crate::authorization::test_authorization_for(actor),
+            );
+            let error = gateway
+                .read_events_page_authorized(
+                    &target.to_string(),
+                    0,
+                    1,
+                    GatewayAuthorizationRequest::read(actor, target, 0, 1, WallTime::now()),
+                )
+                .await
+                .test_err();
+            assert_eq!(error.to_string(), "resource not found");
+            gateway.shutdown().await.test_ok();
+            drop(gateway);
+        }
+
+        for mode in [
+            ScriptMode::ReadPayloadTooLarge,
+            ScriptMode::ReadMetadataTooLarge,
+            ScriptMode::ReadForkDepthTooLarge,
+            ScriptMode::ReadBytesTooLarge,
+            ScriptMode::ReadTimeTooLarge,
+        ] {
+            let target = TimelineId::new();
+            let gateway = Gateway::new_with_world_bodies_and_authorization(
+                Box::new(ScriptedStore { mode }),
                 [],
                 crate::authorization::test_authorization_for(actor),
             );
