@@ -32,7 +32,12 @@ pub mod registry;
 pub mod scheduler;
 pub mod schema;
 
-pub use composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin};
+pub use composition::{
+    DomainImplementationKindV1, PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1,
+    PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1,
+    RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1,
+    ResolvedPluginCompositionV1, ResolvedPluginV1, MAX_REQUIRED_PLUGINS_V1,
+};
 pub use driver::{
     Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey, RecoveryEvent,
     RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,

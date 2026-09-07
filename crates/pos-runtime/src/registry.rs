@@ -18,7 +18,12 @@ use pos_core::{
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
 use crate::{
-    composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin},
+    composition::{
+        PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
+        PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
+        RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
+        ResolvedPluginV1,
+    },
     driver::{
         Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey, SnapshotAnchor,
         StepOutput, TimelineHistorySegment,
@@ -663,6 +668,7 @@ struct PluginEntry {
     approver: Option<Box<dyn ActionApprover>>,
     last_tick: Option<u128>,
     event_cursor: Seq,
+    registration: Option<PluginRegistrationV1>,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -743,6 +749,10 @@ impl PluginRegistry {
                 id: *id,
                 name: entry.name.clone(),
                 version: entry.version.clone(),
+                pin: entry
+                    .registration
+                    .as_ref()
+                    .map(|registration| registration.pin().clone()),
             })
             .collect();
 
@@ -757,6 +767,103 @@ impl PluginRegistry {
         schemas.sort_unstable_by(|left, right| left.event_type.cmp(&right.event_type));
 
         PluginComposition { plugins, schemas }
+    }
+
+    /// Resolve a complete ordered set of required domain implementations.
+    ///
+    /// Resolution is exact: it never substitutes another implementation that
+    /// claims the same role, and it returns no partial evidence.
+    ///
+    /// # Errors
+    /// Returns a closed composition error when mode, identity, order, pin, or
+    /// availability differs from the host registration snapshot.
+    pub fn resolve_required_composition(
+        &self,
+        required: &RequiredPluginCompositionV1,
+    ) -> Result<ResolvedPluginCompositionV1, PluginCompositionErrorV1> {
+        let mode_matches = matches!(
+            (self.run_mode, required.mode()),
+            (
+                RunMode::Live,
+                PluginExecutionModeV1::Local | PluginExecutionModeV1::AirGapped
+            ) | (RunMode::Replay, PluginExecutionModeV1::Replay)
+        );
+        if !mode_matches {
+            return Err(PluginCompositionErrorV1::ExecutionModeMismatch);
+        }
+
+        for expected in required.plugins() {
+            if !self.plugins.contains_key(&expected.plugin_id()) {
+                return Err(PluginCompositionErrorV1::MissingImplementation {
+                    plugin_id: expected.plugin_id(),
+                });
+            }
+        }
+        if self
+            .plugins
+            .keys()
+            .copied()
+            .ne(required.plugins().iter().map(RequiredPluginV1::plugin_id))
+        {
+            return Err(PluginCompositionErrorV1::ExecutionOrderMismatch);
+        }
+
+        let mut resolved = Vec::with_capacity(required.plugins().len());
+        for expected in required.plugins() {
+            let entry = &self.plugins[&expected.plugin_id()];
+            let Some(registration) = entry.registration.as_ref() else {
+                return Err(PluginCompositionErrorV1::UnpinnedImplementation {
+                    plugin_id: expected.plugin_id(),
+                });
+            };
+            let field = if entry.version != expected.version() {
+                Some(PluginPinFieldV1::Version)
+            } else if registration.pin().configuration_digest()
+                != expected.pin().configuration_digest()
+            {
+                Some(PluginPinFieldV1::ConfigurationDigest)
+            } else if registration.pin().implementation_kind()
+                != expected.pin().implementation_kind()
+            {
+                Some(PluginPinFieldV1::ImplementationKind)
+            } else if registration.pin().isolation() != expected.pin().isolation() {
+                Some(PluginPinFieldV1::Isolation)
+            } else if registration.pin().roles() != expected.pin().roles() {
+                Some(PluginPinFieldV1::Roles)
+            } else {
+                None
+            };
+            if let Some(field) = field {
+                return Err(PluginCompositionErrorV1::IncompatibleImplementation {
+                    plugin_id: expected.plugin_id(),
+                    field,
+                });
+            }
+            if registration.availability() != PluginAvailabilityV1::Available {
+                return Err(PluginCompositionErrorV1::ImplementationUnavailable {
+                    plugin_id: expected.plugin_id(),
+                    availability: registration.availability(),
+                });
+            }
+            resolved.push(ResolvedPluginV1::new(
+                expected.plugin_id(),
+                entry.name.clone(),
+                entry.version.clone(),
+                registration.pin().clone(),
+            ));
+        }
+        Ok(ResolvedPluginCompositionV1::new(required.mode(), resolved))
+    }
+
+    fn ensure_live_execution(&self) -> Result<(), RuntimeError> {
+        if self.run_mode == RunMode::Live {
+            Ok(())
+        } else {
+            Err(RuntimeError::ModeMismatch {
+                expected: RunMode::Live.to_string(),
+                got: self.run_mode.to_string(),
+            })
+        }
     }
 
     fn snapshot_for_subscriptions(&self, subscriptions: &[ProjectionKey]) -> ObservationSnapshot {
@@ -1194,6 +1301,7 @@ impl PluginRegistry {
         committed_events: &[Event],
         operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_live_execution()?;
         self.ensure_no_pending_step()?;
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
@@ -1705,6 +1813,27 @@ impl PluginRegistry {
         self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
     }
 
+    /// Register an implementation through the explicit V1 composition seam.
+    ///
+    /// # Errors
+    /// Returns a registration or closed composition error before mutating the registry.
+    pub fn register_pinned(
+        &mut self,
+        plugin: &dyn Plugin,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        self.register_pinned_with_approver(
+            plugin,
+            registration,
+            reducer,
+            driver,
+            None,
+            std::iter::empty(),
+        )
+    }
+
     /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
     ///
     /// Wires event-type schemas, (optionally) a reducer and driver, and (optionally)
@@ -1730,6 +1859,33 @@ impl PluginRegistry {
             approver,
             &approver_event_types,
             context,
+            None,
+        )
+    }
+
+    /// Register a pinned implementation with an optional ADR-057 approver.
+    ///
+    /// # Errors
+    /// Returns a registration or closed composition error before mutating the registry.
+    pub fn register_pinned_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            &approver_event_types,
+            context,
+            Some(registration),
         )
     }
 
@@ -1747,6 +1903,23 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
+    fn validate_registration_roles(
+        &self,
+        registration: &PluginRegistrationV1,
+    ) -> Result<(), PluginCompositionErrorV1> {
+        let duplicate = registration.pin().roles().iter().find(|role| {
+            self.plugins.values().any(|entry| {
+                entry
+                    .registration
+                    .as_ref()
+                    .is_some_and(|registered| registered.pin().roles().contains(role))
+            })
+        });
+        duplicate.map_or(Ok(()), |role| {
+            Err(PluginCompositionErrorV1::DuplicateRole { role: role.clone() })
+        })
+    }
+
     fn register_with_approver_slice(
         &mut self,
         plugin: &dyn Plugin,
@@ -1755,6 +1928,7 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: &[Kind],
         context: (PluginId, String, Capability),
+        registration: Option<PluginRegistrationV1>,
     ) -> Result<(), RuntimeError> {
         let (id, name, cap) = context;
         if let Some(kind) = cap
@@ -1826,6 +2000,10 @@ impl PluginRegistry {
             }
         }
 
+        if let Some(registration) = registration.as_ref() {
+            self.validate_registration_roles(registration)?;
+        }
+
         // Register event type schemas
         for kind in &cap.owned_event_types {
             self.schemas.register(EventTypeSchema {
@@ -1857,6 +2035,7 @@ impl PluginRegistry {
                 approver,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
+                registration,
             },
         );
         Ok(())
@@ -1903,6 +2082,7 @@ impl PluginRegistry {
                 approver: None,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
+                registration: None,
             },
         );
     }
@@ -1967,6 +2147,7 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_live_execution()?;
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
@@ -2116,6 +2297,7 @@ impl PluginRegistry {
         &mut self,
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.ensure_live_execution()?;
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
@@ -3242,6 +3424,7 @@ mod tests {
                 approver: None,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
+                registration: None,
             },
         );
 
