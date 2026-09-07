@@ -1853,12 +1853,7 @@ impl Gateway {
             Ok(entity) => entity,
             Err(error) => return Err(error),
         };
-        let proposal = match ProposedAction::try_new(
-            Kind::new(event_type),
-            entity,
-            json_to_cbor(payload),
-            Kind::new(capability),
-        ) {
+        let proposal = match build_proposed_action(entity, event_type, payload, capability) {
             Ok(proposal) => proposal,
             Err(error) => return Err(error.into()),
         };
@@ -1943,12 +1938,7 @@ impl Gateway {
         if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
             return Err(error);
         }
-        let proposal = match ProposedAction::try_new(
-            Kind::new(event_type),
-            entity,
-            json_to_cbor(payload),
-            Kind::new(capability),
-        ) {
+        let proposal = match build_proposed_action(entity, event_type, payload, capability) {
             Ok(proposal) => proposal,
             Err(error) => return Err(error.into()),
         };
@@ -1988,12 +1978,7 @@ impl Gateway {
             Ok(entity) => entity,
             Err(error) => return Err(error),
         };
-        let proposal = match ProposedAction::try_new(
-            Kind::new(event_type),
-            entity,
-            json_to_cbor(payload),
-            Kind::new(capability),
-        ) {
+        let proposal = match build_proposed_action(entity, event_type, payload, capability) {
             Ok(proposal) => proposal,
             Err(error) => return Err(error.into()),
         };
@@ -2308,6 +2293,20 @@ fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
 
 const fn event_seq(event: &Event) -> u64 {
     event.seq.as_u64()
+}
+
+fn build_proposed_action(
+    entity: EntityId,
+    event_type: &str,
+    payload: &serde_json::Value,
+    capability: &str,
+) -> Result<ProposedAction, ActionRejected> {
+    ProposedAction::try_new(
+        Kind::new(event_type),
+        entity,
+        json_to_cbor(payload),
+        Kind::new(capability),
+    )
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
