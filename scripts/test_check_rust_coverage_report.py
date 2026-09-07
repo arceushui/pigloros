@@ -26,13 +26,16 @@ class RustCoverageReportTests(unittest.TestCase):
         run(["git", "config", "user.email", "coverage-test@example.invalid"], self.repo)
         run(["git", "config", "user.name", "coverage-test"], self.repo)
         source = self.repo / "src" / "lib.rs"
+        shared = self.repo / "src" / "shared.rs"
         source.parent.mkdir()
         source.write_text("pub fn value() -> u8 { 1 }\n", encoding="utf-8")
-        run(["git", "add", "src/lib.rs"], self.repo)
+        shared.write_text("pub fn shared() -> u8 { 1 }\n", encoding="utf-8")
+        run(["git", "add", "src"], self.repo)
         self.assertEqual(run(["git", "commit", "-qm", "base"], self.repo).returncode, 0)
         source.write_text("pub fn value() -> u8 { 2 }\n", encoding="utf-8")
         run(["git", "add", "src/lib.rs"], self.repo)
         self.assertEqual(run(["git", "commit", "-qm", "change"], self.repo).returncode, 0)
+        self.feature = run(["git", "branch", "--show-current"], self.repo).stdout.strip()
         self.base = run(["git", "rev-parse", "HEAD^"], self.repo).stdout.strip()
         self.report = self.repo / "coverage.json"
 
@@ -74,6 +77,17 @@ class RustCoverageReportTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("src/lib.rs", result.stderr)
 
+    def test_line_total_without_region_total_fails_closed(self) -> None:
+        self.write_report(
+            [
+                [1, 1, 1, True, False, False],
+                [2, 1, 1, True, False, False],
+            ]
+        )
+        result = self.check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("src/lib.rs", result.stderr)
+
     def test_positive_line_and_region_totals_pass(self) -> None:
         self.write_report(
             [
@@ -102,6 +116,24 @@ class RustCoverageReportTests(unittest.TestCase):
         result = self.check()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("src/lib.rs", result.stderr)
+
+    def test_base_resolution_matches_covgate_for_diverged_branch(self) -> None:
+        shared = self.repo / "src" / "shared.rs"
+        run(["git", "checkout", "-qb", "upstream", self.base], self.repo)
+        shared.write_text("pub fn shared() -> u8 { 2 }\n", encoding="utf-8")
+        run(["git", "add", "src/shared.rs"], self.repo)
+        self.assertEqual(run(["git", "commit", "-qm", "upstream"], self.repo).returncode, 0)
+        upstream = run(["git", "rev-parse", "HEAD"], self.repo).stdout.strip()
+        run(["git", "checkout", "-q", self.feature], self.repo)
+        self.base = upstream
+        self.write_report(
+            [
+                [1, 1, 1, True, True, False],
+                [2, 1, 1, True, True, False],
+            ]
+        )
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_similarly_named_path_does_not_satisfy_changed_file(self) -> None:
         self.write_report(

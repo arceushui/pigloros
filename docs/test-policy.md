@@ -36,7 +36,8 @@ policy. CI rejects changes to that policy after it is established and requires
 99% line and 99% region coverage for the changed Rust diff. `covgate` reads the
 detailed LLVM JSON report produced by the completed `cargo llvm-cov` run, so the
 diff gate and repository-wide gate use the same test execution and native
-coverage data. Install the local tool with:
+coverage data. The local script requires the same `covgate 0.2.0` version. Install
+the local tool with:
 
 ```bash
 cargo install covgate --version 0.2.0 --locked
@@ -49,11 +50,12 @@ DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
 ```
 
 Before running the diff gate, CI and `scripts/ci.sh` fail closed if any changed
-Rust source file is absent from the LLVM coverage report or has no positive
-line/region total; this prevents unsupported or target-specific files from
-receiving an empty 100% result. The shared checker compares the supplied base
-to the current working tree, so local staged and unstaged tracked Rust edits
-are checked with the same change-set scope as `covgate`.
+Rust source file is absent from the LLVM coverage report or lacks either a
+positive line total or a positive region total; this prevents unsupported or
+target-specific files from receiving an empty 100% result. Both callers first
+resolve the supplied base with `git merge-base <base> HEAD`, matching covgate's
+staged/unstaged tracked change-set semantics. Local staged and unstaged tracked
+Rust edits are therefore checked with the same scope as `covgate`.
 
 ## Change-risk policy
 

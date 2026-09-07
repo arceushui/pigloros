@@ -5,6 +5,7 @@ set -euo pipefail
 coverage_report=${1:?usage: check-rust-coverage-report.sh COVERAGE_JSON BASE_REF}
 base_ref=${2:?usage: check-rust-coverage-report.sh COVERAGE_JSON BASE_REF}
 repo_root="$(git rev-parse --show-toplevel)"
+coverage_base="$(git -C "$repo_root" merge-base "$base_ref" HEAD)"
 
 if [[ ! -s "$coverage_report" ]]; then
   echo "ERROR: LLVM coverage report is missing or empty: $coverage_report" >&2
@@ -49,12 +50,12 @@ while IFS= read -r path; do
     any(
       .data[]?.files[]?;
       ((.filename == $path) or (.filename == $absolute_path))
-      and (has_positive_line_total or has_positive_region_total)
+      and (has_positive_line_total and has_positive_region_total)
     )
   ' "$coverage_report" >/dev/null; then
     missing+=("$path")
   fi
-done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR "$base_ref" -- '*.rs')
+done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR "$coverage_base" -- '*.rs')
 
 if ((${#missing[@]} > 0)); then
   printf 'Changed Rust files missing positive LLVM coverage totals:\n' >&2

@@ -30,6 +30,10 @@ python3 "$ROOT/scripts/test_check_asan_ci_policy.py"
 echo "==> cargo-crap CI policy"
 python3 "$ROOT/scripts/check_cargo_crap_ci_policy.py"
 python3 "$ROOT/scripts/test_check_cargo_crap_ci_policy.py"
+echo "==> new-code coverage CI policy"
+python3 "$ROOT/scripts/check_new_code_coverage_ci_policy.py"
+python3 "$ROOT/scripts/test_check_new_code_coverage_ci_policy.py"
+python3 "$ROOT/scripts/test_check_covgate_policy.py"
 python3 "$ROOT/scripts/test_check_cargo_crap_report.py"
 
 echo "==> cargo deny (dependency policy)"
@@ -81,17 +85,14 @@ cargo llvm-cov --workspace --all-features --locked --summary-only \
   --fail-under-regions 99 \
   -- --include-ignored
 if command -v covgate >/dev/null 2>&1; then
-  expected_covgate_config=$'[[gates]]\nname = "new-rust-code"\nfail-under-lines = 99\nfail-under-regions = 99'
-  if [[ ! -f "$ROOT/covgate.toml" || "$(<"$ROOT/covgate.toml")" != "$expected_covgate_config" ]]; then
-    echo "ERROR: covgate.toml must define the immutable 99% line and region policy" >&2
-    exit 1
-  fi
+  coverage_base="$(bash "$ROOT/scripts/resolve-coverage-base.sh" "${DIFF_COVERAGE_BASE:-origin/main}")"
+  bash "$ROOT/scripts/check-covgate-policy.sh" "$coverage_base"
   coverage_json="$(mktemp)"
   cargo llvm-cov report --json --output-path "$coverage_json"
   bash "$ROOT/scripts/check-rust-coverage-report.sh" \
-    "$coverage_json" "${DIFF_COVERAGE_BASE:-origin/main}"
+    "$coverage_json" "$coverage_base"
   covgate check "$coverage_json" \
-    --base "${DIFF_COVERAGE_BASE:-origin/main}" \
+    --base "$coverage_base" \
     --no-github-summary
 else
   echo "ERROR: covgate 0.2.0 is required for the new-code coverage gate" >&2
