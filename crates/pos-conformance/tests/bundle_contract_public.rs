@@ -1070,6 +1070,28 @@ fn signed_current_bundle(mode: BundleModeV1) -> TestResult<ConformanceBundleV1> 
 }
 
 #[test]
+fn exported_evr1_schema_declares_the_current_sandbox_authority_shape() -> TestResult {
+    let schema = std::str::from_utf8(EVALUATOR_REQUEST_SCHEMA_BYTES)?;
+    let sandbox_field = schema
+        .find("sandbox-requirement: null / sandbox-requirement")
+        .ok_or("EVR1 sandbox requirement field is absent")?;
+    let request_digest = schema
+        .find("request-digest: digest")
+        .ok_or("EVR1 request digest field is absent")?;
+    assert!(sandbox_field < request_digest);
+    for field in [
+        "launch-policy-digest: digest",
+        "signed-image-manifest-digest: digest",
+        "required-provider-capability: provider-capability",
+        "administrator-policy-digest: digest",
+        "policy-epoch: uint",
+    ] {
+        assert!(schema.contains(field), "EVR1 schema omits {field}");
+    }
+    Ok(())
+}
+
+#[test]
 fn public_authority_records_bind_complete_execution_and_trust_policy_shapes() -> TestResult {
     let execution: Value =
         ciborium::from_reader(execution_profile_bytes("deterministic-local-v1")?.as_slice())?;

@@ -57,6 +57,23 @@ pub struct PayloadDescriptor {
     pub digest: [u8; 32],
 }
 
+fn validate_payload_descriptor(
+    descriptor: &PayloadDescriptor,
+    direction: PayloadDirection,
+) -> Result<(), SandboxProviderProtocolError> {
+    if descriptor.byte_length > MAX_INPUT_BYTES_U64 {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    if descriptor.byte_length == 0 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(direction.domain());
+        if descriptor.digest != *hasher.finalize().as_bytes() {
+            return Err(SandboxProviderProtocolError::DigestMismatch);
+        }
+    }
+    Ok(())
+}
+
 /// Independently decoded parent-bound SBC1 payload chunk.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxPayloadChunk {
@@ -146,13 +163,10 @@ impl PayloadStreamValidator {
         direction: PayloadDirection,
         descriptor: PayloadDescriptor,
     ) -> Result<Self, SandboxProviderProtocolError> {
-        if parent_digest == [0; 32]
-            || request_id == [0; 16]
-            || attempt_id == [0; 16]
-            || descriptor.byte_length > MAX_INPUT_BYTES_U64
-        {
+        if parent_digest == [0; 32] || request_id == [0; 16] || attempt_id == [0; 16] {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
+        validate_payload_descriptor(&descriptor, direction)?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(direction.domain());
         Ok(Self {
@@ -287,10 +301,10 @@ impl SandboxExecuteRequest {
             || self.request.apt1_digest != self.authority.apt1_digest
             || self.capability_ids.len() > MAX_LIST_ENTRIES
             || self.network_plans.len() > MAX_LIST_ENTRIES
-            || self.adapter_input.byte_length > MAX_INPUT_BYTES_U64
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
+        validate_payload_descriptor(&self.adapter_input, PayloadDirection::Input)?;
         validate_identifier_order(&self.capability_ids)?;
         validate_network_plans(&self.network_plans)?;
         verify_digest("SPX1", unsigned, self.request_digest)
@@ -612,13 +626,9 @@ impl SandboxProviderResult {
         }
         validate_terminal_event_shape(self.outcome, &self.operational_events)?;
         require_signature(&self.signature)?;
-        if self
-            .output
-            .as_ref()
-            .is_some_and(|output| output.byte_length > MAX_INPUT_BYTES_U64)
-        {
-            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
-        }
+        self.output.as_ref().map_or(Ok(()), |output| {
+            validate_payload_descriptor(output, PayloadDirection::Output)
+        })?;
         let post_admission = nonzero_optional(self.agr1_digest)
             && nonzero_optional(self.spr1_digest)
             && self.output.is_none();
@@ -1078,15 +1088,10 @@ fn decode_payload_descriptor(
     value: &Value,
 ) -> Result<PayloadDescriptor, SandboxProviderProtocolError> {
     let fields = array::<2>(value)?;
-    let descriptor = PayloadDescriptor {
+    Ok(PayloadDescriptor {
         byte_length: uint(&fields[0])?,
         digest: digest32(&fields[1])?,
-    };
-    if descriptor.byte_length > MAX_INPUT_BYTES_U64 {
-        Err(SandboxProviderProtocolError::FieldOutOfBounds)
-    } else {
-        Ok(descriptor)
-    }
+    })
 }
 
 fn decode_network_plans(

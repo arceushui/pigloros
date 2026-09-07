@@ -85,7 +85,7 @@ pub struct ProviderCapabilityV1 {
 pub struct SandboxLimitV1 {
     /// Closed ADR-069 limit discriminant in `0..=16`.
     pub limit_id: u8,
-    /// Nonzero selected ceiling.
+    /// Selected ceiling; zero is the exact deny-all or zero-capacity value.
     pub value: u64,
 }
 

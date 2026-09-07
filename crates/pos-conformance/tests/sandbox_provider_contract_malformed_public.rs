@@ -508,6 +508,26 @@ fn decoders_reject_semantically_invalid_self_digested_collections() -> TestResul
 }
 
 #[test]
+fn decoders_reject_wrong_directional_digest_for_empty_payloads() -> TestResult {
+    for (record, descriptor_path, magic) in [
+        (Record::Spx1, [0, 20], "SPX1"),
+        (Record::Spy1, [0, 5], "SPY1"),
+    ] {
+        let mut value = decode_value(record.bytes())?;
+        let descriptor =
+            value_at_mut(&mut value, &descriptor_path).ok_or("payload descriptor must exist")?;
+        let Value::Array(fields) = descriptor else {
+            return Err("payload descriptor must be an array".into());
+        };
+        fields[0] = Value::Integer(0.into());
+        fields[1] = Value::Bytes(vec![0; 32]);
+        refresh_record_digest(&mut value, magic)?;
+        assert_rejected(record, &value, "wrong digest for empty payload")?;
+    }
+    Ok(())
+}
+
+#[test]
 fn signed_error_decoders_reject_nul_detail_and_orphaned_digest() -> TestResult {
     for (path, replacement, name) in [
         (

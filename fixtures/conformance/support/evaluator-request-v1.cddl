@@ -14,6 +14,7 @@ evaluator-request-v1 = [
   output-capability: output-capability,
   evaluator-protocol-digest: digest,
   evaluator-hard-caps-digest: digest,
+  sandbox-requirement: null / sandbox-requirement,
   request-digest: digest
 ]
 
@@ -30,6 +31,20 @@ output-capability = [
   capability-digest: digest,
   report-bytes-limit: uint .gt 0,
   diagnostic-bytes-limit: uint
+]
+
+sandbox-requirement = [
+  launch-policy-digest: digest,
+  signed-image-manifest-digest: digest,
+  required-provider-capability: provider-capability,
+  administrator-policy-digest: digest,
+  policy-epoch: uint
+]
+
+provider-capability = [
+  capability-id: identifier,
+  capability-version: uint,
+  minimum-strength: uint
 ]
 
 identifier = tstr .size (1..128)

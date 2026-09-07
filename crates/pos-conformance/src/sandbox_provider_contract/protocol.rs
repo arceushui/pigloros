@@ -106,10 +106,17 @@ impl PayloadDescriptorV1 {
         })
     }
 
-    fn validate(&self) -> Result<(), SandboxContractErrorV1> {
-        (self.byte_length <= MAX_SANDBOX_PAYLOAD_BYTES_V1)
-            .then_some(())
-            .ok_or(SandboxContractErrorV1::FieldOutOfBounds)
+    fn validate_for_direction(
+        &self,
+        direction: PayloadDirectionV1,
+    ) -> Result<(), SandboxContractErrorV1> {
+        if self.byte_length > MAX_SANDBOX_PAYLOAD_BYTES_V1 {
+            return Err(SandboxContractErrorV1::FieldOutOfBounds);
+        }
+        if self.byte_length == 0 && self.digest != Self::from_bytes(direction, &[])?.digest {
+            return Err(SandboxContractErrorV1::DigestMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -599,7 +606,7 @@ impl PayloadStreamValidatorV1 {
         direction: PayloadDirectionV1,
         descriptor: PayloadDescriptorV1,
     ) -> Result<Self, SandboxContractErrorV1> {
-        descriptor.validate()?;
+        descriptor.validate_for_direction(direction)?;
         if parent_digest == [0; 32] || request_id == [0; 16] || attempt_id == [0; 16] {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
@@ -742,7 +749,8 @@ impl SandboxExecuteRequestV1 {
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
-        self.adapter_input.validate()?;
+        self.adapter_input
+            .validate_for_direction(PayloadDirectionV1::Input)?;
         if self
             .capability_ids
             .iter()
@@ -849,11 +857,10 @@ fn payload_descriptor_value(value: &PayloadDescriptorV1) -> Value {
 
 fn decode_payload_descriptor(value: &Value) -> Result<PayloadDescriptorV1, SandboxContractErrorV1> {
     let fields = array::<2>(value)?;
-    let descriptor = PayloadDescriptorV1 {
+    Ok(PayloadDescriptorV1 {
         byte_length: uint(&fields[0])?,
         digest: fixed(&fields[1])?,
-    };
-    descriptor.validate().map(|()| descriptor)
+    })
 }
 
 fn decode_identifiers(value: &Value) -> Result<Vec<String>, SandboxContractErrorV1> {
@@ -1275,9 +1282,9 @@ impl SandboxProviderResultV1 {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
         validate_terminal_event_shape(self.outcome, &self.operational_events)?;
-        self.output
-            .as_ref()
-            .map_or(Ok(()), PayloadDescriptorV1::validate)?;
+        self.output.as_ref().map_or(Ok(()), |output| {
+            output.validate_for_direction(PayloadDirectionV1::Output)
+        })?;
         let valid_union = match self.outcome {
             SandboxTerminalOutcomeV1::Completed => {
                 self.output.is_some()
