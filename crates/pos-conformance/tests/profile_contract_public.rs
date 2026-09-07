@@ -1551,8 +1551,7 @@ fn conformance_report_applies_structural_erasure_without_reconstructing_case_evi
             current_claim: ErasureReplayClaimV1::Exact,
             state: ArtifactStateV1::TransitionApplied,
         }],
-    )
-    .expect("a unique conformance artifact should evaluate");
+    )?;
 
     report.apply_artifact_evaluation(&evaluation)?;
     assert_eq!(report.replay_claim, ReplayClaimV1::StructuralOnly);
@@ -1569,6 +1568,29 @@ fn conformance_report_applies_structural_erasure_without_reconstructing_case_evi
         assert!(case.expected_error.is_none());
         assert!(case.actual_error.is_none());
     }
+    report.validate()?;
+    Ok(())
+}
+
+#[test]
+fn unverifiable_enclosing_claim_removes_comparison_material_without_members() -> TestResult {
+    let mut report = report_with_cases(1)?;
+    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+        &[],
+    )?;
+
+    report.apply_artifact_evaluation(&evaluation)?;
+
+    assert_eq!(
+        report.replay_claim,
+        ReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(report.redaction_state, RedactionStateV1::None);
+    assert_eq!(report.cases[0].outcome, CaseOutcomeStatusV1::Unavailable);
+    assert!(report.cases[0].first_coordinate.is_none());
+    assert!(report.cases[0].expected_digest.is_none());
+    assert!(report.cases[0].actual_digest.is_none());
     report.validate()?;
     Ok(())
 }
@@ -1600,8 +1622,7 @@ fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestR
             current_claim: ErasureReplayClaimV1::IncompatibleProfile,
             state: ArtifactStateV1::TransitionApplied,
         }],
-    )
-    .expect("a unique conformance artifact should evaluate");
+    )?;
 
     report.apply_artifact_evaluation(&evaluation)?;
     assert_eq!(report.replay_claim, ReplayClaimV1::IncompatibleProfile);

@@ -2,7 +2,7 @@
 
 use super::{
     ErasureArtifactClassV1, ErasureErrorV1, ErasureKeyRoleV1, ErasureReferenceV1,
-    ErasureReplayClaimV1,
+    ErasureReplayClaimV1, ERASURE_MAX_TARGETS,
 };
 
 /// Data classification fixed before an artifact is committed.
@@ -285,12 +285,16 @@ impl ReplayClaimEvaluatorV1 {
     ///
     /// # Errors
     ///
-    /// Returns [`ErasureErrorV1::PolicyConflict`] for duplicate artifact
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when the V1 closure bound is
+    /// exceeded, or [`ErasureErrorV1::PolicyConflict`] for duplicate artifact
     /// identities.
     pub fn evaluate(
         enclosing_claim: ErasureReplayClaimV1,
         inputs: &[ArtifactClaimInputV1],
     ) -> Result<ReplayClaimEvaluationV1, ErasureErrorV1> {
+        if inputs.len() > ERASURE_MAX_TARGETS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
         let mut inputs = inputs.to_vec();
         inputs.sort_unstable_by_key(|input| {
             (

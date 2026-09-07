@@ -1286,6 +1286,9 @@ impl ConformanceReportV1 {
                     .redaction_state
                     .after_artifact_evaluation(evaluation);
                 if matches!(
+                    case.replay_claim,
+                    ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
+                ) || matches!(
                     case.redaction_state,
                     RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
                 ) {

@@ -2,8 +2,22 @@ use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
     ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureErrorV1,
     ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
-    ReplayClaimEvaluatorV1,
+    ReplayClaimEvaluatorV1, ERASURE_MAX_TARGETS,
 };
+
+trait TestValueExt<T> {
+    fn test_ok(self) -> T;
+}
+
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected artifact evaluator fixture error: {error:?}"
+            )))
+        })
+    }
+}
 
 fn reference(byte: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([byte; 32])
@@ -53,7 +67,7 @@ fn every_artifact_class_uses_its_registered_one_way_transition() {
                 ArtifactStateV1::TransitionApplied,
             )],
         )
-        .expect("a unique registered artifact should evaluate");
+        .test_ok();
         assert_eq!(
             evaluation.replay_claim,
             ErasureReplayClaimV1::StructuralOnly
@@ -110,7 +124,7 @@ fn transition_rules_produce_the_adr_060_claims() {
                 ArtifactStateV1::TransitionApplied,
             )],
         )
-        .expect("registered transition should evaluate");
+        .test_ok();
         assert_eq!(evaluation.replay_claim, expected);
         assert_eq!(evaluation.redaction_state, redaction);
         assert_eq!(
@@ -148,7 +162,7 @@ fn export_takes_the_weakest_required_member_and_ignores_optional_absence() {
             ),
         ],
     )
-    .expect("distinct export members should evaluate");
+    .test_ok();
     assert_eq!(
         evaluation.replay_claim,
         ErasureReplayClaimV1::StructuralOnly
@@ -186,7 +200,7 @@ fn every_missing_prerequisite_and_quarantined_artifact_is_unverifiable() {
                 state,
             )],
         )
-        .expect("registered absence should produce a lower claim");
+        .test_ok();
         assert_eq!(
             evaluation.replay_claim,
             ErasureReplayClaimV1::UnverifiableArtifactsMissing
@@ -211,7 +225,7 @@ fn retained_artifact_preserves_an_existing_weaker_claim() {
     artifact.current_claim = ErasureReplayClaimV1::StructuralOnly;
     let evaluation =
         ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::StructuralOnly, &[artifact])
-            .expect("retained evidence should evaluate");
+            .test_ok();
     assert_eq!(
         evaluation.replay_claim,
         ErasureReplayClaimV1::StructuralOnly
@@ -234,7 +248,7 @@ fn incompatible_profile_remains_orthogonal_to_erasure() {
     artifact.current_claim = ErasureReplayClaimV1::IncompatibleProfile;
     let evaluation =
         ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::IncompatibleProfile, &[artifact])
-            .expect("orthogonal profile state should evaluate");
+            .test_ok();
     assert_eq!(
         evaluation.replay_claim,
         ErasureReplayClaimV1::IncompatibleProfile
@@ -266,7 +280,7 @@ fn empty_required_closure_preserves_the_enclosing_claim() {
         ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
         &[],
     )
-    .expect("an empty member set should preserve its enclosing claim");
+    .test_ok();
     assert_eq!(
         evaluation.replay_claim,
         ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
@@ -348,7 +362,7 @@ fn authoritative_release_requires_the_exact_registered_class_and_digest() {
     );
     let evaluation =
         ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &[retained, erased])
-            .expect("distinct registered artifacts should evaluate");
+            .test_ok();
 
     assert_eq!(
         evaluation.require_authoritative_use(ErasureArtifactClassV1::ReproManifest, reference(1),),
@@ -365,5 +379,33 @@ fn authoritative_release_requires_the_exact_registered_class_and_digest() {
     assert_eq!(
         evaluation.require_authoritative_use(ErasureArtifactClassV1::ReproManifest, reference(9),),
         Err(ErasureErrorV1::PolicyConflict)
+    );
+}
+
+#[test]
+fn evaluator_rejects_an_artifact_closure_above_the_v1_bound() {
+    let artifacts = (0..=ERASURE_MAX_TARGETS)
+        .map(|index| {
+            let mut digest = [0_u8; 32];
+            digest[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::Export,
+                    ErasureReferenceV1::from_digest(digest),
+                    ArtifactDataClassV1::StructuralAuditMetadata,
+                    None,
+                    reference(200),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: ErasureReplayClaimV1::Exact,
+                state: ArtifactStateV1::Retained,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &artifacts),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
 }

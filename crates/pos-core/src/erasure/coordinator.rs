@@ -1073,6 +1073,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if record.active.is_none() {
             return self.finalize_exact_retry(&record, input);
         }
+        input.replay_claim = super::inventory_replay_claim(&input.inventories);
         let terminal = terminal_attempt(request, &record, &input)?;
         let TerminalAttemptV1 {
             admission,
