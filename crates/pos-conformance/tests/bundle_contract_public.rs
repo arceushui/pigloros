@@ -197,7 +197,8 @@ const fn mutation_requires_staged_files(mutation: StagingMutation) -> bool {
 const fn mutation_requires_nested_directory(mutation: StagingMutation) -> bool {
     matches!(
         mutation,
-        StagingMutation::ReplaceDirectoryWithSymlink
+        StagingMutation::RelaxExpectedDirectoryPermissions
+            | StagingMutation::ReplaceDirectoryWithSymlink
             | StagingMutation::ReplaceDirectoryWithRegularFile
     )
 }
