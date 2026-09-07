@@ -1299,12 +1299,8 @@ impl ConformanceReportV1 {
     ) -> Result<(), EvidenceError> {
         self.validate().and_then(|()| {
             for case in &mut self.cases {
-                case.replay_claim = case
-                    .replay_claim
-                    .after_artifact_evaluation(evaluation);
-                case.redaction_state = case
-                    .redaction_state
-                    .after_artifact_evaluation(evaluation);
+                case.replay_claim = case.replay_claim.after_artifact_evaluation(evaluation);
+                case.redaction_state = case.redaction_state.after_artifact_evaluation(evaluation);
                 if matches!(
                     case.replay_claim,
                     ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
@@ -1558,10 +1554,7 @@ pub struct DivergenceReportV1 {
 
 impl MoatProofEvidenceV1 {
     /// Apply one host-owned artifact evaluation to every evidence closure.
-    pub fn apply_artifact_evaluation(
-        &mut self,
-        evaluation: &pos_core::ReplayClaimEvaluationV1,
-    ) {
+    pub fn apply_artifact_evaluation(&mut self, evaluation: &pos_core::ReplayClaimEvaluationV1) {
         self.manifest.apply_artifact_evaluation(evaluation);
         self.contract
             .counterfactual
@@ -1803,10 +1796,9 @@ pub mod strict_codec {
         ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, SafeErrorCodeV1,
         ScenarioRoomFixtureV1, StructuralCausalTraceEntryV1, SuffixInvalidationReasonV1,
         SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1, Value,
-        VerificationErrorV1, VerificationOutcomeV1,
-        VerificationResultV1, Wave8ProofContractV1, CONFORMANCE_REPORT_MAGIC_V1,
-        DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1, EVIDENCE_FORMAT_V1,
-        RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
+        VerificationErrorV1, VerificationOutcomeV1, VerificationResultV1, Wave8ProofContractV1,
+        CONFORMANCE_REPORT_MAGIC_V1, DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1,
+        EVIDENCE_FORMAT_V1, RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
         VERIFICATION_RECORD_MAGIC_V1,
     };
 
@@ -4667,18 +4659,22 @@ fn verify_causal_trace(
     if (structurally_redacted && !trace.is_empty())
         || (!structurally_redacted && !structural_trace.is_empty())
         || trace.iter().any(|edge| {
-        edge.cause_seq >= edge.effect_seq
-            || !sequences.contains(&edge.cause_seq)
-            || !sequences.contains(&edge.effect_seq)
-            || !matches!(
-                edge.relation.as_str(),
-                "physical_to_agent" | "agent_to_society" | "intervention_to_physics" | "derived"
-            )
-            || !matches!(
-                edge.visibility.as_str(),
-                "operator" | "participant" | "public"
-            )
-    }) {
+            edge.cause_seq >= edge.effect_seq
+                || !sequences.contains(&edge.cause_seq)
+                || !sequences.contains(&edge.effect_seq)
+                || !matches!(
+                    edge.relation.as_str(),
+                    "physical_to_agent"
+                        | "agent_to_society"
+                        | "intervention_to_physics"
+                        | "derived"
+                )
+                || !matches!(
+                    edge.visibility.as_str(),
+                    "operator" | "participant" | "public"
+                )
+        })
+    {
         return Err(EvidenceError::InvalidCausalEdge);
     }
     let authoritative_edges = events
@@ -7381,7 +7377,14 @@ pub mod tests {
                 let mut trace = value.causal_trace.clone();
                 trace[0].dependency_class = dependency_class;
                 assert!(
-                    verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok()
+                    verify_causal_trace(
+                        &value.authoritative_events,
+                        &trace,
+                        &[],
+                        value.manifest.replay_claim,
+                        &sequences,
+                    )
+                    .is_ok()
                 );
             }
             for relation in [
@@ -7393,14 +7396,28 @@ pub mod tests {
                 let mut trace = value.causal_trace.clone();
                 trace[0].relation = relation.to_owned();
                 assert!(
-                    verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok()
+                    verify_causal_trace(
+                        &value.authoritative_events,
+                        &trace,
+                        &[],
+                        value.manifest.replay_claim,
+                        &sequences,
+                    )
+                    .is_ok()
                 );
             }
             for visibility in ["operator", "participant", "public"] {
                 let mut trace = value.causal_trace.clone();
                 trace[0].visibility = visibility.to_owned();
                 assert!(
-                    verify_causal_trace(&value.authoritative_events, &trace, &sequences).is_ok()
+                    verify_causal_trace(
+                        &value.authoritative_events,
+                        &trace,
+                        &[],
+                        value.manifest.replay_claim,
+                        &sequences,
+                    )
+                    .is_ok()
                 );
             }
             assert!(event_sequences(&[]).is_err());

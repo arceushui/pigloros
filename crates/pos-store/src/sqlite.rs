@@ -5317,7 +5317,7 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::GeoLocationAdmissionFenceV1,
         ids::{EntityId, EventId},
-        store::{EventReadBounds, SeqRange},
+        store::{EventReadBounds, SeqRange, TimelineExport},
         CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     };

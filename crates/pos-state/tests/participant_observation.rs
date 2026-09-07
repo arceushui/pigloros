@@ -5,12 +5,13 @@ use pos_core::{
     AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1,
-    DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationStatusV1,
-    PersistedAuthorityV1, PluginId, PrincipalRefV1, Reducer, SchemaVersion, Seq, State, TimelineId,
-    WallTime, MAX_OBSERVATION_SNAPSHOT_RECORDS,
+    DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationSnapshotV1,
+    ObservationStatusV1, PersistedAuthorityV1, PluginId, PrincipalRefV1, Reducer, SchemaVersion,
+    Seq, State, TimelineId, WallTime, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 use pos_state::{
-    ProjectionObservationContextV1, ProjectionObservationPolicyV1, ProjectionRegistry,
+    AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
+    ProjectionRegistry,
 };
 use std::fmt::Debug;
 
@@ -34,6 +35,29 @@ impl<T> TestOk<T> for Option<T> {
 
 const fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
+}
+
+fn retained_observation(observation: &AuthorizedObservationV1) -> &ObservationSnapshotV1 {
+    let artifact_digest =
+        pos_core::ErasureReferenceV1::from_digest(*observation.artifact_digest().as_bytes());
+    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+                artifact_digest,
+                pos_core::ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                pos_core::ErasureReferenceV1::from_digest([244; 32]),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .test_ok();
+    observation.authoritative_snapshot(&evaluation).test_ok()
 }
 
 fn authenticated_principal(principal: PrincipalRefV1) -> AuthenticatedPrincipalResultV1 {
@@ -429,6 +453,8 @@ fn authorized_materialization_ignores_every_other_subject() {
             &context(timeline_id),
         )
         .test_ok();
+    let first_snapshot = retained_observation(&first_snapshot);
+    let second_snapshot = retained_observation(&second_snapshot);
 
     assert_eq!(first_snapshot.participant_id(), fixture.participant_id);
     assert_eq!(first_snapshot.plugin_id(), fixture.plugin_id);
@@ -615,6 +641,7 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
             &context(timeline_id),
         )
         .test_ok();
+    let snapshot = retained_observation(&snapshot);
     let record = &snapshot.records()[0];
     assert_eq!(record.status(), ObservationStatusV1::NotObserved);
     assert_eq!(record.artifact_digest(), None);
@@ -633,6 +660,7 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
             },
         )
         .test_ok();
+    let later = retained_observation(&later);
     assert_ne!(record.source_digest(), later.records()[0].source_digest());
 }
 
@@ -660,6 +688,7 @@ fn materialization_canonicalizes_nested_projection_values() {
             &context(TimelineId::new()),
         )
         .test_ok();
+    let snapshot = retained_observation(&snapshot);
     let digest = snapshot.records()[0].artifact_digest().test_ok();
     assert_eq!(
         snapshot.artifact(digest).test_ok().bytes().as_slice(),
@@ -916,6 +945,8 @@ fn prior_observation_snapshot_changes_snapshot_digest_not_policy_provenance() {
             },
         )
         .test_ok();
+    let without_prior = retained_observation(&without_prior);
+    let with_prior = retained_observation(&with_prior);
 
     assert_eq!(with_prior.prior_snapshot_digest(), Some(prior_digest));
     assert_ne!(with_prior.digest(), without_prior.digest());
