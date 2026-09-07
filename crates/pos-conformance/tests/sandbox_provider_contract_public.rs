@@ -3,36 +3,33 @@ use pos_conformance::{
     AdapterInputV1, AdmissionAuthorityV1, AdmissionGrantV1, ExecutionModeV1, LaunchPolicyV1,
     NetworkCapabilityV1, NetworkExchangePlanV1, PartitionDescriptorV1, PartitionRoleV1,
     Pkcs7ProofV1, ProviderCapabilityV1, ReceiptAuthorityV1, RequestAuthorityV1,
-    SandboxArchitectureV1, SandboxContractErrorV1, SandboxExecuteRequestV1, SandboxLimitV1,
-    SandboxCancelRequestV1, SandboxCancelResponseV1, SandboxCancelResultV1,
-    SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxLocalErrorCodeV1,
-    SandboxLocalErrorV1, SandboxOutputV1, SandboxProviderErrorCodeV1, SandboxProviderErrorV1,
-    SandboxProviderManifestV1, SandboxProviderOperationV1, SandboxProviderReceiptV1,
-    SandboxProviderResultV1, SandboxReconcileRequestV1, SandboxReconcileResponseV1,
-    SandboxTerminalOutcomeV1, SignedImageManifestV1,
+    SandboxArchitectureV1, SandboxCancelRequestV1, SandboxCancelResponseV1, SandboxCancelResultV1,
+    SandboxContractErrorV1, SandboxDescribeRequestV1, SandboxDescribeResponseV1,
+    SandboxExecuteRequestV1, SandboxLimitV1, SandboxLocalErrorCodeV1, SandboxLocalErrorV1,
+    SandboxOutputV1, SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
+    SandboxProviderOperationV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
+    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxTerminalOutcomeV1,
+    SignedImageManifestV1,
 };
 use sha2::{Digest, Sha256};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const X86_ROOT: [u8; 16] = [
-    0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84,
-    0xb7, 0x09,
+    0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84, 0xb7, 0x09,
 ];
 const X86_VERITY: [u8; 16] = [
-    0x2c, 0x73, 0x57, 0xed, 0xeb, 0xd2, 0x46, 0xd9, 0xae, 0xc1, 0x23, 0xd4, 0x37, 0xec,
-    0x2b, 0xf5,
+    0x2c, 0x73, 0x57, 0xed, 0xeb, 0xd2, 0x46, 0xd9, 0xae, 0xc1, 0x23, 0xd4, 0x37, 0xec, 0x2b, 0xf5,
 ];
 const X86_VERITY_SIGNATURE: [u8; 16] = [
-    0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08,
-    0xb1, 0x76,
+    0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08, 0xb1, 0x76,
 ];
 
 fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&[42; 32])
 }
 
-fn digest(seed: u8) -> [u8; 32] {
+const fn digest(seed: u8) -> [u8; 32] {
     [seed; 32]
 }
 
@@ -147,7 +144,7 @@ fn partition(
     }
 }
 
-fn network_plan(occurrence: u64) -> NetworkExchangePlanV1 {
+fn network_plan(occurrence: u64) -> Result<NetworkExchangePlanV1, SandboxContractErrorV1> {
     NetworkExchangePlanV1 {
         exchange_id: [1; 16],
         occurrence,
@@ -160,12 +157,11 @@ fn network_plan(occurrence: u64) -> NetworkExchangePlanV1 {
         plan_digest: [0; 32],
     }
     .seal()
-    .expect("valid network plan")
 }
 
-fn execute_request() -> SandboxExecuteRequestV1 {
+fn execute_request() -> Result<SandboxExecuteRequestV1, SandboxContractErrorV1> {
     let input = b"canonical EAI1 stream".to_vec();
-    SandboxExecuteRequestV1 {
+    Ok(SandboxExecuteRequestV1 {
         authority: RequestAuthorityV1 {
             request_id: [1; 16],
             apt1_digest: digest(20),
@@ -193,9 +189,9 @@ fn execute_request() -> SandboxExecuteRequestV1 {
             digest: *blake3::hash(&input).as_bytes(),
             bytes: input,
         },
-        network_plans: vec![network_plan(0), network_plan(1)],
+        network_plans: vec![network_plan(0)?, network_plan(1)?],
         request_digest: [0; 32],
-    }
+    })
 }
 
 fn admission_authority() -> AdmissionAuthorityV1 {
@@ -255,7 +251,7 @@ fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
 }
 
 #[test]
-fn authority_contracts_reject_order_digest_and_partition_changes() -> TestResult {
+fn authority_contracts_reject_order_digest_and_partition_changes() {
     let key = signing_key();
     let mut unordered = manifest();
     unordered.capabilities.reverse();
@@ -277,18 +273,17 @@ fn authority_contracts_reject_order_digest_and_partition_changes() -> TestResult
         invalid_image.sign(&key),
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
-    Ok(())
 }
 
 #[test]
 fn execute_and_admission_contracts_round_trip_and_reject_gaps() -> TestResult {
-    let request = execute_request().seal()?;
+    let request = execute_request()?.seal()?;
     assert_eq!(
         SandboxExecuteRequestV1::from_canonical_cbor(&request.to_canonical_cbor()?)?,
         request
     );
-    let mut gap = execute_request();
-    gap.network_plans[1] = network_plan(2);
+    let mut gap = execute_request()?;
+    gap.network_plans[1] = network_plan(2)?;
     assert_eq!(gap.seal(), Err(SandboxContractErrorV1::InconsistentFields));
 
     let key = signing_key();
@@ -343,7 +338,7 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
     );
     result.verify_signature(&key.verifying_key())?;
 
-    let mut invalid_union = result.clone();
+    let mut invalid_union = result;
     invalid_union.output = None;
     assert_eq!(
         invalid_union.validate(),
