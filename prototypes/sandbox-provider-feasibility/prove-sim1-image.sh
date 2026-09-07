@@ -95,12 +95,15 @@ systemd-repart --definitions="$work_dir/definitions" --dry-run=no \
   --json=short "$image_path" >"$work_dir/repart-signed.json"
 
 systemd-dissect --json=short "$image_path" >"$evidence_dir/dissect.json"
-test "$(jq '[.[] | select(.designator == "root")] | length' \
-  "$evidence_dir/dissect.json")" -eq 1
-test "$(jq '[.[] | select(.designator == "root-verity")] | length' \
-  "$evidence_dir/dissect.json")" -eq 1
-test "$(jq '[.[] | select(.designator == "root-verity-sig")] | length' \
-  "$evidence_dir/dissect.json")" -eq 1
+sfdisk --json "$image_path" >"$evidence_dir/partition-table.json"
+test "$(jq '.partitiontable.partitions | length' \
+  "$evidence_dir/partition-table.json")" -eq 3
+test "$(jq '[.[] | select(.file | endswith("10-root.conf"))] | length' \
+  "$work_dir/repart-signed.json")" -eq 1
+test "$(jq '[.[] | select(.file | endswith("20-root-verity.conf"))] | length' \
+  "$work_dir/repart-signed.json")" -eq 1
+test "$(jq '[.[] | select(.file | endswith("30-root-verity-signature.conf"))] | length' \
+  "$work_dir/repart-signed.json")" -eq 1
 
 image_digest=$(b3sum "$image_path" | cut -d' ' -f1)
 certificate_fingerprint=$(openssl x509 -in "$work_dir/verity-certificate.pem" \
