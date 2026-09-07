@@ -163,7 +163,7 @@ Quality floor: **800+ tests · 0 failures · at least 99% line and 99% region co
 
 ### Test & coverage policy
 
-See **[docs/test-policy.md](docs/test-policy.md)** for the full policy (also mirrored in Cursor user rules).
+See **[docs/test-policy.md](docs/test-policy.md)** for the full policy.
 
 | Gate | Tool | What it bans / enforces |
 |---|---|---|

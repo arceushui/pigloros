@@ -931,7 +931,25 @@ mod tests {
             registry.commit_step_at(Seq::ZERO, 0).test_ok();
         }
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let digest = pos_core::ErasureReferenceV1::from_digest([221; 32]);
+        let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[pos_core::ArtifactClaimInputV1 {
+                registration: pos_core::RegisteredArtifactV1::new(
+                    pos_core::ErasureArtifactClassV1::CalibrationReport,
+                    digest,
+                    pos_core::ArtifactDataClassV1::AggregateData,
+                    None,
+                    pos_core::ErasureReferenceV1::from_digest([222; 32]),
+                    pos_core::ArtifactOptionalityV1::Required,
+                    pos_core::ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state: pos_core::ArtifactStateV1::Retained,
+            }],
+        )
+        .test_ok();
+        let report = compute_report(store.as_ref(), tl.id(), digest, &evaluation).test_ok();
         assert_eq!(report.n_predictions, 5);
         assert_eq!(report.n_resolved, 5);
         assert!(report.brier_score >= 0.0);

@@ -1,8 +1,12 @@
 //! Independent CFB1 closure and signature validation.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 
 use ciborium::value::Value;
+use ciborium_ll::{Decoder, Header};
 use ed25519_dalek::Verifier;
 
 use crate::evaluator_protocol::{
@@ -11,11 +15,17 @@ use crate::evaluator_protocol::{
 };
 
 const MAX_ARCHIVE_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MEMBER_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MEMBERS: usize = 65_536;
 const MAX_PATH_BYTES: usize = 256;
 const PROFILE_PATH: &str = "profile/CPF1.cbor";
 const TRUST_POLICY_PATH: &str = "authority/trust-policy-snapshot.tps1";
+
+trait ArchiveReader: Read + Seek {}
+
+impl<T: Read + Seek> ArchiveReader for T {}
 
 /// CFB1 verification failures that remain safe to expose to an operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -36,6 +46,8 @@ pub enum BundleError {
     TrustPolicyMismatch,
     #[error("archive contains prohibited secret material")]
     ProhibitedMaterial,
+    #[error("private archive snapshot is unavailable")]
+    SnapshotUnavailable,
 }
 
 impl From<ProtocolError> for BundleError {
@@ -48,6 +60,20 @@ impl From<ProtocolError> for BundleError {
                 Self::InvalidEncoding
             }
         }
+    }
+}
+
+trait InvalidEncodingResult<T> {
+    fn map_invalid_encoding(self) -> Result<T, BundleError>;
+}
+
+fn snapshot_unavailable(_: std::io::Error) -> BundleError {
+    BundleError::SnapshotUnavailable
+}
+
+impl<T, E> InvalidEncodingResult<T> for Result<T, E> {
+    fn map_invalid_encoding(self) -> Result<T, BundleError> {
+        self.map_err(|_| BundleError::InvalidEncoding)
     }
 }
 
@@ -80,6 +106,51 @@ pub struct VerifiedBundle {
     pub expected_results: BTreeMap<ExpectedResultKey, String>,
     pub(crate) authority_key_id: String,
     pub(crate) authority_verifying_key: ed25519_dalek::VerifyingKey,
+}
+
+/// Selected archive limits authenticated by the requested CPF1 profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SelectedBundleCaps {
+    pub max_profile_bytes: u64,
+    pub max_bundle_members: u64,
+    pub max_member_path_bytes: u64,
+    pub max_member_bytes: u64,
+    pub max_total_bundle_bytes: u64,
+}
+
+/// Authenticated CFB1 metadata inspected without retaining non-profile member bodies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedBundlePreflight {
+    profile_bytes: Vec<u8>,
+    member_count: u64,
+    maximum_path_bytes: u64,
+    maximum_member_bytes: u64,
+    total_member_bytes: u64,
+}
+
+impl AuthenticatedBundlePreflight {
+    /// Return the digest-checked CPF1 member selected by the signed manifest.
+    #[must_use]
+    pub fn profile_bytes(&self) -> &[u8] {
+        &self.profile_bytes
+    }
+
+    /// Apply authenticated CPF1 archive limits before any archive-wide allocation.
+    ///
+    /// # Errors
+    /// Returns a bound failure when the indexed closure exceeds a selected cap.
+    pub const fn enforce_selected_caps(&self, caps: SelectedBundleCaps) -> Result<(), BundleError> {
+        if self.profile_bytes.len() as u64 > caps.max_profile_bytes
+            || self.member_count > caps.max_bundle_members
+            || self.maximum_path_bytes > caps.max_member_path_bytes
+            || self.maximum_member_bytes > caps.max_member_bytes
+            || self.total_member_bytes > caps.max_total_bundle_bytes
+        {
+            Err(BundleError::FieldOutOfBounds)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl VerifiedBundle {
@@ -136,6 +207,28 @@ struct DecodedArchive {
     manifest_bytes: Vec<u8>,
 }
 
+struct DecodedManifest {
+    mode: u8,
+    profile_digest: [u8; 32],
+    descriptors: Vec<Descriptor>,
+    expected: Vec<ExpectedResult>,
+    manifest_bytes: Vec<u8>,
+}
+
+struct ScannedMember {
+    path: String,
+    size: u64,
+    role: u8,
+}
+
+struct ScannedArchive {
+    manifest_range: Range<usize>,
+    members: Vec<ScannedMember>,
+    profile_bytes: Vec<u8>,
+    signer_key: [u8; 32],
+    signature: [u8; 64],
+}
+
 impl TrustPolicy {
     fn authority_for(&self, public_key: [u8; 32]) -> Option<&TrustRoot> {
         self.roots.iter().find(|root| {
@@ -187,6 +280,394 @@ pub fn verify_signed_bundle(
     })
 }
 
+/// Authenticate and measure a seekable CFB1 archive without retaining non-profile member bodies.
+///
+/// The input is copied once into private immutable storage while its requested
+/// archive digest and compiled size bound are checked. The staged scan then
+/// authenticates the signed manifest, trust policy, CPF1 bytes, and closure
+/// measurements needed for selected-cap enforcement. Complete canonical CFB1
+/// and member-body validation remains the responsibility of [`verify_signed_bundle`].
+///
+/// # Errors
+/// Returns a closed failure when the archive identity, canonical structure, signed manifest,
+/// trust policy, closure metadata, or authenticated CPF1 member is invalid.
+pub fn preflight_signed_bundle<R: Read + Seek>(
+    archive: &mut R,
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedBundlePreflight, BundleError> {
+    let (mut snapshot, archive_length) =
+        authenticated_snapshot(archive, request.fixture_bundle_digest)?;
+    preflight_archive(&mut snapshot, archive_length, trust_policy_bytes, request)
+}
+
+pub(crate) fn preflight_signed_bundle_bytes(
+    archive_bytes: &[u8],
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedBundlePreflight, BundleError> {
+    if archive_bytes.is_empty() || archive_bytes.len() > MAX_ARCHIVE_BYTES {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    if *blake3::hash(archive_bytes).as_bytes() != request.fixture_bundle_digest {
+        return Err(BundleError::DigestMismatch);
+    }
+    let archive_length = archive_bytes.len() as u64;
+    preflight_archive(
+        &mut Cursor::new(archive_bytes),
+        archive_length,
+        trust_policy_bytes,
+        request,
+    )
+}
+
+fn preflight_archive(
+    archive: &mut dyn ArchiveReader,
+    archive_length: u64,
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedBundlePreflight, BundleError> {
+    let scanned = scan_archive(archive, archive_length)?;
+    let manifest = read_range(archive, scanned.manifest_range.clone())
+        .and_then(|manifest_bytes| decode_manifest_bytes(manifest_bytes, request))?;
+    let trust_policy = verified_trust_policy(trust_policy_bytes, request)?;
+    verify_signature(
+        &manifest.manifest_bytes,
+        scanned.signer_key,
+        scanned.signature,
+        &trust_policy,
+    )?;
+    validate_scanned_closure(
+        &manifest,
+        &scanned.members,
+        &scanned.profile_bytes,
+        &trust_policy,
+    )?;
+    let member_count = scanned.members.len() as u64;
+    let maximum_path_bytes = scanned
+        .members
+        .iter()
+        .map(|member| member.path.len() as u64)
+        .fold(0_u64, u64::max);
+    let maximum_member_bytes = scanned
+        .members
+        .iter()
+        .map(|member| member.size)
+        .fold(0_u64, u64::max);
+    let total_member_bytes = scanned.members.iter().map(|member| member.size).sum();
+    Ok(AuthenticatedBundlePreflight {
+        profile_bytes: scanned.profile_bytes,
+        member_count,
+        maximum_path_bytes,
+        maximum_member_bytes,
+        total_member_bytes,
+    })
+}
+
+fn authenticated_snapshot<R: Read + Seek>(
+    archive: &mut R,
+    expected: [u8; 32],
+) -> Result<(File, u64), BundleError> {
+    let length = archive
+        .seek(SeekFrom::End(0))
+        .map_err(snapshot_unavailable)?;
+    if length == 0 || length > MAX_ARCHIVE_BYTES as u64 {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)?;
+    tempfile::tempfile()
+        .map_err(snapshot_unavailable)
+        .and_then(|snapshot| copy_authenticated_snapshot(archive, snapshot, length, expected))
+}
+
+fn copy_authenticated_snapshot<R: Read + ?Sized>(
+    archive: &mut R,
+    mut snapshot: File,
+    length: u64,
+    expected: [u8; 32],
+) -> Result<(File, u64), BundleError> {
+    let mut hasher = blake3::Hasher::new();
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    let mut bounded = archive.take(length + 1);
+    loop {
+        let read = bounded.read(&mut buffer).map_err(snapshot_unavailable)?;
+        if read == 0 {
+            break;
+        }
+        copied += read as u64;
+        hasher.update(&buffer[..read]);
+        snapshot
+            .write_all(&buffer[..read])
+            .map_err(snapshot_unavailable)?;
+    }
+    if copied != length || *hasher.finalize().as_bytes() != expected {
+        return Err(BundleError::DigestMismatch);
+    }
+    snapshot
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)
+        .map(|_| (snapshot, length))
+}
+
+fn scan_archive<R: Read + ?Sized>(
+    archive: &mut R,
+    archive_length: u64,
+) -> Result<ScannedArchive, BundleError> {
+    let mut decoder = Decoder::from(&mut *archive);
+    expect_array(&mut decoder, 4)?;
+    let manifest_start = decoder.offset();
+    skip_cbor_value(&mut decoder, 0)?;
+    let manifest_end = decoder.offset();
+    if manifest_end.saturating_sub(manifest_start) > MAX_MANIFEST_BYTES {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    let (members, profile_bytes) = scan_members(&mut decoder)?;
+    let signer_key = read_fixed_bytes(&mut decoder)?;
+    let signature = read_fixed_bytes(&mut decoder)?;
+    if decoder.offset() as u64 != archive_length {
+        return Err(BundleError::InvalidEncoding);
+    }
+    Ok(ScannedArchive {
+        manifest_range: manifest_start..manifest_end,
+        members,
+        profile_bytes: profile_bytes.ok_or(BundleError::ClosureIncomplete)?,
+        signer_key,
+        signature,
+    })
+}
+
+fn scan_members<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+) -> Result<(Vec<ScannedMember>, Option<Vec<u8>>), BundleError> {
+    let count = array_length(decoder)?;
+    if count == 0 || count > MAX_MEMBERS {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    let mut members = Vec::with_capacity(count);
+    let mut profile_bytes = None;
+    for _ in 0..count {
+        expect_array(decoder, 3)?;
+        let path = validated_path(&read_text(decoder, MAX_PATH_BYTES)?)?;
+        if members
+            .last()
+            .is_some_and(|member: &ScannedMember| member.path.as_bytes() >= path.as_bytes())
+        {
+            return Err(BundleError::NonCanonicalOrder);
+        }
+        let size = bytes_length(decoder)?;
+        if size > MAX_MEMBER_BYTES {
+            return Err(BundleError::FieldOutOfBounds);
+        }
+        let bytes = if path == PROFILE_PATH {
+            Some(read_bytes(decoder, size, MAX_PROFILE_BYTES)?)
+        } else {
+            drain_bytes(decoder, size)?;
+            None
+        };
+        let role = positive(decoder)?;
+        let role = u8::try_from(role).map_invalid_encoding()?;
+        if role > 19 {
+            return Err(BundleError::FieldOutOfBounds);
+        }
+        if let Some(bytes) = bytes {
+            profile_bytes = Some(bytes);
+        }
+        members.push(ScannedMember {
+            path,
+            size: size as u64,
+            role,
+        });
+    }
+    Ok((members, profile_bytes))
+}
+
+fn skip_cbor_value<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+    depth: usize,
+) -> Result<(), BundleError> {
+    if depth > 32 {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    match decoder.pull().map_invalid_encoding()? {
+        Header::Positive(_) | Header::Simple(20..=22) => Ok(()),
+        Header::Bytes(Some(length)) => drain_bytes(decoder, length),
+        Header::Text(Some(length)) => drain_text(decoder, length),
+        Header::Array(Some(length)) if length <= MAX_MEMBERS => {
+            (0..length).try_for_each(|_| skip_cbor_value(decoder, depth + 1))
+        }
+        Header::Array(Some(_)) => Err(BundleError::FieldOutOfBounds),
+        _ => Err(BundleError::InvalidEncoding),
+    }
+}
+
+fn expect_array<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+    expected: usize,
+) -> Result<(), BundleError> {
+    if decoder.pull().map_invalid_encoding()? == Header::Array(Some(expected)) {
+        Ok(())
+    } else {
+        Err(BundleError::InvalidEncoding)
+    }
+}
+
+fn array_length<R: Read + ?Sized>(decoder: &mut Decoder<&mut R>) -> Result<usize, BundleError> {
+    match decoder.pull().map_invalid_encoding()? {
+        Header::Array(Some(length)) => Ok(length),
+        _ => Err(BundleError::InvalidEncoding),
+    }
+}
+
+fn bytes_length<R: Read + ?Sized>(decoder: &mut Decoder<&mut R>) -> Result<usize, BundleError> {
+    match decoder.pull().map_invalid_encoding()? {
+        Header::Bytes(Some(length)) => Ok(length),
+        _ => Err(BundleError::InvalidEncoding),
+    }
+}
+
+fn positive<R: Read + ?Sized>(decoder: &mut Decoder<&mut R>) -> Result<u64, BundleError> {
+    match decoder.pull().map_invalid_encoding()? {
+        Header::Positive(value) => Ok(value),
+        _ => Err(BundleError::InvalidEncoding),
+    }
+}
+
+fn read_fixed_bytes<const N: usize, R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+) -> Result<[u8; N], BundleError> {
+    let length = bytes_length(decoder)?;
+    let bytes = read_bytes(decoder, length, N)?;
+    bytes.try_into().map_invalid_encoding()
+}
+
+fn read_text<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+    maximum: usize,
+) -> Result<String, BundleError> {
+    let length = match decoder.pull().map_invalid_encoding()? {
+        Header::Text(Some(length)) if length <= maximum => length,
+        Header::Text(Some(_)) => return Err(BundleError::FieldOutOfBounds),
+        _ => return Err(BundleError::InvalidEncoding),
+    };
+    let mut output = String::with_capacity(length);
+    let mut segments = decoder.text(Some(length));
+    while let Some(mut segment) = segments.pull().map_invalid_encoding()? {
+        let mut buffer = [0_u8; 256];
+        while let Some(chunk) = segment.pull(&mut buffer).map_invalid_encoding()? {
+            output.push_str(chunk);
+        }
+    }
+    Ok(output)
+}
+
+fn read_bytes<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+    length: usize,
+    maximum: usize,
+) -> Result<Vec<u8>, BundleError> {
+    if length > maximum {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    let mut output = Vec::with_capacity(length);
+    let mut segments = decoder.bytes(Some(length));
+    while let Some(mut segment) = segments.pull().map_invalid_encoding()? {
+        let mut buffer = [0_u8; 8192];
+        while let Some(chunk) = segment.pull(&mut buffer).map_invalid_encoding()? {
+            output.extend_from_slice(chunk);
+        }
+    }
+    Ok(output)
+}
+
+fn drain_bytes<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+    length: usize,
+) -> Result<(), BundleError> {
+    let mut segments = decoder.bytes(Some(length));
+    while let Some(mut segment) = segments.pull().map_invalid_encoding()? {
+        let mut buffer = [0_u8; 8192];
+        while segment.pull(&mut buffer).map_invalid_encoding()?.is_some() {}
+    }
+    Ok(())
+}
+
+fn drain_text<R: Read + ?Sized>(
+    decoder: &mut Decoder<&mut R>,
+    length: usize,
+) -> Result<(), BundleError> {
+    let mut segments = decoder.text(Some(length));
+    while let Some(mut segment) = segments.pull().map_invalid_encoding()? {
+        let mut buffer = [0_u8; 8192];
+        while segment.pull(&mut buffer).map_invalid_encoding()?.is_some() {}
+    }
+    Ok(())
+}
+
+fn read_range<R: Read + Seek + ?Sized>(
+    archive: &mut R,
+    range: Range<usize>,
+) -> Result<Vec<u8>, BundleError> {
+    let length = range.end - range.start;
+    archive
+        .seek(SeekFrom::Start(range.start as u64))
+        .map_invalid_encoding()?;
+    let mut bytes = vec![0_u8; length];
+    archive.read_exact(&mut bytes).map_invalid_encoding()?;
+    Ok(bytes)
+}
+
+fn verified_trust_policy(
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<TrustPolicy, BundleError> {
+    if *blake3::hash(trust_policy_bytes).as_bytes() != request.trust_policy_snapshot_digest {
+        return Err(BundleError::TrustPolicyMismatch);
+    }
+    decode_trust_policy(trust_policy_bytes)
+}
+
+fn validate_scanned_closure(
+    manifest: &DecodedManifest,
+    members: &[ScannedMember],
+    profile_bytes: &[u8],
+    trust_policy: &TrustPolicy,
+) -> Result<(), BundleError> {
+    if manifest.descriptors.len() != members.len() {
+        return Err(BundleError::ClosureIncomplete);
+    }
+    for (descriptor, member) in manifest.descriptors.iter().zip(members) {
+        if descriptor.path != member.path
+            || descriptor.size != member.size
+            || descriptor.role != member.role
+        {
+            return Err(BundleError::DigestMismatch);
+        }
+        if descriptor.path == PROFILE_PATH
+            && (profile_bytes.len() as u64 != descriptor.size
+                || *blake3::hash(profile_bytes).as_bytes() != descriptor.digest)
+        {
+            return Err(BundleError::DigestMismatch);
+        }
+        if trust_policy.artifact_is_revoked(&descriptor.digest) {
+            return Err(BundleError::TrustPolicyMismatch);
+        }
+    }
+    for expected in &manifest.expected {
+        let descriptor = manifest
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.path == expected.path)
+            .ok_or(BundleError::ClosureIncomplete)?;
+        if descriptor.digest != expected.digest {
+            return Err(BundleError::DigestMismatch);
+        }
+    }
+    Ok(())
+}
+
 fn validate_requested_artifacts(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
@@ -213,12 +694,41 @@ fn decode_archive(
 ) -> Result<DecodedArchive, BundleError> {
     let root = decode_canonical_with_limit(archive_bytes, MAX_ARCHIVE_BYTES)?;
     let [manifest_value, members_value, signer_key_value, signature_value] = into_array::<4>(root)?;
-    let manifest_bytes = encode(&manifest_value)?;
+    let manifest = encode(&manifest_value)
+        .map_err(BundleError::from)
+        .and_then(|manifest_bytes| {
+            decode_manifest_value(manifest_value, manifest_bytes, request)
+        })?;
+    Ok(DecodedArchive {
+        mode: manifest.mode,
+        profile_digest: manifest.profile_digest,
+        descriptors: manifest.descriptors,
+        expected: manifest.expected,
+        members: decode_members(members_value)?,
+        signer_key: fixed_bytes(&signer_key_value)?,
+        signature: fixed_bytes(&signature_value)?,
+        manifest_bytes: manifest.manifest_bytes,
+    })
+}
+
+fn decode_manifest_bytes(
+    manifest_bytes: Vec<u8>,
+    request: &EvaluationRequest,
+) -> Result<DecodedManifest, BundleError> {
+    let value = decode_canonical_with_limit(&manifest_bytes, MAX_MANIFEST_BYTES)?;
+    decode_manifest_value(value, manifest_bytes, request)
+}
+
+fn decode_manifest_value(
+    manifest_value: Value,
+    manifest_bytes: Vec<u8>,
+    request: &EvaluationRequest,
+) -> Result<DecodedManifest, BundleError> {
     let [magic, version, mode, profile, descriptors, expected] = into_array::<6>(manifest_value)?;
     if text(&magic)? != "CFB1" || uint(&version)? != 0 {
         return Err(BundleError::InvalidEncoding);
     }
-    let mode = u8::try_from(uint(&mode)?).map_err(|_| BundleError::InvalidEncoding)?;
+    let mode = u8::try_from(uint(&mode)?).map_invalid_encoding()?;
     if mode > 1 {
         return Err(BundleError::InvalidEncoding);
     }
@@ -226,21 +736,18 @@ fn decode_archive(
     if profile_digest != request.profile_digest {
         return Err(BundleError::DigestMismatch);
     }
-    Ok(DecodedArchive {
+    Ok(DecodedManifest {
         mode,
         profile_digest,
         descriptors: decode_descriptors(descriptors)?,
         expected: decode_expected_results(expected)?,
-        members: decode_members(members_value)?,
-        signer_key: fixed_bytes(&signer_key_value)?,
-        signature: fixed_bytes(&signature_value)?,
         manifest_bytes,
     })
 }
 
 fn into_array<const WIDTH: usize>(value: Value) -> Result<[Value; WIDTH], BundleError> {
     match value {
-        Value::Array(values) => values.try_into().map_err(|_| BundleError::InvalidEncoding),
+        Value::Array(values) => values.try_into().map_invalid_encoding(),
         _ => Err(BundleError::InvalidEncoding),
     }
 }
@@ -266,17 +773,33 @@ fn verify_archive_signature(
     archive: &DecodedArchive,
     trust_policy: &TrustPolicy,
 ) -> Result<(TrustRoot, ed25519_dalek::VerifyingKey), BundleError> {
-    let trusted_authority = trust_policy
-        .authority_for(archive.signer_key)
-        .ok_or(BundleError::SignatureInvalid)?;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&archive.signer_key)
-        .map_err(|_| BundleError::SignatureInvalid)?;
-    key.verify(
+    verify_signature(
         &archive.manifest_bytes,
-        &ed25519_dalek::Signature::from_bytes(&archive.signature),
+        archive.signer_key,
+        archive.signature,
+        trust_policy,
     )
-    .map_err(|_| BundleError::SignatureInvalid)?;
-    Ok((trusted_authority.clone(), key))
+}
+
+fn verify_signature(
+    manifest_bytes: &[u8],
+    signer_key: [u8; 32],
+    signature: [u8; 64],
+    trust_policy: &TrustPolicy,
+) -> Result<(TrustRoot, ed25519_dalek::VerifyingKey), BundleError> {
+    let trusted_authority = trust_policy
+        .authority_for(signer_key)
+        .ok_or(BundleError::SignatureInvalid)?;
+    ed25519_dalek::VerifyingKey::from_bytes(&signer_key)
+        .map_err(|_| BundleError::SignatureInvalid)
+        .and_then(|key| {
+            key.verify(
+                manifest_bytes,
+                &ed25519_dalek::Signature::from_bytes(&signature),
+            )
+            .map_err(|_| BundleError::SignatureInvalid)
+            .map(|()| (trusted_authority.clone(), key))
+        })
 }
 
 fn sensitive_name(value: &str) -> bool {
@@ -413,21 +936,24 @@ fn decode_trust_policy(bytes: &[u8]) -> Result<TrustPolicy, BundleError> {
         return Err(BundleError::TrustPolicyMismatch);
     }
     let signature: [u8; 64] = fixed_bytes(&fields[11])?;
-    let unsigned = encode(&Value::Array(fields[..11].to_vec()))?;
-    let signature = ed25519_dalek::Signature::from_bytes(&signature);
-    let signed_by_active_root = roots.iter().any(|root| {
-        !revoked_key_ids.contains(&root.key_id)
-            && ed25519_dalek::VerifyingKey::from_bytes(&root.public_key)
-                .is_ok_and(|key| key.verify(&unsigned, &signature).is_ok())
-    });
-    if !signed_by_active_root {
-        return Err(BundleError::TrustPolicyMismatch);
-    }
-    Ok(TrustPolicy {
-        roots,
-        revoked_key_ids,
-        revoked_artifact_digests,
-    })
+    encode(&Value::Array(fields[..11].to_vec()))
+        .map_err(BundleError::from)
+        .and_then(|unsigned| {
+            let signature = ed25519_dalek::Signature::from_bytes(&signature);
+            let signed_by_active_root = roots.iter().any(|root| {
+                !revoked_key_ids.contains(&root.key_id)
+                    && ed25519_dalek::VerifyingKey::from_bytes(&root.public_key)
+                        .is_ok_and(|key| key.verify(&unsigned, &signature).is_ok())
+            });
+            if !signed_by_active_root {
+                return Err(BundleError::TrustPolicyMismatch);
+            }
+            Ok(TrustPolicy {
+                roots,
+                revoked_key_ids,
+                revoked_artifact_digests,
+            })
+        })
 }
 
 fn decode_trust_roots(value: &Value) -> Result<Vec<TrustRoot>, BundleError> {
@@ -605,7 +1131,7 @@ fn decode_descriptors(value: Value) -> Result<Vec<Descriptor>, BundleError> {
             let path = validated_path(text(&fields[0])?)?;
             let size = uint(&fields[1])?;
             let digest = fixed_bytes(&fields[2])?;
-            let role = u8::try_from(uint(&fields[3])?).map_err(|_| BundleError::InvalidEncoding)?;
+            let role = u8::try_from(uint(&fields[3])?).map_invalid_encoding()?;
             if size > 64 * 1024 * 1024 || role > 19 {
                 return Err(BundleError::FieldOutOfBounds);
             }
@@ -651,7 +1177,7 @@ fn decode_members(value: Value) -> Result<BTreeMap<String, VerifiedMember>, Bund
         let Value::Bytes(raw) = raw_value else {
             return Err(BundleError::InvalidEncoding);
         };
-        let role = u8::try_from(uint(&role_value)?).map_err(|_| BundleError::InvalidEncoding)?;
+        let role = u8::try_from(uint(&role_value)?).map_invalid_encoding()?;
         total += raw.len();
         if raw.len() > MAX_MEMBER_BYTES || total > MAX_ARCHIVE_BYTES || role > 19 {
             return Err(BundleError::FieldOutOfBounds);
@@ -679,9 +1205,8 @@ fn decode_expected_results(value: Value) -> Result<Vec<ExpectedResult>, BundleEr
             if case_id.is_empty() || case_id.len() > 128 {
                 return Err(BundleError::FieldOutOfBounds);
             }
-            let claim_layer =
-                u8::try_from(uint(&fields[1])?).map_err(|_| BundleError::InvalidEncoding)?;
-            let mode = u8::try_from(uint(&fields[3])?).map_err(|_| BundleError::InvalidEncoding)?;
+            let claim_layer = u8::try_from(uint(&fields[1])?).map_invalid_encoding()?;
+            let mode = u8::try_from(uint(&fields[3])?).map_invalid_encoding()?;
             if claim_layer > 6 || mode > 1 {
                 return Err(BundleError::InvalidEncoding);
             }

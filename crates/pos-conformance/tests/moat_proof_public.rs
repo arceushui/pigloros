@@ -38,21 +38,7 @@ impl ManifestField {
 }
 
 #[derive(Clone, Copy)]
-enum ContractField {
-    Report,
-}
-
-impl ContractField {
-    const fn index(self) -> usize {
-        match self {
-            Self::Report => 6,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
 enum ReportField {
-    Cases,
     FollowOnCounts,
     Digest,
 }
@@ -60,22 +46,8 @@ enum ReportField {
 impl ReportField {
     const fn index(self) -> usize {
         match self {
-            Self::Cases => 13,
             Self::FollowOnCounts => 20,
             Self::Digest => 21,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CaseField {
-    FirstCoordinate,
-}
-
-impl CaseField {
-    const fn index(self) -> usize {
-        match self {
-            Self::FirstCoordinate => 6,
         }
     }
 }
@@ -185,6 +157,7 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
             visibility: "operator".to_owned(),
             dependency_class: DependencyClassV1::EndogenousRecomputed,
         }],
+        structural_causal_trace: Vec::new(),
         uncertainty: vec![UncertaintyV1 {
             label: "agent_confidence".to_owned(),
             lower: 0.4,
@@ -217,6 +190,284 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
         },
         contract: proof_contract_fixture(),
     }
+}
+
+fn artifact_evaluation(
+    transition_rule: pos_core::ArtifactTransitionRuleV1,
+    enclosing_claim: pos_core::ErasureReplayClaimV1,
+) -> pos_core::ReplayClaimEvaluationV1 {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ErasureArtifactClassV1, ErasureReferenceV1, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let inputs = [
+        (ErasureArtifactClassV1::ReproManifest, 71),
+        (ErasureArtifactClassV1::CausalTrace, 72),
+        (ErasureArtifactClassV1::Export, 73),
+        (ErasureArtifactClassV1::ForkOrSnapshot, 74),
+    ]
+    .into_iter()
+    .map(|(artifact_class, digest_byte)| ArtifactClaimInputV1 {
+        registration: RegisteredArtifactV1::new(
+            artifact_class,
+            ErasureReferenceV1::from_digest([digest_byte; 32]),
+            ArtifactDataClassV1::PrivateSubjectData,
+            None,
+            ErasureReferenceV1::from_digest([72; 32]),
+            ArtifactOptionalityV1::Required,
+            transition_rule,
+        ),
+        current_claim: enclosing_claim,
+        state: ArtifactStateV1::TransitionApplied,
+    })
+    .collect::<Vec<_>>();
+    ok(ReplayClaimEvaluatorV1::evaluate(enclosing_claim, &inputs))
+}
+
+#[test]
+fn incomplete_artifact_closure_is_rejected_before_evidence_mutation() {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1,
+        RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let mut evidence = public_evidence_fixture();
+    let original = evidence.clone();
+    let incomplete = ok(ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::CausalTrace,
+                ErasureReferenceV1::from_digest([71; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([72; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::Retained,
+        }],
+    ));
+
+    assert_eq!(
+        evidence.apply_artifact_evaluation(&incomplete),
+        Err(EvidenceError::IncompleteArtifactClosure)
+    );
+    assert_eq!(evidence, original);
+}
+
+#[test]
+fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
+    use pos_core::ArtifactTransitionRuleV1;
+
+    let mut evidence = public_evidence_fixture();
+    let original_contract_digest = evidence.contract.counterfactual.contract_digest;
+    evidence.causal_trace[0].relation = "deleted-subject-label".to_owned();
+    evidence.causal_trace[0].visibility = "deleted-private-audience".to_owned();
+    let evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::RetainStructure,
+        pos_core::ErasureReplayClaimV1::Exact,
+    );
+
+    ok(evidence.apply_artifact_evaluation(&evaluation));
+
+    assert!(evidence.causal_trace.is_empty());
+    assert_eq!(evidence.structural_causal_trace.len(), 1);
+    assert_eq!(
+        evidence.manifest.replay_claim,
+        ReplayClaimV1::StructuralOnly
+    );
+    assert_eq!(
+        evidence.contract.counterfactual.replay_claim,
+        ReplayClaimV1::StructuralOnly
+    );
+    assert_ne!(
+        evidence.contract.counterfactual.contract_digest,
+        original_contract_digest
+    );
+    assert_eq!(
+        evidence.contract.counterfactual.contract_digest,
+        ok(evidence.contract.counterfactual.calculated_digest())
+    );
+    let json = ok(evidence.to_json());
+    let cbor = ok(evidence.to_canonical_cbor());
+    assert!(!json.contains("deleted-subject-label"));
+    assert!(!json.contains("deleted-private-audience"));
+    assert!(!String::from_utf8_lossy(&cbor).contains("deleted-subject-label"));
+    assert!(!String::from_utf8_lossy(&cbor).contains("deleted-private-audience"));
+    assert_eq!(ok(MoatProofEvidenceV1::from_json(&json)), evidence);
+    assert_eq!(
+        ok(MoatProofEvidenceV1::from_canonical_cbor(&cbor)),
+        evidence
+    );
+    assert_eq!(verify_evidence(&evidence), Ok(()));
+}
+
+#[test]
+fn redacted_view_export_removes_protected_causal_labels() {
+    let mut evidence = public_evidence_fixture();
+    evidence.causal_trace[0].relation = "deleted-subject-label".to_owned();
+    evidence.causal_trace[0].visibility = "deleted-private-audience".to_owned();
+    let evaluation = artifact_evaluation(
+        pos_core::ArtifactTransitionRuleV1::RedactViews,
+        pos_core::ErasureReplayClaimV1::Exact,
+    );
+
+    ok(evidence.apply_artifact_evaluation(&evaluation));
+
+    assert_eq!(
+        evidence.manifest.replay_claim,
+        ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+    );
+    assert_eq!(evidence.causal_trace[0].relation, "redacted");
+    assert_eq!(evidence.causal_trace[0].visibility, "redacted");
+    assert!(evidence.structural_causal_trace.is_empty());
+    let json = ok(evidence.to_json());
+    let cbor = ok(evidence.to_canonical_cbor());
+    assert!(!json.contains("deleted-subject-label"));
+    assert!(!json.contains("deleted-private-audience"));
+    assert!(!String::from_utf8_lossy(&cbor).contains("deleted-subject-label"));
+    assert!(!String::from_utf8_lossy(&cbor).contains("deleted-private-audience"));
+    assert_eq!(verify_evidence(&evidence), Ok(()));
+}
+
+#[test]
+fn incompatible_profile_remains_orthogonal_to_structural_and_view_redaction() {
+    use pos_core::{ArtifactTransitionRuleV1, ErasureReplayClaimV1};
+
+    let mut retained = public_evidence_fixture();
+    let retained_evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::PreserveExact,
+        ErasureReplayClaimV1::IncompatibleProfile,
+    );
+    ok(retained.apply_artifact_evaluation(&retained_evaluation));
+    assert_eq!(
+        retained.manifest.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(retained.causal_trace.len(), 1);
+    assert!(retained.structural_causal_trace.is_empty());
+    assert_eq!(verify_evidence(&retained), Ok(()));
+
+    let mut structural = public_evidence_fixture();
+    let structural_evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::RetainStructure,
+        ErasureReplayClaimV1::IncompatibleProfile,
+    );
+    ok(structural.apply_artifact_evaluation(&structural_evaluation));
+    assert_eq!(
+        structural.manifest.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert!(structural.causal_trace.is_empty());
+    assert_eq!(structural.structural_causal_trace.len(), 1);
+    assert_eq!(verify_evidence(&structural), Ok(()));
+    assert!(structural.to_canonical_cbor().is_ok());
+
+    let mut redacted = public_evidence_fixture();
+    let redacted_evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::RedactViews,
+        ErasureReplayClaimV1::IncompatibleProfile,
+    );
+    ok(redacted.apply_artifact_evaluation(&redacted_evaluation));
+    assert_eq!(
+        redacted.manifest.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(redacted.causal_trace[0].relation, "redacted");
+    assert_eq!(redacted.causal_trace[0].visibility, "redacted");
+    assert_eq!(verify_evidence(&redacted), Ok(()));
+    assert!(redacted.to_canonical_cbor().is_ok());
+
+    let mut missing = public_evidence_fixture();
+    let missing_evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::Remove,
+        ErasureReplayClaimV1::IncompatibleProfile,
+    );
+    ok(missing.apply_artifact_evaluation(&missing_evaluation));
+    assert_eq!(
+        missing.manifest.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert!(missing.causal_trace.is_empty());
+    assert_eq!(missing.structural_causal_trace.len(), 1);
+    assert_eq!(verify_evidence(&missing), Ok(()));
+}
+
+#[test]
+fn public_serializers_reject_contradictory_structural_evidence() {
+    let mut evidence = public_evidence_fixture();
+    evidence.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+    evidence.contract.counterfactual.replay_claim = ReplayClaimV1::StructuralOnly;
+    ok(evidence.contract.counterfactual.refresh_digest());
+
+    expect_err(&evidence.to_json());
+    expect_err(&evidence.to_canonical_cbor());
+}
+
+#[test]
+fn missing_artifacts_never_produce_an_exact_verification_outcome() {
+    let mut evidence = public_evidence_fixture();
+    let evaluation = artifact_evaluation(
+        pos_core::ArtifactTransitionRuleV1::Remove,
+        pos_core::ErasureReplayClaimV1::Exact,
+    );
+    ok(evidence.apply_artifact_evaluation(&evaluation));
+
+    let result = ok(evidence.to_verification_result());
+
+    assert_eq!(
+        result.verification_outcome,
+        VerificationOutcomeV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(
+        result.replay_claim,
+        ReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(result.authoritative_result_digest, None);
+    assert_eq!(result.checked_artifact_count, 5);
+    assert_eq!(
+        result.first_error.as_ref().map(|error| error.code),
+        Some(SafeErrorCodeV1::ClosureIncomplete)
+    );
+    let encoded = ok(result.to_canonical_cbor());
+    assert_eq!(
+        ok(VerificationResultV1::from_canonical_cbor(&encoded)),
+        result
+    );
+
+    let mut structural_result = result;
+    structural_result.replay_claim = ReplayClaimV1::StructuralOnly;
+    structural_result.result_digest = ok(structural_result.digest());
+    let encoded = ok(structural_result.to_canonical_cbor());
+    assert_eq!(
+        ok(VerificationResultV1::from_canonical_cbor(&encoded)),
+        structural_result
+    );
+}
+
+#[test]
+fn incompatible_profile_produces_a_typed_non_exact_verification_outcome() {
+    let mut evidence = public_evidence_fixture();
+    evidence.manifest.replay_claim = ReplayClaimV1::IncompatibleProfile;
+    evidence.contract.counterfactual.replay_claim = ReplayClaimV1::IncompatibleProfile;
+    ok(evidence.contract.counterfactual.refresh_digest());
+
+    let result = ok(evidence.to_verification_result());
+
+    assert_eq!(
+        result.verification_outcome,
+        VerificationOutcomeV1::IncompatibleProfile
+    );
+    assert_eq!(result.replay_claim, ReplayClaimV1::IncompatibleProfile);
+    assert_eq!(result.authoritative_result_digest, None);
+    assert_eq!(
+        result.first_error.as_ref().map(|error| error.code),
+        Some(SafeErrorCodeV1::ProfileUnsupported)
+    );
 }
 
 fn authorization_fixtures() -> (
@@ -310,7 +561,7 @@ fn counterfactual_fixture() -> CounterfactualContractV1 {
         provenance_digest: [9; 32],
         invalidation_digest: [10; 32],
     };
-    CounterfactualContractV1 {
+    let mut contract = CounterfactualContractV1 {
         fork_id: [3; 16],
         prior_generation: 0,
         generation: 1,
@@ -341,85 +592,10 @@ fn counterfactual_fixture() -> CounterfactualContractV1 {
         recomputed_event_seqs: vec![2],
         retained_exogenous_digests: vec![[8; 32]],
         replay_claim: ReplayClaimV1::Exact,
-        contract_digest: [11; 32],
-    }
-}
-
-fn conformance_report_fixture() -> ConformanceReportV1 {
-    let cases = vec![
-        CaseOutcomeV1 {
-            case_id: "scenario-air-gapped".to_owned(),
-            fixture_digest: [14; 32],
-            execution_profile_digest: [4; 32],
-            mode: ExecutionModeV1::AirGapped,
-            claim_layer: ClaimLayerV1::ReplayConformance,
-            outcome: CaseOutcomeStatusV1::Pass,
-            first_coordinate: None,
-            expected_digest: Some([14; 32]),
-            actual_digest: Some([14; 32]),
-            expected_error: None,
-            actual_error: None,
-            replay_claim: ReplayClaimV1::Exact,
-            redaction_state: RedactionStateV1::None,
-            provenance_digest: [15; 32],
-        },
-        CaseOutcomeV1 {
-            case_id: "scenario-local".to_owned(),
-            fixture_digest: [14; 32],
-            execution_profile_digest: [4; 32],
-            mode: ExecutionModeV1::Local,
-            claim_layer: ClaimLayerV1::ReplayConformance,
-            outcome: CaseOutcomeStatusV1::Pass,
-            first_coordinate: None,
-            expected_digest: Some([14; 32]),
-            actual_digest: Some([14; 32]),
-            expected_error: None,
-            actual_error: None,
-            replay_claim: ReplayClaimV1::Exact,
-            redaction_state: RedactionStateV1::None,
-            provenance_digest: [15; 32],
-        },
-    ];
-    let mut report = ConformanceReportV1 {
-        report_id: [1; 16],
-        subject_artifact_digest: [1; 32],
-        profile_digest: [2; 32],
-        normative_spec_digest: [3; 32],
-        execution_profile_digest: [4; 32],
-        fixture_bundle_digest: [5; 32],
-        evaluator_source_digest: [6; 32],
-        evaluator_binary_digest: [7; 32],
-        evaluator_protocol_digest: [8; 32],
-        implementation: ImplementationIdentityV1 {
-            implementation_id: "test".to_owned(),
-            source_digest: [1; 32],
-            build_digest: [2; 32],
-            binary_digest: [3; 32],
-            public_contract_digest: [4; 32],
-            organization_id: None,
-        },
-        independence: IndependenceEvidenceV1 {
-            technical_independent: true,
-            authorship_independent: true,
-            organizational_independent: false,
-            declaration_digest: [9; 32],
-            shared_code_audit_digest: [10; 32],
-            reviewer_ids: vec!["reviewer".to_owned()],
-        },
-        cases,
-        passed: 2,
-        failed: 0,
-        skipped: 0,
-        unavailable: 0,
-        not_applicable: 0,
-        replay_claim: ReplayClaimV1::Exact,
-        redaction_state: RedactionStateV1::None,
-        limitations_digest: [11; 32],
-        provenance_digest: [12; 32],
-        report_digest: [0; 32],
+        contract_digest: [0; 32],
     };
-    report.report_digest = fixture_ok("compute conformance report digest", report.digest());
-    report
+    ok(contract.refresh_digest());
+    contract
 }
 
 fn proof_contract_fixture() -> Wave8ProofContractV1 {
@@ -462,7 +638,6 @@ fn proof_contract_fixture() -> Wave8ProofContractV1 {
             committed: true,
             failure_class: None,
         }],
-        conformance_report: conformance_report_fixture(),
         non_interference: wave8_non_interference_matrix([1; 32]),
     }
 }
@@ -545,28 +720,16 @@ fn replace_nested_field(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn replace_evidence_case_coordinate(
-    evidence: &ciborium::Value,
-    coordinate: ciborium::Value,
-) -> ciborium::Value {
+fn append_retired_contract_field(evidence: &ciborium::Value) -> ciborium::Value {
     let mut evidence_fields = cloned_array_fields(evidence, "decode evidence fixture structure");
     let mut contract_fields = cloned_array_fields(
         &evidence_fields[EvidenceField::Contract.index()],
         "decode proof-contract fixture structure",
     );
-    let mut report_fields = cloned_array_fields(
-        &contract_fields[ContractField::Report.index()],
-        "decode conformance-report fixture structure",
+    contract_fields.insert(
+        6,
+        ciborium::Value::Text(CONFORMANCE_REPORT_MAGIC_V1.to_owned()),
     );
-    let mut cases = cloned_array_fields(
-        &report_fields[ReportField::Cases.index()],
-        "decode conformance cases fixture structure",
-    );
-    let mut case = cloned_array_fields(&cases[0], "decode first conformance case structure");
-    case[CaseField::FirstCoordinate.index()] = coordinate;
-    cases[0] = ciborium::Value::Array(case);
-    report_fields[ReportField::Cases.index()] = ciborium::Value::Array(cases);
-    contract_fields[ContractField::Report.index()] = ciborium::Value::Array(report_fields);
     evidence_fields[EvidenceField::Contract.index()] = ciborium::Value::Array(contract_fields);
     ciborium::Value::Array(evidence_fields)
 }
@@ -709,6 +872,53 @@ fn exercise_scalar_boundaries<T, E>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
     let mut evidence = public_evidence_fixture();
+    configure_intervention_events(&mut evidence);
+    configure_failed_atomicity(&mut evidence);
+    configure_counterfactual_intervention(&mut evidence);
+    evidence
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn configure_intervention_events(evidence: &mut MoatProofEvidenceV1) {
+    evidence.manifest.fork_cut_seq = Some(1);
+    evidence.authoritative_events[1].tick = 2;
+    "world.action.v1".clone_into(&mut evidence.authoritative_events[1].event_type);
+    evidence.authoritative_events[1].payload_digest = [24; 32];
+    let mut closure = evidence
+        .authoritative_events
+        .pop()
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("closure Event fixture is absent")));
+    evidence.authoritative_events.push(AuthoritativeEventV1 {
+        seq: 3,
+        tick: 2,
+        entity: "society".to_owned(),
+        event_type: "society.signal".to_owned(),
+        payload_digest: [27; 32],
+        causation_seq: Some(2),
+    });
+    closure.seq = 4;
+    closure.tick = 3;
+    evidence.authoritative_events.push(closure);
+    "intervention_to_physics".clone_into(&mut evidence.causal_trace[0].relation);
+    evidence.causal_trace.push(CausalTraceEntryV1 {
+        cause_seq: 2,
+        effect_seq: 3,
+        relation: "agent_to_society".to_owned(),
+        visibility: "public".to_owned(),
+        dependency_class: DependencyClassV1::EndogenousRecomputed,
+    });
+    "world.action.v1".clone_into(&mut evidence.participant_views[0].hidden_event_types[1]);
+    evidence.participant_views[0]
+        .hidden_event_types
+        .push("society.signal".to_owned());
+    evidence.contract.knowledge_snapshots[0].hidden_event_types =
+        vec!["world.action.v1".to_owned(), "society.signal".to_owned()];
+    evidence.host_closure.effective_after_seq = 4;
+    evidence.host_closure.closure_event_seq = 4;
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn configure_failed_atomicity(evidence: &mut MoatProofEvidenceV1) {
     evidence.plugin_failures = vec![
         PluginFailureV1 {
             plugin: "crashing-plugin".to_owned(),
@@ -733,36 +943,119 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
             sibling_step_count: 4,
         },
     ];
-    evidence.contract.counterfactual.intervention = Some(InterventionV1 {
+    evidence.contract.atomicity = vec![
+        TickAtomicityV1 {
+            tick: 1,
+            fork_generation: 1,
+            staged_event_count: 1,
+            committed_event_count: 0,
+            state_digest_before: [21; 32],
+            state_digest_after: [21; 32],
+            committed: false,
+            failure_class: Some(PluginFailureClassV1::PluginCrash),
+        },
+        TickAtomicityV1 {
+            tick: 2,
+            fork_generation: 1,
+            staged_event_count: 3,
+            committed_event_count: 0,
+            state_digest_before: [22; 32],
+            state_digest_after: [22; 32],
+            committed: false,
+            failure_class: Some(PluginFailureClassV1::ResourceExhaustion),
+        },
+    ];
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn dependency_node(
+    tick: u64,
+    scheduler_position: u32,
+    owner_id: &str,
+    event_type: &str,
+    artifact_digest: [u8; 32],
+) -> DependencyNodeV1 {
+    DependencyNodeV1 {
+        tick,
+        scheduler_position,
+        owner_id: owner_id.to_owned(),
+        output_ordinal: 0,
+        schema_id: schema_id_for_event_type(event_type),
+        artifact_digest,
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn configure_counterfactual_intervention(evidence: &mut MoatProofEvidenceV1) {
+    let action_node = dependency_node(2, 0, "agent", "world.action.v1", [24; 32]);
+    let society_node = dependency_node(2, 3, "society", "society.signal", [27; 32]);
+    let observation_node = dependency_node(1, 1, "body", "world.observation.v1", [1; 32]);
+    let zero_node = evidence.contract.counterfactual.dependencies[0]
+        .source
+        .clone();
+    let dependency = |consumer: DependencyNodeV1,
+                      source: DependencyNodeV1,
+                      dependency_class: DependencyClassV1| InputDependencyV1 {
+        consumer,
+        source,
+        dependency_class,
+        authorization_digest: [4; 32],
+        provenance_digest: [5; 32],
+    };
+    let counterfactual = &mut evidence.contract.counterfactual;
+    counterfactual.intervention = Some(InterventionV1 {
         intervention_id: [23; 16],
         target: "body".to_owned(),
         operation: "set_velocity".to_owned(),
         value_digest: [24; 32],
-        effective_tick: 1,
+        effective_tick: 2,
         ordinal: 0,
         principal_id: "principal:operator".to_owned(),
         capability: "intervene".to_owned(),
         consent_epoch: 0,
         provenance_digest: [25; 32],
     });
-    evidence
-        .contract
-        .counterfactual
-        .frontier
-        .unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
-    evidence
-        .contract
-        .counterfactual
-        .frontier
-        .unknown_edge_coordinates = vec![DependencyNodeV1 {
-        tick: 2,
-        scheduler_position: 1,
-        owner_id: "unknown-owner".to_owned(),
-        output_ordinal: 0,
-        schema_id: schema_id_for_event_type("unknown.event.v1"),
-        artifact_digest: [26; 32],
+    counterfactual.dependencies = vec![
+        dependency(
+            observation_node,
+            zero_node,
+            DependencyClassV1::EndogenousRecomputed,
+        ),
+        dependency(
+            action_node.clone(),
+            dependency_node(1, 1, "body", "world.observation.v1", [1; 32]),
+            DependencyClassV1::InterventionAssigned,
+        ),
+        dependency(
+            society_node.clone(),
+            action_node.clone(),
+            DependencyClassV1::EndogenousRecomputed,
+        ),
+    ];
+    counterfactual.frontier.intervention_seed_nodes = vec![action_node];
+    counterfactual.frontier.affected_nodes = vec![society_node.clone()];
+    counterfactual.frontier.owner_frontiers = vec![OwnerFrontierV1 {
+        owner_id: "society".to_owned(),
+        earliest_tick: 2,
+        earliest_scheduler_position: 3,
+        earliest_output_ordinal: 0,
+        cause_node_digests: vec![[24; 32]],
     }];
-    evidence
+    counterfactual.frontier.global_frontier_tick = 2;
+    counterfactual.frontier.global_frontier_scheduler_position = 3;
+    counterfactual.frontier.endogenous_suffix_end_tick = 2;
+    counterfactual.invalidation.invalid_start = society_node.clone();
+    counterfactual.invalidation.invalid_end = society_node.clone();
+    counterfactual.invalidation.invalid_artifacts = vec![InvalidArtifactV1 {
+        artifact_class: "event".to_owned(),
+        schema_id: society_node.schema_id,
+        artifact_digest: society_node.artifact_digest,
+        producer: society_node,
+        prior_generation: 0,
+        reason: SuffixInvalidationReasonV1::NewIntervention,
+    }];
+    counterfactual.recomputed_event_seqs = vec![3];
+    ok(counterfactual.refresh_digest());
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -886,6 +1179,7 @@ fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
     let verification = evidence.to_verification_result();
     assert!(verification.is_ok());
     let verification = verification.map(|result| {
+        assert_eq!(result.provenance_digest, ok(evidence.digest()));
         assert!(result.digest().is_ok());
         result.to_canonical_cbor()
     });
@@ -965,14 +1259,14 @@ fn public_comparisons_classify_each_authoritative_difference() -> Result<(), pos
     );
 
     right = left.clone();
-    right.causal_trace[0].relation = "changed".to_owned();
+    right.causal_trace[0].relation = "derived".to_owned();
     assert_eq!(
         compare(&left, &right)?.divergence,
         DivergenceClassV1::CausalTrace
     );
 
     right = left.clone();
-    right.host_closure.closure_payload_digest = [30; 32];
+    right.uncertainty[0].confidence = 0.8;
     assert_eq!(
         compare(&left, &right)?.divergence,
         DivergenceClassV1::Observability
@@ -993,7 +1287,24 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     let mut invalid_closure = evidence.clone();
     invalid_closure.host_closure.closure_event_type = "other".to_owned();
     expect_err(&verify_evidence(&invalid_closure));
+    let mut overstated_counterfactual = evidence.clone();
+    overstated_counterfactual.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+    overstated_counterfactual.structural_causal_trace = overstated_counterfactual
+        .causal_trace
+        .iter()
+        .map(CausalTraceEntryV1::structural)
+        .collect();
+    overstated_counterfactual.causal_trace.clear();
+    assert_eq!(
+        verify_evidence(&overstated_counterfactual),
+        Err(EvidenceError::InvalidDependencyGraph)
+    );
     let value = decode_value(ok(evidence.to_canonical_cbor()));
+    let mut short_evidence = cloned_array_fields(&value, "decode evidence fixture structure");
+    drop(short_evidence.pop());
+    expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+        &ciborium::Value::Array(short_evidence),
+    )));
     let mut paths = Vec::new();
     structural_paths(&value, &mut Vec::new(), &mut paths);
     assert!(paths.len() > 512);
@@ -1153,22 +1464,40 @@ fn malformed_divergence_reports_reach_closed_decoder_boundaries() {
 }
 
 #[test]
-fn public_evidence_decoder_enforces_case_coordinate_boundary() {
+fn public_moat_proof_contract_excludes_cnr1_and_rejects_the_retired_field() {
     let evidence = public_evidence_fixture();
-    let encoded = decode_value(ok(evidence.to_canonical_cbor()));
-    let exact = replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 128]));
-    assert!(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&exact)).is_ok());
+    let json = ok(serde_json::to_value(&evidence));
+    let contract = json
+        .get("contract")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("proof contract is absent")));
+    assert!(!contract.contains_key("conformance_report"));
 
-    let oversized =
-        replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 129]));
+    let encoded = decode_value(ok(evidence.to_canonical_cbor()));
+    let evidence_fields = cloned_array_fields(&encoded, "decode evidence fixture structure");
+    let contract_fields = cloned_array_fields(
+        &evidence_fields[EvidenceField::Contract.index()],
+        "decode proof-contract fixture structure",
+    );
+    assert_eq!(contract_fields.len(), 7);
+
+    let retired_shape = append_retired_contract_field(&encoded);
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-        &oversized,
+        &retired_shape,
     )));
 
-    let wrong_type =
-        replace_evidence_case_coordinate(&encoded, ciborium::Value::Text("coordinate".to_owned()));
+    let mut trailing_contract_fields = contract_fields;
+    trailing_contract_fields.push(ciborium::Value::Text(
+        CONFORMANCE_REPORT_MAGIC_V1.to_owned(),
+    ));
+    let mut trailing_evidence_fields = cloned_array_fields(
+        &encoded,
+        "decode evidence fixture structure for trailing field",
+    );
+    trailing_evidence_fields[EvidenceField::Contract.index()] =
+        ciborium::Value::Array(trailing_contract_fields);
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-        &wrong_type,
+        &ciborium::Value::Array(trailing_evidence_fields),
     )));
 }
 
@@ -1210,17 +1539,6 @@ fn public_record_variants_round_trip_at_the_wire_seam() {
         evidence
     );
 
-    for code in safe_error_codes() {
-        let mut with_error = evidence.clone();
-        with_error.contract.conformance_report.cases[0].expected_error = Some(code);
-        with_error.contract.conformance_report.cases[0].actual_error = Some(code);
-        let encoded = ok(with_error.to_canonical_cbor());
-        assert_eq!(
-            ok(MoatProofEvidenceV1::from_canonical_cbor(&encoded)),
-            with_error
-        );
-    }
-
     let base = ok(public_evidence_fixture().to_verification_result());
     let outcomes = [
         VerificationOutcomeV1::VerifiedExact,
@@ -1240,9 +1558,27 @@ fn public_record_variants_round_trip_at_the_wire_seam() {
                 result.divergence_report_digest = Some([26; 32]);
             }
             VerificationOutcomeV1::InvalidManifest
-            | VerificationOutcomeV1::UnverifiableArtifactsMissing
-            | VerificationOutcomeV1::IncompatibleProfile
             | VerificationOutcomeV1::ResourceLimitExceeded => {
+                result.authoritative_result_digest = None;
+                result.first_error = Some(VerificationErrorV1 {
+                    code,
+                    field_ordinal: Some(1),
+                    canonical_coordinate: Some(vec![2, 3]),
+                    related_digest: Some([27; 32]),
+                });
+            }
+            VerificationOutcomeV1::UnverifiableArtifactsMissing => {
+                result.replay_claim = ReplayClaimV1::StructuralOnly;
+                result.authoritative_result_digest = None;
+                result.first_error = Some(VerificationErrorV1 {
+                    code,
+                    field_ordinal: Some(1),
+                    canonical_coordinate: Some(vec![2, 3]),
+                    related_digest: Some([27; 32]),
+                });
+            }
+            VerificationOutcomeV1::IncompatibleProfile => {
+                result.replay_claim = ReplayClaimV1::IncompatibleProfile;
                 result.authoritative_result_digest = None;
                 result.first_error = Some(VerificationErrorV1 {
                     code,
@@ -1279,6 +1615,10 @@ fn public_record_rejections_cover_semantic_boundaries() {
         mutate(&mut invalid);
         expect_err(&invalid.to_canonical_cbor());
     }
+    let mut overstated = result.clone();
+    overstated.replay_claim = ReplayClaimV1::StructuralOnly;
+    overstated.result_digest = ok(overstated.digest());
+    expect_err(&overstated.to_canonical_cbor());
     let mut oversized_coordinate = result.clone();
     oversized_coordinate.verification_outcome = VerificationOutcomeV1::InvalidManifest;
     oversized_coordinate.authoritative_result_digest = None;

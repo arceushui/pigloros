@@ -9,14 +9,13 @@ use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, St
 use pos_conformance::{
     compare, compare_authoritative_outputs, schema_id_for_event_type, verify_counterfactual_fork,
     verify_evidence, wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
-    CaseOutcomeStatusV1, CaseOutcomeV1, CausalTraceEntryV1, ClaimLayerV1, ComparisonV1,
-    ConformanceReportV1, CounterfactualContractV1, DependencyClassV1, DependencyNodeV1,
-    DivergenceClassV1, ExecutionModeV1, FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1,
-    FixturePrincipalRefV1, HostClosureAuditV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1,
-    MoatProofInputV1, ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1,
-    ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1,
-    ReproManifestV1, ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
+    CausalTraceEntryV1, ComparisonV1, CounterfactualContractV1, DependencyClassV1,
+    DependencyNodeV1, DivergenceClassV1, ExecutionModeV1, FixtureAuthorizationDecisionV1,
+    FixtureCapabilityGrantV1, FixturePrincipalRefV1, HostClosureAuditV1, InputDependencyV1,
+    InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
+    ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1,
+    ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
+    ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
     SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
     Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
 };
@@ -64,7 +63,6 @@ const SOCIETY_ENTITY_KIND: &str = "proof-society";
 const WORLD_BACKEND_CONTENT: &[u8] = b"PiglorOS.WorldBackend.simple-kinematic.v1";
 const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.deterministic-v1";
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
-const HOST_SOURCE_CONTENT: &[u8] = include_bytes!("moat_proof.rs");
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
 
 /// Result of one Local or Air-Gapped proof execution.
@@ -624,13 +622,13 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
     let causal_trace = causal_trace(events, &ids);
     let uncertainty = uncertainty_from_events(events);
     let participant_views = participant_views(events);
-    let contract = build_wave8_contract(
+    build_wave8_contract(
         context,
         &event_summaries,
         &factual_authoritative_events,
         &participant_views,
-    );
-    Ok(MoatProofEvidenceV1 {
+    )
+    .map(|contract| MoatProofEvidenceV1 {
         format_version: EVIDENCE_FORMAT_V1,
         manifest: ReproManifestV1 {
             format_version: EVIDENCE_FORMAT_V1,
@@ -658,12 +656,14 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
         authoritative_events: event_summaries,
         projections: projection_evidence,
         causal_trace,
+        structural_causal_trace: Vec::new(),
         uncertainty,
         participant_views,
         plugin_failures: failure_probes.to_vec(),
         host_closure: host_closure.clone(),
         contract,
     })
+    .map_err(MoatProofError::from)
 }
 
 fn causal_trace(events: &[Event], ids: &HashMap<EventId, u64>) -> Vec<CausalTraceEntryV1> {
@@ -1181,7 +1181,7 @@ fn build_counterfactual_contract(
     factual_events: &[AuthoritativeEventV1],
     policy_digest: [u8; 32],
     exogenous_digest: [u8; 32],
-) -> CounterfactualContractV1 {
+) -> Result<CounterfactualContractV1, pos_core::CoreError> {
     let parts =
         build_counterfactual_parts(input, fork_cut_seq, events, factual_events, policy_digest);
     let fork_id = id16_digest(&digest_domain(
@@ -1275,91 +1275,7 @@ fn build_counterfactual_contract(
         replay_claim: ReplayClaimV1::Exact,
         contract_digest: [0; 32],
     };
-    counterfactual.contract_digest = serialized_digest(&counterfactual);
-    counterfactual
-}
-
-fn build_conformance_report(
-    mode: ExecutionModeV1,
-    events: &[AuthoritativeEventV1],
-    plugin_versions: &BTreeMap<String, String>,
-    policy_digest: [u8; 32],
-) -> (ConformanceReportV1, [u8; 32]) {
-    let subject_artifact_digest = serialized_digest(&events.to_vec());
-    let cases = vec![CaseOutcomeV1 {
-        case_id: format!("scenario-{mode:?}").to_lowercase(),
-        fixture_digest: subject_artifact_digest,
-        execution_profile_digest: policy_digest,
-        mode,
-        claim_layer: ClaimLayerV1::ReplayConformance,
-        outcome: CaseOutcomeStatusV1::Pass,
-        first_coordinate: None,
-        expected_digest: Some(subject_artifact_digest),
-        actual_digest: Some(subject_artifact_digest),
-        expected_error: None,
-        actual_error: None,
-        replay_claim: ReplayClaimV1::Exact,
-        redaction_state: RedactionStateV1::None,
-        provenance_digest: policy_digest,
-    }];
-    let mut report = ConformanceReportV1 {
-        report_id: id16_digest(&subject_artifact_digest),
-        subject_artifact_digest,
-        profile_digest: policy_digest,
-        normative_spec_digest: digest_domain(b"PiglorOS.NormativeSpec.v1", b"ADR-058-064"),
-        execution_profile_digest: policy_digest,
-        fixture_bundle_digest: serialized_digest(plugin_versions),
-        evaluator_source_digest: digest_domain(b"PiglorOS.Evaluator.Source.v1", EVALUATOR_CONTENT),
-        evaluator_binary_digest: digest_domain(
-            b"PiglorOS.Evaluator.Binary.v1",
-            &[EVALUATOR_CONTENT, EXECUTION_PROFILE_CONTENT].concat(),
-        ),
-        evaluator_protocol_digest: digest_domain(b"PiglorOS.Evaluator.Protocol.v1", b"VRR1/DVR1"),
-        implementation: ImplementationIdentityV1 {
-            implementation_id: "pos-experiment-wave8".to_owned(),
-            source_digest: digest_domain(b"PiglorOS.Host.Source.v1", HOST_SOURCE_CONTENT),
-            build_digest: digest_domain(
-                b"PiglorOS.Host.Build.v1",
-                concat!(env!("CARGO_PKG_NAME"), "\0", env!("CARGO_PKG_VERSION")).as_bytes(),
-            ),
-            binary_digest: digest_domain(
-                b"PiglorOS.Host.Binary.v1",
-                &[HOST_SOURCE_CONTENT, EXECUTION_PROFILE_CONTENT].concat(),
-            ),
-            public_contract_digest: serialized_digest(&wave8_plugin_boundary()),
-            organization_id: None,
-        },
-        independence: IndependenceEvidenceV1 {
-            technical_independent: true,
-            authorship_independent: false,
-            organizational_independent: false,
-            declaration_digest: digest_domain(
-                b"PiglorOS.Independence.Declaration.v1",
-                b"candidate",
-            ),
-            shared_code_audit_digest: digest_domain(
-                b"PiglorOS.Independence.Audit.v1",
-                EVALUATOR_CONTENT,
-            ),
-            reviewer_ids: vec!["pos-reference".to_owned()],
-        },
-        passed: u32::try_from(cases.len()).unwrap_or(u32::MAX),
-        failed: 0,
-        skipped: 0,
-        unavailable: 0,
-        not_applicable: 0,
-        cases,
-        replay_claim: ReplayClaimV1::Exact,
-        redaction_state: RedactionStateV1::None,
-        limitations_digest: digest_domain(
-            b"PiglorOS.Conformance.Limitations.v1",
-            b"external-authorship-and-organization-attestation-not-claimed",
-        ),
-        provenance_digest: policy_digest,
-        report_digest: [0; 32],
-    };
-    report.report_digest = report.digest().unwrap_or([0; 32]);
-    (report, subject_artifact_digest)
+    counterfactual.refresh_digest().map(|()| counterfactual)
 }
 
 fn build_atomicity(
@@ -1399,7 +1315,7 @@ fn build_wave8_contract(
     events: &[AuthoritativeEventV1],
     factual_events: &[AuthoritativeEventV1],
     participant_views: &[ParticipantViewV1],
-) -> Wave8ProofContractV1 {
+) -> Result<Wave8ProofContractV1, pos_core::CoreError> {
     let policy_digest = profile_digest();
     let room_parts = build_room_parts(
         context.input,
@@ -1414,7 +1330,7 @@ fn build_wave8_contract(
         &room_parts.principals,
         &room_parts.grants,
     );
-    let counterfactual = build_counterfactual_contract(
+    build_counterfactual_contract(
         context.input,
         context.timeline_id,
         context.fork_cut_seq,
@@ -1422,26 +1338,27 @@ fn build_wave8_contract(
         factual_events,
         policy_digest,
         room_parts.exogenous_digest,
-    );
-    let (conformance_report, subject_artifact_digest) =
-        build_conformance_report(context.mode, events, context.plugin_versions, policy_digest);
-    let atomicity = build_atomicity(
-        context.input,
-        events,
-        context.failure_probes,
-        counterfactual.generation,
-        subject_artifact_digest,
-    );
-    Wave8ProofContractV1 {
-        scenario_room: room_parts.room,
-        plugin_boundary: wave8_plugin_boundary(),
-        knowledge_snapshots,
-        authorization_decisions,
-        counterfactual,
-        atomicity,
-        conformance_report,
-        non_interference: wave8_non_interference_matrix(context.input.digest().unwrap_or([0; 32])),
-    }
+    )
+    .map(|counterfactual| {
+        let atomicity = build_atomicity(
+            context.input,
+            events,
+            context.failure_probes,
+            counterfactual.generation,
+            serialized_digest(&events.to_vec()),
+        );
+        Wave8ProofContractV1 {
+            scenario_room: room_parts.room,
+            plugin_boundary: wave8_plugin_boundary(),
+            knowledge_snapshots,
+            authorization_decisions,
+            counterfactual,
+            atomicity,
+            non_interference: wave8_non_interference_matrix(
+                context.input.digest().unwrap_or([0; 32]),
+            ),
+        }
+    })
 }
 
 fn owner_frontiers(nodes: &[DependencyNodeV1]) -> Vec<pos_conformance::OwnerFrontierV1> {
@@ -2097,6 +2014,46 @@ impl Driver for ProofSocietyDriver {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn divergence_variants(baseline: &MoatProofEvidenceV1) -> Vec<MoatProofEvidenceV1> {
+    let mut variants = vec![baseline.clone()];
+    let mut metadata = baseline.clone();
+    metadata.manifest.seed += 1;
+    variants.push(metadata);
+
+    let mut events = baseline.clone();
+    let closure_seq = events.host_closure.closure_event_seq;
+    let Some(closure_event) = events
+        .authoritative_events
+        .iter_mut()
+        .find(|event| event.seq == closure_seq)
+    else {
+        std::panic::resume_unwind(Box::new("closure Event fixture is absent"));
+    };
+    closure_event.payload_digest = [9; 32];
+    events.host_closure.closure_payload_digest = [9; 32];
+    variants.push(events);
+
+    let mut projections = baseline.clone();
+    projections.projections[0].state = serde_json::json!({"changed": true});
+    variants.push(projections);
+
+    let mut trace = baseline.clone();
+    let relation = if trace.causal_trace[0].relation == "derived" {
+        "physical_to_agent"
+    } else {
+        "derived"
+    };
+    relation.clone_into(&mut trace.causal_trace[0].relation);
+    variants.push(trace);
+
+    let mut observability = baseline.clone();
+    observability.uncertainty[0].confidence = 0.5;
+    variants.push(observability);
+    variants
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -2170,24 +2127,7 @@ mod tests {
             .run()
             .test_ok();
         let baseline = report.baseline;
-        let mut variants = Vec::new();
-
-        variants.push(baseline.clone());
-        let mut metadata = baseline.clone();
-        metadata.manifest.seed += 1;
-        variants.push(metadata);
-        let mut events = baseline.clone();
-        events.authoritative_events[0].payload_digest = [9; 32];
-        variants.push(events);
-        let mut projections = baseline.clone();
-        projections.projections[0].state = serde_json::json!({"changed": true});
-        variants.push(projections);
-        let mut trace = baseline.clone();
-        trace.causal_trace[0].relation.push_str("-changed");
-        variants.push(trace);
-        let mut observability = baseline.clone();
-        observability.uncertainty[0].confidence = 0.5;
-        variants.push(observability);
+        let variants = divergence_variants(&baseline);
 
         for variant in &variants {
             let expected = compare(&baseline, variant).test_ok();
@@ -2592,23 +2532,7 @@ mod coverage_entrypoints {
         let run = test_ok(MoatProofRun::new(input(), ExecutionModeV1::Local));
         let report = test_ok(run.run());
         let baseline = report.baseline;
-        let mut variants = vec![baseline.clone()];
-
-        let mut metadata = baseline.clone();
-        metadata.manifest.seed += 1;
-        variants.push(metadata);
-        let mut events = baseline.clone();
-        events.authoritative_events[0].payload_digest = [9; 32];
-        variants.push(events);
-        let mut projections = baseline.clone();
-        projections.projections[0].state = serde_json::json!({"changed": true});
-        variants.push(projections);
-        let mut trace = baseline.clone();
-        trace.causal_trace[0].relation.push_str("-changed");
-        variants.push(trace);
-        let mut observability = baseline.clone();
-        observability.uncertainty[0].confidence = 0.5;
-        variants.push(observability);
+        let variants = divergence_variants(&baseline);
 
         for variant in &variants {
             let expected = test_ok(compare(&baseline, variant));

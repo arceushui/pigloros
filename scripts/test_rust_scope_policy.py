@@ -22,7 +22,6 @@ EXPECTED_EXCLUDES = {
     "!**/*.adoc",
     "!**/*.rst",
     "!.agents/**",
-    "!.cursor/**",
     "!docs/**",
 }
 EXPECTED_SCOPE_SCOPED_CI_RESULTS = (
@@ -38,13 +37,13 @@ EXPECTED_SCOPE_SCOPED_CI_RESULTS = (
     "DOCKER_BUILD_RESULT",
     "WORLD_CLIENT_WASM_RESULT",
     "WORLD_CLIENT_BROWSER_PARITY_RESULT",
+    "COVERAGE_RESULT",
+    "CARGO_CRAP_RESULT",
 )
 EXPECTED_UNCONDITIONAL_CI_RESULTS = (
     "CONFORMANCE_FIXTURES_RESULT",
     "MATERIALIZE_CONFORMANCE_BUNDLES_RESULT",
     "CONFORMANCE_NON_LINUX_RESULT",
-    "COVERAGE_RESULT",
-    "CARGO_CRAP_RESULT",
 )
 
 
@@ -112,7 +111,6 @@ class RustScopePolicyTests(unittest.TestCase):
             "adr/decision.adoc",
             "notes/history.rst",
             ".agents/skills/example.md",
-            ".cursor/rules/example.txt",
             "docs/reference.txt",
         ]
         self.assertFalse(rust_gate_required(paths, self.patterns))

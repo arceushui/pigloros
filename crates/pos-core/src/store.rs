@@ -13,8 +13,10 @@
 //!
 //! # `CoW` sync order
 //!
-//! 1. `export_timeline_own(src, root)` → `import_timeline_with_id(dst, …)`
-//! 2. `export_timeline_own(src, child)` → `import_timeline_with_id(dst, …)`
+//! 1. `export_timeline_own(src, root, root_artifact, &root_evaluation)`
+//!    → `import_timeline_with_id(dst, …)`
+//! 2. `export_timeline_own(src, child, child_artifact, &child_evaluation)`
+//!    → `import_timeline_with_id(dst, …)`
 //!
 //! Importing a forked child before its parent fails (`TimelineNotFound`).
 
@@ -948,23 +950,33 @@ fn persist_registry_after_timeline_creation<S: EventStore + ?Sized>(
 /// original ids, use [`export_timeline_own`].
 ///
 /// # Errors
-/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+/// Returns [`CoreError::ArtifactUnavailable`] when the evaluated export
+/// closure is not authoritative, or [`CoreError::TimelineNotFound`] if the
+/// timeline does not exist.
 pub fn export_timeline(
     store: &dyn EventStore,
     id: TimelineId,
+    artifact_digest: crate::ErasureReferenceV1,
+    evaluation: &crate::ReplayClaimEvaluationV1,
 ) -> Result<TimelineExport, CoreError> {
-    let mut export =
-        export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)?;
-    let was_fork = export.timeline.meta.fork_point.take().is_some();
-    if was_fork {
-        materialize_fork_export_as_root(&mut export);
-    }
-    export.parent_fork_hash = None;
-    export.timeline.head = export
-        .events
-        .last()
-        .map_or(crate::clock::Seq::ZERO, |e| e.seq);
-    Ok(export)
+    evaluation
+        .require_authoritative_use(crate::ErasureArtifactClassV1::Export, artifact_digest)
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|()| {
+            export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)
+        })
+        .map(|mut export| {
+            let was_fork = export.timeline.meta.fork_point.take().is_some();
+            if was_fork {
+                materialize_fork_export_as_root(&mut export);
+            }
+            export.parent_fork_hash = None;
+            export.timeline.head = export
+                .events
+                .last()
+                .map_or(crate::clock::Seq::ZERO, |event| event.seq);
+            export
+        })
 }
 
 /// Export only events stored on this timeline (no stitch / renumber) — preferred `CoW` name.
@@ -978,12 +990,16 @@ pub fn export_timeline(
 /// [`export_timeline_cow`].
 ///
 /// # Errors
-/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+/// Returns [`CoreError::ArtifactUnavailable`] when the evaluated export
+/// closure is not authoritative, or [`CoreError::TimelineNotFound`] if the
+/// timeline does not exist.
 pub fn export_timeline_own(
     store: &dyn EventStore,
     id: TimelineId,
+    artifact_digest: crate::ErasureReferenceV1,
+    evaluation: &crate::ReplayClaimEvaluationV1,
 ) -> Result<TimelineExport, CoreError> {
-    export_timeline_raw(store, id)
+    export_timeline_raw(store, id, artifact_digest, evaluation)
 }
 
 /// Alias for [`export_timeline_own`] (copy-on-write / identity-preserving export).
@@ -1000,25 +1016,35 @@ pub use export_timeline_own as export_timeline_cow;
 /// divergent parent history.
 ///
 /// # Errors
-/// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+/// Returns [`CoreError::ArtifactUnavailable`] when the evaluated export
+/// closure is not authoritative, or [`CoreError::TimelineNotFound`] if the
+/// timeline does not exist.
 pub fn export_timeline_raw(
     store: &dyn EventStore,
     id: TimelineId,
+    artifact_digest: crate::ErasureReferenceV1,
+    evaluation: &crate::ReplayClaimEvaluationV1,
 ) -> Result<TimelineExport, CoreError> {
-    let mut export = export_timeline_using(
-        store.get_timeline(id),
-        store.read_own(id, SeqRange::all()),
-        id,
-    )?;
-    match export.timeline.meta.fork_point {
-        Some((parent, at_seq)) => {
-            export.parent_fork_hash = Some(store.chain_hash_at(parent, at_seq)?);
-        }
-        None => {
-            export.parent_fork_hash = None;
-        }
-    }
-    Ok(export)
+    evaluation
+        .require_authoritative_use(crate::ErasureArtifactClassV1::Export, artifact_digest)
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|()| {
+            export_timeline_using(
+                store.get_timeline(id),
+                store.read_own(id, SeqRange::all()),
+                id,
+            )
+        })
+        .and_then(|mut export| {
+            if let Some((parent, at_seq)) = export.timeline.meta.fork_point {
+                store.chain_hash_at(parent, at_seq).map(|parent_hash| {
+                    export.parent_fork_hash = Some(parent_hash);
+                    export
+                })
+            } else {
+                Ok(export)
+            }
+        })
 }
 
 /// Import a previously exported timeline as a **new** logical clone.
@@ -1342,6 +1368,83 @@ mod tests {
         timeline::{Timeline, TimelineMeta},
     };
     use std::fmt::Debug;
+
+    const EXPORT_DIGEST: crate::ErasureReferenceV1 =
+        crate::ErasureReferenceV1::from_digest([201; 32]);
+
+    fn export_evaluation() -> crate::ReplayClaimEvaluationV1 {
+        export_evaluation_for(
+            crate::ArtifactStateV1::Retained,
+            crate::ArtifactTransitionRuleV1::PreserveExact,
+        )
+    }
+
+    fn export_evaluation_for(
+        state: crate::ArtifactStateV1,
+        transition_rule: crate::ArtifactTransitionRuleV1,
+    ) -> crate::ReplayClaimEvaluationV1 {
+        crate::ReplayClaimEvaluatorV1::evaluate(
+            crate::ErasureReplayClaimV1::Exact,
+            &[crate::ArtifactClaimInputV1 {
+                registration: crate::RegisteredArtifactV1::new(
+                    crate::ErasureArtifactClassV1::Export,
+                    EXPORT_DIGEST,
+                    crate::ArtifactDataClassV1::StructuralAuditMetadata,
+                    None,
+                    crate::ErasureReferenceV1::from_digest([202; 32]),
+                    crate::ArtifactOptionalityV1::Required,
+                    transition_rule,
+                ),
+                current_claim: crate::ErasureReplayClaimV1::Exact,
+                state,
+            }],
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+    }
+
+    #[test]
+    fn export_rejects_erased_artifact_before_reading_store_bytes() {
+        let store = TrivialStore::new();
+        let evaluation = export_evaluation_for(
+            crate::ArtifactStateV1::Erased,
+            crate::ArtifactTransitionRuleV1::Remove,
+        );
+        let result = super::export_timeline(&store, TimelineId::new(), EXPORT_DIGEST, &evaluation);
+        match result {
+            Err(CoreError::ArtifactUnavailable) => {}
+            other => std::panic::resume_unwind(Box::new(format!(
+                "expected unavailable export, got {other:?}"
+            ))),
+        }
+    }
+
+    fn export_timeline(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        super::export_timeline(store, id, EXPORT_DIGEST, &export_evaluation())
+    }
+
+    fn export_timeline_raw(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        super::export_timeline_raw(store, id, EXPORT_DIGEST, &export_evaluation())
+    }
+
+    fn export_timeline_own(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        super::export_timeline_own(store, id, EXPORT_DIGEST, &export_evaluation())
+    }
+
+    fn export_timeline_cow(
+        store: &dyn EventStore,
+        id: TimelineId,
+    ) -> Result<TimelineExport, CoreError> {
+        super::export_timeline_cow(store, id, EXPORT_DIGEST, &export_evaluation())
+    }
 
     trait TestResultExt<T, E> {
         fn test_err(self) -> Result<E, Box<dyn std::error::Error>>;

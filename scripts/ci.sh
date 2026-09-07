@@ -58,7 +58,14 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --lock
 echo "==> test (--include-ignored)"
 # Run ignored tests too so #[ignore] cannot silently skip a path.
 test_log="$(mktemp)"
-trap 'rm -f "$test_log"' EXIT
+coverage_json=""
+cleanup() {
+  rm -f -- "$test_log"
+  if [[ -n "$coverage_json" ]]; then
+    rm -f -- "$coverage_json"
+  fi
+}
+trap cleanup EXIT
 cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee "$test_log"
 bash "$ROOT/scripts/assert-no-ignored-in-test-summary.sh" "$test_log"
 
@@ -73,5 +80,20 @@ cargo llvm-cov --workspace --all-features --locked --summary-only \
   --fail-under-lines 99 \
   --fail-under-regions 99 \
   -- --include-ignored
+if command -v covgate >/dev/null 2>&1; then
+  if [[ "$(covgate --version)" != "covgate 0.2.0" ]]; then
+    echo "ERROR: covgate 0.2.0 is required for the new-code coverage gate" >&2
+    exit 1
+  fi
+  coverage_json="$(mktemp)"
+  cargo llvm-cov report --json --output-path "$coverage_json"
+  covgate check "$coverage_json" \
+    --base "${DIFF_COVERAGE_BASE:-origin/main}" \
+    --no-github-summary
+else
+  echo "ERROR: covgate is required for the new-code coverage gate" >&2
+  echo "Install it with: cargo install covgate --version 0.2.0 --locked" >&2
+  exit 1
+fi
 
 echo "==> CI gates OK"

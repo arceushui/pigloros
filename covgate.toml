@@ -1,0 +1,5 @@
+[[gates]]
+name = "new-production-rust-code"
+include = "**/src/**/*.rs"
+fail-under-lines = 99
+fail-under-regions = 99

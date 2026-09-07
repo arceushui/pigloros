@@ -11,6 +11,24 @@ use ciborium::Value;
 
 use crate::{CanonicalBytes, EntityId, Hash, PluginId, Seq, TimelineId, WallTime};
 
+mod knowledge;
+mod persistence;
+
+pub use knowledge::{
+    AiGoalPolicyRevisionV1, BeliefRecordDraftV1, BeliefRecordV1, ConfidenceV1,
+    KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationArtifactV1,
+    ObservationRecordDraftV1, ObservationRecordV1, ObservationSnapshotDraftV1,
+    ObservationSnapshotV1, ObservationStatusV1, PreferenceValueRevisionV1,
+    MAX_KNOWLEDGE_SNAPSHOT_BYTES, MAX_KNOWLEDGE_SNAPSHOT_RECORDS, MAX_OBSERVATION_ARTIFACT_BYTES,
+    MAX_OBSERVATION_RECORD_BYTES, MAX_OBSERVATION_SNAPSHOT_BYTES, MAX_OBSERVATION_SNAPSHOT_RECORDS,
+};
+pub use persistence::{
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
+    AuthorityPersistenceStateV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    PersistedAuthorityV1, MAX_PERSISTED_AUTHORITY_GRANTS, MAX_PERSISTED_AUTHORITY_STATE_BYTES,
+};
+
 const PRINCIPAL_MAGIC: [u8; 4] = *b"PRN1";
 const GRANT_MAGIC: [u8; 4] = *b"CPG1";
 const DECISION_MAGIC: [u8; 4] = *b"AUD1";
@@ -417,12 +435,20 @@ impl AuthorityRegistrySnapshotV1 {
     }
 
     fn trusts_capabilities(&self, grant_chain: &DelegationChainV1) -> bool {
-        grant_chain.grants.iter().all(|grant| {
-            grant.authority_registry_digest == self.registry_digest
-                && grant
-                    .binding_digest()
-                    .is_ok_and(|binding| self.capability_bindings.binary_search(&binding).is_ok())
-        })
+        grant_chain
+            .grants
+            .iter()
+            .all(|grant| self.capability_binding(grant).is_some())
+    }
+
+    fn capability_binding(&self, grant: &CapabilityGrantV1) -> Option<Hash> {
+        if grant.authority_registry_digest != self.registry_digest {
+            return None;
+        }
+        grant
+            .binding_digest()
+            .ok()
+            .filter(|binding| self.capability_bindings.binary_search(binding).is_ok())
     }
 }
 
@@ -973,6 +999,17 @@ impl CapabilityGrantV1 {
         self.authority_registry_digest
     }
 
+    pub(super) fn with_persisted_revocation(
+        &self,
+        revocation_epoch: u64,
+        revocation_fence: Option<Seq>,
+    ) -> Self {
+        let mut resolved = self.clone();
+        resolved.revocation_epoch = revocation_epoch;
+        resolved.revocation_fence = revocation_fence;
+        resolved
+    }
+
     /// Return the digest that a trusted registry attests for this exact record.
     ///
     /// # Errors
@@ -1119,6 +1156,12 @@ pub struct AuthorizationRequestV1 {
 }
 
 impl AuthorizationRequestV1 {
+    /// Canonical digest binding every resolved request input.
+    #[must_use]
+    pub fn binding_digest(&self) -> Hash {
+        request_digest(self)
+    }
+
     /// Validate a fully resolved host request.
     ///
     /// # Errors
@@ -1482,6 +1525,18 @@ impl AuthorizationDecisionV1 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuthorityEvaluatorV1;
 
+// Private-seam coverage exception: validated grants cannot make `binding_digest`
+// fail, but this original defensive branch must remain fail-closed. Keep the
+// transition isolated so that invariant can be verified without weakening the
+// public grant constructors or changing authorization behavior.
+const fn deny_missing_grant_provenance(evaluation: &mut AuthorizationEvaluationV1) -> Vec<Hash> {
+    *evaluation = AuthorizationEvaluationV1::denied(
+        AuthorizationOutcomeV1::IndeterminateFailClosed,
+        Some(AuthorityErrorV1::ProvenanceMissing),
+    );
+    Vec::new()
+}
+
 impl AuthorityEvaluatorV1 {
     /// Evaluate adapter evidence, consent, capability, delegation, and revocation
     /// in ADR-059 order and return a closed decision.
@@ -1494,18 +1549,17 @@ impl AuthorityEvaluatorV1 {
         let mut evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
         let request_digest = request_digest(request);
         let grant_chain_bindings = if evaluation.grant_evidence_is_trusted {
-            grant_chain
-                .grants
-                .iter()
-                .map(CapabilityGrantV1::binding_digest)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_else(|_| {
-                    evaluation = AuthorizationEvaluationV1::denied(
-                        AuthorizationOutcomeV1::IndeterminateFailClosed,
-                        Some(AuthorityErrorV1::ProvenanceMissing),
-                    );
-                    Vec::new()
-                })
+            'grant_bindings: {
+                let Ok(bindings) = grant_chain
+                    .grants
+                    .iter()
+                    .map(CapabilityGrantV1::binding_digest)
+                    .collect::<Result<Vec<_>, _>>()
+                else {
+                    break 'grant_bindings deny_missing_grant_provenance(&mut evaluation);
+                };
+                bindings
+            }
         } else {
             Vec::new()
         };
@@ -3052,5 +3106,24 @@ fn decode_principal_set(value: &Value) -> Result<Vec<PrincipalRefV1>, AuthorityE
     match value {
         Value::Array(values) => values.iter().map(decode_principal_value).collect(),
         _ => Err(AuthorityErrorV1::InvalidEncoding),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_paths {
+    use super::*;
+
+    #[test]
+    fn missing_grant_provenance_fails_closed() {
+        let mut evaluation = AuthorizationEvaluationV1::active();
+
+        assert!(deny_missing_grant_provenance(&mut evaluation).is_empty());
+        assert_eq!(
+            evaluation.outcome,
+            AuthorizationOutcomeV1::IndeterminateFailClosed
+        );
+        assert_eq!(evaluation.error, Some(AuthorityErrorV1::ProvenanceMissing));
+        assert!(!evaluation.grant_evidence_is_trusted);
     }
 }

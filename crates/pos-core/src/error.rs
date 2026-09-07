@@ -28,6 +28,9 @@ pub enum CoreError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    #[error("artifact is unavailable for authoritative use")]
+    ArtifactUnavailable,
+
     #[error("payload too large: {size} bytes")]
     PayloadTooLarge { size: usize },
 

@@ -1,6 +1,6 @@
 # Test & coverage policy
 
-Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors this in-repo.
+Shared reference for humans and agents.
 
 ## Rules
 
@@ -8,6 +8,7 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 2. **Never** put `coverage(off)` on production code — only on `#[test]` / `#[tokio::test]` or inside `#[cfg(test)]`.
 3. Prefer deleting/simplifying unhittable branches over exemptions.
 4. Do not use rustdoc ` ```ignore ` fences — use ` ```text ` or a real doctest.
+5. Pull requests recognized as documentation-only by `.github/rust-scope.yml` skip Rust test, coverage, and cargo-crap jobs; Rust-affecting changes retain those gates.
 
 ## Enforcement
 
@@ -17,8 +18,8 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 | Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
-| Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions |
-| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 |
+| Coverage | `cargo llvm-cov` with `--include-ignored` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
+| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 for Rust-affecting changes |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
 ## Coverage attribution policy
@@ -29,10 +30,31 @@ reporting-tolerance only: all tests still run with `--include-ignored`, and
 `coverage(off)` remains test-only. Do not use the allowance to exempt
 production code or avoid writing a reachable behavior test.
 
+The same coverage job runs `covgate` 0.2.0 against the exact pull-request base
+(or the previous commit on a push). Its checked-in configuration applies the
+same 99% line and 99% region thresholds to changed production Rust files under
+`**/src/**/*.rs`. `covgate` reads the detailed LLVM JSON report produced by the
+completed `cargo llvm-cov` run, so the diff gate and repository-wide gate use the
+same test execution and native coverage data. Install the local tool with:
+
+```bash
+cargo install covgate --version 0.2.0 --locked
+```
+
+Then reproduce the gate against the exact pull-request base with:
+
+```bash
+DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
+```
+
+`covgate` resolves the supplied base against the current worktree, so local
+staged and unstaged tracked production-Rust edits use the same scope as CI.
+
 ## Change-risk policy
 
-The hosted coverage job publishes its completed LCOV report to a separate,
-required `cargo-crap` check running pinned v0.2.2. The verdict uses zero
+For Rust-affecting changes, the hosted coverage job publishes its completed
+LCOV report to a separate, required `cargo-crap` check running pinned v0.2.2.
+Documentation-only pull requests skip both jobs. The verdict uses zero
 tool tolerance and treats one IEEE-754 representation step (one ULP) as
 numerical equality; every larger score increase fails, including increases on
 moved functions. Every new function must score at most 30. Standard Cargo
@@ -44,8 +66,14 @@ suppress or truncate the report.
 Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so
 newly merged functions become existing baseline entries on the next change.
-If that trusted artifact has expired or the base never completed green CI, the
-pull request must rebase onto a green `main` commit.
+The pull request job polls for the artifact for up to five minutes to cover the
+short interval while the corresponding `main` cargo-crap job is still finishing.
+It trusts only an unexpired artifact attached to the exact base commit on the
+repository's `main` branch; it does not wait for unrelated slower jobs such as
+ASan. The aggregate `main` gate remains responsible for keeping `main` green.
+If that trusted artifact has expired or no successful `main` cargo-crap job has
+published one for the base, the pull request must rebase onto a newer `main`
+commit with a trusted baseline.
 
 PR #58 has one explicit initialization exception for pre-gate base
 `45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,
@@ -147,6 +175,9 @@ git config core.hooksPath .githooks
 
 # Full CI parity:
 ./scripts/ci.sh
+
+# Full CI parity for a pull request (use the exact base commit):
+DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
 ```
 
 ## cargo-deny ≠ source attributes

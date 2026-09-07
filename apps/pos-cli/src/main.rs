@@ -348,7 +348,7 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
 
     let mut registry = pos_state::ProjectionRegistry::new();
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    let events = pos_time::replay(store.as_ref(), tl_id, &mut registry)?;
+    let events = replay_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
     let entity_count = events
         .iter()
         .map(|e| e.entity)
@@ -369,7 +369,7 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
     let mut registry = pos_state::ProjectionRegistry::new();
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
-    let snapshot = pos_time::snapshot(store.as_ref(), tl_id, &mut registry)?;
+    let snapshot = snapshot_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
 
     let entity_count = count_snapshot_entities(&snapshot);
 
@@ -377,6 +377,65 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
     output_stdout!("entity_count: {entity_count}");
 
     Ok(())
+}
+
+fn retained_timeline_artifact(
+    timeline: pos_core::TimelineId,
+    artifact_class: pos_core::ErasureArtifactClassV1,
+    owner_domain: &[u8],
+) -> Result<
+    (
+        pos_core::ErasureReferenceV1,
+        pos_core::ReplayClaimEvaluationV1,
+    ),
+    pos_core::ErasureErrorV1,
+> {
+    let artifact_digest = pos_core::ErasureReferenceV1::from_digest(
+        *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
+    );
+    pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                artifact_class,
+                artifact_digest,
+                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                pos_core::ErasureReferenceV1::from_digest(*blake3::hash(owner_domain).as_bytes()),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .map(|evaluation| (artifact_digest, evaluation))
+}
+
+fn replay_retained_timeline(
+    store: &dyn pos_core::store::EventStore,
+    timeline: TimelineId,
+    registry: &mut pos_state::ProjectionRegistry,
+) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
+    let (artifact_digest, evaluation) = retained_timeline_artifact(
+        timeline,
+        pos_core::ErasureArtifactClassV1::TimelineReplay,
+        b"pos-cli/timeline-replay",
+    )?;
+    pos_time::replay(store, timeline, registry, artifact_digest, &evaluation).map_err(Into::into)
+}
+
+fn snapshot_retained_timeline(
+    store: &dyn pos_core::store::EventStore,
+    timeline: TimelineId,
+    registry: &mut pos_state::ProjectionRegistry,
+) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
+    let (artifact_digest, evaluation) = retained_timeline_artifact(
+        timeline,
+        pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+        b"pos-cli/timeline-snapshot",
+    )?;
+    pos_time::snapshot(store, timeline, registry, artifact_digest, &evaluation).map_err(Into::into)
 }
 
 fn cmd_timeline_compare(
@@ -797,6 +856,31 @@ fn save_run_manifest(
 #[cfg(test)]
 fn open_memory_store() -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
     open_store(StoreConfig::Memory)
+}
+
+#[cfg(test)]
+const TEST_EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
+    pos_core::ErasureReferenceV1::from_digest([231; 32]);
+
+#[cfg(test)]
+fn test_export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
+    pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                pos_core::ErasureArtifactClassV1::Export,
+                TEST_EXPORT_DIGEST,
+                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                pos_core::ErasureReferenceV1::from_digest([232; 32]),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, Box<dyn std::error::Error>> {
@@ -1860,7 +1944,13 @@ mod main_coverage {
             // cmd_experiment_verify uses Memory store internally so it won't find
             // the SQLite timeline. Use the in-memory path instead.
             // Create an in-memory store with the same timeline_id via import.
-            let export = pos_core::store::export_timeline(store.as_ref(), tl.id()).test_ok();
+            let export = pos_core::store::export_timeline(
+                store.as_ref(),
+                tl.id(),
+                TEST_EXPORT_DIGEST,
+                &test_export_evaluation(),
+            )
+            .test_ok();
             let mut mem = open_store(StoreConfig::Memory).test_ok();
             pos_core::store::import_timeline(mem.as_mut(), export).test_ok();
 

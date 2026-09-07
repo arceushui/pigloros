@@ -46,6 +46,9 @@ pub enum EvalError {
     /// CBOR payload could not be decoded.
     #[error("payload decode error: {0}")]
     Decode(String),
+    /// ADR-060 forbids this artifact from authoritative evaluator input.
+    #[error("calibration artifact is unavailable for authoritative use")]
+    ArtifactUnavailable,
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +149,10 @@ pub struct ReliabilityBin {
 /// Calibration report produced by [`compute_report`].
 #[derive(Clone, Debug)]
 pub struct CalibrationReport {
+    /// Replay evidence retained for the report and its required inputs.
+    pub replay_claim: pos_core::ErasureReplayClaimV1,
+    /// Redaction state retained independently of profile compatibility.
+    pub redaction_state: pos_core::ArtifactRedactionStateV1,
     /// Brier score: mean squared error of probabilistic predictions.
     pub brier_score: f64,
     pub crps: f64,
@@ -166,6 +173,19 @@ pub struct CalibrationReport {
     pub n_resolved: u64,
     /// The 10 reliability bins used to compute ECE.
     pub reliability_bins: Vec<ReliabilityBin>,
+}
+
+impl CalibrationReport {
+    /// Consume the host-owned artifact evaluation without strengthening this report.
+    pub const fn apply_artifact_evaluation(
+        &mut self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) {
+        self.replay_claim = self.replay_claim.weakened_to(evaluation.replay_claim());
+        self.redaction_state = self
+            .redaction_state
+            .weakened_to(evaluation.redaction_state());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,9 +389,25 @@ fn compute_ece(bins: &[ReliabilityBin], total: u64) -> f64 {
 /// Read all events from the given timeline and compute a [`CalibrationReport`].
 ///
 /// # Errors
-/// Returns [`EvalError::Store`] if the store cannot be read, or
+/// Returns [`EvalError::ArtifactUnavailable`] when the report closure is not
+/// authoritative, [`EvalError::Store`] if the store cannot be read, or
 /// [`EvalError::Decode`] if a payload cannot be decoded.
 pub fn compute_report(
+    store: &dyn EventStore,
+    timeline_id: TimelineId,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
+) -> Result<CalibrationReport, EvalError> {
+    evaluation
+        .require_authoritative_use(
+            pos_core::ErasureArtifactClassV1::CalibrationReport,
+            artifact_digest,
+        )
+        .map_err(|_| EvalError::ArtifactUnavailable)
+        .and_then(|()| compute_report_authorized(store, timeline_id))
+}
+
+fn compute_report_authorized(
     store: &dyn EventStore,
     timeline_id: TimelineId,
 ) -> Result<CalibrationReport, EvalError> {
@@ -420,6 +456,8 @@ pub fn compute_report(
     if resolved.is_empty() {
         let empty_bins = build_bins(&[]);
         return Ok(CalibrationReport {
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            redaction_state: pos_core::ArtifactRedactionStateV1::None,
             brier_score: 0.0,
             crps: 0.0,
             lift_vs_personal_base_rate: 0.0,
@@ -486,6 +524,8 @@ pub fn compute_report(
     let ece = compute_ece(&reliability_bins, n_resolved);
 
     Ok(CalibrationReport {
+        replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+        redaction_state: pos_core::ArtifactRedactionStateV1::None,
         brier_score,
         crps,
         lift_vs_personal_base_rate,
@@ -827,7 +867,12 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("eval-zero").test_ok();
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
+        assert_eq!(report.replay_claim, pos_core::ErasureReplayClaimV1::Exact);
+        assert_eq!(
+            report.redaction_state,
+            pos_core::ArtifactRedactionStateV1::None
+        );
         assert_eq!(report.n_predictions, 0);
         assert_eq!(report.n_resolved, 0);
         assert!((report.brier_score).abs() < f64::EPSILON);
@@ -840,6 +885,84 @@ mod tests {
     }
 
     #[test]
+    fn calibration_report_consumes_host_claim_and_never_strengthens() {
+        use pos_core::{
+            ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+            ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
+            RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+        };
+
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let timeline = store.create_timeline("claim-degradation").test_ok();
+        let mut report = compute_report_authorized(store.as_ref(), timeline.id()).test_ok();
+        let evaluation = ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::CalibrationReport,
+                    ErasureReferenceV1::from_digest([1; 32]),
+                    ArtifactDataClassV1::AggregateData,
+                    Some(ErasureKeyRoleV1::DataEncryption),
+                    ErasureReferenceV1::from_digest([2; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::RetainStructure,
+                ),
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state: ArtifactStateV1::TransitionApplied,
+            }],
+        )
+        .test_ok();
+        let result = compute_report(
+            store.as_ref(),
+            timeline.id(),
+            ErasureReferenceV1::from_digest([1; 32]),
+            &evaluation,
+        );
+        match result {
+            Err(EvalError::ArtifactUnavailable) => {}
+            other => std::panic::resume_unwind(Box::new(format!(
+                "expected unavailable calibration report, got {other:?}"
+            ))),
+        }
+        report.apply_artifact_evaluation(&evaluation);
+        assert_eq!(
+            report.replay_claim,
+            pos_core::ErasureReplayClaimV1::StructuralOnly
+        );
+        assert_eq!(
+            report.redaction_state,
+            pos_core::ArtifactRedactionStateV1::StructuralOnly
+        );
+
+        let exact = ReplayClaimEvaluatorV1::evaluate(
+            pos_core::ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::CalibrationReport,
+                    ErasureReferenceV1::from_digest([1; 32]),
+                    ArtifactDataClassV1::AggregateData,
+                    Some(ErasureKeyRoleV1::DataEncryption),
+                    ErasureReferenceV1::from_digest([2; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: pos_core::ErasureReplayClaimV1::Exact,
+                state: ArtifactStateV1::Retained,
+            }],
+        )
+        .test_ok();
+        report.apply_artifact_evaluation(&exact);
+        assert_eq!(
+            report.replay_claim,
+            pos_core::ErasureReplayClaimV1::StructuralOnly
+        );
+        assert_eq!(
+            report.redaction_state,
+            pos_core::ArtifactRedactionStateV1::StructuralOnly
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compute_report_predictions_without_outcomes() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
@@ -849,7 +972,7 @@ mod tests {
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.8, "p1");
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.3, "p2");
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 2);
         assert_eq!(report.n_resolved, 0);
         assert!((report.brier_score).abs() < f64::EPSILON);
@@ -868,7 +991,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 2);
         assert_eq!(report.n_resolved, 2);
         // Perfect predictor → Brier score = 0.
@@ -890,7 +1013,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p1", false);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         // Brier score = mean((1-0)^2, (0-1)^2) = 1.0.
         assert!((report.brier_score - 1.0).abs() < 1e-10);
     }
@@ -915,7 +1038,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p3", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p4", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_resolved, 4);
         let expected_brier = 0.075;
         assert!(
@@ -942,7 +1065,7 @@ mod tests {
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.9, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         // lift_vs_population_avg = 0 because the model IS the population avg predictor.
         assert!(
             report.lift_vs_population_avg.abs() < 1e-10,
@@ -969,7 +1092,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         let expected_lift = 0.25 - 0.01;
         assert!(
             (report.lift_vs_persistence - expected_lift).abs() < 1e-10,
@@ -997,7 +1120,7 @@ mod tests {
             append_outcome(store.as_mut(), tl.id(), entity, &pid, prob > 0.5);
         }
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_resolved, 10);
         // ECE should be > 0 (predictions do not perfectly match outcomes).
         // Specifically for bins 0-4: mean_predicted ~ prob, fraction_positive=0.0 → |prob-0|
@@ -1017,7 +1140,7 @@ mod tests {
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.75, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         let bin7 = &report.reliability_bins[7];
         assert_eq!(bin7.n, 1);
         assert!((bin7.mean_predicted - 0.75).abs() < 1e-10);
@@ -1037,7 +1160,7 @@ mod tests {
         append_prediction(store.as_mut(), tl.id(), entity, "e", 1.0, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         let last_bin = &report.reliability_bins[9];
         assert_eq!(last_bin.n, 1, "prob=1.0 should land in bin 9");
     }
@@ -1053,7 +1176,7 @@ mod tests {
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.0, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         let bin0 = &report.reliability_bins[0];
         assert_eq!(bin0.n, 1, "prob=0.0 should land in bin 0");
     }
@@ -1074,7 +1197,7 @@ mod tests {
             append_outcome(store.as_mut(), tl.id(), entity, &pid, i >= 5);
         }
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.reliability_bins.len(), 10);
         for (i, bin) in report.reliability_bins.iter().enumerate() {
             assert_eq!(bin.n, 1, "bin {i} should have 1 prediction");
@@ -1092,7 +1215,7 @@ mod tests {
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.7, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p999", true); // no match
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 1);
         assert_eq!(report.n_resolved, 0);
     }
@@ -1116,7 +1239,7 @@ mod tests {
         append_prediction(store.as_mut(), tl.id(), entity, "e", 0.6, "p1");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 1);
         assert_eq!(report.n_resolved, 1);
     }
@@ -1135,7 +1258,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         let bin3 = &report.reliability_bins[3];
 
         assert_eq!(bin3.n, 2);
@@ -1163,7 +1286,7 @@ mod tests {
             append_outcome(store.as_mut(), tl.id(), entity, &pid, outcome);
         }
 
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_predictions, 5);
         assert_eq!(report.n_resolved, 5);
         assert!(report.brier_score >= 0.0);
@@ -1243,7 +1366,7 @@ mod tests {
     fn compute_report_store_error_on_unknown_timeline() {
         let store = open_store(StoreConfig::Memory).test_ok();
         let missing = TimelineId::new();
-        let err = compute_report(store.as_ref(), missing).test_err();
+        let err = compute_report_authorized(store.as_ref(), missing).test_err();
         assert!(matches!(err, EvalError::Store(_)));
     }
 
@@ -1259,7 +1382,7 @@ mod tests {
             CanonicalBytes::from_vec(vec![0xFF, 0x00]),
         );
         store.append(tl.id(), &[draft]).test_ok();
-        let err = compute_report(store.as_ref(), tl.id()).test_err();
+        let err = compute_report_authorized(store.as_ref(), tl.id()).test_err();
         assert!(matches!(err, EvalError::Decode(_)));
     }
 
@@ -1275,7 +1398,7 @@ mod tests {
             CanonicalBytes::from_vec(vec![0xFF, 0x00]),
         );
         store.append(tl.id(), &[draft]).test_ok();
-        let err = compute_report(store.as_ref(), tl.id()).test_err();
+        let err = compute_report_authorized(store.as_ref(), tl.id()).test_err();
         assert!(matches!(err, EvalError::Decode(_)));
     }
 
@@ -1289,7 +1412,7 @@ mod tests {
         append_prediction(store.as_mut(), tl.id(), entity, "e1", 0.3, "p2");
         append_outcome(store.as_mut(), tl.id(), entity, "p1", true);
         append_outcome(store.as_mut(), tl.id(), entity, "p2", false);
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert!((report.crps - report.brier_score).abs() < 1e-10);
     }
 
@@ -1306,7 +1429,7 @@ mod tests {
         append_outcome(store.as_mut(), tl.id(), e1, "p2", false);
         append_prediction(store.as_mut(), tl.id(), e2, "b", 0.5, "p3");
         append_outcome(store.as_mut(), tl.id(), e2, "p3", false);
-        let report = compute_report(store.as_ref(), tl.id()).test_ok();
+        let report = compute_report_authorized(store.as_ref(), tl.id()).test_ok();
         assert_eq!(report.n_resolved, 3);
         assert!((report.crps - report.brier_score).abs() < 1e-10);
         // personal base rate with leave-one-out: entity e1 (2 preds) gives

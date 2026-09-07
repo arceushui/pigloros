@@ -51,12 +51,39 @@ pub use pos_core::store::{
     APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use pos_core::{
-    CanonicalBytes, CoreError, CorrelationId, EntityId, ErasureFreezeAuthorizationVerifierV1,
-    ErasurePersistencePortV1, Event, EventDraft, EventId, GeographicAdmissionAdmin,
-    GeographicAdmissionOutcome, GeographicAdmissionStore, GeographicReplayEvidenceV1,
-    GeographicReplayVerifier, Kind, OwnTracksEnrollmentStore, TimelineId,
-    ValidatedGeographicAdmissionV1, WallTime,
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
+    CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,
+    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event, EventDraft, EventId,
+    GeographicAdmissionAdmin, GeographicAdmissionOutcome, GeographicAdmissionStore,
+    GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind, OwnTracksEnrollmentStore,
+    PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1, WallTime,
 };
+
+#[cfg(test)]
+const TEST_EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
+    pos_core::ErasureReferenceV1::from_digest([211; 32]);
+
+#[cfg(test)]
+fn test_export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
+    pos_core::ReplayClaimEvaluatorV1::evaluate(
+        pos_core::ErasureReplayClaimV1::Exact,
+        &[pos_core::ArtifactClaimInputV1 {
+            registration: pos_core::RegisteredArtifactV1::new(
+                pos_core::ErasureArtifactClassV1::Export,
+                TEST_EXPORT_DIGEST,
+                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                pos_core::ErasureReferenceV1::from_digest([212; 32]),
+                pos_core::ArtifactOptionalityV1::Required,
+                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: pos_core::ErasureReplayClaimV1::Exact,
+            state: pos_core::ArtifactStateV1::Retained,
+        }],
+    )
+    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+}
 
 /// Resolve a generic-adapter visibility check without exposing protected Timeline state.
 ///
@@ -296,6 +323,10 @@ pub enum StoreConfig {
 ///     event::{CanonicalBytes, EventDraft, Kind},
 ///     ids::EntityId,
 ///     store::SeqRange,
+///     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
+///     ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1,
+///     ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
+///     ReplayClaimEvaluatorV1,
 /// };
 /// use pos_store::{
 ///     export_timeline_own, import_timeline_with_id, open_store, StoreConfig,
@@ -316,9 +347,42 @@ pub enum StoreConfig {
 /// .unwrap();
 /// let child = src.fork(root.id(), Seq::from_u64(1), "child").unwrap();
 ///
+/// // The host supplies the registered Export artifact identity and the latest
+/// // replay-claim evaluation before any source bytes are read.
+/// let host_export_authorization = |_| {
+///     let artifact = ErasureReferenceV1::from_digest([21; 32]);
+///     let evaluation = ReplayClaimEvaluatorV1::evaluate(
+///         ErasureReplayClaimV1::Exact,
+///         &[ArtifactClaimInputV1 {
+///             registration: RegisteredArtifactV1::new(
+///                 ErasureArtifactClassV1::Export,
+///                 artifact,
+///                 ArtifactDataClassV1::StructuralAuditMetadata,
+///                 None,
+///                 ErasureReferenceV1::from_digest([22; 32]),
+///                 ArtifactOptionalityV1::Required,
+///                 ArtifactTransitionRuleV1::PreserveExact,
+///             ),
+///             current_claim: ErasureReplayClaimV1::Exact,
+///             state: ArtifactStateV1::Retained,
+///         }],
+///     )
+///     .unwrap();
+///     (artifact, evaluation)
+/// };
+/// let (root_artifact, root_evaluation) = host_export_authorization(root.id());
+/// let (child_artifact, child_evaluation) = host_export_authorization(child.id());
 /// let mut dst = open_store(StoreConfig::Memory).unwrap();
-/// import_timeline_with_id(&mut *dst, export_timeline_own(&*src, root.id()).unwrap()).unwrap();
-/// import_timeline_with_id(&mut *dst, export_timeline_own(&*src, child.id()).unwrap()).unwrap();
+/// import_timeline_with_id(
+///     &mut *dst,
+///     export_timeline_own(&*src, root.id(), root_artifact, &root_evaluation).unwrap(),
+/// )
+/// .unwrap();
+/// import_timeline_with_id(
+///     &mut *dst,
+///     export_timeline_own(&*src, child.id(), child_artifact, &child_evaluation).unwrap(),
+/// )
+/// .unwrap();
 /// assert_eq!(dst.read(child.id(), SeqRange::all()).unwrap().len(), 1);
 /// ```
 pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
@@ -1018,7 +1082,13 @@ mod tests {
         src.append(tl.id(), &drafts).test_ok();
 
         // Export from source
-        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).test_ok();
+        let export = pos_core::store::export_timeline(
+            src.as_ref(),
+            tl.id(),
+            TEST_EXPORT_DIGEST,
+            &test_export_evaluation(),
+        )
+        .test_ok();
         assert_eq!(export.events.len(), 2);
 
         // Import into a fresh store — different backend, same data
@@ -1047,7 +1117,13 @@ mod tests {
         )
         .test_ok();
 
-        let export = pos_core::store::export_timeline(src.as_ref(), tl.id()).test_ok();
+        let export = pos_core::store::export_timeline(
+            src.as_ref(),
+            tl.id(),
+            TEST_EXPORT_DIGEST,
+            &test_export_evaluation(),
+        )
+        .test_ok();
 
         let mut dst = open_store(StoreConfig::SqliteInMemory).test_ok();
         let imported = pos_core::store::import_timeline(dst.as_mut(), export).test_ok();

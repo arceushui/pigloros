@@ -148,7 +148,7 @@ fn public_lifecycle_persists_raw_manifest_objects_and_attempt_index() -> Result<
                 replicas: Vec::new(),
                 backups: Vec::new(),
             },
-            replay_claim: ErasureReplayClaimV1::StructuralOnly,
+            replay_claim: ErasureReplayClaimV1::Exact,
             policy: reference(0),
             trust: reference(0),
             provenance: reference(0),
@@ -158,6 +158,7 @@ fn public_lifecycle_persists_raw_manifest_objects_and_attempt_index() -> Result<
         },
     )?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(receipt.replay_claim(), ErasureReplayClaimV1::StructuralOnly);
     assert_eq!(receipt.request(), request.reference());
     assert_eq!(adapter.attempt_index_count(request.reference())?, 1);
     assert!(adapter.attempt_page_ref(request.reference(), 0)?.is_some());
