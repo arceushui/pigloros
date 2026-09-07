@@ -193,7 +193,10 @@ jobs:
 
   materialize-conformance-bundles:
     name: materialize-conformance-bundles
-    needs: conformance-fixtures
+    needs:
+      - ci_change_scope
+      - conformance-fixtures
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -913,9 +916,8 @@ jobs:
             FMT_RESULT RUSTDOC_RESULT TEST_RESULT CLIPPY_RESULT \
             AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
             DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT \
-            COVERAGE_RESULT CARGO_CRAP_RESULT
+            COVERAGE_RESULT CARGO_CRAP_RESULT MATERIALIZE_CONFORMANCE_BUNDLES_RESULT
           check_results false \
-            CONFORMANCE_FIXTURES_RESULT MATERIALIZE_CONFORMANCE_BUNDLES_RESULT \
-            CONFORMANCE_NON_LINUX_RESULT
+            CONFORMANCE_FIXTURES_RESULT CONFORMANCE_NON_LINUX_RESULT
 
           exit "${failed}"
