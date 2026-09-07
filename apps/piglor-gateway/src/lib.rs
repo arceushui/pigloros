@@ -3394,59 +3394,59 @@ mod tests {
             ));
         }
 
-        let action_only_actor = EntityId::new();
-        let action_only_gateway = Gateway::new_with_world_bodies_and_authorization(
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn authority_bound_gateway_rejects_action_capability_as_read() {
+        let actor = EntityId::new();
+        let timeline = TimelineId::new();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
             open_store(StoreConfig::Memory).test_ok(),
             [],
-            crate::authorization::test_action_only_authorization_for(action_only_actor),
+            crate::authorization::test_action_only_authorization_for(actor),
         );
         let mut action_shaped_read = GatewayAuthorizationRequest::action(
-            action_only_actor,
-            timeline.id(),
+            actor,
+            timeline,
             EVENT_TYPE_ACTION,
             "world.action.submit",
             WallTime::now(),
         );
         action_shaped_read.target = GatewayAuthorizationTarget::Read {
-            timeline_id: timeline.id(),
+            timeline_id: timeline,
             from_position: Seq::ZERO,
             limit: 1,
         };
-        let substituted_operation = action_only_gateway
-            .read_events_page_authorized(&timeline.id().to_string(), 0, 1, action_shaped_read)
+        let substituted_operation = gateway
+            .read_events_page_authorized(&timeline.to_string(), 0, 1, action_shaped_read)
             .await
             .test_err();
         assert!(matches!(
             substituted_operation,
             GatewayError::AuthorizationDenied
         ));
-        action_only_gateway.shutdown().await.test_ok();
-        drop(action_only_gateway);
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
 
-        let expired_actor = EntityId::new();
-        let expired_gateway = Gateway::new_with_world_bodies_and_authorization(
+    #[tokio::test]
+    async fn authority_bound_gateway_uses_host_time_for_read_expiry() {
+        let actor = EntityId::new();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
             open_store(StoreConfig::Memory).test_ok(),
             [],
-            crate::authorization::test_expired_authorization_for(expired_actor),
+            crate::authorization::test_expired_authorization_for(actor),
         );
-        let expired_timeline = expired_gateway
-            .create_timeline("expired-read")
-            .await
-            .test_ok();
-        let expired_request = GatewayAuthorizationRequest::read(
-            expired_actor,
-            expired_timeline.id(),
-            0,
-            1,
-            WallTime::from_micros(1),
-        );
-        let expired_error = expired_gateway
-            .read_events_page_authorized(&expired_timeline.id().to_string(), 0, 1, expired_request)
+        let timeline = gateway.create_timeline("expired-read").await.test_ok();
+        let request =
+            GatewayAuthorizationRequest::read(actor, timeline.id(), 0, 1, WallTime::from_micros(1));
+        let error = gateway
+            .read_events_page_authorized(&timeline.id().to_string(), 0, 1, request)
             .await
             .test_err();
-        assert!(matches!(expired_error, GatewayError::AuthorizationDenied));
-        expired_gateway.shutdown().await.test_ok();
-        drop(expired_gateway);
+        assert!(matches!(error, GatewayError::AuthorizationDenied));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
