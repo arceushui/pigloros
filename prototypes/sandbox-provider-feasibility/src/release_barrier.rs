@@ -75,7 +75,6 @@ impl Drop for MountedImage {
 
 struct LaunchRecord {
     parameters: LaunchParameters,
-    encoded: Vec<u8>,
     encoded_hex: String,
 }
 
@@ -343,7 +342,6 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         &service,
         &unit,
         &launch.parameters,
-        &launch.encoded,
         &channels.provider_release,
         channels.provider_proxy.as_ref(),
         &ReleaseConfiguration {
@@ -371,6 +369,11 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
     } else {
         result?;
     }
+    report_release_result(proof_case, mode, &unit);
+    Ok(())
+}
+
+fn report_release_result(proof_case: ProofCase, mode: ExecutionMode, unit: &str) {
     if proof_case == ProofCase::Positive && mode == ExecutionMode::Local {
         println!(
             "release_barrier=typed-local-release-ok;unit={unit};fd3=proxy-only;fd4=closed-before-adapter"
@@ -386,7 +389,6 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
             proof_case.name()
         );
     }
-    Ok(())
 }
 
 fn emit_unit_diagnostics(unit: &str) {
@@ -431,7 +433,6 @@ fn build_launch_record(mode: ExecutionMode, sim1_digest: [u8; 32]) -> Result<Lau
     let encoded_hex = hex::encode(&encoded);
     Ok(LaunchRecord {
         parameters,
-        encoded,
         encoded_hex,
     })
 }
@@ -509,6 +510,10 @@ fn load_image_authority(arguments: &[String]) -> Result<ImageAuthority, String> 
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the linear trust-chain readback is intentionally kept in verification order"
+)]
 fn mount_verified_image(
     image: &ImageAuthority,
     attempt_id: &[u8; 16],
@@ -662,7 +667,7 @@ fn mount_verified_image(
     let activation_digest = *blake3::hash(activation_record.as_bytes()).as_bytes();
     mounted.root_device = root_device;
     mounted.root_major_minor = root_major_minor;
-    mounted.root_filesystem = mount_fields[1].to_owned();
+    mount_fields[1].clone_into(&mut mounted.root_filesystem);
     mounted.activation_digest = activation_digest;
     println!(
         "provider_image_activation=verified-before-private-ipc;root_hash={};activation_digest={}",
@@ -838,7 +843,6 @@ async fn complete_release(
     service: &zbus::Proxy<'_>,
     unit: &str,
     parameters: &LaunchParameters,
-    encoded_parameters: &[u8],
     release_socket: &OwnedFd,
     proxy_socket: Option<&OwnedFd>,
     configuration: &ReleaseConfiguration<'_>,
@@ -847,7 +851,7 @@ async fn complete_release(
     let (ready_bytes, credential_pid) = receive_ready(release_socket)?;
     let ready = crate::release_wire::decode_ready(&ready_bytes)?;
     let (main_pid, _namespace_descriptors) =
-        validate_ready_state(unit, parameters, encoded_parameters, &ready, credential_pid)?;
+        validate_ready_state(unit, parameters, &ready, credential_pid)?;
     validate_requested_readback(
         service,
         unit,
@@ -950,16 +954,16 @@ fn ensure_adapter_blocked(proxy_socket: &OwnedFd) -> Result<(), String> {
 fn validate_ready_state(
     unit: &str,
     parameters: &LaunchParameters,
-    encoded_parameters: &[u8],
     ready: &Ready,
     credential_pid: u32,
 ) -> Result<(u32, Vec<File>), String> {
+    let encoded_parameters = encode_launch_parameters(parameters)?;
     let main_pid = wait_for_main_pid(unit)?;
     if credential_pid != main_pid
         || ready.attempt_id != parameters.attempt_id
         || ready.nonce != parameters.nonce
         || ready.sim1_digest != parameters.sim1_digest
-        || ready.launch_parameter_digest != launch_parameter_digest(encoded_parameters)?
+        || ready.launch_parameter_digest != launch_parameter_digest(&encoded_parameters)?
         || ready.expected_fd_layout_digest != parameters.expected_fd_layout_digest
         || ready.observed_fd_layout_digest != parameters.expected_fd_layout_digest
     {
@@ -1920,6 +1924,10 @@ fn validate_ready_executables(main_pid: u32, ready: &Ready) -> Result<(), String
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the complete ADR property matrix stays explicit and auditable"
+)]
 async fn validate_requested_readback(
     service: &zbus::Proxy<'_>,
     unit: &str,
