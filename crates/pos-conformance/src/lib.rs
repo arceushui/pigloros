@@ -3136,7 +3136,7 @@ pub mod strict_codec {
         ]))
     }
 
-    fn uncertainty_values_are_finite(claim: &UncertaintyV1) -> bool {
+    const fn uncertainty_values_are_finite(claim: &UncertaintyV1) -> bool {
         claim.lower.is_finite() && claim.upper.is_finite() && claim.confidence.is_finite()
     }
 
