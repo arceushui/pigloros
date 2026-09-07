@@ -3041,6 +3041,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
+                "world.action.submit",
                 "boundary-success",
             )
             .await
