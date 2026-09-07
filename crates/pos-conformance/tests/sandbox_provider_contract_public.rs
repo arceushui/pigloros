@@ -287,6 +287,30 @@ const fn receipt_authority() -> ReceiptAuthorityV1 {
     }
 }
 
+fn signed_receipt(key: &SigningKey) -> Result<SandboxProviderReceiptV1, SandboxContractErrorV1> {
+    SandboxProviderReceiptV1 {
+        attempt_id: [2; 16],
+        authority: receipt_authority(),
+        trust_epoch: 3,
+        revocation_epoch: 4,
+        policy_epoch: 5,
+        hcp1_digest: digest(9),
+        elm1_digest: digest(10),
+        network_transcript_digests: vec![digest(11)],
+        ready1_digest: Some(digest(12)),
+        release1_digest: Some(digest(13)),
+        requested_configuration_evidence: digest(14),
+        kernel_observation_evidence: digest(15),
+        negative_probe_evidence: digest(16),
+        termination_evidence: digest(17),
+        sau1_digest: digest(18),
+        runtime_attestation_key_id: "runtime-key".to_owned(),
+        receipt_digest: [0; 32],
+        signature: [0; 64],
+    }
+    .sign(key)
+}
+
 const fn operation_authority() -> RequestAuthorityV1 {
     RequestAuthorityV1 {
         request_id: [1; 16],
@@ -552,27 +576,7 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         .verify_signature(&key.verifying_key())?;
     verify_and_materialize_vector("spe1", &error_bytes)?;
 
-    let receipt = SandboxProviderReceiptV1 {
-        attempt_id: [2; 16],
-        authority: receipt_authority(),
-        trust_epoch: 3,
-        revocation_epoch: 4,
-        policy_epoch: 5,
-        hcp1_digest: digest(9),
-        elm1_digest: digest(10),
-        network_transcript_digests: vec![digest(11)],
-        ready1_digest: Some(digest(12)),
-        release1_digest: Some(digest(13)),
-        requested_configuration_evidence: digest(14),
-        kernel_observation_evidence: digest(15),
-        negative_probe_evidence: digest(16),
-        termination_evidence: digest(17),
-        sau1_digest: digest(18),
-        runtime_attestation_key_id: "runtime-key".to_owned(),
-        receipt_digest: [0; 32],
-        signature: [0; 64],
-    }
-    .sign(&key)?;
+    let receipt = signed_receipt(&key)?;
     let receipt_bytes = receipt.to_canonical_cbor()?;
     assert_eq!(
         SandboxProviderReceiptV1::from_canonical_cbor(&receipt_bytes)?,
@@ -582,6 +586,14 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
     independent::SandboxProviderReceipt::from_canonical_cbor(&receipt_bytes)?
         .verify_signature(&key.verifying_key())?;
     verify_and_materialize_vector("spr1", &receipt_bytes)?;
+
+    Ok(())
+}
+
+#[test]
+fn spr1_preserves_each_valid_lifecycle_stage_and_rejects_false_evidence() -> TestResult {
+    let key = signing_key();
+    let receipt = signed_receipt(&key)?;
 
     let mut before_ready = receipt.clone();
     before_ready.ready1_digest = None;
@@ -626,21 +638,28 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
 
-    let mut zero_release_digest = receipt.clone();
+    let mut zero_release_digest = receipt;
     zero_release_digest.release1_digest = Some([0; 32]);
     assert_eq!(
         zero_release_digest.validate(),
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
 
-    let lifecycle_event = result_for_outcome(SandboxTerminalOutcomeV1::Completed)?;
-    for event in 11..=13 {
-        let mut result = lifecycle_event.clone();
+    Ok(())
+}
+
+#[test]
+fn spy1_accepts_the_closed_sau1_event_domain_only() -> TestResult {
+    let key = signing_key();
+    let template = result_for_outcome(SandboxTerminalOutcomeV1::UnavailableAfterAdmission)?;
+    for event in 0..=13 {
+        let mut result = template.clone();
         result.operational_events = vec![event];
-        result.sign(&key)?;
+        let result = result.sign(&key)?;
+        independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?;
     }
 
-    let mut unknown_event = result_for_outcome(SandboxTerminalOutcomeV1::Completed)?;
+    let mut unknown_event = template;
     unknown_event.operational_events = vec![14];
     assert_eq!(
         unknown_event.sign(&key).err(),
