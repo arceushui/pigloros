@@ -6198,6 +6198,7 @@ mod coverage_entrypoints {
             &[],
         );
         assert!(recovery.is_err());
+        drop(recovery);
         Ok(())
     }
 }
