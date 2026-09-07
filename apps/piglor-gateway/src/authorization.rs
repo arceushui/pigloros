@@ -1214,13 +1214,14 @@ mod tests {
     #[test]
     fn stale_pinned_revocation_state_denies_even_when_the_grant_is_valid() {
         let fixture = fixture();
+        let request = action(&fixture);
         let stale = GatewayAuthorization::new_with_revocation_state(
             Arc::new(LocalAuthenticationAdapter::new(fixture.authenticated)),
             fixture.authority,
             fixture.authorization.registry.clone(),
             false,
         );
-        let decision = stale.evaluate(action(&fixture)).test_ok();
+        let decision = stale.evaluate(request).test_ok();
         assert!(!decision.is_allowed());
         assert_eq!(
             decision.decision().error(),

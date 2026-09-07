@@ -1832,7 +1832,7 @@ impl Gateway {
             Ok(draft) => draft,
             Err(error) => return Err(error),
         };
-        let decision = reauthorize_at_commit_fence(&authorization, decision)?;
+        let decision = reauthorize_at_commit_fence(&authorization, &decision)?;
         let event = match self.append_draft(timeline, draft).await {
             Ok(event) => event,
             Err(error) => return Err(error),
@@ -1965,7 +1965,7 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         drop(proposal);
-        let decision = reauthorize_at_commit_fence(&authorization, decision)?;
+        let decision = reauthorize_at_commit_fence(&authorization, &decision)?;
         let result = match self
             .append_identified_draft(timeline, draft, ingress_id)
             .await
@@ -2305,7 +2305,7 @@ const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayErr
 
 fn reauthorize_at_commit_fence(
     authorization: &GatewayAuthorization,
-    decision: GatewayAuthorizationDecision,
+    decision: &GatewayAuthorizationDecision,
 ) -> Result<GatewayAuthorizationDecision, GatewayError> {
     let mut request = decision.request().clone();
     request.at_time = WallTime::now();
