@@ -5,8 +5,8 @@ use super::codec::{
     decode_identifiers, decode_u8_list, digest32, digest_list_value, id16, identifier,
     invalid_digest_list, key_id, nonzero_optional, optional_bytes_value, optional_digest,
     optional_digest_value, optional_id16, optional_text, optional_u8, require_signature,
-    self_digested, signed, text_value, uint, uint_value, valid_key_id, validate_identifier_order,
-    validate_magic, verify_digest, verify_signature, MAX_LIST_ENTRIES,
+    self_digested, signed, text_value, uint, uint_value, usize_u64, valid_key_id,
+    validate_identifier_order, validate_magic, verify_digest, verify_signature, MAX_LIST_ENTRIES,
 };
 use super::operations::{decode_request_authority, validate_request_authority, RequestAuthority};
 use super::SandboxProviderProtocolError;

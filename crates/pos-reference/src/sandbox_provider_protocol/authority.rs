@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use super::codec::{
     array, bounded_array, byte_string, bytes_value, decode_document, decode_text_list, digest32,
-    fixed_bytes, identifier, key_id, normalized_absolute_path, require_canonical_order,
+    fixed_bytes, id16, identifier, key_id, normalized_absolute_path, require_canonical_order,
     require_signature, self_digested, signed, text, text_value, uint, uint_value, usize_u64,
     valid_identifier, valid_key_id, verify_digest, verify_signature, MAX_LIST_ENTRIES,
 };

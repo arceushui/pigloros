@@ -183,7 +183,7 @@ pub struct SandboxReconcileResponse {
 }
 
 macro_rules! request_codec {
-    ($type:ty, $magic:literal, $width:literal, $decode:expr) => {
+    ($type:ty, $magic:literal, $width:literal, $decode:expr_2021) => {
         impl $type {
             /// Decode and fully validate one exact canonical request record.
             ///
@@ -243,7 +243,7 @@ request_codec!(
 );
 
 macro_rules! signed_response_codec {
-    ($type:ty, $magic:literal, $width:literal, $decode:expr, $unsigned:expr) => {
+    ($type:ty, $magic:literal, $width:literal, $decode:expr_2021, $unsigned:expr_2021) => {
         impl $type {
             /// Decode and fully validate one exact canonical signed response.
             ///
