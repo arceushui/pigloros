@@ -1756,7 +1756,7 @@ osf_link = \"https://osf.io/example\"\n";
         let entity = test_action_actor().to_string();
 
         let (status, err) = json_request(
-            app,
+            app.clone(),
             "POST",
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
@@ -1771,7 +1771,7 @@ osf_link = \"https://osf.io/example\"\n";
 
         let other_actor = EntityId::new().to_string();
         let (status, err) = json_request(
-            test_app(),
+            app,
             "POST",
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
