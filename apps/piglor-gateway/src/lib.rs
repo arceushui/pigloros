@@ -1786,14 +1786,12 @@ impl Gateway {
                 Ok(decision) => decision,
                 Err(error) => return Err(error),
             };
-            match self.store.timeline(timeline).await {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
-                Err(error) => return Err(error.into()),
+            if let Err(error) = self.ensure_timeline_exists(timeline).await {
+                return Err(error);
             }
-            let draft = match self.action_registry.submit_action(&proposal) {
+            let draft = match self.submit_action_draft(&proposal) {
                 Ok(draft) => draft,
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             let event = match self.append_draft(timeline, draft).await {
                 Ok(event) => event,
@@ -1812,14 +1810,12 @@ impl Gateway {
                 Ok(timeline) => timeline,
                 Err(error) => return Err(error),
             };
-            match self.store.timeline(timeline).await {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
-                Err(error) => return Err(error.into()),
+            if let Err(error) = self.ensure_timeline_exists(timeline).await {
+                return Err(error);
             }
-            let draft = match self.action_registry.submit_action(&proposal) {
+            let draft = match self.submit_action_draft(&proposal) {
                 Ok(draft) => draft,
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             return self.append_draft(timeline, draft).await;
         }
@@ -1890,10 +1886,8 @@ impl Gateway {
                 Ok(decision) => decision,
                 Err(error) => return Err(error),
             };
-            match self.store.timeline(timeline).await {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
-                Err(error) => return Err(error.into()),
+            if let Err(error) = self.ensure_timeline_exists(timeline).await {
+                return Err(error);
             }
             let proposal = match ProposedAction::try_new(
                 Kind::new(event_type),
@@ -1904,9 +1898,9 @@ impl Gateway {
                 Ok(proposal) => proposal,
                 Err(error) => return Err(error.into()),
             };
-            let draft = match self.action_registry.submit_action(&proposal) {
+            let draft = match self.submit_action_draft(&proposal) {
                 Ok(draft) => draft,
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             drop(proposal);
             let result = match self
@@ -1928,10 +1922,8 @@ impl Gateway {
                 Ok(timeline) => timeline,
                 Err(error) => return Err(error),
             };
-            match self.store.timeline(timeline).await {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
-                Err(error) => return Err(error.into()),
+            if let Err(error) = self.ensure_timeline_exists(timeline).await {
+                return Err(error);
             }
             let entity = match parse_entity_id(entity_id) {
                 Ok(entity) => entity,
@@ -1949,9 +1941,9 @@ impl Gateway {
             if let Err(error) = principal.authorizes(&proposal) {
                 return Err(error.into());
             }
-            let draft = match self.action_registry.submit_action(&proposal) {
+            let draft = match self.submit_action_draft(&proposal) {
                 Ok(draft) => draft,
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             drop(proposal);
             return self
@@ -1959,6 +1951,21 @@ impl Gateway {
                 .await;
         }
         Err(GatewayError::ActionAuthorizationUnavailable)
+    }
+
+    async fn ensure_timeline_exists(&self, timeline: TimelineId) -> Result<(), GatewayError> {
+        match self.store.timeline(timeline).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn submit_action_draft(&self, proposal: &ProposedAction) -> Result<EventDraft, GatewayError> {
+        match self.action_registry.submit_action(proposal) {
+            Ok(draft) => Ok(draft),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Append an action using an opaque external ingress identity.
