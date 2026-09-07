@@ -2,10 +2,35 @@ use std::sync::Arc;
 
 use pos_core::{
     store::{export_timeline_raw, EventStore, SeqRange},
-    CanonicalBytes, EntityId, ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1,
-    EventDraft, Kind, SchemaVersion,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, CanonicalBytes, EntityId, ErasureArtifactClassV1,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, EventDraft, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    SchemaVersion,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
+
+const EXPORT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([211; 32]);
+
+fn export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
+    ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::Export,
+                EXPORT_DIGEST,
+                ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                ErasureReferenceV1::from_digest([212; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: ErasureReplayClaimV1::Exact,
+            state: ArtifactStateV1::Retained,
+        }],
+    )
+    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+}
 
 fn draft() -> EventDraft {
     EventDraft {
@@ -38,7 +63,13 @@ fn assert_blocked<S: EventStore>(mut store: S) -> Result<(), Box<dyn std::error:
         read_error.map(|error| error.to_string()),
         Some("erasure containment boundary is unavailable".to_owned())
     );
-    let export_error = export_timeline_raw(&store, timeline.id()).err();
+    let export_error = export_timeline_raw(
+        &store,
+        timeline.id(),
+        EXPORT_DIGEST,
+        &export_evaluation(),
+    )
+    .err();
     assert_eq!(
         export_error.map(|error| error.to_string()),
         Some("erasure containment boundary is unavailable".to_owned())
