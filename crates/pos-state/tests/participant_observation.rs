@@ -37,10 +37,14 @@ const fn hash_from_repeated_byte(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
-fn retained_observation(observation: &AuthorizedObservationV1) -> &ObservationSnapshotV1 {
+fn observation_evaluation(
+    observation: &AuthorizedObservationV1,
+    transition_rule: pos_core::ArtifactTransitionRuleV1,
+    state: pos_core::ArtifactStateV1,
+) -> pos_core::ReplayClaimEvaluationV1 {
     let artifact_digest =
         pos_core::ErasureReferenceV1::from_digest(*observation.artifact_digest().as_bytes());
-    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
+    pos_core::ReplayClaimEvaluatorV1::evaluate(
         pos_core::ErasureReplayClaimV1::Exact,
         &[pos_core::ArtifactClaimInputV1 {
             registration: pos_core::RegisteredArtifactV1::new(
@@ -50,13 +54,21 @@ fn retained_observation(observation: &AuthorizedObservationV1) -> &ObservationSn
                 None,
                 pos_core::ErasureReferenceV1::from_digest([244; 32]),
                 pos_core::ArtifactOptionalityV1::Required,
-                pos_core::ArtifactTransitionRuleV1::PreserveExact,
+                transition_rule,
             ),
             current_claim: pos_core::ErasureReplayClaimV1::Exact,
-            state: pos_core::ArtifactStateV1::Retained,
+            state,
         }],
     )
-    .test_ok();
+    .test_ok()
+}
+
+fn retained_observation(observation: &AuthorizedObservationV1) -> &ObservationSnapshotV1 {
+    let evaluation = observation_evaluation(
+        observation,
+        pos_core::ArtifactTransitionRuleV1::PreserveExact,
+        pos_core::ArtifactStateV1::Retained,
+    );
     observation.authoritative_snapshot(&evaluation).test_ok()
 }
 
@@ -494,41 +506,16 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
             &context(TimelineId::new()),
         )
         .test_ok();
-    let snapshot_digest = observation.artifact_digest();
-    let snapshot_evaluation = ReplayClaimEvaluatorV1::evaluate(
-        ErasureReplayClaimV1::Exact,
-        &[ArtifactClaimInputV1 {
-            registration: RegisteredArtifactV1::new(
-                ErasureArtifactClassV1::ForkOrSnapshot,
-                ErasureReferenceV1::from_digest(*snapshot_digest.as_bytes()),
-                ArtifactDataClassV1::PrivateSubjectData,
-                None,
-                ErasureReferenceV1::from_digest([70; 32]),
-                ArtifactOptionalityV1::Required,
-                ArtifactTransitionRuleV1::PreserveExact,
-            ),
-            current_claim: ErasureReplayClaimV1::Exact,
-            state: ArtifactStateV1::Retained,
-        }],
-    )
-    .test_ok();
-    let erased_snapshot_evaluation = ReplayClaimEvaluatorV1::evaluate(
-        ErasureReplayClaimV1::Exact,
-        &[ArtifactClaimInputV1 {
-            registration: RegisteredArtifactV1::new(
-                ErasureArtifactClassV1::ForkOrSnapshot,
-                ErasureReferenceV1::from_digest(*snapshot_digest.as_bytes()),
-                ArtifactDataClassV1::PrivateSubjectData,
-                None,
-                ErasureReferenceV1::from_digest([70; 32]),
-                ArtifactOptionalityV1::Required,
-                ArtifactTransitionRuleV1::Remove,
-            ),
-            current_claim: ErasureReplayClaimV1::Exact,
-            state: ArtifactStateV1::Erased,
-        }],
-    )
-    .test_ok();
+    let snapshot_evaluation = observation_evaluation(
+        &observation,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let erased_snapshot_evaluation = observation_evaluation(
+        &observation,
+        ArtifactTransitionRuleV1::Remove,
+        ArtifactStateV1::Erased,
+    );
     assert!(matches!(
         observation.authoritative_snapshot(&erased_snapshot_evaluation),
         Err(pos_core::AuthorityErrorV1::SourceUnavailable)
