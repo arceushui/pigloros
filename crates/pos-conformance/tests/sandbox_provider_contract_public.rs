@@ -128,7 +128,7 @@ fn image_manifest() -> SignedImageManifestV1 {
     }
 }
 
-fn partition(
+const fn partition(
     role: PartitionRoleV1,
     partition_type_uuid: [u8; 16],
     instance_seed: u8,
@@ -194,7 +194,7 @@ fn execute_request() -> Result<SandboxExecuteRequestV1, SandboxContractErrorV1> 
     })
 }
 
-fn admission_authority() -> AdmissionAuthorityV1 {
+const fn admission_authority() -> AdmissionAuthorityV1 {
     AdmissionAuthorityV1 {
         evr1_digest: digest(1),
         fixture_contract_digest: digest(2),
@@ -212,7 +212,7 @@ fn admission_authority() -> AdmissionAuthorityV1 {
     }
 }
 
-fn receipt_authority() -> ReceiptAuthorityV1 {
+const fn receipt_authority() -> ReceiptAuthorityV1 {
     ReceiptAuthorityV1 {
         agr1_digest: digest(1),
         spm1_digest: digest(2),
