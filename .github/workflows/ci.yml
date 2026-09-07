@@ -354,7 +354,7 @@ jobs:
       - name: Enforce new production Rust code coverage (lines ≥99%, regions ≥99%)
         run: >
           covgate check "${{ runner.temp }}/coverage.json"
-          --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+          --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
           --no-github-summary
 
   cargo-crap:
