@@ -16,6 +16,7 @@ use pos_reference::profile::ProfileError;
 use pos_reference::signed_bundle::BundleError;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+type RequirementMutation = fn(&mut SandboxRequirement);
 
 #[test]
 fn public_error_boundaries_preserve_closed_failure_classes() {
@@ -317,7 +318,6 @@ fn sandbox_authority_fields_change_independent_capability_identity() -> TestResu
     let mut request = valid_request()?;
     request.sandbox_requirement = Some(sandbox_requirement());
     let expected = request.expected_output_capability_digest()?;
-    type RequirementMutation = fn(&mut SandboxRequirement);
     let mutations: [(&str, RequirementMutation); 6] = [
         ("LPS1 digest", |value| value.lps1_digest = [41; 32]),
         ("SIM1 digest", |value| value.sim1_digest = [42; 32]),

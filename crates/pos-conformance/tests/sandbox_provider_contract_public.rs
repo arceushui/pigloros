@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use pos_reference::sandbox_provider_protocol as independent;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+type ResultMutation = fn(&mut SandboxProviderResultV1);
 
 fn verify_and_materialize_vector(name: &str, bytes: &[u8]) -> TestResult {
     let filename = format!("{name}.cbor");
@@ -757,7 +758,6 @@ fn result_receipt_pairs_accept_each_reachable_lifecycle_stage() -> TestResult {
 
 #[test]
 fn result_receipt_pairs_reject_identity_and_authority_mismatches() -> TestResult {
-    type ResultMutation = fn(&mut SandboxProviderResultV1);
     let key = signing_key();
     let receipt = signed_receipt_at_stage(&key, ReceiptStage::Released)?;
     let result = signed_result_for_receipt(
@@ -778,6 +778,52 @@ fn result_receipt_pairs_reject_identity_and_authority_mismatches() -> TestResult
         let changed = changed.sign(&key)?;
         assert_pair_rejected(&changed, &receipt)?;
     }
+    Ok(())
+}
+
+#[test]
+fn result_receipt_pair_validation_rejects_invalid_records_before_comparing_them() -> TestResult {
+    let key = signing_key();
+    let receipt = signed_receipt_at_stage(&key, ReceiptStage::Released)?;
+    let result = signed_result_for_receipt(
+        &key,
+        &receipt,
+        SandboxTerminalOutcomeV1::Completed,
+        vec![11, 12],
+    )?;
+
+    let mut invalid_result = result.clone();
+    invalid_result.result_digest[0] ^= 1;
+    assert_eq!(
+        invalid_result.validate_receipt_lifecycle(&receipt),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
+
+    let mut invalid_receipt = receipt.clone();
+    invalid_receipt.receipt_digest[0] ^= 1;
+    assert_eq!(
+        result.validate_receipt_lifecycle(&invalid_receipt),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
+
+    let mut decoded_result =
+        independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?;
+    let decoded_receipt =
+        independent::SandboxProviderReceipt::from_canonical_cbor(&receipt.to_canonical_cbor()?)?;
+    decoded_result.result_digest[0] ^= 1;
+    assert_eq!(
+        decoded_result.validate_receipt_lifecycle(&decoded_receipt),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
+
+    let decoded_result =
+        independent::SandboxProviderResult::from_canonical_cbor(&result.to_canonical_cbor()?)?;
+    let mut decoded_receipt = decoded_receipt;
+    decoded_receipt.receipt_digest[0] ^= 1;
+    assert_eq!(
+        decoded_result.validate_receipt_lifecycle(&decoded_receipt),
+        Err(independent::SandboxProviderProtocolError::DigestMismatch)
+    );
     Ok(())
 }
 
