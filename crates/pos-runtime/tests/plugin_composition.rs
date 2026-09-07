@@ -187,6 +187,36 @@ fn exact_native_plugin_and_governed_public_adapter_resolve_in_required_order() {
     assert_eq!(
         registry
             .resolve_required_composition(&air_gapped)
+            .test_err(),
+        PluginCompositionErrorV1::ExecutionModeMismatch
+    );
+
+    let mut air_gapped_registry = PluginRegistry::new_air_gapped();
+    air_gapped_registry
+        .register_pinned(
+            &world,
+            PluginRegistrationV1::new(
+                air_gapped.plugins()[0].pin().clone(),
+                PluginAvailabilityV1::Available,
+            ),
+            None,
+            None,
+        )
+        .test_ok();
+    air_gapped_registry
+        .register_pinned(
+            &evaluation,
+            PluginRegistrationV1::new(
+                air_gapped.plugins()[1].pin().clone(),
+                PluginAvailabilityV1::Available,
+            ),
+            None,
+            None,
+        )
+        .test_ok();
+    assert_eq!(
+        air_gapped_registry
+            .resolve_required_composition(&air_gapped)
             .test_ok()
             .mode(),
         PluginExecutionModeV1::AirGapped

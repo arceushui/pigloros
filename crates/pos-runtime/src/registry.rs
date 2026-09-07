@@ -728,6 +728,7 @@ pub struct PluginRegistry {
     projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
     run_mode: RunMode,
+    composition_mode: PluginExecutionModeV1,
     resource_limit: Option<u64>,
     poisoned_driver: Option<String>,
     consent_gate: Option<Arc<dyn ConsentGate>>,
@@ -781,14 +782,7 @@ impl PluginRegistry {
         &self,
         required: &RequiredPluginCompositionV1,
     ) -> Result<ResolvedPluginCompositionV1, PluginCompositionErrorV1> {
-        let mode_matches = matches!(
-            (self.run_mode, required.mode()),
-            (
-                RunMode::Live,
-                PluginExecutionModeV1::Local | PluginExecutionModeV1::AirGapped
-            ) | (RunMode::Replay, PluginExecutionModeV1::Replay)
-        );
-        if !mode_matches {
+        if self.composition_mode != required.mode() {
             return Err(PluginCompositionErrorV1::ExecutionModeMismatch);
         }
 
@@ -932,16 +926,22 @@ impl PluginRegistry {
 
     #[must_use]
     pub fn new() -> Self {
-        Self::new_with_mode(RunMode::Live)
+        Self::new_with_mode(RunMode::Live, PluginExecutionModeV1::Local)
+    }
+
+    /// Create a live registry for an Air-Gapped execution profile.
+    #[must_use]
+    pub fn new_air_gapped() -> Self {
+        Self::new_with_mode(RunMode::Live, PluginExecutionModeV1::AirGapped)
     }
 
     /// Create a projection-only registry for replay.
     #[must_use]
     pub fn new_replay() -> Self {
-        Self::new_with_mode(RunMode::Replay)
+        Self::new_with_mode(RunMode::Replay, PluginExecutionModeV1::Replay)
     }
 
-    fn new_with_mode(run_mode: RunMode) -> Self {
+    fn new_with_mode(run_mode: RunMode, composition_mode: PluginExecutionModeV1) -> Self {
         let mut schemas = SchemaRegistry::new();
         // Auto-register the Recorder's internal event type so that
         // Recorder::to_draft() output passes SchemaRegistry::validate().
@@ -962,6 +962,7 @@ impl PluginRegistry {
             projections: ProjectionRegistry::new(),
             pending_step: None,
             run_mode,
+            composition_mode,
             resource_limit: None,
             poisoned_driver: None,
             // Every live registry has a host-owned gate, even before the
