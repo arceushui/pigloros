@@ -723,6 +723,9 @@ pub enum GatewayError {
     /// Malformed event polling query.
     #[error("invalid events query: {0}")]
     InvalidEventsQuery(String),
+    /// Authorization request fields failed host-side validation.
+    #[error("invalid authorization request")]
+    InvalidAuthorizationRequest,
     /// A single stored Event cannot fit in a bounded response.
     #[error("event response exceeds maximum of {maximum} bytes")]
     EventResponseTooLarge { maximum: usize },
@@ -1935,9 +1938,6 @@ impl Gateway {
             Ok(decision) => decision,
             Err(error) => return Err(error),
         };
-        if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
-            return Err(error);
-        }
         let proposal = match build_proposed_action(entity, event_type, payload, capability) {
             Ok(proposal) => proposal,
             Err(error) => return Err(error.into()),
@@ -2278,8 +2278,8 @@ fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) ->
 const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
     match error {
         GatewayAuthorizationError::AuthenticationUnavailable
-        | GatewayAuthorizationError::RequestUnavailable
         | GatewayAuthorizationError::AuthorityUnavailable => GatewayError::AuthorizationUnavailable,
+        GatewayAuthorizationError::RequestUnavailable => GatewayError::InvalidAuthorizationRequest,
         GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
     }
 }
@@ -3125,6 +3125,20 @@ mod tests {
             "catalogue_version": 1,
             "tick": 1
         });
+        let malformed_request = gateway
+            .submit_json_action(
+                &timeline_id,
+                &actor.to_string(),
+                "",
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            malformed_request,
+            GatewayError::InvalidAuthorizationRequest
+        ));
         assert_authority_identified_action_boundaries(&gateway, &timeline_id, actor, &payload)
             .await;
         let appended = gateway

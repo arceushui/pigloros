@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock};
 
 const MAX_AUTHORIZATION_AUDITS: usize = 1_024;
 
@@ -416,7 +416,7 @@ pub struct GatewayAuthorization {
     adapter: Arc<dyn GatewayAuthenticationAdapter>,
     authority: Arc<RwLock<PersistedAuthorityV1>>,
     registry: AuthorityRegistrySnapshotV1,
-    commit_lock: Arc<Mutex<()>>,
+    commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
 }
 
@@ -432,7 +432,7 @@ impl GatewayAuthorization {
             adapter,
             authority: Arc::new(RwLock::new(authority)),
             registry,
-            commit_lock: Arc::new(Mutex::new(())),
+            commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
@@ -505,7 +505,7 @@ impl GatewayAuthorization {
         &self,
         authority: PersistedAuthorityV1,
     ) -> Result<(), GatewayAuthorizationError> {
-        let _guard = self.commit_lock.lock().await;
+        let _guard = self.commit_lock.write().await;
         self.authority
             .write()
             .map(|mut current| {
@@ -530,8 +530,8 @@ impl GatewayAuthorization {
     }
 
     /// Acquire the append fence used by the Gateway before a final recheck.
-    pub(crate) async fn commit_fence(&self) -> OwnedMutexGuard<()> {
-        Arc::clone(&self.commit_lock).lock_owned().await
+    pub(crate) async fn commit_fence(&self) -> OwnedRwLockReadGuard<()> {
+        Arc::clone(&self.commit_lock).read_owned().await
     }
 }
 
@@ -596,7 +596,7 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
     match request.target {
         GatewayAuthorizationTarget::Action { timeline_id } => {
             hasher.update(&[0]);
-            hasher.update(&timeline_id.inner().to_bytes());
+            hasher.update(&timeline_bytes(timeline_id));
         }
         GatewayAuthorizationTarget::Read {
             timeline_id,
@@ -609,7 +609,12 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
             hasher.update(&u64::try_from(limit).unwrap_or(u64::MAX).to_be_bytes());
         }
     }
-    hasher.update(request.actor_entity_id.to_string().as_bytes());
+    hasher.update(&entity_bytes(request.actor_entity_id));
+    digest_optional_fixed(&mut hasher, request.subject_id.map(entity_bytes));
+    digest_optional_fixed(&mut hasher, request.participant_id.map(entity_bytes));
+    digest_optional_fixed(&mut hasher, request.plugin_id.map(plugin_bytes));
+    digest_optional_fixed(&mut hasher, request.installation_id);
+    hasher.update(&[role_code(request.principal_role)]);
     for value in [
         request.resource.as_str(),
         request.data_category.as_str(),
@@ -620,7 +625,43 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
         hasher.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
         hasher.update(value.as_bytes());
     }
+    hasher.update(&request.at_time.as_micros().to_be_bytes());
+    hasher.update(&request.at_position.as_u64().to_be_bytes());
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn entity_bytes(value: EntityId) -> [u8; 16] {
+    let raw: u128 = value.inner().into();
+    raw.to_be_bytes()
+}
+
+fn plugin_bytes(value: PluginId) -> [u8; 16] {
+    let raw: u128 = value.inner().into();
+    raw.to_be_bytes()
+}
+
+fn timeline_bytes(value: TimelineId) -> [u8; 16] {
+    let raw: u128 = value.inner().into();
+    raw.to_be_bytes()
+}
+
+fn digest_optional_fixed<const N: usize>(hasher: &mut blake3::Hasher, value: Option<[u8; N]>) {
+    match value {
+        None => hasher.update(&[0]),
+        Some(bytes) => {
+            hasher.update(&[1]);
+            hasher.update(&(N as u64).to_be_bytes());
+            hasher.update(&bytes);
+        }
+    }
+}
+
+const fn role_code(value: AuthorityRoleV1) -> u8 {
+    match value {
+        AuthorityRoleV1::Actor => 0,
+        AuthorityRoleV1::Approver => 1,
+        AuthorityRoleV1::Evaluator => 2,
+    }
 }
 
 #[cfg(test)]
@@ -894,6 +935,49 @@ mod tests {
             first.audit().operation_binding(),
             second.audit().operation_binding()
         );
+    }
+
+    #[test]
+    fn operation_binding_includes_every_decision_identifying_field() {
+        let fixture = fixture();
+        let baseline = operation_binding(&action(&fixture));
+        let mut variants = Vec::new();
+
+        let mut request = action(&fixture);
+        request.subject_id = Some(EntityId::new());
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.participant_id = Some(EntityId::new());
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.plugin_id = Some(PluginId::new());
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.installation_id = Some([7; 16]);
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.principal_role = AuthorityRoleV1::Approver;
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.principal_role = AuthorityRoleV1::Evaluator;
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.at_time = WallTime::from_micros(11);
+        variants.push(request);
+
+        let mut request = action(&fixture);
+        request.at_position = Seq::from_u64(1);
+        variants.push(request);
+
+        for variant in variants {
+            assert_ne!(baseline, operation_binding(&variant));
+        }
     }
 
     #[test]

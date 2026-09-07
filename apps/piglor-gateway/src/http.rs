@@ -427,6 +427,7 @@ impl IntoResponse for GatewayError {
             | Self::UnsupportedAction(_)
             | Self::InvalidPageLimit { .. }
             | Self::InvalidEventsQuery(_)
+            | Self::InvalidAuthorizationRequest
             | Self::ConsentCodec(_)
             | Self::ConsentGrantSequenceMismatch
             | Self::ConsentRevocationFenceMismatch => StatusCode::BAD_REQUEST,
@@ -1492,6 +1493,8 @@ osf_link = \"https://osf.io/example\"\n";
         .into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::InvalidEventsQuery("bad".into()).into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = GatewayError::InvalidAuthorizationRequest.into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::ConsentRevocationFenceMismatch.into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
