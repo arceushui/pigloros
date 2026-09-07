@@ -2179,7 +2179,25 @@ impl PluginRegistry {
             return Err(ActionRejected::UnknownEventType);
         };
 
-        approver.approve(proposal)
+        Self::validate_approver_draft(proposal, approver.approve(proposal))
+    }
+
+    fn validate_approver_draft(
+        proposal: &ProposedAction,
+        result: Result<EventDraft, ActionRejected>,
+    ) -> Result<EventDraft, ActionRejected> {
+        let draft = result?;
+        if draft.entity != proposal.actor_entity_id {
+            return Err(ActionRejected::DomainValidationFailed(
+                "approver returned an event for a different actor".to_owned(),
+            ));
+        }
+        if draft.event_type != proposal.event_type {
+            return Err(ActionRejected::DomainValidationFailed(
+                "approver returned an event for a different event type".to_owned(),
+            ));
+        }
+        Ok(draft)
     }
 
     /// Return the action approver registered for the given event type, if any.
@@ -4692,6 +4710,21 @@ mod tests {
         }
     }
 
+    struct ForgingActionApprover {
+        entity: EntityId,
+        event_type: Kind,
+    }
+
+    impl ActionApprover for ForgingActionApprover {
+        fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+            Ok(EventDraft::new(
+                self.entity,
+                self.event_type.clone(),
+                proposal.payload.clone(),
+            ))
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_registry_registers_approver_and_submits_action() {
@@ -4808,6 +4841,63 @@ mod tests {
         assert_eq!(
             replay.submit_action(&valid),
             Err(ActionRejected::UnknownEventType)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugin_registry_rejects_approver_drafts_that_change_authority() {
+        let actor = EntityId::new();
+        let forged_actor = EntityId::new();
+        let event_type = Kind::new("action.type");
+        let proposal = ProposedAction::new(
+            event_type.clone(),
+            actor,
+            CanonicalBytes::from_static(b"ok_payload"),
+            Kind::new("action.type.submit"),
+        );
+
+        let plugin = plugin_with_caps("forged_actor", &["action.type"], false, false);
+        let mut actor_registry = PluginRegistry::default();
+        actor_registry
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(ForgingActionApprover {
+                    entity: forged_actor,
+                    event_type: event_type.clone(),
+                })),
+                [event_type.clone()],
+            )
+            .test_ok();
+        assert_eq!(
+            actor_registry.submit_action(&proposal),
+            Err(ActionRejected::DomainValidationFailed(
+                "approver returned an event for a different actor".to_owned(),
+            ))
+        );
+
+        let forged_event_type = Kind::new("other.action.type");
+        let plugin = plugin_with_caps("forged_event_type", &["action.type"], false, false);
+        let mut event_type_registry = PluginRegistry::default();
+        event_type_registry
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(ForgingActionApprover {
+                    entity: actor,
+                    event_type: forged_event_type,
+                })),
+                [event_type],
+            )
+            .test_ok();
+        assert_eq!(
+            event_type_registry.submit_action(&proposal),
+            Err(ActionRejected::DomainValidationFailed(
+                "approver returned an event for a different event type".to_owned(),
+            ))
         );
     }
 
