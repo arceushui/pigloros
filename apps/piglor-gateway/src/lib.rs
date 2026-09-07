@@ -3673,7 +3673,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    pub(super) enum ScriptMode {
+    pub enum ScriptMode {
         FailCreate,
         FailList,
         FailGetTimeline,
@@ -3695,8 +3695,8 @@ mod tests {
         MissingTimeline,
     }
 
-    pub(super) struct ScriptedStore {
-        pub(super) mode: ScriptMode,
+    pub struct ScriptedStore {
+        pub mode: ScriptMode,
     }
 
     impl EventStore for ScriptedStore {
@@ -6158,6 +6158,7 @@ mod coverage_entrypoints {
             Arc::clone(&gate),
         );
         assert!(matches!(rejected, Err(GatewayError::Store(_))));
+        drop(rejected);
 
         let owner_key = OwnTracksOwnerKey([7; 32]);
         let owntracks = Gateway::new_with_owntracks_ingress_and_erasure_gate(
