@@ -526,7 +526,12 @@ fn transient_properties(
         format!("--mode={}", mode.name()),
         format!("--launch-parameters={parameter_hex}"),
     ];
-    let bind = format!("{}:{RELEASE_LAUNCHER}", executable.display());
+    let bind = vec![(
+        executable.display().to_string(),
+        RELEASE_LAUNCHER.to_owned(),
+        false,
+        0_u64,
+    )];
     let syscalls = flattened_system_service_syscalls()?;
     Ok(vec![
         property("Description", "PiglorOS ADR-069 release barrier proof")?,
@@ -539,7 +544,9 @@ fn transient_properties(
         property("RootHash", root_hash)?,
         property("RootHashSignature", root_signature)?,
         property("RootImagePolicy", "root=verity+signed+read-only-on:=absent")?,
-        property("BindReadOnlyPaths", vec![bind])?,
+        // systemd v260.2 consumes bind mounts as a(ssbt): source,
+        // destination, ignore-missing, and mount flags.
+        property("BindReadOnlyPaths", bind)?,
         property("DynamicUser", true)?,
         property("NoNewPrivileges", true)?,
         property("PrivateDevices", true)?,
