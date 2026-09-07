@@ -1,4 +1,5 @@
-//! Axum HTTP surface for [`crate::Gateway`] (WebSocket stream deferred — HTTP poll is the current foundation).
+//! Axum HTTP surface for [`crate::Gateway`] (WebSocket stream deferred — HTTP
+//! poll is the current foundation; configured host authorization protects reads).
 
 use crate::{
     ActionRequest, CreateTimelineRequest, EventPage, EventView, EventsQuery, Gateway, GatewayError,
@@ -9,14 +10,17 @@ use axum::{
     extract::{DefaultBodyLimit, Path, RawQuery, State},
     http::{
         header::{self, CONTENT_SECURITY_POLICY},
-        HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
     },
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use piglor_ledger::{render_html, LedgerView};
-use pos_core::{clock::Seq, ActionRejected, CoreError};
+use pos_core::{
+    clock::{Seq, WallTime},
+    ActionRejected, CoreError,
+};
 use pos_plugin_ledger::NewPrediction;
 use serde_json::json;
 use std::net::SocketAddr;
@@ -190,12 +194,30 @@ async fn list_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
     RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, GatewayError> {
     let q = parse_events_query(raw_query.as_deref())?;
-    let page = state
-        .gateway
-        .read_events_page(&id, q.from_seq, q.limit)
-        .await?;
+    let page = if state.gateway.has_authorization() {
+        let actor = headers
+            .get("x-piglor-actor-entity")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| crate::parse_entity_id(value).ok())
+            .ok_or(GatewayError::ActionAuthorizationUnavailable)?;
+        state
+            .gateway
+            .read_events_page_authorized(
+                &id,
+                q.from_seq,
+                q.limit,
+                crate::GatewayAuthorizationRequest::read(actor, WallTime::now()),
+            )
+            .await?
+    } else {
+        state
+            .gateway
+            .read_events_page(&id, q.from_seq, q.limit)
+            .await?
+    };
     Ok(Json(bounded_events_response(
         page,
         MAX_EVENTS_RESPONSE_BYTES,
@@ -366,7 +388,9 @@ impl IntoResponse for GatewayError {
                 | ActionRejected::DomainValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             },
-            Self::Consent(_) | Self::LedgerWriteDisabled => StatusCode::FORBIDDEN,
+            Self::Consent(_) | Self::LedgerWriteDisabled | Self::AuthorizationDenied => {
+                StatusCode::FORBIDDEN
+            }
             Self::TimelineLimitReached { .. }
             | Self::EventLimitReached { .. }
             | Self::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
@@ -472,6 +496,19 @@ mod tests {
             },
             max_body_bytes,
         )
+    }
+
+    fn authority_test_app(actor: EntityId) -> Router {
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [],
+            crate::authorization::test_authorization_for(actor),
+        );
+        router(AppState {
+            gateway,
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        })
     }
 
     fn world_action_payload(actor: &str, body: &str, marker: u8) -> serde_json::Value {
@@ -1206,6 +1243,43 @@ osf_link = \"https://osf.io/example\"\n";
     }
 
     #[tokio::test]
+    async fn authority_bound_read_requires_actor_header_and_uses_stable_errors() {
+        let actor = test_action_actor();
+        let app = authority_test_app(actor);
+        let (_status, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "authority-read"})),
+        )
+        .await;
+        let id = created["id"].as_str().test_ok();
+
+        let (status, missing) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            missing["error"],
+            "human action authorization is unavailable"
+        );
+
+        let wrong = EntityId::new().to_string();
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/timelines/{id}/events?limit=1"))
+            .header("x-piglor-actor-entity", wrong)
+            .body(Body::empty())
+            .test_ok();
+        let response = app.oneshot(request).await.test_ok();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn malformed_json_body_is_rejected() {
         let app = test_app();
@@ -1386,6 +1460,8 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::ActionAuthorizationUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = GatewayError::AuthorizationDenied.into_response();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::LedgerUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::InvalidPrediction(

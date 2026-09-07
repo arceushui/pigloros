@@ -3,20 +3,28 @@
 #![warn(clippy::pedantic)]
 //! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
 //!
-//! JSON HTTP envelope; CBOR payloads into [`EventStore`]. No auth in this slice.
+//! JSON HTTP envelope; CBOR payloads into [`EventStore`]. Host-bound Principal
+//! authorization is opt-in through [`GatewayAuthorization`].
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+pub mod authorization;
 pub mod executor;
 mod http;
 pub mod ledger_config;
 pub mod owntracks;
 pub mod owntracks_http;
 
+pub use authorization::{
+    AirGappedAuthenticationAdapter, GatewayAuthenticationAdapter, GatewayAuthenticationError,
+    GatewayAuthenticationRequest, GatewayAuthorization, GatewayAuthorizationAudit,
+    GatewayAuthorizationDecision, GatewayAuthorizationError, GatewayAuthorizationRequest,
+    LocalAuthenticationAdapter,
+};
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
 use pos_core::{
-    clock::Seq,
+    clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
@@ -544,6 +552,7 @@ pub struct Gateway {
     consent_history_locks: Arc<ConsentHistoryLocks>,
     pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
+    authorization: Option<Arc<GatewayAuthorization>>,
     action_principal: Option<ActionPrincipal>,
 }
 
@@ -758,6 +767,9 @@ pub enum GatewayError {
     /// Human action submission requires an authenticated action principal.
     #[error("human action authorization is unavailable")]
     ActionAuthorizationUnavailable,
+    /// The provider-neutral host authorization decision denied the operation.
+    #[error("authorization denied")]
+    AuthorizationDenied,
     /// Consent payload did not meet its closed V1 contract.
     #[error(transparent)]
     ConsentCodec(#[from] ConsentCodecError),
@@ -1072,6 +1084,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1100,6 +1113,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1129,7 +1143,42 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
             action_principal: Some(principal),
+        }
+        .schedule_startup_consent_cleanup()
+    }
+
+    /// Wrap a store with World bodies and a provider-neutral host authorizer.
+    ///
+    /// The authorizer owns adapter evidence and the current authority snapshot;
+    /// the Gateway never receives credentials or turns adapter output into
+    /// policy.  Proposed actions and configured protected reads use this seam.
+    #[must_use]
+    pub fn new_with_world_bodies_and_authorization(
+        store: Box<dyn EventStore>,
+        bodies: impl IntoIterator<Item = EntityId>,
+        authorization: GatewayAuthorization,
+    ) -> Self {
+        let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
+        Self {
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
+            bus,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_authority(
+                bodies,
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: Some(Arc::new(authorization)),
+            action_principal: None,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -1160,6 +1209,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1192,6 +1242,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1220,6 +1271,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
@@ -1331,6 +1383,12 @@ impl Gateway {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.store.is_ready()
+    }
+
+    /// Return whether this Gateway has a provider-neutral host authorizer.
+    #[must_use]
+    pub fn has_authorization(&self) -> bool {
+        self.authorization.is_some()
     }
 
     /// Drain queued store commands and join the dedicated worker.
@@ -1600,6 +1658,28 @@ impl Gateway {
         })
     }
 
+    /// Poll one page after a fresh Principal/authority decision.
+    ///
+    /// The commit fence is held through the store read, so a host authority
+    /// replacement cannot race a protected read.  The same seam is used for
+    /// exports and other Gateway-owned projections as they are added.
+    pub async fn read_events_page_authorized(
+        &self,
+        timeline_id: &str,
+        from_seq: u64,
+        limit: usize,
+        request: GatewayAuthorizationRequest,
+    ) -> Result<EventPage, GatewayError> {
+        let Some(authorization) = self.authorization.as_ref() else {
+            return Err(GatewayError::ActionAuthorizationUnavailable);
+        };
+        let _fence = authorization.commit_fence().await;
+        authorization
+            .authorize(request)
+            .map_err(map_authorization_error)?;
+        self.read_events_page(timeline_id, from_seq, limit).await
+    }
+
     /// Compatibility shim for Timelines that fit in one bounded page.
     ///
     /// This method no longer aggregates the Timeline to exhaustion. New callers
@@ -1660,6 +1740,25 @@ impl Gateway {
         timeline_id: &str,
         proposal: ProposedAction,
     ) -> Result<Event, GatewayError> {
+        if let Some(authorization) = self.authorization.clone() {
+            let _fence = authorization.commit_fence().await;
+            authorization
+                .authorize(GatewayAuthorizationRequest::action(
+                    proposal.actor_entity_id,
+                    proposal.event_type.as_str(),
+                    proposal.capability.as_str(),
+                    WallTime::now(),
+                ))
+                .map_err(map_authorization_error)?;
+            let timeline = parse_timeline_id(timeline_id)?;
+            match self.store.timeline(timeline).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
+                Err(error) => return Err(error.into()),
+            }
+            let draft = self.action_registry.submit_action(&proposal)?;
+            return self.append_draft(timeline, draft).await;
+        }
         let Some(principal) = self.action_principal.as_ref() else {
             return Err(GatewayError::ActionAuthorizationUnavailable);
         };
@@ -1721,6 +1820,35 @@ impl Gateway {
         capability: &str,
         ingress_id: &str,
     ) -> Result<IdentifiedAppend, GatewayError> {
+        if let Some(authorization) = self.authorization.clone() {
+            let entity = parse_entity_id(entity_id)?;
+            let _fence = authorization.commit_fence().await;
+            authorization
+                .authorize(GatewayAuthorizationRequest::action(
+                    entity,
+                    event_type,
+                    capability,
+                    WallTime::now(),
+                ))
+                .map_err(map_authorization_error)?;
+            let timeline = parse_timeline_id(timeline_id)?;
+            match self.store.timeline(timeline).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(GatewayError::Store(CoreError::TimelineNotFound(timeline))),
+                Err(error) => return Err(error.into()),
+            }
+            let proposal = ProposedAction::try_new(
+                Kind::new(event_type),
+                entity,
+                json_to_cbor(payload),
+                Kind::new(capability),
+            )?;
+            let draft = self.action_registry.submit_action(&proposal)?;
+            drop(proposal);
+            return self
+                .append_identified_draft(timeline, draft, ingress_id)
+                .await;
+        }
         let Some(principal) = self.action_principal.as_ref() else {
             return Err(GatewayError::ActionAuthorizationUnavailable);
         };
@@ -1969,6 +2097,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         }
     }
@@ -1984,6 +2113,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         }
     }
@@ -2003,6 +2133,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         }
     }
@@ -2024,6 +2155,17 @@ fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) ->
         AppendDedupKey::from_keyed_hash(*key.finalize().as_bytes()),
         ingress_dedup_scope(entity),
     )
+}
+
+fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
+    match error {
+        GatewayAuthorizationError::AuthenticationUnavailable
+        | GatewayAuthorizationError::RequestUnavailable
+        | GatewayAuthorizationError::AuthorityUnavailable => {
+            GatewayError::ActionAuthorizationUnavailable
+        }
+        GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
+    }
 }
 
 fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
@@ -2549,6 +2691,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry_with_bodies([body]),
+            authorization: None,
             action_principal: Some(ActionPrincipal::new(
                 actor,
                 [Kind::new("world.action.submit")],
@@ -2600,6 +2743,93 @@ mod tests {
         error_gateway.shutdown().await.test_ok();
         drop(error_gateway);
         drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn authority_bound_gateway_rechecks_principal_before_action_commit() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_for(actor);
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            authorization,
+        );
+        let timeline = gateway.create_timeline("authority-action").await.test_ok();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+        let event = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_ok();
+        assert_eq!(event.entity, actor);
+
+        let denied = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &EntityId::new().to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        gateway.shutdown().await.test_ok();
+    }
+
+    #[tokio::test]
+    async fn authority_bound_gateway_protects_reads_without_enumerating_missing_actor() {
+        let actor = EntityId::new();
+        let authorization = crate::authorization::test_authorization_for(actor);
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [],
+            authorization,
+        );
+        let timeline = gateway.create_timeline("authority-read").await.test_ok();
+        let denied = gateway
+            .read_events_page_authorized(
+                &timeline.id().to_string(),
+                0,
+                1,
+                GatewayAuthorizationRequest::read(EntityId::new(), WallTime::now()),
+            )
+            .await
+            .test_err();
+        assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        gateway.shutdown().await.test_ok();
+    }
+
+    #[test]
+    fn authorization_error_mapping_is_stable_and_non_enumerating() {
+        for error in [
+            GatewayAuthorizationError::AuthenticationUnavailable,
+            GatewayAuthorizationError::RequestUnavailable,
+            GatewayAuthorizationError::AuthorityUnavailable,
+        ] {
+            assert!(matches!(
+                map_authorization_error(error),
+                GatewayError::ActionAuthorizationUnavailable
+            ));
+        }
+        assert!(matches!(
+            map_authorization_error(GatewayAuthorizationError::AuthorizationDenied),
+            GatewayError::AuthorizationDenied
+        ));
     }
 
     struct TemporarySqliteFile {
@@ -4692,6 +4922,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         };
         assert!(matches!(
@@ -4710,6 +4941,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         };
         assert!(matches!(
@@ -4734,6 +4966,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         };
         let tl = empty_append.create_timeline("e").await.test_ok();
@@ -4759,6 +4992,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         };
         let err = fail_get_timeline
@@ -4783,6 +5017,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         };
         let tl = fail_append.create_timeline("a").await.test_ok();
@@ -4808,6 +5043,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
+            authorization: None,
             action_principal: None,
         };
         let err = fail_read
@@ -4867,6 +5103,7 @@ mod tests {
                 consent_history_locks: new_consent_history_locks(),
                 pending_consent_cleanup: new_pending_consent_cleanup(),
                 action_registry: gateway_action_registry(),
+                authorization: None,
                 action_principal: None,
             };
             let error = gateway
