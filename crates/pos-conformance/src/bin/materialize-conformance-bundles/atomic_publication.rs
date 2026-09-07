@@ -876,12 +876,8 @@ mod tests {
             Err(MaterializationError::UntrustedOutputDirectory)
         ));
 
-        let symlink = fs::statat(
-            CWD,
-            Path::new("/proc/self/fd/0"),
-            AtFlags::SYMLINK_NOFOLLOW,
-        )
-        .map_err(map_open_error)?;
+        let symlink = fs::statat(CWD, Path::new("/proc/self/fd/0"), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(map_open_error)?;
         assert!(matches!(
             private_directory_identity(symlink),
             Err(MaterializationError::SymlinkDetected)
