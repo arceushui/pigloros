@@ -165,6 +165,7 @@ systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
 # survives as FD 3.
 "$static_prototype" --release-barrier-proof \
   "--root-image=$image_path" \
+  "--partition-table=$evidence_dir/partition-table.json" \
   "--root-hash-file=$work_dir/sim1.roothash" \
   "--root-signature=$work_dir/sim1.roothash.p7s" \
   "--root-certificate=$work_dir/verity-certificate.pem" \
@@ -182,6 +183,7 @@ for execution_mode in air-gapped replay fork; do
   "$static_prototype" --release-barrier-proof \
     "--mode=$execution_mode" \
     "--root-image=$image_path" \
+    "--partition-table=$evidence_dir/partition-table.json" \
     "--root-hash-file=$work_dir/sim1.roothash" \
     "--root-signature=$work_dir/sim1.roothash.p7s" \
     "--root-certificate=$work_dir/verity-certificate.pem" \
@@ -203,6 +205,7 @@ for barrier_case in malformed-release duplicate-release reordered-release \
   "$static_prototype" --release-barrier-proof \
     "--barrier-case=$barrier_case" \
     "--root-image=$image_path" \
+    "--partition-table=$evidence_dir/partition-table.json" \
     "--root-hash-file=$work_dir/sim1.roothash" \
     "--root-signature=$work_dir/sim1.roothash.p7s" \
     "--root-certificate=$work_dir/verity-certificate.pem" \
@@ -218,6 +221,7 @@ test "$(grep -c 'adapter=unexecuted;unit=terminated$' \
 "$static_prototype" --release-barrier-proof \
   --barrier-case=provider-death-hold \
   "--root-image=$image_path" \
+  "--partition-table=$evidence_dir/partition-table.json" \
   "--root-hash-file=$work_dir/sim1.roothash" \
   "--root-signature=$work_dir/sim1.roothash.p7s" \
   "--root-certificate=$work_dir/verity-certificate.pem" \
@@ -308,6 +312,7 @@ systemctl list-units --all 'pigloros-release-*' --no-legend \
   >"$work_dir/release-units-before-invalid-signature.txt"
 if "$static_prototype" --release-barrier-proof \
   "--root-image=$image_path" \
+  "--partition-table=$evidence_dir/partition-table.json" \
   "--root-hash-file=$work_dir/sim1.roothash" \
   "--root-signature=$work_dir/invalid-signature.p7s" \
   "--root-certificate=$work_dir/verity-certificate.pem" \

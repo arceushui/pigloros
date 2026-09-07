@@ -8,7 +8,6 @@ use crate::release_wire::{
 use nix::{
     fcntl::{fcntl, AtFlags, FcntlArg, FdFlag},
     sys::{
-        resource::{getrlimit, Resource, RLIM_INFINITY},
         socket::{
             getsockopt, recv, recvmsg, send, setsockopt, shutdown, socketpair, sockopt,
             AddressFamily, ControlMessageOwned, MsgFlags, Shutdown, SockFlag, SockType,
@@ -23,6 +22,7 @@ use std::{
     ffi::CString,
     fs::{File, OpenOptions},
     io::{IoSliceMut, Read as _, Seek as _, SeekFrom, Write as _},
+    os::unix::process::ExitStatusExt as _,
     os::{
         fd::{AsRawFd as _, OwnedFd, RawFd},
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
@@ -50,12 +50,17 @@ struct DescriptorSet {
 
 struct ImageAuthority {
     root_image: String,
+    partition_table: String,
     root_hash: Vec<u8>,
     sim1_digest: [u8; 32],
 }
 
 struct MountedImage {
     root: PathBuf,
+    root_device: String,
+    root_major_minor: String,
+    root_filesystem: String,
+    activation_digest: [u8; 32],
 }
 
 impl Drop for MountedImage {
@@ -75,7 +80,7 @@ struct LaunchRecord {
 }
 
 struct ReleaseConfiguration<'a> {
-    root_directory: &'a Path,
+    mounted_image: &'a MountedImage,
     mode: ExecutionMode,
 }
 
@@ -238,6 +243,18 @@ impl ProofCase {
 pub fn dispatch(arguments: &[String]) -> Option<Result<(), String>> {
     if arguments
         .iter()
+        .any(|argument| argument == "--seccomp-denied-syscall-probe")
+    {
+        return Some(denied_syscall_probe());
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--address-family-denial-probe")
+    {
+        return Some(address_family_denial_probe());
+    }
+    if arguments
+        .iter()
         .any(|argument| argument == "--release-launcher")
     {
         return Some(run_launcher(arguments));
@@ -297,12 +314,25 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         &mounted_image.root,
         &launch.encoded_hex,
         mode,
+        proof_case == ProofCase::HigherDescriptor,
         extra_descriptors,
     )?;
     manager
         .start_transient_unit(unit.clone(), "fail".to_owned(), properties, vec![])
         .await
         .map_err(display_error)?;
+    let unit_path = manager
+        .get_unit(unit.clone())
+        .await
+        .map_err(display_error)?;
+    let service = zbus::Proxy::new(
+        &connection,
+        "org.freedesktop.systemd1",
+        unit_path,
+        "org.freedesktop.systemd1.Service",
+    )
+    .await
+    .map_err(display_error)?;
 
     // Keep the opposite endpoints of deliberately malformed descriptors alive
     // until systemd has consumed the request.
@@ -310,13 +340,14 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
 
     let result = complete_release(
         &manager,
+        &service,
         &unit,
         &launch.parameters,
         &launch.encoded,
         &channels.provider_release,
         channels.provider_proxy.as_ref(),
         &ReleaseConfiguration {
-            root_directory: &mounted_image.root,
+            mounted_image: &mounted_image,
             mode,
         },
         proof_case,
@@ -454,6 +485,7 @@ fn configure_provider_sockets(release: &OwnedFd, proxy: Option<&OwnedFd>) -> Res
 
 fn load_image_authority(arguments: &[String]) -> Result<ImageAuthority, String> {
     let root_image = required_argument(arguments, "--root-image")?;
+    let partition_table = required_argument(arguments, "--partition-table")?;
     let root_hash_path = required_argument(arguments, "--root-hash-file")?;
     let signature_path = required_argument(arguments, "--root-signature")?;
     let certificate_path = required_argument(arguments, "--root-certificate")?;
@@ -471,6 +503,7 @@ fn load_image_authority(arguments: &[String]) -> Result<ImageAuthority, String> 
     }
     Ok(ImageAuthority {
         root_image: root_image.to_owned(),
+        partition_table: partition_table.to_owned(),
         root_hash,
         sim1_digest: digest_file(Path::new(root_image))?,
     })
@@ -501,33 +534,140 @@ fn mount_verified_image(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let mounted = MountedImage { root };
-    let mount_options = Command::new("findmnt")
-        .args([
+    let mut mounted = MountedImage {
+        root,
+        root_device: String::new(),
+        root_major_minor: String::new(),
+        root_filesystem: String::new(),
+        activation_digest: [0; 32],
+    };
+    let observed_partition_table = command_output(
+        Command::new("sfdisk").args(["--json", image.root_image.as_str()]),
+        "read admitted GPT partition table",
+    )?;
+    let expected_partition_table =
+        std::fs::read_to_string(&image.partition_table).map_err(display_error)?;
+    if observed_partition_table.trim() != expected_partition_table.trim() {
+        return Err("admitted GPT partition identity or offsets changed".to_owned());
+    }
+    let mount_readback = command_output(
+        Command::new("findmnt").args([
+            "--raw",
             "--noheadings",
-            "--output=OPTIONS",
+            "--output=SOURCE,FSTYPE,OPTIONS,MAJ:MIN",
             "--target",
             root_path.as_str(),
-        ])
-        .output()
-        .map_err(display_error)?;
-    let mapper_table = Command::new("dmsetup")
-        .args(["table", "--showkeys"])
-        .output()
-        .map_err(display_error)?;
-    if !mount_options.status.success()
-        || !String::from_utf8_lossy(&mount_options.stdout)
-            .trim()
-            .split(',')
-            .any(|option| option == "ro")
-        || !mapper_table.status.success()
-        || !String::from_utf8_lossy(&mapper_table.stdout).contains(&hex::encode(&image.root_hash))
+        ]),
+        "read provider image mount",
+    )?;
+    let mount_fields = mount_readback.split_whitespace().collect::<Vec<_>>();
+    if mount_fields.len() != 4
+        || !mount_fields[0].starts_with("/dev/mapper/")
+        || !mount_fields[2].split(',').any(|option| option == "ro")
     {
-        return Err("provider dm-verity mount readback mismatch".to_owned());
+        return Err("provider image mount source or flags mismatch".to_owned());
     }
+    let root_device = mount_fields[0].to_owned();
+    let root_major_minor = mount_fields[3].to_owned();
+    let mapper_name = root_device
+        .strip_prefix("/dev/mapper/")
+        .ok_or_else(|| "provider root is not a device-mapper source".to_owned())?;
+    let mapper_table = command_output(
+        Command::new("dmsetup").args(["table", "--showkeys", mapper_name]),
+        "read exact dm-verity mapping",
+    )?;
+    let table_fields = mapper_table.split_whitespace().collect::<Vec<_>>();
+    let verity_index = table_fields
+        .iter()
+        .position(|field| *field == "verity")
+        .ok_or_else(|| "provider root mapping is not dm-verity".to_owned())?;
+    let data_device = table_fields
+        .get(verity_index + 2)
+        .ok_or_else(|| "dm-verity data device is absent".to_owned())?;
+    let hash_device = table_fields
+        .get(verity_index + 3)
+        .ok_or_else(|| "dm-verity hash device is absent".to_owned())?;
+    let expected_root_hash = hex::encode(&image.root_hash);
+    if data_device == hash_device
+        || !table_fields
+            .iter()
+            .any(|field| *field == expected_root_hash)
+    {
+        return Err("exact dm-verity devices or root hash mismatch".to_owned());
+    }
+    let block_readback = command_output(
+        Command::new("lsblk").args([
+            "--raw",
+            "--noheadings",
+            "--output=NAME,MAJ:MIN,PKNAME,START",
+        ]),
+        "read loop partition identities",
+    )?;
+    let mut loop_parents = Vec::new();
+    for (device, partition_number) in [(data_device, "1"), (hash_device, "2")] {
+        let expected_start = command_output(
+            Command::new("sfdisk").args([
+                "--part-start",
+                image.root_image.as_str(),
+                partition_number,
+            ]),
+            "read admitted GPT partition offset",
+        )?;
+        let parent = block_readback.lines().find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            (fields.get(1) == Some(device)
+                && fields
+                    .get(2)
+                    .is_some_and(|parent| parent.starts_with("loop"))
+                && fields.get(3) == Some(&expected_start.as_str()))
+            .then(|| fields[2].to_owned())
+        });
+        let Some(parent) = parent else {
+            return Err(format!(
+                "dm-verity device {device} is not an admitted loop partition"
+            ));
+        };
+        loop_parents.push(parent);
+    }
+    let loop_readback = command_output(
+        Command::new("losetup").args(["--list", "--noheadings", "--output=NAME,BACK-FILE,OFFSET"]),
+        "read loop backing identity",
+    )?;
+    let canonical_image = std::fs::canonicalize(&image.root_image).map_err(display_error)?;
+    for parent in loop_parents {
+        let expected_loop = format!("/dev/{parent}");
+        if !loop_readback.lines().any(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            fields.first() == Some(&expected_loop.as_str())
+                && fields.get(1).is_some_and(|backing| {
+                    std::fs::canonicalize(backing).is_ok_and(|path| path == canonical_image)
+                })
+                && fields.get(2).is_some_and(|offset| *offset == "0")
+        }) {
+            return Err(format!(
+                "dm-verity loop {expected_loop} does not reference the admitted image at offset zero"
+            ));
+        }
+    }
+    let image_metadata = std::fs::metadata(&canonical_image).map_err(display_error)?;
+    let activation_record = format!(
+        "image={};digest={};length={};device={};inode={};partition_digest={};mount={mount_readback};mapper={mapper_name};table={mapper_table};blocks={block_readback};loops={loop_readback}",
+        canonical_image.display(),
+        hex::encode(image.sim1_digest),
+        image_metadata.len(),
+        image_metadata.dev(),
+        image_metadata.ino(),
+        hex::encode(digest_file(Path::new(&image.partition_table))?),
+    );
+    let activation_digest = *blake3::hash(activation_record.as_bytes()).as_bytes();
+    mounted.root_device = root_device;
+    mounted.root_major_minor = root_major_minor;
+    mounted.root_filesystem = mount_fields[1].to_owned();
+    mounted.activation_digest = activation_digest;
     println!(
-        "provider_image_activation=verified-before-private-ipc;root_hash={}",
-        hex::encode(&image.root_hash)
+        "provider_image_activation=verified-before-private-ipc;root_hash={};activation_digest={}",
+        expected_root_hash,
+        hex::encode(activation_digest)
     );
     Ok(mounted)
 }
@@ -549,7 +689,7 @@ fn descriptor_set(
         ProofCase::MissingDescriptor => {
             descriptors.pop();
         }
-        ProofCase::ExtraDescriptor | ProofCase::HigherDescriptor => {
+        ProofCase::ExtraDescriptor => {
             let (provider_extra, launcher_extra) = socketpair(
                 AddressFamily::Unix,
                 SockType::Stream,
@@ -587,7 +727,8 @@ fn descriptor_set(
         | ProofCase::ReadbackMismatch
         | ProofCase::Cancellation
         | ProofCase::ProviderEof
-        | ProofCase::ProviderDeathHold => {}
+        | ProofCase::ProviderDeathHold
+        | ProofCase::HigherDescriptor => {}
     }
     Ok(DescriptorSet {
         descriptors,
@@ -615,14 +756,18 @@ fn transient_properties(
     root_directory: &Path,
     parameter_hex: &str,
     mode: ExecutionMode,
+    inject_higher_descriptor: bool,
     extra_descriptors: Vec<(String, ZbusOwnedFd)>,
 ) -> Result<Vec<(String, OwnedValue)>, String> {
-    let launcher_arguments = vec![
+    let mut launcher_arguments = vec![
         RELEASE_LAUNCHER.to_owned(),
         "--release-launcher".to_owned(),
         format!("--mode={}", mode.name()),
         format!("--launch-parameters={parameter_hex}"),
     ];
+    if inject_higher_descriptor {
+        launcher_arguments.push("--inject-higher-descriptor".to_owned());
+    }
     let bind = vec![(
         executable.display().to_string(),
         RELEASE_LAUNCHER.to_owned(),
@@ -690,6 +835,7 @@ fn transient_properties(
 
 async fn complete_release(
     manager: &zbus_systemd::systemd1::ManagerProxy<'_>,
+    service: &zbus::Proxy<'_>,
     unit: &str,
     parameters: &LaunchParameters,
     encoded_parameters: &[u8],
@@ -703,11 +849,13 @@ async fn complete_release(
     let (main_pid, _namespace_descriptors) =
         validate_ready_state(unit, parameters, encoded_parameters, &ready, credential_pid)?;
     validate_requested_readback(
+        service,
         unit,
         parameters,
-        configuration.root_directory,
+        configuration.mounted_image,
         configuration.mode,
-    )?;
+    )
+    .await?;
     let network = configure_network(main_pid, parameters.attempt_id, configuration.mode)?;
     if let Some(proxy_socket) = proxy_socket {
         ensure_adapter_blocked(proxy_socket)?;
@@ -743,7 +891,13 @@ async fn complete_release(
         return confirm_negative_termination(unit, required_proxy(proxy_socket)?);
     }
 
-    let release_bytes = build_release(parameters, &ready_bytes, &network, proof_case)?;
+    let release_bytes = build_release(
+        parameters,
+        &ready_bytes,
+        &network,
+        configuration.mounted_image.activation_digest,
+        proof_case,
+    )?;
     let (_, release_digest, release_signature) = decode_release(&release_bytes)?;
     verify_release_signature(
         release_digest,
@@ -824,8 +978,17 @@ fn build_release(
     parameters: &LaunchParameters,
     ready_bytes: &[u8],
     local_network: &LocalNetworkGuard,
+    image_activation_digest: [u8; 32],
     proof_case: ProofCase,
 ) -> Result<Vec<u8>, String> {
+    let expected_readback_digest = combined_readback_digest(
+        image_activation_digest,
+        local_network.expected_readback_digest,
+    );
+    let observed_readback_digest = combined_readback_digest(
+        image_activation_digest,
+        local_network.observed_readback_digest,
+    );
     let mut release = Release {
         attempt_id: parameters.attempt_id,
         nonce: parameters.nonce,
@@ -836,8 +999,8 @@ fn build_release(
         trust_epoch: 7,
         revocation_epoch: 11,
         policy_epoch: 13,
-        expected_readback_digest: local_network.expected_readback_digest,
-        observed_readback_digest: local_network.observed_readback_digest,
+        expected_readback_digest,
+        observed_readback_digest,
         deadline_monotonic_ns: monotonic_ns()?.saturating_add(5_000_000_000),
         runtime_key_id: "adr069-proof-runtime-key".to_owned(),
     };
@@ -864,6 +1027,14 @@ fn build_release(
         | ProofCase::HigherDescriptor => {}
     }
     crate::release_wire::encode_release(&release, &proof_signing_key())
+}
+
+fn combined_readback_digest(image: [u8; 32], network: [u8; 32]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros-release-readback-v1\0");
+    hasher.update(&image);
+    hasher.update(&network);
+    *hasher.finalize().as_bytes()
 }
 
 fn confirm_negative_termination(unit: &str, proxy_socket: &OwnedFd) -> Result<(), String> {
@@ -893,7 +1064,27 @@ fn run_launcher(arguments: &[String]) -> Result<(), String> {
     } else {
         vec![(3, RELEASE_NAME, SockType::SeqPacket)]
     };
+    let higher_descriptor_pair = arguments
+        .iter()
+        .any(|argument| argument == "--inject-higher-descriptor")
+        .then(|| {
+            socketpair(
+                AddressFamily::Unix,
+                SockType::Stream,
+                None,
+                SockFlag::SOCK_CLOEXEC,
+            )
+            .map_err(display_error)
+        })
+        .transpose()?;
+    if higher_descriptor_pair
+        .as_ref()
+        .is_some_and(|(first, second)| first.as_raw_fd() <= 4 || second.as_raw_fd() <= 4)
+    {
+        return Err("higher-descriptor probe did not allocate above FD 4".to_owned());
+    }
     let (observed, descriptors) = take_systemd_descriptors(mode.ordinal(), &expected_descriptors)?;
+    drop(higher_descriptor_pair);
     if fd_layout_digest(&observed)? != parameters.expected_fd_layout_digest {
         return Err("observed descriptor layout does not match LPV1".to_owned());
     }
@@ -922,6 +1113,7 @@ fn run_launcher(arguments: &[String]) -> Result<(), String> {
         set_close_on_exec(proxy, true)?;
     }
     set_close_on_exec(&release, true)?;
+    prove_effective_kernel_policy()?;
     let adapter = open_native_adapter(&parameters.adapter_path)?;
     let ready = build_ready(&parameters, &encoded, &adapter, &observed)?;
     let ready_bytes = encode_ready(&ready)?;
@@ -944,6 +1136,58 @@ fn run_launcher(arguments: &[String]) -> Result<(), String> {
         set_close_on_exec(proxy, false)?;
     }
     exec_adapter(&adapter, &parameters.adapter_arguments)
+}
+
+fn prove_effective_kernel_policy() -> Result<(), String> {
+    let denied_syscall = Command::new(RELEASE_LAUNCHER)
+        .arg("--seccomp-denied-syscall-probe")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(display_error)?;
+    if !denied_syscall.success() && denied_syscall.signal() != Some(nix::libc::SIGSYS) {
+        return Err(format!(
+            "forbidden ptrace probe did not observe seccomp denial: {denied_syscall}"
+        ));
+    }
+    let denied_family = Command::new(RELEASE_LAUNCHER)
+        .arg("--address-family-denial-probe")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(display_error)?;
+    if !denied_family.success() {
+        return Err(format!(
+            "forbidden AF_INET probe did not observe the configured denial: {denied_family}"
+        ));
+    }
+    println!("kernel_policy_probes=ptrace-denied;af-inet-denied");
+    Ok(())
+}
+
+fn denied_syscall_probe() -> Result<(), String> {
+    match nix::sys::ptrace::traceme() {
+        Err(nix::errno::Errno::EPERM) => Ok(()),
+        Ok(()) => Err("ptrace unexpectedly passed the effective seccomp filter".to_owned()),
+        Err(error) => Err(format!("ptrace probe returned the wrong denial: {error}")),
+    }
+}
+
+fn address_family_denial_probe() -> Result<(), String> {
+    match nix::sys::socket::socket(
+        AddressFamily::Inet,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    ) {
+        Err(nix::errno::Errno::EAFNOSUPPORT) => Ok(()),
+        Ok(_) => Err("AF_INET socket unexpectedly passed the effective filter".to_owned()),
+        Err(error) => Err(format!("AF_INET probe returned the wrong denial: {error}")),
+    }
 }
 
 fn reject_queued_release(descriptor: RawFd) -> Result<(), String> {
@@ -1148,14 +1392,18 @@ fn validate_taken_descriptors(
 }
 
 fn open_non_stdio_descriptors() -> Result<Vec<RawFd>, String> {
-    let (soft_limit, _) = getrlimit(Resource::RLIMIT_NOFILE).map_err(display_error)?;
-    let upper = if soft_limit == RLIM_INFINITY {
-        1_048_576
-    } else {
-        soft_limit.min(1_048_576)
-    };
-    let upper = i32::try_from(upper).map_err(display_error)?;
-    Ok((3..upper).filter(|&fd| descriptor_is_open(fd)).collect())
+    let entries = std::fs::read_dir("/proc/self/fd").map_err(display_error)?;
+    let mut descriptors = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<RawFd>().ok())
+        .filter(|descriptor| *descriptor >= 3)
+        .collect::<Vec<_>>();
+    // Drop the directory iterator before validating the snapshot so its own
+    // directory descriptor is not mistaken for inherited process state.
+    descriptors.retain(|descriptor| descriptor_is_open(*descriptor));
+    descriptors.sort_unstable();
+    descriptors.dedup();
+    Ok(descriptors)
 }
 
 fn descriptor_is_open(descriptor: RawFd) -> bool {
@@ -1672,30 +1920,119 @@ fn validate_ready_executables(main_pid: u32, ready: &Ready) -> Result<(), String
     Ok(())
 }
 
-fn validate_requested_readback(
+async fn validate_requested_readback(
+    service: &zbus::Proxy<'_>,
     unit: &str,
     parameters: &LaunchParameters,
-    root_directory: &Path,
+    mounted_image: &MountedImage,
     mode: ExecutionMode,
 ) -> Result<(), String> {
-    let properties = [
-        ("Type", "exec"),
-        ("DynamicUser", "yes"),
-        ("NoNewPrivileges", "yes"),
-        ("PrivateDevices", "yes"),
-        ("PrivateIPC", "yes"),
-        ("PrivateMounts", "yes"),
-        ("PrivateNetwork", "yes"),
-        ("PrivatePIDs", "yes"),
-        ("FileDescriptorStoreMax", "0"),
-    ];
-    for (name, expected) in properties {
-        if unit_property(unit, name)?.trim() != expected {
-            return Err(format!("{name} readback mismatch"));
+    macro_rules! expect_property {
+        ($name:literal, $expected:expr) => {{
+            let expected = $expected;
+            let observed = service.get_property($name).await.map_err(display_error)?;
+            if observed != expected {
+                return Err(format!(
+                    "{} typed readback mismatch: expected {:?}, observed {:?}",
+                    $name, expected, observed
+                ));
+            }
+        }};
+    }
+    expect_property!("Type", "exec".to_owned());
+    expect_property!("DynamicUser", true);
+    expect_property!("NoNewPrivileges", true);
+    expect_property!("PrivateDevices", true);
+    expect_property!("PrivateIPC", true);
+    expect_property!("PrivateMounts", true);
+    expect_property!("PrivateNetwork", true);
+    expect_property!("PrivatePIDs", "yes".to_owned());
+    expect_property!("PrivateUsersEx", "self".to_owned());
+    expect_property!("CapabilityBoundingSet", 0_u64);
+    expect_property!("AmbientCapabilities", 0_u64);
+    expect_property!("ProtectSystem", "strict".to_owned());
+    expect_property!("ProtectHome", "yes".to_owned());
+    expect_property!("ProtectControlGroupsEx", "strict".to_owned());
+    expect_property!("ProtectKernelTunables", true);
+    expect_property!("ProtectKernelModules", true);
+    expect_property!("ProtectKernelLogs", true);
+    expect_property!("ProtectClock", true);
+    expect_property!("ProtectHostname", true);
+    expect_property!("ProtectProc", "invisible".to_owned());
+    expect_property!("ProcSubset", "pid".to_owned());
+    expect_property!("RestrictNamespaces", 0x7e02_0080_u64);
+    expect_property!("RestrictSUIDSGID", true);
+    expect_property!("RestrictRealtime", true);
+    expect_property!("LockPersonality", true);
+    expect_property!("SystemCallArchitectures", vec!["native".to_owned()]);
+    expect_property!("SystemCallFilter", (true, flattened_release_syscalls()?));
+    expect_property!(
+        "RestrictAddressFamilies",
+        (
+            true,
+            if mode == ExecutionMode::Local {
+                vec!["AF_UNIX".to_owned()]
+            } else {
+                Vec::<String>::new()
+            }
+        )
+    );
+    expect_property!("UMask", 0o77_u32);
+    expect_property!("KillMode", "control-group".to_owned());
+    expect_property!("SendSIGKILL", true);
+    expect_property!("FileDescriptorStoreMax", 0_u32);
+    expect_property!(
+        "ExtraFileDescriptorNames",
+        if mode == ExecutionMode::Local {
+            vec![PROXY_NAME.to_owned(), RELEASE_NAME.to_owned()]
+        } else {
+            vec![RELEASE_NAME.to_owned()]
+        }
+    );
+    expect_property!("RootDirectory", mounted_image.root.display().to_string());
+    let provider_executable = std::env::current_exe().map_err(display_error)?;
+    expect_property!(
+        "BindReadOnlyPaths",
+        vec![(
+            provider_executable.display().to_string(),
+            RELEASE_LAUNCHER.to_owned(),
+            false,
+            0_u64,
+        )]
+    );
+    if unit_property(unit, "RootDirectory")?.trim() != mounted_image.root.to_string_lossy().as_ref()
+    {
+        return Err("RootDirectory readback mismatch".to_owned());
+    }
+    for omitted in [
+        "RootImage",
+        "RootHash",
+        "RootHashSignature",
+        "RootImagePolicy",
+    ] {
+        if !unit_property(unit, omitted)?.trim().is_empty() {
+            return Err(format!("{omitted} was delegated to the transient unit"));
         }
     }
-    if unit_property(unit, "RootDirectory")?.trim() != root_directory.to_string_lossy().as_ref() {
-        return Err("RootDirectory readback mismatch".to_owned());
+    let main_pid = wait_for_main_pid(unit)?;
+    let mountinfo =
+        std::fs::read_to_string(format!("/proc/{main_pid}/mountinfo")).map_err(display_error)?;
+    let root_mount = mountinfo
+        .lines()
+        .find(|line| line.split_whitespace().nth(4) == Some("/"))
+        .ok_or_else(|| "unit root mount is absent".to_owned())?;
+    let fields = root_mount.split_whitespace().collect::<Vec<_>>();
+    let separator = fields
+        .iter()
+        .position(|field| *field == "-")
+        .ok_or_else(|| "unit root mountinfo separator is absent".to_owned())?;
+    if fields.get(2) != Some(&mounted_image.root_major_minor.as_str())
+        || fields.get(separator + 1) != Some(&mounted_image.root_filesystem.as_str())
+        || !fields
+            .get(5)
+            .is_some_and(|options| options.split(',').any(|option| option == "ro"))
+    {
+        return Err("unit root source does not match provider activation".to_owned());
     }
     let command = unit_property(unit, "ExecStart")?;
     if !command.contains(RELEASE_LAUNCHER)
@@ -1804,6 +2141,10 @@ fn flattened_release_syscalls() -> Result<Vec<String>, String> {
     }
     names.sort_unstable();
     names.dedup();
+    // These compatibility aliases are not native syscall names on either
+    // supported architecture. systemd otherwise ignores them, which makes the
+    // requested allow-list differ from the effective kernel filter.
+    names.retain(|name| !matches!(name.as_str(), "fstatat" | "llseek" | "newfstat"));
     for required in [
         "execveat",
         "getsockopt",

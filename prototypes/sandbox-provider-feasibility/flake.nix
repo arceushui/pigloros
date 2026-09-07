@@ -156,8 +156,31 @@
               machine.succeed(
                   "nix --extra-experimental-features nix-command "
                   "path-info --json --recursive /run/current-system "
+                  "${staticPrototype} ${pkgs.pkgsStatic.busybox} "
                   ">/tmp/guest-runtime-closure.json"
               )
+              closure_roots = machine.succeed(
+                  "nix --extra-experimental-features nix-command "
+                  "path-info --json /run/current-system "
+                  "${staticPrototype} ${pkgs.pkgsStatic.busybox}"
+              )
+              closure = machine.succeed(
+                  "cat /tmp/guest-runtime-closure.json"
+              )
+              closure_roots = __import__("json").loads(closure_roots)
+              closure = __import__("json").loads(closure)
+              closure_paths = set(closure)
+              expected_roots = set(closure_roots)
+              assert len(expected_roots) == 3, expected_roots
+              assert expected_roots.issubset(closure_paths), (
+                  expected_roots,
+                  closure_paths,
+              )
+              for path, entry in closure.items():
+                  assert entry.get("narHash"), entry
+                  assert set(entry.get("references", [])).issubset(
+                      closure_paths
+                  ), (path, entry)
               machine.copy_from_machine(
                   "/tmp/guest-runtime-closure.json",
                   "runtime-identity",
