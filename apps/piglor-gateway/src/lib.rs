@@ -3231,7 +3231,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(deprecated)]
     async fn authority_bound_gateway_protects_reads_without_enumerating_missing_actor() {
         let actor = EntityId::new();
         let authorization = crate::authorization::test_authorization_for(actor);
@@ -3247,14 +3246,6 @@ mod tests {
             .test_err();
         assert!(matches!(
             unguarded_page,
-            GatewayError::AuthorizationUnavailable
-        ));
-        let unguarded_compatibility = gateway
-            .read_events_from(&timeline.id().to_string(), 0)
-            .await
-            .test_err();
-        assert!(matches!(
-            unguarded_compatibility,
             GatewayError::AuthorizationUnavailable
         ));
         let denied = gateway
