@@ -18,7 +18,7 @@ use pos_core::{
     ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1,
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ERASURE_MAX_RECOVERY_ERRORS,
+    ErasureVerifiedTopologyObservationV1, ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
 
@@ -165,6 +165,14 @@ impl<S: ErasurePersistencePortV1> ErasureRecoveryAuthorizationVerifierV1 for Hos
 }
 
 impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
+    fn verified_topology_observation(
+        &self,
+        _request: ErasureReferenceV1,
+        _manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        Ok(None)
+    }
+
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
