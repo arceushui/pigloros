@@ -1928,9 +1928,10 @@ async fn validate_requested_readback(
     mode: ExecutionMode,
 ) -> Result<(), String> {
     macro_rules! expect_property {
-        ($name:literal, $expected:expr) => {{
+        ($name:literal, $property_type:ty, $expected:expr) => {{
             let expected = $expected;
-            let observed = service.get_property($name).await.map_err(display_error)?;
+            let observed: $property_type =
+                service.get_property($name).await.map_err(display_error)?;
             if observed != expected {
                 return Err(format!(
                     "{} typed readback mismatch: expected {:?}, observed {:?}",
@@ -1939,35 +1940,44 @@ async fn validate_requested_readback(
             }
         }};
     }
-    expect_property!("Type", "exec".to_owned());
-    expect_property!("DynamicUser", true);
-    expect_property!("NoNewPrivileges", true);
-    expect_property!("PrivateDevices", true);
-    expect_property!("PrivateIPC", true);
-    expect_property!("PrivateMounts", true);
-    expect_property!("PrivateNetwork", true);
-    expect_property!("PrivatePIDs", "yes".to_owned());
-    expect_property!("PrivateUsersEx", "self".to_owned());
-    expect_property!("CapabilityBoundingSet", 0_u64);
-    expect_property!("AmbientCapabilities", 0_u64);
-    expect_property!("ProtectSystem", "strict".to_owned());
-    expect_property!("ProtectHome", "yes".to_owned());
-    expect_property!("ProtectControlGroupsEx", "strict".to_owned());
-    expect_property!("ProtectKernelTunables", true);
-    expect_property!("ProtectKernelModules", true);
-    expect_property!("ProtectKernelLogs", true);
-    expect_property!("ProtectClock", true);
-    expect_property!("ProtectHostname", true);
-    expect_property!("ProtectProc", "invisible".to_owned());
-    expect_property!("ProcSubset", "pid".to_owned());
-    expect_property!("RestrictNamespaces", 0x7e02_0080_u64);
-    expect_property!("RestrictSUIDSGID", true);
-    expect_property!("RestrictRealtime", true);
-    expect_property!("LockPersonality", true);
-    expect_property!("SystemCallArchitectures", vec!["native".to_owned()]);
-    expect_property!("SystemCallFilter", (true, flattened_release_syscalls()?));
+    expect_property!("Type", String, "exec".to_owned());
+    expect_property!("DynamicUser", bool, true);
+    expect_property!("NoNewPrivileges", bool, true);
+    expect_property!("PrivateDevices", bool, true);
+    expect_property!("PrivateIPC", bool, true);
+    expect_property!("PrivateMounts", bool, true);
+    expect_property!("PrivateNetwork", bool, true);
+    expect_property!("PrivatePIDs", String, "yes".to_owned());
+    expect_property!("PrivateUsersEx", String, "self".to_owned());
+    expect_property!("CapabilityBoundingSet", u64, 0_u64);
+    expect_property!("AmbientCapabilities", u64, 0_u64);
+    expect_property!("ProtectSystem", String, "strict".to_owned());
+    expect_property!("ProtectHome", String, "yes".to_owned());
+    expect_property!("ProtectControlGroupsEx", String, "strict".to_owned());
+    expect_property!("ProtectKernelTunables", bool, true);
+    expect_property!("ProtectKernelModules", bool, true);
+    expect_property!("ProtectKernelLogs", bool, true);
+    expect_property!("ProtectClock", bool, true);
+    expect_property!("ProtectHostname", bool, true);
+    expect_property!("ProtectProc", String, "invisible".to_owned());
+    expect_property!("ProcSubset", String, "pid".to_owned());
+    expect_property!("RestrictNamespaces", u64, 0x7e02_0080_u64);
+    expect_property!("RestrictSUIDSGID", bool, true);
+    expect_property!("RestrictRealtime", bool, true);
+    expect_property!("LockPersonality", bool, true);
+    expect_property!(
+        "SystemCallArchitectures",
+        Vec<String>,
+        vec!["native".to_owned()]
+    );
+    expect_property!(
+        "SystemCallFilter",
+        (bool, Vec<String>),
+        (true, flattened_release_syscalls()?)
+    );
     expect_property!(
         "RestrictAddressFamilies",
+        (bool, Vec<String>),
         (
             true,
             if mode == ExecutionMode::Local {
@@ -1977,22 +1987,28 @@ async fn validate_requested_readback(
             }
         )
     );
-    expect_property!("UMask", 0o77_u32);
-    expect_property!("KillMode", "control-group".to_owned());
-    expect_property!("SendSIGKILL", true);
-    expect_property!("FileDescriptorStoreMax", 0_u32);
+    expect_property!("UMask", u32, 0o77_u32);
+    expect_property!("KillMode", String, "control-group".to_owned());
+    expect_property!("SendSIGKILL", bool, true);
+    expect_property!("FileDescriptorStoreMax", u32, 0_u32);
     expect_property!(
         "ExtraFileDescriptorNames",
+        Vec<String>,
         if mode == ExecutionMode::Local {
             vec![PROXY_NAME.to_owned(), RELEASE_NAME.to_owned()]
         } else {
             vec![RELEASE_NAME.to_owned()]
         }
     );
-    expect_property!("RootDirectory", mounted_image.root.display().to_string());
+    expect_property!(
+        "RootDirectory",
+        String,
+        mounted_image.root.display().to_string()
+    );
     let provider_executable = std::env::current_exe().map_err(display_error)?;
     expect_property!(
         "BindReadOnlyPaths",
+        Vec<(String, String, bool, u64)>,
         vec![(
             provider_executable.display().to_string(),
             RELEASE_LAUNCHER.to_owned(),
