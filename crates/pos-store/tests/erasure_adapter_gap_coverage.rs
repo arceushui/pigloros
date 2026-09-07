@@ -32,7 +32,7 @@ use pos_core::{
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    PreparedErasureCasV1,
+    ErasureVerifiedTopologyObservationV1, PreparedErasureCasV1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -301,6 +301,14 @@ where
     S: ErasurePersistencePortV1,
     H: RetryHook<S>,
 {
+    fn verified_topology_observation(
+        &self,
+        _request: ErasureReferenceV1,
+        _manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        Ok(None)
+    }
+
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
