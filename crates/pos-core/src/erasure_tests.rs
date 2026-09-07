@@ -1012,7 +1012,10 @@ fn containment_gate_rejects_duplicate_timeline_bindings() -> Result<(), ErasureE
     let state =
         verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
     assert_eq!(
-        gate.install_verified_state(state, &[(timeline, reference(7)), (timeline, reference(7))],),
+        gate.install_verified_state(
+            &state,
+            &[(timeline, reference(7)), (timeline, reference(7))],
+        ),
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
     Ok(())
@@ -1031,20 +1034,20 @@ fn containment_gate_rejects_incomplete_and_conflicting_installations() -> Result
         Vec::new(),
     )?;
     assert_eq!(
-        gate.install_verified_state(state.clone(), &[(timeline, reference(99))]),
+        gate.install_verified_state(&state, &[(timeline, reference(99))]),
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
     assert_eq!(
-        gate.install_verified_state(state.clone(), &[]),
+        gate.install_verified_state(&state, &[]),
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
 
-    gate.install_verified_state(state, &[(timeline, reference(7))])
+    gate.install_verified_state(&state, &[(timeline, reference(7))])
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     let submitted =
         verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
     assert_eq!(
-        gate.install_verified_state(submitted, &[(timeline, reference(7))]),
+        gate.install_verified_state(&submitted, &[(timeline, reference(7))]),
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
 
@@ -1060,7 +1063,7 @@ fn containment_gate_rejects_incomplete_and_conflicting_installations() -> Result
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(
         fresh_gate.install_verified_state(
-            conflicting_state,
+            &conflicting_state,
             &[(timeline, reference(8)), (other_timeline, reference(7))],
         ),
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)

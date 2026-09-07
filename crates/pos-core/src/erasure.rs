@@ -384,10 +384,10 @@ impl ErasureContainmentGateV1 {
     /// installed boundary.
     pub fn install_verified_state(
         &self,
-        state: ErasureVerifiedStateV1,
+        state: &ErasureVerifiedStateV1,
         bindings: &[(TimelineId, ErasureReferenceV1)],
     ) -> Result<(), ErasureContainmentErrorV1> {
-        self.install_verified_state_with_bindings(&state, bindings, &[])
+        self.install_verified_state_with_bindings(state, bindings, &[])
     }
 
     /// Install verified state with a topology proof issued by the recovery
@@ -400,7 +400,7 @@ impl ErasureContainmentGateV1 {
     pub fn install_verified_state_with_topology(
         &self,
         state: &ErasureVerifiedStateV1,
-        proof: ErasureVerifiedTopologyProofV1,
+        proof: &ErasureVerifiedTopologyProofV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
         if proof.manifest_digest != state.manifest_digest() {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
@@ -516,7 +516,7 @@ impl ErasureContainmentGateV1 {
         bindings: &[(TimelineId, ErasureReferenceV1)],
     ) -> Result<(), ErasureContainmentErrorV1> {
         if let Ok(Some(state)) = query.verified_state(request) {
-            self.install_verified_state(state, bindings)
+            self.install_verified_state(&state, bindings)
         } else {
             for (timeline, _) in bindings {
                 self.block_timeline(*timeline);
@@ -544,7 +544,7 @@ impl ErasureContainmentGateV1 {
             .verified_topology(request)
             .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
             .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)?;
-        self.install_verified_state_with_topology(&state, proof)
+        self.install_verified_state_with_topology(&state, &proof)
     }
 
     const fn containment_rank(lifecycle: ErasureLifecycleV1) -> u8 {
@@ -3675,7 +3675,7 @@ pub struct ErasureVerifiedTopologyProofV1 {
 }
 
 impl ErasureVerifiedTopologyProofV1 {
-    pub(crate) fn from_verified_recovery(
+    pub(crate) const fn from_verified_recovery(
         manifest_digest: ErasureReferenceV1,
         bindings: Vec<(TimelineId, ErasureReferenceV1)>,
         unaffected: Vec<TimelineId>,
@@ -5116,7 +5116,16 @@ mod coverage_paths {
             vec![(affected, reference(7))],
             vec![unaffected],
         );
-        gate.install_verified_state_with_topology(&state, proof)
+        let mismatched_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            reference(8),
+            vec![(affected, reference(7))],
+            vec![unaffected],
+        );
+        assert_eq!(
+            gate.install_verified_state_with_topology(&state, &mismatched_proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        gate.install_verified_state_with_topology(&state, &proof)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         assert_eq!(
             gate.authorize(affected, ErasureProtectedOperationV1::Read),

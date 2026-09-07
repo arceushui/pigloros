@@ -18,7 +18,8 @@ use super::{
     ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorQueryV1,
     ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedStateQueryV1,
-    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
+    ErasureVerifiedTopologyProofV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    StoredErasureManifestV1,
 };
 use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
@@ -1265,6 +1266,25 @@ impl<P: ErasureCoordinatorPortV1> ErasureVerifiedStateQueryV1
         request: ErasureReferenceV1,
     ) -> Result<Option<super::ErasureVerifiedStateV1>, ErasureErrorV1> {
         Self::verified_state(self, request)
+    }
+
+    fn verified_topology(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyProofV1>, ErasureErrorV1> {
+        let Some(state) = Self::verified_state(self, request)? else {
+            return Ok(None);
+        };
+        if state.scope().is_none() {
+            return Ok(Some(
+                ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                    state.manifest_digest(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ));
+        }
+        Ok(None)
     }
 }
 
