@@ -287,15 +287,15 @@ fn materialization_requires_each_observation_identity_before_projection_access()
     for (present, expected) in [
         (
             [false, true, true],
-            pos_core::AuthorityErrorV1::ConsentMissing,
+            pos_core::AuthorityErrorV1::CapabilityMissing,
         ),
         (
             [true, false, true],
-            pos_core::AuthorityErrorV1::UnauthorizedSource,
+            pos_core::AuthorityErrorV1::CapabilityMissing,
         ),
         (
             [true, true, false],
-            pos_core::AuthorityErrorV1::UnauthorizedSource,
+            pos_core::AuthorityErrorV1::CapabilityMissing,
         ),
     ] {
         let fixture = authority_fixture_with_identity_presence(present);
@@ -323,6 +323,47 @@ fn materialization_requires_each_observation_identity_before_projection_access()
             Err(expected)
         );
     }
+}
+
+#[test]
+fn unresolved_principal_precedes_missing_observation_identity() {
+    let fixture = authority_fixture_with_identity_presence([true, false, true]);
+    let untrusted_registry = AuthorityRegistrySnapshotV1::try_new(
+        fixture.request.authority_registry_digest(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .test_ok();
+    let decision =
+        AuthorityEvaluatorV1::authorize(&fixture.request, &fixture.chain, &untrusted_registry);
+    assert_eq!(
+        decision.error(),
+        Some(pos_core::AuthorityErrorV1::PrincipalUnresolved)
+    );
+    assert_eq!(
+        fixture.authority.validate_observation_authorization(
+            &fixture.request,
+            &decision,
+            &untrusted_registry,
+            Seq::from_u64(10),
+        ),
+        Err(pos_core::AuthorityErrorV1::PrincipalUnresolved)
+    );
+
+    let mut projections = ProjectionRegistry::new();
+    register_profile(&mut projections, Box::new(CountReducer));
+    assert_eq!(
+        projections.materialize_authorized_observation(
+            &fixture.request,
+            &decision,
+            &fixture.authority,
+            &untrusted_registry,
+            Seq::from_u64(10),
+            &context(TimelineId::new()),
+        ),
+        Err(pos_core::AuthorityErrorV1::PrincipalUnresolved)
+    );
 }
 
 fn context(timeline_id: TimelineId) -> ProjectionObservationContextV1 {

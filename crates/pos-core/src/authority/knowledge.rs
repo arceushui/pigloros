@@ -734,17 +734,6 @@ impl PersistedAuthorityV1 {
         registry: &super::AuthorityRegistrySnapshotV1,
         at_position: Seq,
     ) -> Result<(), AuthorityErrorV1> {
-        if request.subject_id().is_none() {
-            return Err(AuthorityErrorV1::ConsentMissing);
-        }
-        let Some(participant_id) = request.participant_id() else {
-            return Err(AuthorityErrorV1::UnauthorizedSource);
-        };
-        let (Some(plugin_id), Some(installation_id)) =
-            (request.plugin_id(), request.installation_id())
-        else {
-            return Err(AuthorityErrorV1::UnauthorizedSource);
-        };
         if !observation_decision_matches_request(request, decision) {
             return Err(decision
                 .error()
@@ -756,6 +745,14 @@ impl PersistedAuthorityV1 {
                 .error()
                 .unwrap_or(AuthorityErrorV1::UnauthorizedSource));
         }
+        let Some(participant_id) = request.participant_id() else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
+        let (Some(plugin_id), Some(installation_id)) =
+            (request.plugin_id(), request.installation_id())
+        else {
+            return Err(AuthorityErrorV1::UnauthorizedSource);
+        };
         validate_current_observation_authority(
             self,
             at_position,
