@@ -409,8 +409,11 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
     let mut pre_freeze = ErasureCoordinatorStateMachineV1::new(port(Vec::new(), None), COORDINATOR);
     pre_freeze.submit(request.clone(), request.provenance())?;
     assert!(<ErasureCoordinatorStateMachineV1<PublicCoordinatorPort> as
-        ErasureVerifiedStateQueryV1>::verified_topology(&mut pre_freeze, request.reference())?
-        .is_some());
+        ErasureVerifiedStateQueryV1>::verified_state_with_topology(
+        &mut pre_freeze,
+        request.reference(),
+    )?
+    .is_some());
 
     let pre_freeze_gate = ErasureContainmentGateV1::new_fail_closed();
     pre_freeze_gate

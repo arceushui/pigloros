@@ -1268,23 +1268,40 @@ impl<P: ErasureCoordinatorPortV1> ErasureVerifiedStateQueryV1
         Self::verified_state(self, request)
     }
 
+    fn verified_state_with_topology(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<
+        Option<(
+            super::ErasureVerifiedStateV1,
+            ErasureVerifiedTopologyProofV1,
+        )>,
+        ErasureErrorV1,
+    > {
+        let Some(record) = self.recover(request)? else {
+            return Ok(None);
+        };
+        let state = record.verified_state();
+        let proof = if state.scope().is_none() {
+            Some(ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                state.manifest_digest(),
+                Vec::new(),
+                Vec::new(),
+            ))
+        } else {
+            None
+        };
+        self.cache(record);
+        Ok(proof.map(|proof| (state, proof)))
+    }
+
     fn verified_topology(
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyProofV1>, ErasureErrorV1> {
-        let Some(state) = Self::verified_state(self, request)? else {
-            return Ok(None);
-        };
-        if state.scope().is_none() {
-            return Ok(Some(
-                ErasureVerifiedTopologyProofV1::from_verified_recovery(
-                    state.manifest_digest(),
-                    Vec::new(),
-                    Vec::new(),
-                ),
-            ));
-        }
-        Ok(None)
+        Ok(self
+            .verified_state_with_topology(request)?
+            .map(|(_, proof)| proof))
     }
 }
 
