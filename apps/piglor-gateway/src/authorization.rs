@@ -751,6 +751,11 @@ pub(crate) fn test_action_only_authorization_for(actor: EntityId) -> GatewayAuth
 }
 
 #[cfg(test)]
+pub(crate) fn test_expired_authorization_for(actor: EntityId) -> GatewayAuthorization {
+    tests::fixture_expired_authorization_with_actor(actor)
+}
+
+#[cfg(test)]
 pub(crate) fn test_authorization_unavailable_for(actor: EntityId) -> GatewayAuthorization {
     tests::fixture_authorization_unavailable_with_actor(actor)
 }
@@ -929,6 +934,42 @@ mod tests {
             vec!["action".to_owned()],
         )
         .authorization
+    }
+
+    pub(super) fn fixture_expired_authorization_with_actor(
+        actor: EntityId,
+    ) -> GatewayAuthorization {
+        let fixture = fixture_with_actor(actor);
+        let authenticated =
+            AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+                principal: fixture.authenticated.principal().clone(),
+                adapter_id: fixture.authenticated.adapter_id().to_owned(),
+                assurance: fixture.authenticated.assurance(),
+                issued_at: WallTime::from_micros(1),
+                expires_at: WallTime::from_micros(2),
+                binding_digest: fixture.authenticated.binding_digest(),
+            })
+            .test_ok();
+        let grant_binding = fixture
+            .authority
+            .chain()
+            .grants()
+            .iter()
+            .map(CapabilityGrantV1::binding_digest)
+            .collect::<Result<Vec<_>, _>>()
+            .test_ok();
+        let registry = AuthorityRegistrySnapshotV1::try_new(
+            fixture.authorization.registry.registry_digest(),
+            vec![authenticated.registry_binding_digest()],
+            grant_binding,
+            Vec::new(),
+        )
+        .test_ok();
+        GatewayAuthorization::new(
+            Arc::new(LocalAuthenticationAdapter::new(authenticated)),
+            fixture.authority,
+            registry,
+        )
     }
 
     pub(super) fn fixture_authorization_unavailable_with_actor(

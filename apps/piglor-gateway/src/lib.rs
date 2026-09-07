@@ -1727,7 +1727,7 @@ impl Gateway {
             target_timeline,
             from_seq,
             limit,
-            request.at_time,
+            WallTime::now(),
         );
         let fence = authorization.commit_fence().await;
         if let Err(error) = authorization.authorize(request) {
@@ -3422,6 +3422,31 @@ mod tests {
         ));
         action_only_gateway.shutdown().await.test_ok();
         drop(action_only_gateway);
+
+        let expired_actor = EntityId::new();
+        let expired_gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [],
+            crate::authorization::test_expired_authorization_for(expired_actor),
+        );
+        let expired_timeline = expired_gateway
+            .create_timeline("expired-read")
+            .await
+            .test_ok();
+        let expired_request = GatewayAuthorizationRequest::read(
+            expired_actor,
+            expired_timeline.id(),
+            0,
+            1,
+            WallTime::from_micros(1),
+        );
+        let expired_error = expired_gateway
+            .read_events_page_authorized(&expired_timeline.id().to_string(), 0, 1, expired_request)
+            .await
+            .test_err();
+        assert!(matches!(expired_error, GatewayError::AuthorizationDenied));
+        expired_gateway.shutdown().await.test_ok();
+        drop(expired_gateway);
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
