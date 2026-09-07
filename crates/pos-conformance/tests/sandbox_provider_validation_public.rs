@@ -226,3 +226,55 @@ fn independent_error_verification_rejects_mutated_nul_detail() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn independent_verifiers_propagate_public_validation_failures() -> TestResult {
+    let key = SigningKey::from_bytes(&[42; 32]);
+    let verifying_key = key.verifying_key();
+
+    let mut image = independent::SignedImageManifest::from_canonical_cbor(include_bytes!(
+        "../vectors/sandbox-provider-v1/sim1.cbor"
+    ))?;
+    image.image_id.clear();
+    assert_eq!(
+        image.verify_signature(&verifying_key),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+
+    let mut grant = independent::AdmissionGrant::from_canonical_cbor(include_bytes!(
+        "../vectors/sandbox-provider-v1/agr1.cbor"
+    ))?;
+    grant.request_id = [0; 16];
+    assert_eq!(
+        grant.verify_signature(&verifying_key),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+
+    let mut result = independent::SandboxProviderResult::from_canonical_cbor(include_bytes!(
+        "../vectors/sandbox-provider-v1/spy1.cbor"
+    ))?;
+    result.request_id = [0; 16];
+    assert_eq!(
+        result.verify_signature(&verifying_key),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+
+    let mut receipt = independent::SandboxProviderReceipt::from_canonical_cbor(include_bytes!(
+        "../vectors/sandbox-provider-v1/spr1.cbor"
+    ))?;
+    receipt.attempt_id = [0; 16];
+    assert_eq!(
+        receipt.verify_signature(&verifying_key),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+
+    let mut response = independent::SandboxDescribeResponse::from_canonical_cbor(include_bytes!(
+        "../vectors/sandbox-provider-v1/sdy1.cbor"
+    ))?;
+    response.request_id = [0; 16];
+    assert_eq!(
+        response.verify_signature(&verifying_key),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+    Ok(())
+}
