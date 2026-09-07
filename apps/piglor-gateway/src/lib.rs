@@ -650,6 +650,18 @@ fn gateway_action_registry_with_authority(
     Arc::new(registry)
 }
 
+fn gateway_action_registry_with_authority_and_erasure_gate(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+    gate: Arc<dyn ErasureGate>,
+) -> Arc<PluginRegistry> {
+    let mut registry = gateway_action_registry_with_authority(bodies, authority);
+    Arc::get_mut(&mut registry)
+        .expect("new action registry must be uniquely owned before Gateway startup")
+        .bind_erasure_gate(gate);
+    registry
+}
+
 /// Resource bounds applied by the local-first Gateway process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GatewayLimits {
@@ -1112,11 +1124,26 @@ impl Gateway {
         gate: Arc<dyn ErasureGate>,
     ) -> Result<Self, GatewayError> {
         store.bind_erasure_gate(Arc::clone(&gate))?;
-        let mut gateway = Self::new(store);
-        if let Some(registry) = Arc::get_mut(&mut gateway.action_registry) {
-            registry.bind_erasure_gate(gate);
+        let consent_authority = ConsentAuthority::new();
+        Ok(Self {
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            action_principal: None,
         }
-        Ok(gateway)
+        .schedule_startup_consent_cleanup())
     }
 
     /// Recover verified ERS1 evidence and bind its host-resolved
@@ -1310,11 +1337,27 @@ impl Gateway {
         gate: Arc<dyn ErasureGate>,
     ) -> Result<Self, GatewayError> {
         store.bind_erasure_gate(Arc::clone(&gate))?;
-        let mut gateway = Self::new_with_owntracks_ingress(store, owner_key);
-        if let Some(registry) = Arc::get_mut(&mut gateway.action_registry) {
-            registry.bind_erasure_gate(gate);
+        let consent_authority = ConsentAuthority::new();
+        Ok(Self {
+            store: executor::StoreExecutor::new_with_owntracks_ingress(
+                store,
+                owner_key.0,
+                consent_authority.append_permit(),
+            ),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: true,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            action_principal: None,
         }
-        Ok(gateway)
+        .schedule_startup_consent_cleanup())
     }
 
     #[cfg(test)]

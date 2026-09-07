@@ -909,3 +909,90 @@ fn containment_gate_blocks_bindings_when_verified_query_fails() {
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
 }
+
+#[test]
+fn containment_gate_does_not_downgrade_a_frozen_state() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?);
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::Submitted,
+        None,
+        Vec::new(),
+    )?);
+    gate.bind_timeline(timeline, reference(7))
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::AccessFrozen)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_allows_nested_store_fences() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let mut invoked = false;
+    gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
+        assert_eq!(
+            gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
+                invoked = true;
+            }),
+            Ok(())
+        );
+    })?;
+    assert!(invoked);
+    Ok(())
+}
+
+#[test]
+fn containment_gate_rechecks_nested_timeline_authorization() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let frozen = TimelineId::new();
+    let allowed = TimelineId::new();
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?);
+    gate.bind_timeline(frozen, reference(7))
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    let mut invoked = false;
+    gate.with_fence(allowed, ErasureProtectedOperationV1::Read, &mut || {
+        assert_eq!(
+            gate.with_fence(frozen, ErasureProtectedOperationV1::Read, &mut || {
+                invoked = true;
+            }),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+    })?;
+    assert!(!invoked);
+    Ok(())
+}
+
+#[test]
+fn containment_gate_rejects_duplicate_timeline_bindings() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let state =
+        verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
+    assert_eq!(
+        gate.install_verified_state(state, &[(timeline, reference(7)), (timeline, reference(7))],),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn fail_closed_gate_rejects_unbound_timeline() {
+    let gate = ErasureContainmentGateV1::new_fail_closed();
+    assert_eq!(
+        gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+}

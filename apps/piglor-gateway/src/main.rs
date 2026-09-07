@@ -222,7 +222,10 @@ async fn serve_with_owntracks(
             .map(OwnTracksOwnerKey::load)
             .transpose()?
     };
-    let erasure_gate = Arc::new(ErasureContainmentGateV1::new());
+    // Startup has no durable #184 recovery query in this composition root.
+    // Keep every protected boundary fail-closed until the host installs
+    // verified evidence and Timeline/Fork bindings.
+    let erasure_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
     let gateway = match (owntracks_owner_key.as_ref(), sqlite_path) {
         (Some(owner_key), Some(path)) => Gateway::new_with_owntracks_ingress_and_erasure_gate(
             pos_store::sqlite::SqliteStore::open(path)?,

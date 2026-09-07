@@ -886,6 +886,44 @@ impl PluginRegistry {
         })
     }
 
+    fn with_erasure_fence<T>(
+        &self,
+        timeline: pos_core::ids::TimelineId,
+        operation: ErasureProtectedOperationV1,
+        mut effect: impl FnMut(&Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let gate = self
+            .erasure_gate
+            .as_ref()
+            .ok_or(RuntimeError::ErasureOperationUnavailable)?;
+        let mut result = Err(RuntimeError::ErasureOperationUnavailable);
+        let mut run = || {
+            result = effect(self);
+        };
+        gate.with_fence(timeline, operation, &mut run)
+            .map_err(RuntimeError::ErasureContainment)?;
+        result
+    }
+
+    fn with_erasure_mut_fence<T>(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        operation: ErasureProtectedOperationV1,
+        mut effect: impl FnMut(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let gate = self
+            .erasure_gate
+            .clone()
+            .ok_or(RuntimeError::ErasureOperationUnavailable)?;
+        let mut result = Err(RuntimeError::ErasureOperationUnavailable);
+        let mut run = || {
+            result = effect(self);
+        };
+        gate.with_fence(timeline, operation, &mut run)
+            .map_err(RuntimeError::ErasureContainment)?;
+        result
+    }
+
     fn snapshot_for_tick(
         &self,
         timeline: pos_core::ids::TimelineId,
@@ -903,14 +941,19 @@ impl PluginRegistry {
             extend_unique_subscriptions(&mut subscriptions, &mut seen, entry.subscriptions());
         }
 
-        self.authorize_snapshot_subscriptions(
+        self.with_erasure_fence(
             timeline,
-            timeline_head,
-            operation,
-            subscriptions.iter(),
-        )?;
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Snapshot)?;
-        Ok(self.snapshot_for_subscriptions(&subscriptions))
+            ErasureProtectedOperationV1::Snapshot,
+            |registry| {
+                registry.authorize_snapshot_subscriptions(
+                    timeline,
+                    timeline_head,
+                    operation,
+                    subscriptions.iter(),
+                )?;
+                Ok(registry.snapshot_for_subscriptions(&subscriptions))
+            },
+        )
     }
 
     fn authorize_snapshot_subscriptions<'a>(
@@ -1061,20 +1104,6 @@ impl PluginRegistry {
     #[must_use]
     pub fn clone_erasure_gate(&self) -> Option<Arc<dyn ErasureGate>> {
         self.erasure_gate.clone()
-    }
-
-    fn authorize_erasure(
-        &self,
-        timeline: pos_core::ids::TimelineId,
-        operation: ErasureProtectedOperationV1,
-    ) -> Result<(), RuntimeError> {
-        self.erasure_gate
-            .as_ref()
-            .ok_or(RuntimeError::ErasureOperationUnavailable)
-            .and_then(|gate| {
-                gate.authorize(timeline, operation)
-                    .map_err(RuntimeError::ErasureContainment)
-            })
     }
 
     /// Fold a host-captured Event range into the registered reducers.
@@ -1386,8 +1415,30 @@ impl PluginRegistry {
         committed_events: &[Event],
         operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+        self.with_erasure_mut_fence(
+            timeline,
+            ErasureProtectedOperationV1::PluginInput,
+            |registry| {
+                registry.step_anchored_transaction_live_unfenced(
+                    timeline,
+                    observed_through,
+                    selection,
+                    committed_events,
+                    operation.clone(),
+                )
+            },
+        )
+    }
+
+    fn step_anchored_transaction_live_unfenced(
+        &mut self,
+        timeline: pos_core::ids::TimelineId,
+        observed_through: Seq,
+        selection: AnchoredSelection,
+        committed_events: &[Event],
+        operation: OperationContext,
+    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::PluginInput)?;
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
             self.collect_anchored_selection(selection)?;
@@ -1484,9 +1535,6 @@ impl PluginRegistry {
         self.ensure_live_execution()
             .and_then(|()| self.ensure_no_pending_step())
             .and_then(|()| {
-                self.authorize_erasure(timeline, ErasureProtectedOperationV1::PluginInput)
-            })
-            .and_then(|()| {
                 observation
                     .revalidate(authority, authority_registry, authority_position)
                     .map_err(RuntimeError::Authority)
@@ -1503,12 +1551,29 @@ impl PluginRegistry {
                     })
             })
             .and_then(|snapshot| {
-                self.stage_authorized_driver_after_fence(
-                    plugin_id,
+                self.with_erasure_mut_fence(
                     timeline,
-                    observation,
-                    &snapshot,
-                    knowledge,
+                    ErasureProtectedOperationV1::PluginInput,
+                    |registry| {
+                        registry.stage_authorized_driver_after_fence(
+                            plugin_id,
+                            timeline,
+                            observation.clone(),
+                            &snapshot,
+                            knowledge,
+            .and_then(|()| {
+                self.with_erasure_mut_fence(
+                    timeline,
+                    ErasureProtectedOperationV1::PluginInput,
+                    |registry| {
+                        registry.stage_authorized_driver_after_fence(
+                            plugin_id,
+                            timeline,
+                            observation.clone(),
+                            knowledge,
+                        )
+                    },
+>>>>>>> 6e340f50 ([#186] Fence runtime and fail closed at gateway startup)
                 )
             })
     }

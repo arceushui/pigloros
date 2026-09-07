@@ -345,14 +345,22 @@ impl ProjectionRegistry {
         self
     }
 
-    fn authorize_bound_erasure(&self, timeline: TimelineId) -> Result<(), AuthorityErrorV1> {
-        self.erasure_gate
+    fn with_erasure_fence<T>(
+        &self,
+        timeline: TimelineId,
+        mut effect: impl FnMut(&Self) -> Result<T, AuthorityErrorV1>,
+    ) -> Result<T, AuthorityErrorV1> {
+        let gate = self
+            .erasure_gate
             .as_ref()
-            .ok_or(AuthorityErrorV1::SourceUnavailable)
-            .and_then(|gate| {
-                gate.authorize(timeline, ErasureProtectedOperationV1::Snapshot)
-                    .map_err(|_| AuthorityErrorV1::SourceUnavailable)
-            })
+            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        let mut result = Err(AuthorityErrorV1::SourceUnavailable);
+        let mut run = || {
+            result = effect(self);
+        };
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut run)
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        result
     }
 
     /// Register a named reducer.
@@ -466,24 +474,32 @@ impl ProjectionRegistry {
         authority_position: Seq,
         context: &ProjectionObservationContextV1,
     ) -> Result<AuthorizedObservationV1, AuthorityErrorV1> {
-        self.authorize_bound_erasure(context.timeline_id)?;
-        authority
-            .validate_observation_authorization(
-                request,
-                decision,
-                authority_registry,
-                authority_position,
-            )
-            .and_then(|()| self.materialize_authorized_projection(request, decision, context))
-            .map(|snapshot| {
-                let artifact_digest = snapshot.provenance_digest();
-                AuthorizedObservationV1 {
-                    snapshot,
-                    artifact_digest,
-                    request: request.clone(),
-                    decision: decision.clone(),
-                }
-            })
+        self.with_erasure_fence(context.timeline_id, |registry| {
+            authority
+                .validate_observation_authorization(
+                    request,
+                    decision,
+                    authority_registry,
+                    authority_position,
+                )
+                .and_then(|()| {
+                    registry.materialize_authorized_projection(request, decision, context)
+                })
+                .map(|snapshot| {
+                    let artifact_digest = snapshot.provenance_digest();
+                    AuthorizedObservationV1 {
+                        snapshot,
+                        artifact_digest,
+                        request: request.clone(),
+                        decision: decision.clone(),
+                    }
+                })
+        })
+        /*
+>>>>>>> 6e340f50 ([#186] Fence runtime and fail closed at gateway startup)
+    }
+
+        */
     }
 
     fn materialize_authorized_projection(
@@ -1904,11 +1920,6 @@ mod wave3_tests {
         assert_eq!(
             registry.authorize_erasure_observation(gate.as_ref(), timeline),
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
-        );
-        let disabled = registry.without_erasure_gate();
-        assert_eq!(
-            disabled.authorize_bound_erasure(timeline),
-            Err(AuthorityErrorV1::SourceUnavailable)
         );
     }
 }

@@ -74,8 +74,8 @@ pub use consent::{
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use erasure::{
-    acknowledgement_inventory_reference, destruction_command_reference, erasure_evidence_set_reference,
-    selected_obligations_reference, ArtifactClaimInputV1,
+    acknowledgement_inventory_reference, destruction_command_reference,
+    erasure_evidence_set_reference, selected_obligations_reference, ArtifactClaimInputV1,
     ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, ErasureAcknowledgementOutcomeV1,
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,

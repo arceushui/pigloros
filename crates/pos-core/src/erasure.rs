@@ -229,9 +229,6 @@ pub trait ErasureGate: Send + Sync {
 
     /// Serialize an operation decision with its protected effect.
     ///
-    /// The default is safe for stateless gates. Mutable gates should override
-    /// it to hold their read/write lock across `effect`.
-    ///
     /// # Errors
     /// Returns the same payload-free containment error as [`Self::authorize`].
     fn with_fence(
@@ -239,11 +236,7 @@ pub trait ErasureGate: Send + Sync {
         timeline: TimelineId,
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(),
-    ) -> Result<(), ErasureContainmentErrorV1> {
-        self.authorize(timeline, operation)?;
-        effect();
-        Ok(())
-    }
+    ) -> Result<(), ErasureContainmentErrorV1>;
 }
 
 /// In-process host gate backed only by verified payload-free ERS1 snapshots.
@@ -256,6 +249,8 @@ pub struct ErasureContainmentGateV1 {
     timeline_scopes: RwLock<BTreeMap<TimelineId, ErasureReferenceV1>>,
     states: RwLock<BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>>,
     blocked_timelines: RwLock<BTreeSet<TimelineId>>,
+    fence_lock: std::sync::Mutex<()>,
+    fail_closed_unbound: bool,
 }
 
 thread_local! {
@@ -288,6 +283,21 @@ impl ErasureContainmentGateV1 {
             timeline_scopes: RwLock::new(BTreeMap::new()),
             states: RwLock::new(BTreeMap::new()),
             blocked_timelines: RwLock::new(BTreeSet::new()),
+            fence_lock: std::sync::Mutex::new(()),
+            fail_closed_unbound: false,
+        }
+    }
+
+    /// Construct a gate that refuses protected operations for every Timeline
+    /// until the host installs verified evidence and topology bindings.
+    #[must_use]
+    pub const fn new_fail_closed() -> Self {
+        Self {
+            timeline_scopes: RwLock::new(BTreeMap::new()),
+            states: RwLock::new(BTreeMap::new()),
+            blocked_timelines: RwLock::new(BTreeSet::new()),
+            fence_lock: std::sync::Mutex::new(()),
+            fail_closed_unbound: true,
         }
     }
 
@@ -303,6 +313,10 @@ impl ErasureContainmentGateV1 {
         timeline: TimelineId,
         scope: ErasureReferenceV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
+        let _fence = self
+            .fence_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bindings = self
             .timeline_scopes
             .write()
@@ -327,6 +341,10 @@ impl ErasureContainmentGateV1 {
     /// clears a previously published frozen state: a caller must provide the
     /// monotonic state recovered from the durable predecessor chain.
     pub fn publish_verified_state(&self, state: ErasureVerifiedStateV1) {
+        let _fence = self
+            .fence_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let request = state.request().reference();
         let mut states = self
             .states
@@ -358,6 +376,10 @@ impl ErasureContainmentGateV1 {
         state: ErasureVerifiedStateV1,
         bindings: &[(TimelineId, ErasureReferenceV1)],
     ) -> Result<(), ErasureContainmentErrorV1> {
+        let _fence = self
+            .fence_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if bindings
             .iter()
             .any(|(_, scope)| !state.scope_contains(*scope))
@@ -373,6 +395,13 @@ impl ErasureContainmentGateV1 {
             .collect();
         let bound_scopes: BTreeSet<_> = bindings.iter().map(|(_, scope)| *scope).collect();
         if expected_scopes != bound_scopes {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let mut bound_timelines = BTreeSet::new();
+        if bindings
+            .iter()
+            .any(|(timeline, _)| !bound_timelines.insert(*timeline))
+        {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
         let request = state.request().reference();
@@ -446,6 +475,10 @@ impl ErasureContainmentGateV1 {
     /// Mark the narrowest authenticated boundary unavailable after recovery
     /// cannot establish its effective erasure scope.
     pub fn block_timeline(&self, timeline: TimelineId) {
+        let _fence = self
+            .fence_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.blocked_timelines
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -473,7 +506,11 @@ impl ErasureContainmentGateV1 {
             .get(&timeline)
             .copied();
         let Some(scope) = scope else {
-            return Ok(());
+            return if self.fail_closed_unbound {
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+            } else {
+                Ok(())
+            };
         };
         let mut matched = false;
         for state in states.values() {
@@ -511,9 +548,14 @@ impl ErasureGate for ErasureContainmentGateV1 {
     ) -> Result<(), ErasureContainmentErrorV1> {
         let identity = self as *const Self as usize;
         if ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity)) {
+            self.authorize(timeline, operation)?;
             effect();
             return Ok(());
         }
+        let _fence = self
+            .fence_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let states = self
             .states
             .read()
