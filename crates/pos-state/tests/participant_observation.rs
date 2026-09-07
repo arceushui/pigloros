@@ -680,7 +680,7 @@ fn observation_policy_rejects_duplicate_permitted_fields() {
 }
 
 #[test]
-fn prior_observation_snapshot_changes_host_provenance() {
+fn prior_observation_snapshot_changes_snapshot_digest_not_policy_provenance() {
     let fixture = authority_fixture();
     let mut registry = ProjectionRegistry::new();
     register_profile(&mut registry, Box::new(CountReducer));
@@ -712,7 +712,7 @@ fn prior_observation_snapshot_changes_host_provenance() {
 
     assert_eq!(with_prior.prior_snapshot_digest(), Some(prior_digest));
     assert_ne!(with_prior.digest(), without_prior.digest());
-    assert_ne!(
+    assert_eq!(
         with_prior.provenance_digest(),
         without_prior.provenance_digest()
     );
