@@ -72,6 +72,11 @@ struct LaunchRecord {
     encoded_hex: String,
 }
 
+struct ReleaseConfiguration<'a> {
+    root_directory: &'a Path,
+    mode: ExecutionMode,
+}
+
 struct ProviderChannels {
     provider_proxy: Option<OwnedFd>,
     launcher_proxy: Option<OwnedFd>,
@@ -308,8 +313,10 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         &launch.encoded,
         &channels.provider_release,
         channels.provider_proxy.as_ref(),
-        &mounted_image.root,
-        mode,
+        &ReleaseConfiguration {
+            root_directory: &mounted_image.root,
+            mode,
+        },
         proof_case,
     )
     .await;
@@ -686,16 +693,20 @@ async fn complete_release(
     encoded_parameters: &[u8],
     release_socket: &OwnedFd,
     proxy_socket: Option<&OwnedFd>,
-    root_directory: &Path,
-    mode: ExecutionMode,
+    configuration: &ReleaseConfiguration<'_>,
     proof_case: ProofCase,
 ) -> Result<(), String> {
     let (ready_bytes, credential_pid) = receive_ready(release_socket)?;
     let ready = crate::release_wire::decode_ready(&ready_bytes)?;
     let (main_pid, _namespace_descriptors) =
         validate_ready_state(unit, parameters, encoded_parameters, &ready, credential_pid)?;
-    validate_requested_readback(unit, parameters, root_directory, mode)?;
-    let network = configure_network(main_pid, parameters.attempt_id, mode)?;
+    validate_requested_readback(
+        unit,
+        parameters,
+        configuration.root_directory,
+        configuration.mode,
+    )?;
+    let network = configure_network(main_pid, parameters.attempt_id, configuration.mode)?;
     if let Some(proxy_socket) = proxy_socket {
         ensure_adapter_blocked(proxy_socket)?;
     }
