@@ -3673,7 +3673,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    pub enum ScriptMode {
+    enum ScriptMode {
         FailCreate,
         FailList,
         FailGetTimeline,
@@ -3695,8 +3695,8 @@ mod tests {
         MissingTimeline,
     }
 
-    pub struct ScriptedStore {
-        pub mode: ScriptMode,
+    struct ScriptedStore {
+        mode: ScriptMode,
     }
 
     impl EventStore for ScriptedStore {
@@ -5769,6 +5769,18 @@ mod tests {
         drop(fail_list);
     }
 
+    #[test]
+    fn erasure_gate_constructor_rejects_store_binding() {
+        let rejected = Gateway::new_with_erasure_gate(
+            Box::new(ScriptedStore {
+                mode: ScriptMode::FailCreate,
+            }),
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+        );
+        assert!(matches!(rejected.as_ref(), Err(GatewayError::Store(_))));
+        drop(rejected);
+    }
+
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn store_error_paths_append_and_read() {
@@ -6150,15 +6162,6 @@ mod coverage_entrypoints {
         let gateway =
             Gateway::new_with_erasure_gate(open_store(StoreConfig::Memory)?, Arc::clone(&gate))?;
         drop(gateway);
-
-        let rejected = Gateway::new_with_erasure_gate(
-            Box::new(super::tests::ScriptedStore {
-                mode: super::tests::ScriptMode::FailCreate,
-            }),
-            Arc::clone(&gate),
-        );
-        assert!(matches!(rejected, Err(GatewayError::Store(_))));
-        drop(rejected);
 
         let owner_key = OwnTracksOwnerKey([7; 32]);
         let owntracks = Gateway::new_with_owntracks_ingress_and_erasure_gate(
