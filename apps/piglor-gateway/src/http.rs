@@ -196,11 +196,25 @@ async fn list_events(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let q = match parse_events_query(raw_query.as_deref()) {
+    let response =
+        match list_events_response(&state.gateway, &id, raw_query.as_deref(), &headers).await {
+            Ok(response) => response,
+            Err(error) => return Err(error),
+        };
+    Ok(Json(response))
+}
+
+async fn list_events_response(
+    gateway: &Gateway,
+    timeline_id: &str,
+    raw_query: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<serde_json::Value, GatewayError> {
+    let q = match parse_events_query(raw_query) {
         Ok(query) => query,
         Err(error) => return Err(error),
     };
-    let page = match read_events_page(&state.gateway, &id, &q, &headers).await {
+    let page = match read_events_page(gateway, timeline_id, &q, headers).await {
         Ok(page) => page,
         Err(error) => return Err(error),
     };
@@ -208,7 +222,7 @@ async fn list_events(
         Ok(response) => response,
         Err(error) => return Err(error),
     };
-    Ok(Json(response))
+    Ok(response)
 }
 
 async fn read_events_page(
