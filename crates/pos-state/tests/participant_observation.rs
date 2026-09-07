@@ -139,6 +139,16 @@ fn consent_grant(
     .test_ok()
 }
 
+fn consent_evidence(present: bool, consent: &ConsentGrantRefV1) -> ConsentEvidenceV1 {
+    if present {
+        ConsentEvidenceV1::Resolved {
+            grants: vec![consent.clone()],
+        }
+    } else {
+        ConsentEvidenceV1::NotRequired
+    }
+}
+
 fn observation_scope(
     actor: EntityId,
     subject: EntityId,
@@ -250,13 +260,7 @@ fn authority_fixture_with_identity_presence(present: [bool; 3]) -> AuthorityFixt
         revocation_epoch: 0,
         revocation_state_current: true,
         authority_registry_digest: registry_digest,
-        consent: if present[0] {
-            ConsentEvidenceV1::Resolved {
-                grants: vec![consent.clone()],
-            }
-        } else {
-            ConsentEvidenceV1::NotRequired
-        },
+        consent: consent_evidence(present[0], &consent),
         environment_constraints: vec!["local-only".to_owned()],
     })
     .test_ok();
