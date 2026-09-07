@@ -367,6 +367,20 @@ fn incompatible_profile_remains_orthogonal_to_structural_and_view_redaction() {
     assert_eq!(redacted.causal_trace[0].visibility, "redacted");
     assert_eq!(verify_evidence(&redacted), Ok(()));
     assert!(redacted.to_canonical_cbor().is_ok());
+
+    let mut missing = public_evidence_fixture();
+    let missing_evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::Remove,
+        ErasureReplayClaimV1::IncompatibleProfile,
+    );
+    ok(missing.apply_artifact_evaluation(&missing_evaluation));
+    assert_eq!(
+        missing.manifest.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert!(missing.causal_trace.is_empty());
+    assert_eq!(missing.structural_causal_trace.len(), 1);
+    assert_eq!(verify_evidence(&missing), Ok(()));
 }
 
 #[test]
@@ -405,6 +419,8 @@ fn missing_artifacts_never_produce_an_exact_verification_outcome() {
         result.first_error.as_ref().map(|error| error.code),
         Some(SafeErrorCodeV1::ClosureIncomplete)
     );
+    let encoded = ok(result.to_canonical_cbor());
+    assert_eq!(ok(VerificationResultV1::from_canonical_cbor(&encoded)), result);
 }
 
 #[test]
@@ -1258,6 +1274,11 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
         Err(EvidenceError::InvalidDependencyGraph)
     );
     let value = decode_value(ok(evidence.to_canonical_cbor()));
+    let mut short_evidence = cloned_array_fields(&value, "decode evidence fixture structure");
+    drop(short_evidence.pop());
+    expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+        &ciborium::Value::Array(short_evidence),
+    )));
     let mut paths = Vec::new();
     structural_paths(&value, &mut Vec::new(), &mut paths);
     assert!(paths.len() > 512);

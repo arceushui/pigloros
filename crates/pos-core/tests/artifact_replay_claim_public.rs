@@ -76,6 +76,7 @@ fn every_artifact_class_uses_its_registered_one_way_transition() {
             evaluation.artifacts()[0].from(),
             ErasureReplayClaimV1::Exact
         );
+        assert_eq!(evaluation.artifacts()[0].artifact_class(), artifact_class);
         assert_eq!(
             evaluation.artifacts()[0].to(),
             ErasureReplayClaimV1::StructuralOnly

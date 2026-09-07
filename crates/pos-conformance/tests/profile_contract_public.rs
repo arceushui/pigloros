@@ -1625,6 +1625,7 @@ fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestR
     report.cases[0].replay_claim = ReplayClaimV1::IncompatibleProfile;
     report.replay_claim = ReplayClaimV1::IncompatibleProfile;
     report.report_digest = report.digest()?;
+    let mut missing_report = report.clone();
     let evaluation = ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::IncompatibleProfile,
         &[ArtifactClaimInputV1 {
@@ -1646,6 +1647,31 @@ fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestR
     assert_eq!(report.replay_claim, ReplayClaimV1::IncompatibleProfile);
     assert_eq!(report.redaction_state, RedactionStateV1::StructuralOnly);
     report.validate()?;
+
+    let missing_evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::IncompatibleProfile,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::ConformanceReport,
+                ErasureReferenceV1::from_digest([33; 32]),
+                ArtifactDataClassV1::PrivateSubjectData,
+                None,
+                ErasureReferenceV1::from_digest([34; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::Remove,
+            ),
+            current_claim: ErasureReplayClaimV1::IncompatibleProfile,
+            state: ArtifactStateV1::Erased,
+        }],
+    )?;
+    missing_report.apply_artifact_evaluation(&missing_evaluation)?;
+    assert_eq!(
+        missing_report.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(missing_report.redaction_state, RedactionStateV1::EvidenceMissing);
+    assert_eq!(missing_report.cases[0].outcome, CaseOutcomeStatusV1::Unavailable);
+    missing_report.validate()?;
     Ok(())
 }
 
