@@ -1540,12 +1540,13 @@ impl PluginRegistry {
             .map_err(RuntimeError::Authority)?;
         let snapshot = observation
             .authoritative_snapshot(artifact_evaluation)
-            .map_err(RuntimeError::Authority)?;
+            .map_err(RuntimeError::Authority)?
+            .clone();
         knowledge
-            .validate_observation_snapshot(snapshot)
+            .validate_observation_snapshot(&snapshot)
             .map_err(RuntimeError::Authority)?;
         let mut observation = Some(observation);
-        return self.with_erasure_mut_fence(
+        self.with_erasure_mut_fence(
             timeline,
             ErasureProtectedOperationV1::PluginInput,
             |registry| {
