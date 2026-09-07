@@ -88,6 +88,8 @@ if command -v covgate >/dev/null 2>&1; then
   fi
   coverage_json="$(mktemp)"
   cargo llvm-cov report --json --output-path "$coverage_json"
+  bash "$ROOT/scripts/check-rust-coverage-report.sh" \
+    "$coverage_json" "${DIFF_COVERAGE_BASE:-origin/main}"
   covgate check "$coverage_json" \
     --base "${DIFF_COVERAGE_BASE:-origin/main}" \
     --no-github-summary

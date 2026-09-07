@@ -379,23 +379,7 @@ jobs:
           if [[ -z "${base_ref}" || "${base_ref}" =~ ^0+$ ]]; then
             base_ref="$(git rev-parse HEAD^1)"
           fi
-          missing=()
-          while IFS= read -r path; do
-            [[ -z "${path}" ]] && continue
-            if ! jq -e --arg path "${path}" '
-              any(.data[]?.files[]?;
-                ((.filename == $path) or (.filename | endswith("/" + $path)))
-                and ((.segments // []) | length > 0)
-              )
-            ' "${RUNNER_TEMP}/coverage.json" >/dev/null; then
-              missing+=("${path}")
-            fi
-          done < <(git diff --name-only --diff-filter=ACMR "${base_ref}" HEAD -- '*.rs')
-          if ((${#missing[@]} > 0)); then
-            printf 'Changed Rust files missing from the LLVM coverage report:\n' >&2
-            printf '  %s\n' "${missing[@]}" >&2
-            exit 1
-          fi
+          bash scripts/check-rust-coverage-report.sh "${RUNNER_TEMP}/coverage.json" "${base_ref}"
       - name: Enforce new Rust code coverage (lines ≥99%, regions ≥99%)
         if: ${{ success() }}
         env:
@@ -803,6 +787,8 @@ jobs:
         run: bash scripts/test-check-pinned-dependencies.sh
       - name: Test Rust scope filter policy
         run: python scripts/test_rust_scope_policy.py
+      - name: Test Rust coverage report guard
+        run: python scripts/test_check_rust_coverage_report.py
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker

@@ -48,9 +48,10 @@ Then reproduce the gate against the exact pull-request base with:
 DIFF_COVERAGE_BASE=<pull-request-base-sha> ./scripts/ci.sh
 ```
 
-Before running the diff gate, CI also fails closed if any changed Rust source
-file is absent from the LLVM coverage report; this prevents unsupported or
-target-specific files from receiving an empty 100% result.
+Before running the diff gate, CI and `scripts/ci.sh` fail closed if any changed
+Rust source file is absent from the LLVM coverage report or has no positive
+line/region total; this prevents unsupported or target-specific files from
+receiving an empty 100% result.
 
 ## Change-risk policy
 
