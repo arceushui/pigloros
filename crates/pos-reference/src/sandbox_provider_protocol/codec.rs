@@ -294,7 +294,12 @@ pub(super) fn fixed_bytes<const N: usize>(
 }
 
 pub(super) fn id16(value: &Value) -> Result<[u8; 16], SandboxProviderProtocolError> {
-    fixed_bytes(value)
+    let identity = fixed_bytes(value)?;
+    if identity == [0; 16] {
+        Err(SandboxProviderProtocolError::FieldOutOfBounds)
+    } else {
+        Ok(identity)
+    }
 }
 
 pub(super) fn digest32(value: &Value) -> Result<[u8; 32], SandboxProviderProtocolError> {
