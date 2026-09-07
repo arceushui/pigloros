@@ -1522,7 +1522,7 @@ impl PluginRegistry {
     pub fn stage_authorized_driver(
         &mut self,
         target: AuthorizedDriverTargetV1,
-        observation: &AuthorizedObservationV1,
+        observation: AuthorizedObservationV1,
         artifact_evaluation: &pos_core::ReplayClaimEvaluationV1,
         knowledge: &KnowledgeSnapshotV1,
         authority: &PersistedAuthorityV1,
@@ -1545,6 +1545,7 @@ impl PluginRegistry {
         knowledge
             .validate_observation_snapshot(&snapshot)
             .map_err(RuntimeError::Authority)?;
+        let observation = Box::new(observation);
         self.with_erasure_mut_fence(
             timeline,
             ErasureProtectedOperationV1::PluginInput,
@@ -1552,7 +1553,7 @@ impl PluginRegistry {
                 registry.stage_authorized_driver_after_fence(
                     plugin_id,
                     timeline,
-                    observation,
+                    observation.as_ref(),
                     &snapshot,
                     knowledge,
                 )
