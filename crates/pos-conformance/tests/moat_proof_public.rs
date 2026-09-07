@@ -830,6 +830,40 @@ fn exercise_scalar_boundaries<T, E>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
     let mut evidence = public_evidence_fixture();
+    evidence.manifest.fork_cut_seq = Some(1);
+    evidence.authoritative_events[1].tick = 2;
+    evidence.authoritative_events[1].event_type = "world.action.v1".to_owned();
+    evidence.authoritative_events[1].payload_digest = [24; 32];
+    let mut closure = evidence.authoritative_events.pop().unwrap_or_else(|| {
+        std::panic::resume_unwind(Box::new("closure Event fixture is absent"))
+    });
+    evidence.authoritative_events.push(AuthoritativeEventV1 {
+        seq: 3,
+        tick: 2,
+        entity: "society".to_owned(),
+        event_type: "society.signal".to_owned(),
+        payload_digest: [27; 32],
+        causation_seq: Some(2),
+    });
+    closure.seq = 4;
+    closure.tick = 3;
+    evidence.authoritative_events.push(closure);
+    evidence.causal_trace[0].relation = "intervention_to_physics".to_owned();
+    evidence.causal_trace.push(CausalTraceEntryV1 {
+        cause_seq: 2,
+        effect_seq: 3,
+        relation: "agent_to_society".to_owned(),
+        visibility: "public".to_owned(),
+        dependency_class: DependencyClassV1::EndogenousRecomputed,
+    });
+    evidence.participant_views[0].hidden_event_types[1] = "world.action.v1".to_owned();
+    evidence.participant_views[0]
+        .hidden_event_types
+        .push("society.signal".to_owned());
+    evidence.contract.knowledge_snapshots[0].hidden_event_types =
+        vec!["world.action.v1".to_owned(), "society.signal".to_owned()];
+    evidence.host_closure.effective_after_seq = 4;
+    evidence.host_closure.closure_event_seq = 4;
     evidence.plugin_failures = vec![
         PluginFailureV1 {
             plugin: "crashing-plugin".to_owned(),
@@ -854,28 +888,110 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
             sibling_step_count: 4,
         },
     ];
-    evidence.contract.counterfactual.intervention = Some(InterventionV1 {
+    evidence.contract.atomicity = vec![
+        TickAtomicityV1 {
+            tick: 1,
+            fork_generation: 1,
+            staged_event_count: 1,
+            committed_event_count: 0,
+            state_digest_before: [21; 32],
+            state_digest_after: [21; 32],
+            committed: false,
+            failure_class: Some(PluginFailureClassV1::PluginCrash),
+        },
+        TickAtomicityV1 {
+            tick: 2,
+            fork_generation: 1,
+            staged_event_count: 3,
+            committed_event_count: 0,
+            state_digest_before: [22; 32],
+            state_digest_after: [22; 32],
+            committed: false,
+            failure_class: Some(PluginFailureClassV1::ResourceExhaustion),
+        },
+    ];
+    let action_node = DependencyNodeV1 {
+        tick: 2,
+        scheduler_position: 0,
+        owner_id: "agent".to_owned(),
+        output_ordinal: 0,
+        schema_id: schema_id_for_event_type("world.action.v1"),
+        artifact_digest: [24; 32],
+    };
+    let society_node = DependencyNodeV1 {
+        tick: 2,
+        scheduler_position: 3,
+        owner_id: "society".to_owned(),
+        output_ordinal: 0,
+        schema_id: schema_id_for_event_type("society.signal"),
+        artifact_digest: [27; 32],
+    };
+    let observation_node = evidence.contract.counterfactual.dependencies[0]
+        .consumer
+        .clone();
+    let zero_node = evidence.contract.counterfactual.dependencies[0]
+        .source
+        .clone();
+    let dependency = |consumer: DependencyNodeV1,
+                      source: DependencyNodeV1,
+                      dependency_class: DependencyClassV1| InputDependencyV1 {
+        consumer,
+        source,
+        dependency_class,
+        authorization_digest: [4; 32],
+        provenance_digest: [5; 32],
+    };
+    let counterfactual = &mut evidence.contract.counterfactual;
+    counterfactual.intervention = Some(InterventionV1 {
         intervention_id: [23; 16],
         target: "body".to_owned(),
         operation: "set_velocity".to_owned(),
         value_digest: [24; 32],
-        effective_tick: 1,
+        effective_tick: 2,
         ordinal: 0,
         principal_id: "principal:operator".to_owned(),
         capability: "intervene".to_owned(),
         consent_epoch: 0,
         provenance_digest: [25; 32],
     });
-    evidence
-        .contract
-        .counterfactual
-        .frontier
-        .unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
-    evidence
-        .contract
-        .counterfactual
-        .frontier
-        .unknown_edge_coordinates = vec![DependencyNodeV1 {
+    counterfactual.dependencies = vec![
+        dependency(
+            observation_node,
+            zero_node,
+            DependencyClassV1::EndogenousRecomputed,
+        ),
+        dependency(
+            action_node.clone(),
+            DependencyNodeV1 {
+                tick: 1,
+                scheduler_position: 1,
+                owner_id: "body".to_owned(),
+                output_ordinal: 0,
+                schema_id: schema_id_for_event_type("world.observation.v1"),
+                artifact_digest: [1; 32],
+            },
+            DependencyClassV1::InterventionAssigned,
+        ),
+        dependency(
+            society_node.clone(),
+            action_node.clone(),
+            DependencyClassV1::EndogenousRecomputed,
+        ),
+    ];
+    counterfactual.frontier.intervention_seed_nodes = vec![action_node];
+    counterfactual.frontier.affected_nodes = vec![society_node.clone()];
+    counterfactual.frontier.owner_frontiers = vec![OwnerFrontierV1 {
+        owner_id: "society".to_owned(),
+        earliest_tick: 2,
+        earliest_scheduler_position: 3,
+        earliest_output_ordinal: 0,
+        cause_node_digests: vec![[24; 32]],
+    }];
+    counterfactual.frontier.global_frontier_tick = 2;
+    counterfactual.frontier.global_frontier_scheduler_position = 3;
+    counterfactual.frontier.endogenous_suffix_end_tick = 2;
+    counterfactual.frontier.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
+    counterfactual.frontier.unknown_edge_coordinates = vec![DependencyNodeV1 {
         tick: 2,
         scheduler_position: 1,
         owner_id: "unknown-owner".to_owned(),
@@ -883,6 +999,18 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
         schema_id: schema_id_for_event_type("unknown.event.v1"),
         artifact_digest: [26; 32],
     }];
+    counterfactual.invalidation.invalid_start = society_node.clone();
+    counterfactual.invalidation.invalid_end = society_node.clone();
+    counterfactual.invalidation.invalid_artifacts = vec![InvalidArtifactV1 {
+        artifact_class: "event".to_owned(),
+        schema_id: society_node.schema_id,
+        artifact_digest: society_node.artifact_digest,
+        producer: society_node,
+        prior_generation: 0,
+        reason: SuffixInvalidationReasonV1::NewIntervention,
+    }];
+    counterfactual.recomputed_event_seqs = vec![3];
+    ok(counterfactual.refresh_digest());
     evidence
 }
 
@@ -1087,14 +1215,14 @@ fn public_comparisons_classify_each_authoritative_difference() -> Result<(), pos
     );
 
     right = left.clone();
-    right.causal_trace[0].relation = "changed".to_owned();
+    right.causal_trace[0].relation = "derived".to_owned();
     assert_eq!(
         compare(&left, &right)?.divergence,
         DivergenceClassV1::CausalTrace
     );
 
     right = left.clone();
-    right.host_closure.closure_payload_digest = [30; 32];
+    right.uncertainty[0].confidence = 0.8;
     assert_eq!(
         compare(&left, &right)?.divergence,
         DivergenceClassV1::Observability

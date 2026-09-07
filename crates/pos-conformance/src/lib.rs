@@ -7179,12 +7179,16 @@ pub mod tests {
             class: PluginFailureClassV1::PluginCrash,
             tick: 1,
             committed: false,
-            staged_event_count: 0,
+            staged_event_count: 1,
             committed_event_count: 0,
             state_digest_before: [1; 32],
             state_digest_after: [1; 32],
             sibling_step_count: 1,
         });
+        right.contract.atomicity[0].committed = false;
+        right.contract.atomicity[0].committed_event_count = 0;
+        right.contract.atomicity[0].state_digest_after = [1; 32];
+        right.contract.atomicity[0].failure_class = Some(PluginFailureClassV1::PluginCrash);
         assert_eq!(
             compare(&left, &right)?.divergence,
             DivergenceClassV1::Observability
@@ -7999,6 +8003,15 @@ pub mod tests {
                 .contract
                 .counterfactual
                 .recomputed_event_seqs = vec![action_event.seq];
+            incomplete_suffix
+                .contract
+                .counterfactual
+                .refresh_digest()
+                .unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!(
+                        "counterfactual fixture digest failed: {error}"
+                    )))
+                });
             assert_eq!(
                 verify_wave8_contract(&incomplete_suffix),
                 Err(EvidenceError::IncompleteRecomputationContract)
