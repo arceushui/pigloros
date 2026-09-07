@@ -746,6 +746,11 @@ pub(crate) fn test_authorization_for(actor: EntityId) -> GatewayAuthorization {
 }
 
 #[cfg(test)]
+pub(crate) fn test_action_only_authorization_for(actor: EntityId) -> GatewayAuthorization {
+    tests::fixture_action_only_authorization_with_actor(actor)
+}
+
+#[cfg(test)]
 pub(crate) fn test_authorization_unavailable_for(actor: EntityId) -> GatewayAuthorization {
     tests::fixture_authorization_unavailable_with_actor(actor)
 }
@@ -802,6 +807,20 @@ mod tests {
     }
 
     fn fixture_with_actor(actor: EntityId) -> Fixture {
+        fixture_with_scope(
+            actor,
+            vec!["timeline.events".to_owned(), "world.action".to_owned()],
+            vec!["read".to_owned(), "world.action.submit".to_owned()],
+            vec!["action".to_owned(), "read".to_owned()],
+        )
+    }
+
+    fn fixture_with_scope(
+        actor: EntityId,
+        resources: Vec<String>,
+        actions: Vec<String>,
+        purposes: Vec<String>,
+    ) -> Fixture {
         let principal = PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok();
         let authenticated =
             AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
@@ -817,9 +836,9 @@ mod tests {
         let registry_digest = hash(3);
         let policy_revision = hash(4);
         let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-            resources: vec!["timeline.events".to_owned(), "world.action".to_owned()],
-            actions: vec!["read".to_owned(), "world.action.submit".to_owned()],
-            purposes: vec!["action".to_owned(), "read".to_owned()],
+            resources,
+            actions,
+            purposes,
             audiences: vec!["gateway".to_owned()],
             actor_entity_ids: vec![actor],
             subject_ids: Vec::new(),
@@ -898,6 +917,18 @@ mod tests {
 
     pub(super) fn fixture_authorization_with_actor(actor: EntityId) -> GatewayAuthorization {
         fixture_with_actor(actor).authorization
+    }
+
+    pub(super) fn fixture_action_only_authorization_with_actor(
+        actor: EntityId,
+    ) -> GatewayAuthorization {
+        fixture_with_scope(
+            actor,
+            vec!["world.action".to_owned()],
+            vec!["world.action.submit".to_owned()],
+            vec!["action".to_owned()],
+        )
+        .authorization
     }
 
     pub(super) fn fixture_authorization_unavailable_with_actor(

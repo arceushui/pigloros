@@ -1673,10 +1673,10 @@ impl Gateway {
             }
             Err(error) => return Err(error.into()),
         };
-        if events.iter().any(|event| {
-            pos_core::is_geographic_event_type(&event.event_type)
-                || pos_core::is_consent_event_type(&event.event_type)
-        }) {
+        if events
+            .iter()
+            .any(|event| is_subject_controlled_event_type(&event.event_type))
+        {
             return Err(GatewayError::ResourceUnavailable);
         }
         let next_from_seq = events
@@ -1716,13 +1716,32 @@ impl Gateway {
         if !request.targets_read(target_timeline, from_seq, limit) {
             return Err(GatewayError::AuthorizationDenied);
         }
+        // The public request is an input envelope, not authority to choose the
+        // operation being authorized. Rebuild the complete read semantics from
+        // the host route so an action-shaped request cannot be relabeled as a
+        // read by changing only its target coordinates. Subject-controlled
+        // Event families are rejected by the bounded read before release;
+        // this seam never trusts caller-provided `NotRequired` consent.
+        let request = GatewayAuthorizationRequest::read(
+            request.actor_entity_id,
+            target_timeline,
+            from_seq,
+            limit,
+            request.at_time,
+        );
         let fence = authorization.commit_fence().await;
         if let Err(error) = authorization.authorize(request) {
             return Err(map_authorization_error(error));
         }
-        let page = self
+        let page = match self
             .read_events_page_unchecked(timeline_id, from_seq, limit)
-            .await;
+            .await
+        {
+            Err(GatewayError::Store(CoreError::TimelineNotFound(_))) => {
+                Err(GatewayError::ResourceUnavailable)
+            }
+            result => result,
+        };
         drop(fence);
         page
     }
@@ -2474,9 +2493,7 @@ impl TryFrom<&Event> for EventView {
     type Error = GatewayError;
 
     fn try_from(event: &Event) -> Result<Self, Self::Error> {
-        if pos_core::is_geographic_event_type(&event.event_type)
-            || pos_core::is_consent_event_type(&event.event_type)
-        {
+        if is_subject_controlled_event_type(&event.event_type) {
             return Err(GatewayError::ResourceUnavailable);
         }
         let bytes = event.payload.as_slice();
@@ -2489,6 +2506,13 @@ impl TryFrom<&Event> for EventView {
             payload_hex: hex_encode(bytes),
         })
     }
+}
+
+fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
+    pos_core::required_modality_for_event(event_type) != 0
+        || pos_core::is_consent_event_type(event_type)
+        || event_type.as_str().starts_with("timeline.fork.")
+        || event_type.as_str().starts_with("retention.")
 }
 
 fn classify_owntracks_admission(
@@ -3354,8 +3378,88 @@ mod tests {
                 GatewayError::AuthorizationDenied
             ));
         }
+
+        let action_only_actor = EntityId::new();
+        let action_only_gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [],
+            crate::authorization::test_action_only_authorization_for(action_only_actor),
+        );
+        let mut action_shaped_read = GatewayAuthorizationRequest::action(
+            action_only_actor,
+            timeline.id(),
+            EVENT_TYPE_ACTION,
+            "world.action.submit",
+            WallTime::now(),
+        );
+        action_shaped_read.target = GatewayAuthorizationTarget::Read {
+            timeline_id: timeline.id(),
+            from_position: Seq::ZERO,
+            limit: 1,
+        };
+        let substituted_operation = action_only_gateway
+            .read_events_page_authorized(&timeline.id().to_string(), 0, 1, action_shaped_read)
+            .await
+            .test_err();
+        assert!(matches!(
+            substituted_operation,
+            GatewayError::AuthorizationDenied
+        ));
+        action_only_gateway.shutdown().await.test_ok();
         gateway.shutdown().await.test_ok();
         drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn authority_bound_gateway_blocks_subject_controlled_reads_and_normalizes_missing() {
+        let actor = EntityId::new();
+        for event_type in [
+            "persona.profile",
+            "model.fit",
+            "export.bundle",
+            "timeline.fork.created",
+            "retention.policy",
+        ] {
+            let target = TimelineId::new();
+            let gateway = Gateway::new_with_world_bodies_and_authorization(
+                Box::new(ScriptedStore {
+                    mode: ScriptMode::SubjectControlledRead(event_type),
+                }),
+                [],
+                crate::authorization::test_authorization_for(actor),
+            );
+            let error = gateway
+                .read_events_page_authorized(
+                    &target.to_string(),
+                    0,
+                    1,
+                    GatewayAuthorizationRequest::read(actor, target, 0, 1, WallTime::now()),
+                )
+                .await
+                .test_err();
+            assert_eq!(error.to_string(), "resource not found");
+            gateway.shutdown().await.test_ok();
+        }
+
+        let missing = Gateway::new_with_world_bodies_and_authorization(
+            Box::new(ScriptedStore {
+                mode: ScriptMode::MissingTimeline,
+            }),
+            [],
+            crate::authorization::test_authorization_for(actor),
+        );
+        let missing_target = TimelineId::new();
+        let missing_error = missing
+            .read_events_page_authorized(
+                &missing_target.to_string(),
+                0,
+                1,
+                GatewayAuthorizationRequest::read(actor, missing_target, 0, 1, WallTime::now()),
+            )
+            .await
+            .test_err();
+        assert_eq!(missing_error.to_string(), "resource not found");
+        missing.shutdown().await.test_ok();
     }
 
     #[tokio::test]
@@ -3431,6 +3535,7 @@ mod tests {
         DuplicateReadError,
         GeographicRead(&'static str),
         ConsentRead(&'static str),
+        SubjectControlledRead(&'static str),
         MissingTimeline,
     }
 
@@ -3517,9 +3622,12 @@ mod tests {
             self.append_consent_bounded(timeline, drafts, permit, max_owned_events)
         }
 
-        fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        fn read(&self, timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
             if matches!(self.mode, ScriptMode::FailRead) {
                 return Err(CoreError::Storage("read failed".into()));
+            }
+            if matches!(self.mode, ScriptMode::MissingTimeline) {
+                return Err(CoreError::TimelineNotFound(timeline));
             }
             let bounded_error = match self.mode {
                 ScriptMode::ReadPayloadTooLarge => Some(CoreError::PayloadTooLarge { size: 1 }),
@@ -3539,8 +3647,9 @@ mod tests {
             if let Some(error) = bounded_error {
                 return Err(error);
             }
-            if let ScriptMode::GeographicRead(event_type) | ScriptMode::ConsentRead(event_type) =
-                self.mode
+            if let ScriptMode::GeographicRead(event_type)
+            | ScriptMode::ConsentRead(event_type)
+            | ScriptMode::SubjectControlledRead(event_type) = self.mode
             {
                 let payload = CanonicalBytes::from_vec(b"protected".to_vec());
                 return Ok(vec![Event {
