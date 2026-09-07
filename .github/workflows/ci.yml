@@ -314,6 +314,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -368,6 +369,33 @@ jobs:
         continue-on-error: true
         run: cargo llvm-cov report --json
           --output-path "${{ runner.temp }}/coverage.json"
+      - name: Reject changed Rust files missing from coverage
+        if: ${{ success() }}
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base_ref="${BASE_REF}"
+          if [[ -z "${base_ref}" || "${base_ref}" =~ ^0+$ ]]; then
+            base_ref="$(git rev-parse HEAD^1)"
+          fi
+          missing=()
+          while IFS= read -r path; do
+            [[ -z "${path}" ]] && continue
+            if ! jq -e --arg path "${path}" '
+              any(.data[]?.files[]?;
+                ((.filename == $path) or (.filename | endswith("/" + $path)))
+                and ((.segments // []) | length > 0)
+              )
+            ' "${RUNNER_TEMP}/coverage.json" >/dev/null; then
+              missing+=("${path}")
+            fi
+          done < <(git diff --name-only --diff-filter=ACMR "${base_ref}" HEAD -- '*.rs')
+          if ((${#missing[@]} > 0)); then
+            printf 'Changed Rust files missing from the LLVM coverage report:\n' >&2
+            printf '  %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
       - name: Enforce new Rust code coverage (lines ≥99%, regions ≥99%)
         if: ${{ success() }}
         env:
