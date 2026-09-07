@@ -5240,11 +5240,7 @@ fn counterfactual_dependency_is_invalid(dependency: &InputDependencyV1) -> bool 
 
 fn counterfactual_header_is_valid(evidence: &MoatProofEvidenceV1) -> bool {
     let counterfactual = &evidence.contract.counterfactual;
-    counterfactual
-        .replay_claim
-        .is_no_stronger_than(evidence.manifest.replay_claim)
-        && counterfactual.contract_digest != [0; 32]
-        && counterfactual_digest_is_valid(counterfactual)
+    counterfactual_identity_is_valid(evidence)
         && counterfactual.frontier.frontier_digest != [0; 32]
         && counterfactual.invalidation.invalidation_digest != [0; 32]
         && counterfactual.frontier.unknown_edge_policy == UnknownEdgePolicyV1::Reject
@@ -5253,6 +5249,15 @@ fn counterfactual_header_is_valid(evidence: &MoatProofEvidenceV1) -> bool {
         && counterfactual.invalidation.prior_generation == counterfactual.prior_generation
         && (counterfactual.intervention.is_none()
             || counterfactual.generation == counterfactual.prior_generation.saturating_add(1))
+}
+
+fn counterfactual_identity_is_valid(evidence: &MoatProofEvidenceV1) -> bool {
+    let counterfactual = &evidence.contract.counterfactual;
+    counterfactual
+        .replay_claim
+        .is_no_stronger_than(evidence.manifest.replay_claim)
+        && counterfactual.contract_digest != [0; 32]
+        && counterfactual_digest_is_valid(counterfactual)
 }
 
 fn counterfactual_digest_is_valid(counterfactual: &CounterfactualContractV1) -> bool {
