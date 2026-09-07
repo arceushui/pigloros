@@ -300,6 +300,9 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         proof_case,
     )
     .await;
+    if result.is_err() {
+        emit_unit_diagnostics(&unit);
+    }
     let _ = manager.stop_unit(unit.clone(), "replace".to_owned()).await;
     let _ = manager.reset_failed_unit(unit.clone()).await;
     if proof_case.is_descriptor_defect() {
@@ -331,6 +334,23 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn emit_unit_diagnostics(unit: &str) {
+    let output = Command::new("systemctl")
+        .args([
+            "show",
+            unit,
+            "--property=ActiveState,SubState,Result,MainPID,ExecMainCode,ExecMainStatus",
+        ])
+        .output();
+    match output {
+        Ok(output) => eprintln!(
+            "release_barrier_unit_diagnostics;{}",
+            String::from_utf8_lossy(&output.stdout).replace('\n', ";")
+        ),
+        Err(error) => eprintln!("release_barrier_unit_diagnostics_error;{error}"),
+    }
 }
 
 fn build_launch_record(mode: ExecutionMode, sim1_digest: [u8; 32]) -> Result<LaunchRecord, String> {
