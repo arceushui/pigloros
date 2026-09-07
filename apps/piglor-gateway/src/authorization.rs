@@ -647,7 +647,9 @@ fn timeline_bytes(value: TimelineId) -> [u8; 16] {
 
 fn digest_optional_fixed<const N: usize>(hasher: &mut blake3::Hasher, value: Option<[u8; N]>) {
     match value {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some(bytes) => {
             hasher.update(&[1]);
             hasher.update(&(N as u64).to_be_bytes());
