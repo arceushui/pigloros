@@ -1634,7 +1634,7 @@ fn incompatible_conformance_report_still_records_orthogonal_redaction() -> TestR
             registration: RegisteredArtifactV1::new(
                 ErasureArtifactClassV1::ConformanceReport,
                 ErasureReferenceV1::from_digest([29; 32]),
-                ArtifactDataClassV1::Public,
+                ArtifactDataClassV1::PublicRecord,
                 None,
                 ErasureReferenceV1::from_digest([30; 32]),
                 ArtifactOptionalityV1::Required,
