@@ -426,9 +426,11 @@ impl ErasureContainmentGateV1 {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
         states.insert(request, state);
+        drop(states);
         for (timeline, scope) in bindings {
             timeline_scopes.insert(*timeline, *scope);
         }
+        drop(timeline_scopes);
         Ok(())
     }
 
@@ -449,14 +451,13 @@ impl ErasureContainmentGateV1 {
         request: ErasureReferenceV1,
         bindings: &[(TimelineId, ErasureReferenceV1)],
     ) -> Result<(), ErasureContainmentErrorV1> {
-        match query.verified_state(request) {
-            Ok(Some(state)) => self.install_verified_state(state, bindings),
-            Ok(None) | Err(_) => {
-                for (timeline, _) in bindings {
-                    self.block_timeline(*timeline);
-                }
-                Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        if let Ok(Some(state)) = query.verified_state(request) {
+            self.install_verified_state(state, bindings)
+        } else {
+            for (timeline, _) in bindings {
+                self.block_timeline(*timeline);
             }
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         }
     }
 
@@ -546,7 +547,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(),
     ) -> Result<(), ErasureContainmentErrorV1> {
-        let identity = self as *const Self as usize;
+        let identity = std::ptr::from_ref(self) as usize;
         if ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity)) {
             self.authorize(timeline, operation)?;
             effect();

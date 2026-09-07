@@ -946,7 +946,8 @@ fn containment_gate_allows_nested_store_fences() -> Result<(), ErasureErrorV1> {
                 }),
                 Ok(())
             );
-        }),
+        })
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing),
         Ok(())
     );
     assert!(invoked);
@@ -974,7 +975,8 @@ fn containment_gate_rechecks_nested_timeline_authorization() -> Result<(), Erasu
                 }),
                 Err(ErasureContainmentErrorV1::AccessFrozen)
             );
-        }),
+        })
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing),
         Ok(())
     );
     assert!(!invoked);
