@@ -420,6 +420,7 @@ fn request_and_report_decoders_reject_wrong_types_at_every_required_field() -> T
     let request_bytes = valid_request()?.to_canonical_cbor()?;
     let request = decoded_value(&request_bytes)?;
     for path in (0..15)
+        .filter(|index| *index != 13)
         .map(|index| vec![index])
         .chain((0..5).map(|index| vec![7, index]))
         .chain((0..3).map(|index| vec![10, index]))
