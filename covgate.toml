@@ -1,0 +1,4 @@
+[[gates]]
+name = "new-rust-code"
+fail-under-lines = 99
+fail-under-regions = 99

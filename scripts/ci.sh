@@ -73,5 +73,15 @@ cargo llvm-cov --workspace --all-features --locked --summary-only \
   --fail-under-lines 99 \
   --fail-under-regions 99 \
   -- --include-ignored
+if command -v covgate >/dev/null 2>&1; then
+  coverage_json="$(mktemp)"
+  cargo llvm-cov report --json --output-path "$coverage_json"
+  covgate check "$coverage_json" \
+    --base "${DIFF_COVERAGE_BASE:-main}" \
+    --no-github-summary
+  rm -f "$coverage_json"
+else
+  echo "WARNING: covgate not on PATH; install covgate 0.2.0 to run the new-code gate"
+fi
 
 echo "==> CI gates OK"
