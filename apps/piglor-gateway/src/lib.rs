@@ -1107,17 +1107,16 @@ impl Gateway {
     /// Binding happens before the bounded `StoreExecutor` starts, so every
     /// Gateway append/read/export command observes the same gate as direct
     /// `EventStore` consumers.
-    #[must_use]
     pub fn new_with_erasure_gate(
         mut store: Box<dyn EventStore>,
         gate: Arc<dyn ErasureGate>,
-    ) -> Self {
-        drop(store.bind_erasure_gate(Arc::clone(&gate)));
+    ) -> Result<Self, GatewayError> {
+        store.bind_erasure_gate(Arc::clone(&gate))?;
         let mut gateway = Self::new(store);
         if let Some(registry) = Arc::get_mut(&mut gateway.action_registry) {
             registry.bind_erasure_gate(gate);
         }
-        gateway
+        Ok(gateway)
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.

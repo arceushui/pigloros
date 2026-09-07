@@ -317,7 +317,24 @@ impl ErasureContainmentGateV1 {
             .states
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if states.get(&request).is_some_and(|existing| {
+            Self::containment_rank(existing.lifecycle()) > Self::containment_rank(state.lifecycle())
+        }) {
+            return;
+        }
         states.insert(request, state);
+    }
+
+    const fn containment_rank(lifecycle: ErasureLifecycleV1) -> u8 {
+        match lifecycle {
+            ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected => 0,
+            ErasureLifecycleV1::Authorized => 1,
+            ErasureLifecycleV1::AccessFrozen
+            | ErasureLifecycleV1::DestructionDispatched
+            | ErasureLifecycleV1::AwaitingAcknowledgements
+            | ErasureLifecycleV1::Complete
+            | ErasureLifecycleV1::PartialFailure => 2,
+        }
     }
 
     /// Mark the narrowest authenticated boundary unavailable after recovery
