@@ -416,6 +416,7 @@ pub struct GatewayAuthorization {
     adapter: Arc<dyn GatewayAuthenticationAdapter>,
     authority: Arc<RwLock<PersistedAuthorityV1>>,
     registry: AuthorityRegistrySnapshotV1,
+    revocation_state_current: bool,
     commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
 }
@@ -428,10 +429,27 @@ impl GatewayAuthorization {
         authority: PersistedAuthorityV1,
         registry: AuthorityRegistrySnapshotV1,
     ) -> Self {
+        Self::new_with_revocation_state(adapter, authority, registry, true)
+    }
+
+    /// Bind one adapter to host-pinned authority state with an explicit
+    /// revocation-freshness claim.
+    ///
+    /// Local hosts normally pass `true`. An Air-Gapped host must pass `false`
+    /// until its pinned revocation snapshot is current; authorization then
+    /// fails closed with [`GatewayAuthorizationError::AuthorizationDenied`].
+    #[must_use]
+    pub fn new_with_revocation_state(
+        adapter: Arc<dyn GatewayAuthenticationAdapter>,
+        authority: PersistedAuthorityV1,
+        registry: AuthorityRegistrySnapshotV1,
+        revocation_state_current: bool,
+    ) -> Self {
         Self {
             adapter,
             authority: Arc::new(RwLock::new(authority)),
             registry,
+            revocation_state_current,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
         }
@@ -447,8 +465,9 @@ impl GatewayAuthorization {
     /// error when the host cannot establish a complete decision.
     pub fn evaluate(
         &self,
-        request: GatewayAuthorizationRequest,
+        mut request: GatewayAuthorizationRequest,
     ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
+        request.revocation_state_current = self.revocation_state_current;
         let operation_binding = operation_binding(&request);
         self.adapter
             .authenticate(&GatewayAuthenticationRequest { operation_binding })
@@ -732,6 +751,11 @@ pub(crate) fn test_authorization_unavailable_for(actor: EntityId) -> GatewayAuth
 }
 
 #[cfg(test)]
+pub(crate) fn test_authorization_reject_after_first_for(actor: EntityId) -> GatewayAuthorization {
+    tests::fixture_authorization_reject_after_first_with_actor(actor)
+}
+
+#[cfg(test)]
 pub(crate) fn test_revoked_authority_for(actor: EntityId) -> PersistedAuthorityV1 {
     tests::fixture_revoked_authority_with_actor(actor)
 }
@@ -746,6 +770,7 @@ mod tests {
         CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
         CapabilityScopeDraftV1, CapabilityScopeV1, PrincipalRefV1,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     trait TestOk<T> {
         fn test_ok(self) -> T;
@@ -886,6 +911,20 @@ mod tests {
         )
     }
 
+    pub(super) fn fixture_authorization_reject_after_first_with_actor(
+        actor: EntityId,
+    ) -> GatewayAuthorization {
+        let fixture = fixture_with_actor(actor);
+        GatewayAuthorization::new(
+            Arc::new(RejectAfterFirstAdapter {
+                evidence: fixture.authenticated,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            fixture.authority,
+            fixture.authorization.registry,
+        )
+    }
+
     pub(super) fn fixture_revoked_authority_with_actor(actor: EntityId) -> PersistedAuthorityV1 {
         fixture_with_actor(actor).revoked_authority
     }
@@ -923,6 +962,24 @@ mod tests {
             _request: &GatewayAuthenticationRequest,
         ) -> Result<AuthenticatedPrincipalResultV1, GatewayAuthenticationError> {
             Err(GatewayAuthenticationError::Unavailable)
+        }
+    }
+
+    struct RejectAfterFirstAdapter {
+        evidence: AuthenticatedPrincipalResultV1,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl GatewayAuthenticationAdapter for RejectAfterFirstAdapter {
+        fn authenticate(
+            &self,
+            _request: &GatewayAuthenticationRequest,
+        ) -> Result<AuthenticatedPrincipalResultV1, GatewayAuthenticationError> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                Ok(self.evidence.clone())
+            } else {
+                Err(GatewayAuthenticationError::Unavailable)
+            }
         }
     }
 
@@ -1151,6 +1208,23 @@ mod tests {
         assert_eq!(
             decision.decision().error(),
             Some(AuthorityErrorV1::ConsentMissing)
+        );
+    }
+
+    #[test]
+    fn stale_pinned_revocation_state_denies_even_when_the_grant_is_valid() {
+        let fixture = fixture();
+        let stale = GatewayAuthorization::new_with_revocation_state(
+            Arc::new(LocalAuthenticationAdapter::new(fixture.authenticated)),
+            fixture.authority,
+            fixture.authorization.registry.clone(),
+            false,
+        );
+        let decision = stale.evaluate(action(&fixture)).test_ok();
+        assert!(!decision.is_allowed());
+        assert_eq!(
+            decision.decision().error(),
+            Some(AuthorityErrorV1::RevocationStateStale)
         );
     }
 

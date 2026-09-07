@@ -1832,6 +1832,7 @@ impl Gateway {
             Ok(draft) => draft,
             Err(error) => return Err(error),
         };
+        let decision = reauthorize_at_commit_fence(&authorization, decision)?;
         let event = match self.append_draft(timeline, draft).await {
             Ok(event) => event,
             Err(error) => return Err(error),
@@ -1964,6 +1965,7 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         drop(proposal);
+        let decision = reauthorize_at_commit_fence(&authorization, decision)?;
         let result = match self
             .append_identified_draft(timeline, draft, ingress_id)
             .await
@@ -2299,6 +2301,17 @@ const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayErr
         GatewayAuthorizationError::RequestUnavailable => GatewayError::InvalidAuthorizationRequest,
         GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
     }
+}
+
+fn reauthorize_at_commit_fence(
+    authorization: &GatewayAuthorization,
+    decision: GatewayAuthorizationDecision,
+) -> Result<GatewayAuthorizationDecision, GatewayError> {
+    let mut request = decision.request().clone();
+    request.at_time = WallTime::now();
+    authorization
+        .authorize(request)
+        .map_err(map_authorization_error)
 }
 
 fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
@@ -2988,6 +3001,46 @@ mod tests {
             mismatched_target,
             GatewayError::AuthorizationDenied
         ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn authority_bound_gateway_rechecks_authentication_at_commit_fence() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_reject_after_first_for(actor);
+        let audit_host = authorization.clone();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            authorization,
+        );
+        let timeline = gateway
+            .create_timeline("authority-commit-recheck")
+            .await
+            .test_ok();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+        let error = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(error, GatewayError::AuthorizationUnavailable));
+        assert!(audit_host.audits().await.is_empty());
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
