@@ -475,10 +475,18 @@ fn observation_snapshot_rejects_stale_or_newly_revoked_authority() {
         .state
         .resolve(current_epoch.grant.grant_id())
         .test_ok();
+    let current_bindings = revoked_authority
+        .chain()
+        .grants()
+        .iter()
+        .map(CapabilityGrantV1::binding_digest)
+        .collect::<Result<Vec<_>, _>>()
+        .test_ok();
+    let mut current_snapshot_draft = current_epoch.snapshot_draft;
+    current_snapshot_draft.grant_chain_bindings = current_bindings;
+    let current_snapshot = ObservationSnapshotV1::try_from_draft(current_snapshot_draft).test_ok();
     assert_eq!(
-        current_epoch
-            .snapshot
-            .validate_authority_fence(&revoked_authority, Seq::from_u64(11)),
+        current_snapshot.validate_authority_fence(&revoked_authority, Seq::from_u64(11)),
         Err(AuthorityErrorV1::RevokedAtFence)
     );
 }
