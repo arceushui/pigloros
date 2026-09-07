@@ -1758,7 +1758,11 @@ async fn wait_for_unit_terminal(
 }
 
 fn wait_for_terminal_status(unit: &str) -> Result<i32, String> {
-    for _ in 0..250 {
+    // A transient service can remain in deactivating/stop-sigterm for more
+    // than five seconds under hosted nested virtualization. Cancellation is
+    // already requested before this observer starts; this budget only waits
+    // for systemd's authoritative terminal state.
+    for _ in 0..1_500 {
         let active = unit_property(unit, "ActiveState")?;
         if matches!(active.trim(), "inactive" | "failed") {
             return unit_property(unit, "ExecMainStatus")?
