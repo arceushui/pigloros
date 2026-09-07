@@ -7378,16 +7378,14 @@ pub mod tests {
             ] {
                 let mut trace = value.causal_trace.clone();
                 trace[0].dependency_class = dependency_class;
-                assert!(
-                    verify_causal_trace(
-                        &value.authoritative_events,
-                        &trace,
-                        &[],
-                        value.manifest.replay_claim,
-                        &sequences,
-                    )
-                    .is_ok()
-                );
+                assert!(verify_causal_trace(
+                    &value.authoritative_events,
+                    &trace,
+                    &[],
+                    value.manifest.replay_claim,
+                    &sequences,
+                )
+                .is_ok());
             }
             for relation in [
                 "physical_to_agent",
@@ -7397,30 +7395,26 @@ pub mod tests {
             ] {
                 let mut trace = value.causal_trace.clone();
                 trace[0].relation = relation.to_owned();
-                assert!(
-                    verify_causal_trace(
-                        &value.authoritative_events,
-                        &trace,
-                        &[],
-                        value.manifest.replay_claim,
-                        &sequences,
-                    )
-                    .is_ok()
-                );
+                assert!(verify_causal_trace(
+                    &value.authoritative_events,
+                    &trace,
+                    &[],
+                    value.manifest.replay_claim,
+                    &sequences,
+                )
+                .is_ok());
             }
             for visibility in ["operator", "participant", "public"] {
                 let mut trace = value.causal_trace.clone();
                 trace[0].visibility = visibility.to_owned();
-                assert!(
-                    verify_causal_trace(
-                        &value.authoritative_events,
-                        &trace,
-                        &[],
-                        value.manifest.replay_claim,
-                        &sequences,
-                    )
-                    .is_ok()
-                );
+                assert!(verify_causal_trace(
+                    &value.authoritative_events,
+                    &trace,
+                    &[],
+                    value.manifest.replay_claim,
+                    &sequences,
+                )
+                .is_ok());
             }
             assert!(event_sequences(&[]).is_err());
             assert!(verify_uncertainty(&[]).is_ok());
