@@ -5159,7 +5159,7 @@ mod coverage_paths {
         conflicting_gate
             .install_verified_state_with_topology(&state, &proof)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        let mut replacement_state = state.clone();
+        let mut replacement_state = state;
         replacement_state.manifest_digest = reference(9);
         let replacement_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             replacement_state.manifest_digest(),
