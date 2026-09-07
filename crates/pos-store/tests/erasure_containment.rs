@@ -25,23 +25,24 @@ fn assert_blocked<S: EventStore>(mut store: S) -> Result<(), Box<dyn std::error:
     gate.block_timeline(timeline.id());
     let gate_for_store: Arc<dyn ErasureGate> = gate.clone();
     store.bind_erasure_gate(gate_for_store)?;
-    assert!(matches!(
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())),
-        Err(pos_core::CoreError::Storage(_))
-    ));
+    let second_binding = store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    assert!(second_binding.is_err());
 
-    assert!(matches!(
-        store.append(timeline.id(), &[draft()]),
-        Err(pos_core::CoreError::ErasureContainmentUnavailable)
-    ));
-    assert!(matches!(
-        store.read(timeline.id(), SeqRange::all()),
-        Err(pos_core::CoreError::ErasureContainmentUnavailable)
-    ));
-    assert!(matches!(
-        export_timeline_raw(&store, timeline.id()),
-        Err(pos_core::CoreError::ErasureContainmentUnavailable)
-    ));
+    let append_error = store.append(timeline.id(), &[draft()]).err();
+    assert_eq!(
+        append_error.map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
+    let read_error = store.read(timeline.id(), SeqRange::all()).err();
+    assert_eq!(
+        read_error.map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
+    let export_error = export_timeline_raw(&store, timeline.id()).err();
+    assert_eq!(
+        export_error.map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
     assert_eq!(
         gate.authorize(timeline.id(), ErasureProtectedOperationV1::Export),
         Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)

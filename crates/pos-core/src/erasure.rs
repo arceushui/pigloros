@@ -4,6 +4,7 @@
 //! exposes the host-owned artifact-registration and `ReplayClaim` policy seam.
 
 use std::{
+    cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     sync::RwLock,
@@ -257,6 +258,20 @@ pub struct ErasureContainmentGateV1 {
     blocked_timelines: RwLock<BTreeSet<TimelineId>>,
 }
 
+thread_local! {
+    static ACTIVE_CONTAINMENT_FENCES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ActiveContainmentFence;
+
+impl Drop for ActiveContainmentFence {
+    fn drop(&mut self) {
+        ACTIVE_CONTAINMENT_FENCES.with(|active| {
+            let _ = active.borrow_mut().pop();
+        });
+    }
+}
+
 impl Default for ErasureContainmentGateV1 {
     fn default() -> Self {
         Self::new()
@@ -323,6 +338,97 @@ impl ErasureContainmentGateV1 {
             return;
         }
         states.insert(request, state);
+    }
+
+    /// Atomically install one recovered ERS1 snapshot and its host-resolved
+    /// Timeline/Fork bindings.
+    ///
+    /// The bindings are supplied by the authoritative topology resolver; this
+    /// adapter never derives a scope reference from a Timeline identifier.
+    /// Every binding must belong to the verified effective scope, and existing
+    /// bindings may not be replaced with a different scope. A lower lifecycle
+    /// snapshot can never overwrite an already frozen state.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// evidence or topology binding is incomplete or conflicts with an
+    /// installed boundary.
+    pub fn install_verified_state(
+        &self,
+        state: ErasureVerifiedStateV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if bindings
+            .iter()
+            .any(|(_, scope)| !state.scope_contains(*scope))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let expected_scopes: BTreeSet<_> = state
+            .scope
+            .as_ref()
+            .into_iter()
+            .flat_map(|scope| scope.scope_members().iter().copied())
+            .chain(state.scope_forks())
+            .collect();
+        let bound_scopes: BTreeSet<_> = bindings.iter().map(|(_, scope)| *scope).collect();
+        if expected_scopes != bound_scopes {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let request = state.request().reference();
+        let mut states = self
+            .states
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if states.get(&request).is_some_and(|existing| {
+            Self::containment_rank(existing.lifecycle()) > Self::containment_rank(state.lifecycle())
+        }) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let mut timeline_scopes = self
+            .timeline_scopes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if bindings.iter().any(|(timeline, scope)| {
+            timeline_scopes
+                .get(timeline)
+                .is_some_and(|existing| *existing != *scope)
+        }) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        states.insert(request, state);
+        for (timeline, scope) in bindings {
+            timeline_scopes.insert(*timeline, *scope);
+        }
+        Ok(())
+    }
+
+    /// Recover and install one request through the host-owned verified-state
+    /// query seam.
+    ///
+    /// Recovery errors and missing requests block every supplied boundary so a
+    /// caller cannot accidentally continue with an unverified scope. The
+    /// query returns only payload-free verified state; this method retains no
+    /// raw ERQ1/ERS1 material.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// query cannot establish a verified state or the topology binding fails.
+    pub fn install_from_verified_query<Q: ErasureVerifiedStateQueryV1>(
+        &self,
+        query: &mut Q,
+        request: ErasureReferenceV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        match query.verified_state(request) {
+            Ok(Some(state)) => self.install_verified_state(state, bindings),
+            Ok(None) | Err(_) => {
+                for (timeline, _) in bindings {
+                    self.block_timeline(*timeline);
+                }
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+            }
+        }
     }
 
     const fn containment_rank(lifecycle: ErasureLifecycleV1) -> u8 {
@@ -403,11 +509,18 @@ impl ErasureGate for ErasureContainmentGateV1 {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(),
     ) -> Result<(), ErasureContainmentErrorV1> {
+        let identity = self as *const Self as usize;
+        if ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity)) {
+            effect();
+            return Ok(());
+        }
         let states = self
             .states
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.authorize_locked(timeline, operation, &states)?;
+        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
+        let _active = ActiveContainmentFence;
         effect();
         Ok(())
     }

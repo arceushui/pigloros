@@ -27,6 +27,19 @@ impl ErasureStateResolverV1 for TestStateResolver {
     }
 }
 
+struct TestVerifiedStateQuery {
+    state: Option<ErasureVerifiedStateV1>,
+}
+
+impl ErasureVerifiedStateQueryV1 for TestVerifiedStateQuery {
+    fn verified_state(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
+        Ok(self.state.clone())
+    }
+}
+
 #[test]
 fn lifecycle_permits_exactly_the_adr_edges() {
     let lifecycles = [
@@ -861,4 +874,38 @@ fn containment_gate_requires_verified_state_for_bound_scope() {
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
     assert!(!invoked);
+}
+
+#[test]
+fn containment_gate_installs_verified_query_and_scope_bindings() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?;
+    let mut query = TestVerifiedStateQuery { state: Some(state) };
+    gate.install_from_verified_query(&mut query, reference(1), &[(timeline, reference(7))])
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::AccessFrozen)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_blocks_bindings_when_verified_query_fails() {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let mut query = TestVerifiedStateQuery { state: None };
+    assert_eq!(
+        gate.install_from_verified_query(&mut query, reference(1), &[(timeline, reference(7))]),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
 }

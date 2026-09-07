@@ -332,14 +332,17 @@ pub trait EventStore: Send {
     /// operations. Adapters retain the gate for their lifetime and must check
     /// it inside the same logical boundary as the protected effect.
     ///
-    /// The default is source-compatible for third-party adapters. Production
-    /// adapters that expose protected data should override it and fail closed
-    /// when a gate is not available.
+    /// The default refuses the binding. A third-party adapter must explicitly
+    /// implement this seam before a Gateway can claim host-owned erasure
+    /// containment; silently accepting the gate would leave a compatibility
+    /// bypass around the fail-closed boundary.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the adapter rejects the binding.
     fn bind_erasure_gate(&mut self, _gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
-        Ok(())
+        Err(CoreError::Storage(
+            "EventStore does not implement erasure containment binding".to_owned(),
+        ))
     }
 
     /// Bind this adapter to the Gateway consent authority that owns protected

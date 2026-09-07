@@ -24,8 +24,9 @@ use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
+use pos_core::ErasureContainmentGateV1;
 use pos_store::{open_store, StoreConfig};
-use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
+use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc};
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -221,12 +222,14 @@ async fn serve_with_owntracks(
             .map(OwnTracksOwnerKey::load)
             .transpose()?
     };
+    let erasure_gate = Arc::new(ErasureContainmentGateV1::new());
     let gateway = match (owntracks_owner_key.as_ref(), sqlite_path) {
-        (Some(owner_key), Some(path)) => Gateway::new_with_owntracks_ingress(
+        (Some(owner_key), Some(path)) => Gateway::new_with_owntracks_ingress_and_erasure_gate(
             pos_store::sqlite::SqliteStore::open(path)?,
             owner_key,
-        ),
-        (None, _) => Gateway::new(open_store(config)?),
+            erasure_gate,
+        )?,
+        (None, _) => Gateway::new_with_erasure_gate(open_store(config)?, erasure_gate)?,
         (Some(_), None) => return Err("OwnTracks ingress requires an SQLite path".into()),
     };
     let app = router_for_addr(

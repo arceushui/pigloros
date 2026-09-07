@@ -36,8 +36,8 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, Plugin,
-    ProposedAction,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1,
+    ErasureGate, ErasureReferenceV1, ErasureVerifiedStateQueryV1, Plugin, ProposedAction,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
@@ -1119,6 +1119,27 @@ impl Gateway {
         Ok(gateway)
     }
 
+    /// Recover verified ERS1 evidence and bind its host-resolved
+    /// Timeline/Fork scope before starting the Gateway executor.
+    ///
+    /// The query owns durable recovery and authorization validation; the
+    /// Gateway receives only the payload-free snapshot through the concrete
+    /// containment gate. A failed query blocks every supplied boundary and
+    /// prevents Gateway construction from claiming a usable protected path.
+    pub fn new_with_verified_erasure_state<Q: ErasureVerifiedStateQueryV1>(
+        store: Box<dyn EventStore>,
+        gate: Arc<ErasureContainmentGateV1>,
+        query: &mut Q,
+        request: ErasureReferenceV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<Self, GatewayError> {
+        gate.install_from_verified_query(query, request, bindings)
+            .map_err(|error| {
+                GatewayError::Store(pos_core::store::erasure_containment_error(error))
+            })?;
+        Self::new_with_erasure_gate(store, gate)
+    }
+
     /// Wrap a store and configure the World body catalogue used for actions.
     #[must_use]
     pub fn new_with_world_bodies(
@@ -1279,6 +1300,21 @@ impl Gateway {
             action_principal: None,
         }
         .schedule_startup_consent_cleanup()
+    }
+
+    /// Construct the authenticated local `OwnTracks` Gateway with a shared
+    /// host-owned erasure containment gate.
+    pub fn new_with_owntracks_ingress_and_erasure_gate(
+        mut store: pos_store::sqlite::SqliteStore,
+        owner_key: &OwnTracksOwnerKey,
+        gate: Arc<dyn ErasureGate>,
+    ) -> Result<Self, GatewayError> {
+        store.bind_erasure_gate(Arc::clone(&gate))?;
+        let mut gateway = Self::new_with_owntracks_ingress(store, owner_key);
+        if let Some(registry) = Arc::get_mut(&mut gateway.action_registry) {
+            registry.bind_erasure_gate(gate);
+        }
+        Ok(gateway)
     }
 
     #[cfg(test)]

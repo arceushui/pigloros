@@ -2137,15 +2137,44 @@ impl SqliteStore {
         )
     }
 
-    fn authorize_erasure(
+    fn with_erasure_fence<T>(
+        &mut self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        mut effect: impl FnMut(&mut Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let Some(gate) = self.erasure_gate.clone() else {
+            return effect(self);
+        };
+        let mut result = Err(CoreError::Storage(
+            "erasure fence did not execute the protected operation".to_owned(),
+        ));
+        let mut run = || {
+            result = effect(self);
+        };
+        gate.with_fence(timeline, operation, &mut run)
+            .map_err(pos_core::store::erasure_containment_error)?;
+        result
+    }
+
+    fn with_erasure_read_fence<T>(
         &self,
         timeline: TimelineId,
         operation: ErasureProtectedOperationV1,
-    ) -> Result<(), CoreError> {
-        self.erasure_gate.as_ref().map_or(Ok(()), |gate| {
-            gate.authorize(timeline, operation)
-                .map_err(pos_core::store::erasure_containment_error)
-        })
+        mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let Some(gate) = self.erasure_gate.clone() else {
+            return effect(self);
+        };
+        let mut result = Err(CoreError::Storage(
+            "erasure fence did not execute the protected operation".to_owned(),
+        ));
+        let mut run = || {
+            result = effect(self);
+        };
+        gate.with_fence(timeline, operation, &mut run)
+            .map_err(pos_core::store::erasure_containment_error)?;
+        result
     }
 
     fn append_visible(
@@ -3419,10 +3448,11 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
-            .and_then(|()| crate::ensure_non_geographic_drafts(drafts, timeline))
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| self.append_visible(timeline, drafts))
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            crate::ensure_non_geographic_drafts(drafts, timeline)
+                .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
+                .and_then(|()| store.append_visible(timeline, drafts))
+        })
     }
 
     fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
@@ -3546,12 +3576,20 @@ impl EventStore for SqliteStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
-            .and_then(|()| crate::ensure_non_geographic_drafts(drafts, timeline))
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| {
-                self.append_bounded_visible(timeline, drafts, max_owned_events, false, None, None)
-            })
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            crate::ensure_non_geographic_drafts(drafts, timeline)
+                .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
+                .and_then(|()| {
+                    store.append_bounded_visible(
+                        timeline,
+                        drafts,
+                        max_owned_events,
+                        false,
+                        None,
+                        None,
+                    )
+                })
+        })
     }
 
     fn append_consent_bounded(
@@ -3561,10 +3599,9 @@ impl EventStore for SqliteStore {
         permit: ConsentAppendPermit,
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
-            .and_then(|()| crate::ensure_gateway_consent_types(drafts, timeline))
-            .and_then(|()| {
-                self.append_bounded_visible(
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            crate::ensure_gateway_consent_types(drafts, timeline).and_then(|()| {
+                store.append_bounded_visible(
                     timeline,
                     drafts,
                     max_owned_events,
@@ -3573,6 +3610,7 @@ impl EventStore for SqliteStore {
                     None,
                 )
             })
+        })
     }
 
     fn append_consent_revocation_bounded(
@@ -3583,19 +3621,20 @@ impl EventStore for SqliteStore {
         max_owned_events: u64,
         cleanup_scope: AppendDedupScope,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
-            .and_then(|()| crate::ensure_gateway_consent_revocation(drafts, timeline))
-            .and_then(|()| crate::ensure_gateway_consent_types(drafts, timeline))
-            .and_then(|()| {
-                self.append_bounded_visible(
-                    timeline,
-                    drafts,
-                    max_owned_events,
-                    true,
-                    Some(permit),
-                    Some(cleanup_scope),
-                )
-            })
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            crate::ensure_gateway_consent_revocation(drafts, timeline)
+                .and_then(|()| crate::ensure_gateway_consent_types(drafts, timeline))
+                .and_then(|()| {
+                    store.append_bounded_visible(
+                        timeline,
+                        drafts,
+                        max_owned_events,
+                        true,
+                        Some(permit),
+                        Some(cleanup_scope),
+                    )
+                })
+        })
     }
 
     fn append_or_duplicate(
@@ -3605,11 +3644,11 @@ impl EventStore for SqliteStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
-            .and_then(|()| {
-                self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
-            })
-            .and_then(crate::unbounded_append_outcome)
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            store
+                .append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
+                .and_then(crate::unbounded_append_outcome)
+        })
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -3644,16 +3683,15 @@ impl EventStore for SqliteStore {
         let admitted_at = self.clock.now()?;
         let mut draft = intent.into_draft();
         draft.wall_time = Some(admitted_at);
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)
-            .and_then(|()| {
-                self.append_or_duplicate_with_limit(
-                    timeline,
-                    identity,
-                    admitted_at,
-                    &draft,
-                    Some(max_owned_events),
-                )
-            })
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            store.append_or_duplicate_with_limit(
+                timeline,
+                identity,
+                admitted_at,
+                &draft,
+                Some(max_owned_events),
+            )
+        })
     }
 
     fn read_event_by_id(
@@ -3661,51 +3699,52 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         event_id: EventId,
     ) -> Result<Option<Event>, CoreError> {
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)?;
-        self.ensure_generic_timeline_visibility(timeline)?;
-        let chain = self.fork_chain(timeline)?;
-        let located = self
-            .conn
-            .query_row(
-                "SELECT timeline_id, seq FROM events WHERE event_id = ?1",
-                params![event_id.to_string()],
-                |row| {
-                    row.get::<_, String>(0)
-                        .and_then(|timeline| row.get::<_, i64>(1).map(|seq| (timeline, seq)))
-                },
-            )
-            .optional()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let Some((owner, local_seq)) = located else {
-            return Ok(None);
-        };
-        let owner = parse_timeline_id(&owner)?;
-        let Some(index) = chain.iter().position(|(id, _)| *id == owner) else {
-            return Ok(None);
-        };
-        let prefix = chain[index].1.as_u64();
-        let local_limit = self.logical_segment_length(&chain, index, owner)?;
-        let local_seq = u64::try_from(local_seq).map_err(|_| {
-            CoreError::Storage(format!("timeline {owner} has a negative Event sequence"))
-        })?;
-        if local_seq > local_limit {
-            return Ok(None);
-        }
-        {
-            let mut events = Self::read_own_events_limited_on(
-                &self.conn,
-                owner,
-                Seq::from_u64(local_seq),
-                Some(Seq::from_u64(local_seq)),
-                Some(1),
-                None,
-                u64::MAX,
-            )?;
-            events
-                .pop()
-                .map(|event| Self::logical_event(prefix, event))
-                .transpose()
-        }
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            store.ensure_generic_timeline_visibility(timeline)?;
+            let chain = store.fork_chain(timeline)?;
+            let located = store
+                .conn
+                .query_row(
+                    "SELECT timeline_id, seq FROM events WHERE event_id = ?1",
+                    params![event_id.to_string()],
+                    |row| {
+                        row.get::<_, String>(0)
+                            .and_then(|timeline| row.get::<_, i64>(1).map(|seq| (timeline, seq)))
+                    },
+                )
+                .optional()
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let Some((owner, local_seq)) = located else {
+                return Ok(None);
+            };
+            let owner = parse_timeline_id(&owner)?;
+            let Some(index) = chain.iter().position(|(id, _)| *id == owner) else {
+                return Ok(None);
+            };
+            let prefix = chain[index].1.as_u64();
+            let local_limit = store.logical_segment_length(&chain, index, owner)?;
+            let local_seq = u64::try_from(local_seq).map_err(|_| {
+                CoreError::Storage(format!("timeline {owner} has a negative Event sequence"))
+            })?;
+            if local_seq > local_limit {
+                return Ok(None);
+            }
+            {
+                let mut events = Self::read_own_events_limited_on(
+                    &store.conn,
+                    owner,
+                    Seq::from_u64(local_seq),
+                    Some(Seq::from_u64(local_seq)),
+                    Some(1),
+                    None,
+                    u64::MAX,
+                )?;
+                events
+                    .pop()
+                    .map(|event| Self::logical_event(prefix, event))
+                    .transpose()
+            }
+        })
     }
 
     fn purge_expired_append_identities_bounded(
@@ -3845,10 +3884,10 @@ impl EventStore for SqliteStore {
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            store.ensure_generic_timeline_visibility(timeline)
             .and_then(|()| {
-                let chain = self.fork_chain(timeline)?;
+                let chain = store.fork_chain(timeline)?;
                 let mut all: Vec<Event> = Vec::new();
 
                 for (i, &(tid, _)) in chain.iter().enumerate() {
@@ -3862,7 +3901,7 @@ impl EventStore for SqliteStore {
                             .as_u64()
                             .checked_sub(logical_prefix)
                             .ok_or(fork_point_error)?;
-                        self.get_head_seq(tid)
+                        store.get_head_seq(tid)
                             .map(Seq::as_u64)
                             .and_then(|local_head| {
                                 if local_limit > local_head {
@@ -3870,7 +3909,7 @@ impl EventStore for SqliteStore {
                                         "Fork point exceeds parent logical Event head for timeline {tid}"
                                     )));
                                 }
-                                self.read_own_events(
+                                store.read_own_events(
                                     tid,
                                     Seq::ZERO,
                                     Some(Seq::from_u64(local_limit)),
@@ -3879,13 +3918,14 @@ impl EventStore for SqliteStore {
                             })?;
                     } else {
                         // Leaf: all own events; range applied after logical renumber.
-                        let events = self.read_own_events(tid, Seq::ZERO, None)?;
+                        let events = store.read_own_events(tid, Seq::ZERO, None)?;
                         all.extend(events);
                     }
                 }
 
                 Ok(crate::stitch::renumber_and_filter(all, range))
             })
+        })
     }
 
     fn read_bounded(
@@ -3898,52 +3938,57 @@ impl EventStore for SqliteStore {
         if bounds.max_elapsed_micros() == 0 {
             return Err(CoreError::ReadTimeTooLarge { elapsed_micros: 0 });
         }
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| self.read_logical_bounded(timeline, range, bounds, started))
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| store.read_logical_bounded(timeline, range, bounds, started))
+        })
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         // Ensure timeline exists (and surface TimelineNotFound for missing ids).
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Read)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| {
-                let _ = self
-                    .get_timeline(timeline)?
-                    .ok_or(CoreError::TimelineNotFound(timeline))?;
-                self.read_own_events(timeline, range.from, range.to)
-            })
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Export, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| {
+                    let _ = store
+                        .get_timeline(timeline)?
+                        .ok_or(CoreError::TimelineNotFound(timeline))?;
+                    store.read_own_events(timeline, range.from, range.to)
+                })
+        })
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
-        self.authorize_erasure(parent, ErasureProtectedOperationV1::Fork)
-            .and_then(|()| self.ensure_generic_timeline_visibility(parent))
-            .and_then(|()| {
-                let head = self.logical_head(parent)?;
-                if at_seq > head {
-                    return Err(CoreError::ForkBeyondHead {
-                        fork_seq: at_seq.as_u64(),
-                        head: head.as_u64(),
-                    });
-                }
+        self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
+            store
+                .ensure_generic_timeline_visibility(parent)
+                .and_then(|()| {
+                    let head = store.logical_head(parent)?;
+                    if at_seq > head {
+                        return Err(CoreError::ForkBeyondHead {
+                            fork_seq: at_seq.as_u64(),
+                            head: head.as_u64(),
+                        });
+                    }
 
-                // Compute chain hash at the fork point
-                let fork_hash = self.compute_chain_hash_at(parent, at_seq)?;
+                    // Compute chain hash at the fork point
+                    let fork_hash = store.compute_chain_hash_at(parent, at_seq)?;
 
-                let meta = self.timeline_owner(parent)?.map_or_else(
-                    || TimelineMeta::forked_from(parent, at_seq, name),
-                    |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
-                );
-                let child = Timeline::new(meta);
+                    let meta = store.timeline_owner(parent)?.map_or_else(
+                        || TimelineMeta::forked_from(parent, at_seq, name),
+                        |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+                    );
+                    let child = Timeline::new(meta);
 
-                let tx = match self
-                    .conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                {
-                    Ok(tx) => tx,
-                    Err(error) => return Err(CoreError::Storage(error.to_string())),
-                };
-                tx.execute(
+                    let tx = match store
+                        .conn
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                    {
+                        Ok(tx) => tx,
+                        Err(error) => return Err(CoreError::Storage(error.to_string())),
+                    };
+                    tx.execute(
             "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
                  VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
             params![
@@ -3957,16 +4002,17 @@ impl EventStore for SqliteStore {
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
 
-                if let Some(owner) = child.meta.owner {
-                    Self::persist_timeline_owner(&tx, child.id(), owner)?;
-                }
+                    if let Some(owner) = child.meta.owner {
+                        Self::persist_timeline_owner(&tx, child.id(), owner)?;
+                    }
 
-                if let Err(error) = tx.commit() {
-                    return Err(CoreError::Storage(error.to_string()));
-                }
+                    if let Err(error) = tx.commit() {
+                        return Err(CoreError::Storage(error.to_string()));
+                    }
 
-                Ok(child)
-            })
+                    Ok(child)
+                })
+        })
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
@@ -4047,103 +4093,115 @@ impl EventStore for SqliteStore {
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
-                params![id.to_string()],
-                read_timeline_row,
-            )
-            .optional()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-        match row {
-            None => Ok(None),
-            Some(timeline_row) => {
-                let timeline = timeline_fields_to_timeline(
-                    &timeline_row.id,
-                    timeline_row.name,
-                    &timeline_row.mode,
-                    timeline_row.parent_id,
-                    timeline_row.fork_seq,
-                    timeline_row.head_seq,
-                )?;
-                let mut timeline = timeline;
-                timeline.meta.owner = self.timeline_owner(timeline.id())?;
-                crate::generic_timeline_is_visible(
-                    self.timeline_contains_geographic_evidence(timeline.id()),
+        self.with_erasure_read_fence(id, ErasureProtectedOperationV1::Read, |store| {
+            let row = store
+                .conn
+                .query_row(
+                    "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+                    params![id.to_string()],
+                    read_timeline_row,
                 )
-                .map(|visible| visible.then_some(timeline))
+                .optional()
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+            match row {
+                None => Ok(None),
+                Some(timeline_row) => {
+                    let timeline = timeline_fields_to_timeline(
+                        &timeline_row.id,
+                        timeline_row.name,
+                        &timeline_row.mode,
+                        timeline_row.parent_id,
+                        timeline_row.fork_seq,
+                        timeline_row.head_seq,
+                    )?;
+                    let mut timeline = timeline;
+                    timeline.meta.owner = store.timeline_owner(timeline.id())?;
+                    crate::generic_timeline_is_visible(
+                        store.timeline_contains_geographic_evidence(timeline.id()),
+                    )
+                    .map(|visible| visible.then_some(timeline))
+                }
             }
-        }
+        })
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
-        self.ensure_generic_timeline_visibility(id)?;
-        self.logical_head_unchecked(id)
+        self.with_erasure_read_fence(id, ErasureProtectedOperationV1::Read, |store| {
+            store
+                .ensure_generic_timeline_visibility(id)
+                .and_then(|()| store.logical_head_unchecked(id))
+        })
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
-        let id = meta.id;
-        // Resolve fork parent before the duplicate-id check so storage failures on the
-        // parent lookup are exercised (and fail closed before INSERT).
-        let chain_head = match meta.fork_point {
-            Some((parent, at_seq)) => {
-                self.authorize_erasure(parent, ErasureProtectedOperationV1::Fork)?;
-                let parent_head = self.logical_head(parent)?;
-                if at_seq > parent_head {
-                    return Err(CoreError::ForkBeyondHead {
-                        fork_seq: at_seq.as_u64(),
-                        head: parent_head.as_u64(),
-                    });
+        let mut create = |store: &mut Self| {
+            let id = meta.id;
+            // Resolve fork parent before the duplicate-id check so storage failures on the
+            // parent lookup are exercised (and fail closed before INSERT).
+            let chain_head = match meta.fork_point {
+                Some((parent, at_seq)) => {
+                    let parent_head = store.logical_head(parent)?;
+                    if at_seq > parent_head {
+                        return Err(CoreError::ForkBeyondHead {
+                            fork_seq: at_seq.as_u64(),
+                            head: parent_head.as_u64(),
+                        });
+                    }
+                    store.compute_chain_hash_at(parent, at_seq)?
                 }
-                self.compute_chain_hash_at(parent, at_seq)?
+                None => store.hasher.genesis_hash(),
+            };
+            if store.get_timeline(id)?.is_some() {
+                return Err(CoreError::Storage(format!("timeline already exists: {id}")));
             }
-            None => self.hasher.genesis_hash(),
-        };
-        if self.get_timeline(id)?.is_some() {
-            return Err(CoreError::Storage(format!("timeline already exists: {id}")));
-        }
-        let (parent_id, fork_seq) = match meta.fork_point {
-            Some((parent, at_seq)) => (Some(parent.to_string()), Some(seq_as_i64(at_seq))),
-            None => (None, None),
-        };
-        let timeline = Timeline::new(meta);
-        let insert_rows = |conn: &Connection| -> Result<(), CoreError> {
-            conn.execute(
-                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-                params![
-                    timeline.id().to_string(),
-                    timeline.meta.name.as_deref(),
-                    mode_str(timeline.mode()),
-                    parent_id.as_deref(),
-                    fork_seq,
-                    chain_head.as_bytes().as_slice(),
-                ],
-            )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-            if let Some(owner) = timeline.meta.owner {
+            let (parent_id, fork_seq) = match meta.fork_point {
+                Some((parent, at_seq)) => (Some(parent.to_string()), Some(seq_as_i64(at_seq))),
+                None => (None, None),
+            };
+            let timeline = Timeline::new(meta.clone());
+            let insert_rows = |conn: &Connection| -> Result<(), CoreError> {
                 conn.execute(
-                    "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
-                    params![timeline.id().to_string(), owner.to_string()],
+                    "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                    params![
+                        timeline.id().to_string(),
+                        timeline.meta.name.as_deref(),
+                        mode_str(timeline.mode()),
+                        parent_id.as_deref(),
+                        fork_seq,
+                        chain_head.as_bytes().as_slice(),
+                    ],
                 )
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
+                if let Some(owner) = timeline.meta.owner {
+                    conn.execute(
+                        "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
+                        params![timeline.id().to_string(), owner.to_string()],
+                    )
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                }
+                Ok(())
+            };
+            if store.conn.is_autocommit() {
+                let tx = store
+                    .conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                insert_rows(&tx)?;
+                tx.commit()
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+            } else {
+                insert_rows(&store.conn)?;
             }
-            Ok(())
+            Ok(timeline)
         };
-        if self.conn.is_autocommit() {
-            let tx = self
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            insert_rows(&tx)?;
-            tx.commit()
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-        } else {
-            insert_rows(&self.conn)?;
+        match meta.fork_point {
+            Some((parent, _)) => {
+                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, &mut create)
+            }
+            None => create(self),
         }
-        Ok(timeline)
     }
 
     fn append_committed(
@@ -4151,76 +4209,80 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         events: &[Event],
     ) -> Result<(), CoreError> {
-        self.authorize_erasure(timeline, ErasureProtectedOperationV1::Append)?;
-        if events.is_empty() {
-            let _ = self
-                .get_timeline(timeline)?
-                .ok_or(CoreError::TimelineNotFound(timeline))?;
-            return Ok(());
-        }
-        crate::ensure_non_geographic_events(events, timeline)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| {
-                let (head_seq, prev_hash) = match self.conn.query_row(
-                    "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
-                    params![timeline.to_string()],
-                    |row| match (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)) {
-                        (Ok(n), Ok(bytes)) => Ok((n, bytes)),
-                        (Err(e), _) | (_, Err(e)) => Err(e),
-                    },
-                ) {
-                    Ok((n, bytes)) => {
-                        let arr: [u8; 32] = bytes
-                            .try_into()
-                            .map_err(|_| CoreError::Serialization("bad hash length".to_owned()))?;
-                        (
-                            Seq::from_u64(u64::try_from(n).unwrap_or(0)),
-                            pos_core::Hash::from_bytes(arr),
-                        )
-                    }
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {
-                        return Err(CoreError::TimelineNotFound(timeline));
-                    }
-                    Err(e) => return Err(CoreError::Storage(e.to_string())),
-                };
-
-                let ordered = pos_core::store::validate_committed_batch(
-                    head_seq,
-                    events,
-                    &mut |id| {
-                        self.conn
-                            .query_row(
-                                "SELECT 1 FROM events WHERE event_id = ?1",
-                                params![id.to_string()],
-                                |_| Ok(()),
-                            )
-                            .optional()
-                            .map_or(true, |row| row.is_some()) // treat lookup failure as taken to fail closed
-                    },
-                    &*self.hasher,
-                )?;
-
-                // Join an outer import transaction when present; otherwise own the txn.
-                let own_tx = self.conn.is_autocommit();
-                if own_tx {
-                    self.conn
-                        .execute_batch(begin_immediate_sql())
-                        .map_err(|e| CoreError::Storage(e.to_string()))?;
-                }
-                let applied = self.write_committed_rows(timeline, head_seq, prev_hash, &ordered);
-                if own_tx {
-                    match &applied {
-                        Ok(()) => self
-                            .conn
-                            .execute_batch("COMMIT")
-                            .map_err(|e| CoreError::Storage(e.to_string()))?,
-                        Err(_) => match self.conn.execute_batch("ROLLBACK") {
-                            Ok(()) | Err(_) => {}
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            if events.is_empty() {
+                let _ = store
+                    .get_timeline(timeline)?
+                    .ok_or(CoreError::TimelineNotFound(timeline))?;
+                return Ok(());
+            }
+            crate::ensure_non_geographic_events(events, timeline)
+                .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
+                .and_then(|()| {
+                    let (head_seq, prev_hash) = match store.conn.query_row(
+                        "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
+                        params![timeline.to_string()],
+                        |row| match (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)) {
+                            (Ok(n), Ok(bytes)) => Ok((n, bytes)),
+                            (Err(e), _) | (_, Err(e)) => Err(e),
                         },
+                    ) {
+                        Ok((n, bytes)) => {
+                            let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                                CoreError::Serialization("bad hash length".to_owned())
+                            })?;
+                            (
+                                Seq::from_u64(u64::try_from(n).unwrap_or(0)),
+                                pos_core::Hash::from_bytes(arr),
+                            )
+                        }
+                        Err(rusqlite::Error::QueryReturnedNoRows) => {
+                            return Err(CoreError::TimelineNotFound(timeline));
+                        }
+                        Err(e) => return Err(CoreError::Storage(e.to_string())),
+                    };
+
+                    let ordered = pos_core::store::validate_committed_batch(
+                        head_seq,
+                        events,
+                        &mut |id| {
+                            store
+                                .conn
+                                .query_row(
+                                    "SELECT 1 FROM events WHERE event_id = ?1",
+                                    params![id.to_string()],
+                                    |_| Ok(()),
+                                )
+                                .optional()
+                                .map_or(true, |row| row.is_some()) // treat lookup failure as taken to fail closed
+                        },
+                        &*store.hasher,
+                    )?;
+
+                    // Join an outer import transaction when present; otherwise own the txn.
+                    let own_tx = store.conn.is_autocommit();
+                    if own_tx {
+                        store
+                            .conn
+                            .execute_batch(begin_immediate_sql())
+                            .map_err(|e| CoreError::Storage(e.to_string()))?;
                     }
-                }
-                applied
-            })
+                    let applied =
+                        store.write_committed_rows(timeline, head_seq, prev_hash, &ordered);
+                    if own_tx {
+                        match &applied {
+                            Ok(()) => store
+                                .conn
+                                .execute_batch("COMMIT")
+                                .map_err(|e| CoreError::Storage(e.to_string()))?,
+                            Err(_) => match store.conn.execute_batch("ROLLBACK") {
+                                Ok(()) | Err(_) => {}
+                            },
+                        }
+                    }
+                    applied
+                })
+        })
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
@@ -4323,8 +4385,11 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<pos_core::Hash, CoreError> {
-        self.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| self.compute_chain_hash_at(timeline, at_seq))
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Export, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| store.compute_chain_hash_at(timeline, at_seq))
+        })
     }
 
     fn import_committed(
