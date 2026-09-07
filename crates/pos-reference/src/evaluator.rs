@@ -150,6 +150,8 @@ pub enum EvaluatorError {
     Profile,
     #[error("subject adapter identity does not match EVR1")]
     AdapterIdentity,
+    #[error("Sandbox Provider receipt evidence is invalid")]
+    SandboxReceipt,
     #[error("evaluator independence does not satisfy CPF1")]
     Independence,
     #[error("CNR1 output exceeds its capability")]
@@ -328,6 +330,12 @@ fn evaluate_case(
 ) -> Result<CaseOutcome, EvaluatorError> {
     let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
     let observation = adapter.execute(&attempt);
+    if observation
+        .as_ref()
+        .is_ok_and(|value| value.sandbox_receipt_digest == Some([0; 32]))
+    {
+        return Err(EvaluatorError::SandboxReceipt);
+    }
     enforce_observed_coordinate_limit(
         &observation,
         profile.evaluator_hard_caps.max_coordinate_bytes,
@@ -421,7 +429,6 @@ fn case_outcome(
         .as_ref()
         .ok()
         .and_then(|value| value.sandbox_receipt_digest)
-        .filter(|digest| *digest != [0; 32])
     {
         outcome.provenance_digest = receipt_digest;
     }

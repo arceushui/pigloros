@@ -168,6 +168,17 @@ fn sandboxed_case_provenance_is_the_validated_receipt_digest() -> TestResult {
         .cases
         .iter()
         .all(|case| case.provenance_digest == receipt_digest));
+    adapter.receipt_digest = [0; 32];
+    assert_eq!(
+        evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut adapter,
+        ),
+        Err(EvaluatorError::SandboxReceipt)
+    );
     Ok(())
 }
 
