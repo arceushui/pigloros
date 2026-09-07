@@ -264,12 +264,20 @@ fn attempt_writer_rejects_invalid_public_values() {
 }
 
 #[test]
-fn attempt_writer_reports_capability_frame_failures() {
-    let writer = FailAfterWrites {
+fn attempt_writer_reports_capability_and_artifact_frame_failures() {
+    let capability_writer = FailAfterWrites {
         successful_writes_remaining: 2,
     };
     assert_eq!(
-        write_attempt(writer, &attempt()),
+        write_attempt(capability_writer, &attempt()),
+        Err(TransportError::InvalidEncoding)
+    );
+
+    let artifact_chunk_writer = FailAfterWrites {
+        successful_writes_remaining: 8,
+    };
+    assert_eq!(
+        write_attempt(artifact_chunk_writer, &attempt()),
         Err(TransportError::InvalidEncoding)
     );
 }
