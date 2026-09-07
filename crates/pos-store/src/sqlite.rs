@@ -2199,6 +2199,35 @@ impl SqliteStore {
         }
     }
 
+    fn timeline_visible_for_read(&self, timeline: TimelineId) -> Result<bool, CoreError> {
+        self.with_erasure_read_filter(timeline, ErasureProtectedOperationV1::Read, |store| {
+            crate::generic_timeline_is_visible(
+                store.timeline_contains_geographic_evidence(timeline),
+            )
+        })
+        .map(|visible| visible == Some(true))
+    }
+
+    fn root_timeline_ids(&self) -> Result<Vec<TimelineId>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM timelines WHERE parent_id IS NULL")
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut rows = Self::query_prepared(&mut stmt, &[])
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            ids.push(parse_timeline_id(&id)?);
+        }
+        Ok(ids)
+    }
+
     fn append_visible(
         &mut self,
         timeline: TimelineId,
@@ -4094,34 +4123,12 @@ impl EventStore for SqliteStore {
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
         let stop_after = maximum.saturating_add(1);
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM timelines WHERE parent_id IS NULL")
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let mut rows = Self::query_prepared(&mut stmt, &[])
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
         let mut count = 0;
-        while count < stop_after {
-            let Some(row) = rows
-                .next()
-                .map_err(|error| CoreError::Storage(error.to_string()))?
-            else {
+        for timeline in self.root_timeline_ids()? {
+            if count >= stop_after {
                 break;
-            };
-            let id: String = row
-                .get(0)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            let timeline = parse_timeline_id(&id)?;
-            let visible = self.with_erasure_read_filter(
-                timeline,
-                ErasureProtectedOperationV1::Read,
-                |store| {
-                    crate::generic_timeline_is_visible(
-                        store.timeline_contains_geographic_evidence(timeline),
-                    )
-                },
-            )?;
-            if visible == Some(true) {
+            }
+            if self.timeline_visible_for_read(timeline)? {
                 count += 1;
             }
         }

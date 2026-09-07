@@ -1146,6 +1146,28 @@ impl MemoryStore {
         }
     }
 
+    fn visible_timeline_for_read(
+        &self,
+        candidate: Timeline,
+    ) -> Result<Option<Timeline>, CoreError> {
+        let timeline = candidate.id();
+        self.with_erasure_read_filter(timeline, ErasureProtectedOperationV1::Read, |store| {
+            crate::generic_timeline_is_visible(
+                store.timeline_contains_geographic_evidence(timeline),
+            )
+            .map(|visible| visible.then_some(candidate.clone()))
+        })
+    }
+
+    fn timeline_visible_for_read(&self, timeline: TimelineId) -> Result<bool, CoreError> {
+        self.with_erasure_read_filter(timeline, ErasureProtectedOperationV1::Read, |store| {
+            crate::generic_timeline_is_visible(
+                store.timeline_contains_geographic_evidence(timeline),
+            )
+        })
+        .map(|visible| visible == Some(true))
+    }
+
     fn append_visible(
         &mut self,
         timeline: TimelineId,
@@ -2635,35 +2657,11 @@ impl EventStore for MemoryStore {
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-        let candidates = self
-            .timelines
+        self.timelines
             .values()
-            .map(|state| state.timeline.id())
-            .collect::<Vec<_>>();
-        let mut timelines = Vec::new();
-        for timeline in candidates {
-            let Some(candidate) = self
-                .timelines
-                .get(&timeline)
-                .map(|state| state.timeline.clone())
-            else {
-                continue;
-            };
-            let visible = self.with_erasure_read_filter(
-                timeline,
-                ErasureProtectedOperationV1::Read,
-                |store| {
-                    crate::generic_timeline_is_visible(
-                        store.timeline_contains_geographic_evidence(timeline),
-                    )
-                    .map(|visible| visible.then_some(candidate.clone()))
-                },
-            )?;
-            if let Some(Some(timeline)) = visible {
-                timelines.push(timeline);
-            }
-        }
-        Ok(timelines)
+            .map(|state| self.visible_timeline_for_read(state.timeline.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|timelines| timelines.into_iter().flatten().collect())
     }
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
@@ -2678,16 +2676,7 @@ impl EventStore for MemoryStore {
             if count >= stop_after {
                 break;
             }
-            let visible = self.with_erasure_read_filter(
-                timeline,
-                ErasureProtectedOperationV1::Read,
-                |store| {
-                    crate::generic_timeline_is_visible(
-                        store.timeline_contains_geographic_evidence(timeline),
-                    )
-                },
-            )?;
-            if visible == Some(true) {
+            if self.timeline_visible_for_read(timeline)? {
                 count += 1;
             }
         }
