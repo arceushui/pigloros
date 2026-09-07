@@ -2664,14 +2664,13 @@ impl EventStore for MemoryStore {
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
         let stop_after = maximum.saturating_add(1);
-        let candidates = self
+        let mut count = 0;
+        for timeline in self
             .timelines
             .values()
             .filter(|state| state.timeline.meta.is_root())
             .map(|state| state.timeline.id())
-            .collect::<Vec<_>>();
-        let mut count = 0;
-        for timeline in candidates {
+        {
             if count >= stop_after {
                 break;
             }

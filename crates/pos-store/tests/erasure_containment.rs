@@ -119,6 +119,7 @@ fn assert_listing_filters_frozen_scope<S: EventStore>(
         .iter()
         .any(|timeline| timeline.id() == available.id()));
     assert!(!listed.iter().any(|timeline| timeline.id() == blocked.id()));
+    assert_eq!(store.root_timeline_count_bounded(0)?, 1);
     assert_eq!(store.root_timeline_count_bounded(usize::MAX)?, 1);
     Ok(())
 }

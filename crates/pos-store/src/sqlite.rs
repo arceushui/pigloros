@@ -4100,24 +4100,18 @@ impl EventStore for SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let mut rows = Self::query_prepared(&mut stmt, &[])
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let mut candidates = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|error| CoreError::Storage(error.to_string()))?
-        {
+        let mut count = 0;
+        while count < stop_after {
+            let Some(row) = rows
+                .next()
+                .map_err(|error| CoreError::Storage(error.to_string()))?
+            else {
+                break;
+            };
             let id: String = row
                 .get(0)
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
-            candidates.push(parse_timeline_id(&id)?);
-        }
-        drop(rows);
-        drop(stmt);
-
-        let mut count = 0;
-        for timeline in candidates {
-            if count >= stop_after {
-                break;
-            }
+            let timeline = parse_timeline_id(&id)?;
             let visible = self.with_erasure_read_filter(
                 timeline,
                 ErasureProtectedOperationV1::Read,
