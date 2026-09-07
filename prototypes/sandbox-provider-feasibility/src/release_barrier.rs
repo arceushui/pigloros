@@ -27,7 +27,7 @@ use std::{
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     },
     path::{Component, Path},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::Duration,
 };
@@ -41,10 +41,98 @@ const RELEASE_NAME: &str = "piglor-release-v1";
 const PROXY_NAME: &str = "piglor-host-service-v1";
 const MAX_PACKET: usize = 64 * 1024;
 
+struct DescriptorSet {
+    descriptors: Vec<(String, OwnedFd)>,
+    retained_peers: Vec<OwnedFd>,
+}
+
+struct ImageAuthority {
+    root_image: String,
+    root_hash: Vec<u8>,
+    root_signature: Vec<u8>,
+    sim1_digest: [u8; 32],
+}
+
+struct LaunchRecord {
+    parameters: LaunchParameters,
+    encoded: Vec<u8>,
+    encoded_hex: String,
+}
+
+struct ProviderChannels {
+    provider_proxy: Option<OwnedFd>,
+    launcher_proxy: Option<OwnedFd>,
+    provider_release: OwnedFd,
+    launcher_release: OwnedFd,
+}
+
+struct LocalNetworkGuard {
+    host_interface: Option<String>,
+    expected_readback_digest: [u8; 32],
+    observed_readback_digest: [u8; 32],
+}
+
+impl Drop for LocalNetworkGuard {
+    fn drop(&mut self) {
+        if let Some(host_interface) = &self.host_interface {
+            let _ = Command::new("ip")
+                .args(["link", "delete", "dev", host_interface])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionMode {
+    Local,
+    AirGapped,
+    Replay,
+    Fork,
+}
+
+impl ExecutionMode {
+    fn parse(arguments: &[String]) -> Result<Self, String> {
+        let value = arguments
+            .iter()
+            .find_map(|argument| argument.strip_prefix("--mode="))
+            .unwrap_or("local");
+        match value {
+            "local" => Ok(Self::Local),
+            "air-gapped" => Ok(Self::AirGapped),
+            "replay" => Ok(Self::Replay),
+            "fork" => Ok(Self::Fork),
+            _ => Err(format!("unknown execution mode {value}")),
+        }
+    }
+
+    const fn ordinal(self) -> u8 {
+        match self {
+            Self::Local => 0,
+            Self::AirGapped => 1,
+            Self::Replay => 2,
+            Self::Fork => 3,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::AirGapped => "air-gapped",
+            Self::Replay => "replay",
+            Self::Fork => "fork",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProofCase {
     Positive,
     MalformedRelease,
+    DuplicateRelease,
+    ReorderedRelease,
+    ReleaseTimeout,
     MismatchedRelease,
     ReplayedRelease,
     ExpiredRelease,
@@ -71,6 +159,9 @@ impl ProofCase {
         match value {
             "positive" => Ok(Self::Positive),
             "malformed-release" => Ok(Self::MalformedRelease),
+            "duplicate-release" => Ok(Self::DuplicateRelease),
+            "reordered-release" => Ok(Self::ReorderedRelease),
+            "release-timeout" => Ok(Self::ReleaseTimeout),
             "mismatched-release" => Ok(Self::MismatchedRelease),
             "replayed-release" => Ok(Self::ReplayedRelease),
             "expired-release" => Ok(Self::ExpiredRelease),
@@ -92,6 +183,9 @@ impl ProofCase {
         match self {
             Self::Positive => "positive",
             Self::MalformedRelease => "malformed-release",
+            Self::DuplicateRelease => "duplicate-release",
+            Self::ReorderedRelease => "reordered-release",
+            Self::ReleaseTimeout => "release-timeout",
             Self::MismatchedRelease => "mismatched-release",
             Self::ReplayedRelease => "replayed-release",
             Self::ExpiredRelease => "expired-release",
@@ -132,7 +226,7 @@ pub fn dispatch(arguments: &[String]) -> Option<Result<(), String>> {
         .iter()
         .any(|argument| argument == "--release-adapter")
     {
-        return Some(run_adapter());
+        return Some(run_adapter(arguments));
     }
     if arguments
         .iter()
@@ -149,6 +243,172 @@ pub fn dispatch(arguments: &[String]) -> Option<Result<(), String>> {
 
 async fn run_provider(arguments: &[String]) -> Result<(), String> {
     let proof_case = ProofCase::parse(arguments)?;
+    let mode = ExecutionMode::parse(arguments)?;
+    if mode != ExecutionMode::Local && proof_case != ProofCase::Positive {
+        return Err("negative barrier cases use the Local descriptor contract".to_owned());
+    }
+    let image = load_image_authority(arguments)?;
+    let launch = build_launch_record(mode, image.sim1_digest)?;
+    let channels = create_provider_channels(mode)?;
+
+    let executable = std::env::current_exe().map_err(display_error)?;
+    ensure_static_native_elf(&executable)?;
+    let unit = format!(
+        "pigloros-release-{}.service",
+        hex::encode(launch.parameters.attempt_id)
+    );
+    let connection = zbus::Connection::system().await.map_err(display_error)?;
+    let manager = zbus_systemd::systemd1::ManagerProxy::new(&connection)
+        .await
+        .map_err(display_error)?;
+    let descriptor_set = descriptor_set(
+        proof_case,
+        channels.launcher_proxy,
+        channels.launcher_release,
+    )?;
+    let extra_descriptors = descriptor_set
+        .descriptors
+        .into_iter()
+        .map(|(name, descriptor)| (name, ZbusOwnedFd::from(descriptor)))
+        .collect();
+    let properties = transient_properties(
+        &executable,
+        &image.root_image,
+        image.root_hash,
+        image.root_signature,
+        &launch.encoded_hex,
+        mode,
+        extra_descriptors,
+    )?;
+    manager
+        .start_transient_unit(unit.clone(), "fail".to_owned(), properties, vec![])
+        .await
+        .map_err(display_error)?;
+
+    // Keep the opposite endpoints of deliberately malformed descriptors alive
+    // until systemd has consumed the request.
+    let _retained_defect_peers = descriptor_set.retained_peers;
+
+    let result = complete_release(
+        &manager,
+        &unit,
+        &launch.parameters,
+        &launch.encoded,
+        &channels.provider_release,
+        channels.provider_proxy.as_ref(),
+        mode,
+        proof_case,
+    )
+    .await;
+    let _ = manager.stop_unit(unit.clone(), "replace".to_owned()).await;
+    let _ = manager.reset_failed_unit(unit.clone()).await;
+    if proof_case.is_descriptor_defect() {
+        if result.is_ok() {
+            return Err("descriptor defect unexpectedly reached release".to_owned());
+        }
+        ensure_no_adapter_marker(
+            channels
+                .provider_proxy
+                .as_ref()
+                .ok_or_else(|| "descriptor defect lacks Local proxy".to_owned())?,
+        )?;
+    } else {
+        result?;
+    }
+    if proof_case == ProofCase::Positive && mode == ExecutionMode::Local {
+        println!(
+            "release_barrier=typed-local-release-ok;unit={unit};fd3=proxy-only;fd4=closed-before-adapter"
+        );
+    } else if proof_case == ProofCase::Positive {
+        println!(
+            "release_barrier=typed-{}-release-ok;unit={unit};release_fd3=closed-before-adapter;adapter_nonstdio=none",
+            mode.name()
+        );
+    } else {
+        println!(
+            "release_barrier_negative={};adapter=unexecuted;unit=terminated",
+            proof_case.name()
+        );
+    }
+    Ok(())
+}
+
+fn build_launch_record(mode: ExecutionMode, sim1_digest: [u8; 32]) -> Result<LaunchRecord, String> {
+    let expected_layout = FdLayout {
+        mode: mode.ordinal(),
+        entries: if mode == ExecutionMode::Local {
+            vec![(3, 0), (4, 1)]
+        } else {
+            vec![(3, 1)]
+        },
+    };
+    let parameters = LaunchParameters {
+        attempt_id: random_bytes()?,
+        nonce: random_bytes()?,
+        sim1_digest,
+        adapter_path: ADAPTER_PATH.to_owned(),
+        adapter_arguments: vec![
+            ADAPTER_PATH.to_owned(),
+            "--release-adapter".to_owned(),
+            format!("--mode={}", mode.name()),
+        ],
+        expected_fd_layout_digest: fd_layout_digest(&expected_layout)?,
+    };
+    let encoded = encode_launch_parameters(&parameters)?;
+    let encoded_hex = hex::encode(&encoded);
+    Ok(LaunchRecord {
+        parameters,
+        encoded,
+        encoded_hex,
+    })
+}
+
+fn create_provider_channels(mode: ExecutionMode) -> Result<ProviderChannels, String> {
+    let (provider_proxy, launcher_proxy) = if mode == ExecutionMode::Local {
+        let pair = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::SOCK_CLOEXEC,
+        )
+        .map_err(display_error)?;
+        (Some(pair.0), Some(pair.1))
+    } else {
+        (None, None)
+    };
+    let (provider_release, launcher_release) = socketpair(
+        AddressFamily::Unix,
+        SockType::SeqPacket,
+        None,
+        SockFlag::SOCK_CLOEXEC,
+    )
+    .map_err(display_error)?;
+    setsockopt(
+        &launcher_release,
+        sockopt::ReceiveTimeout,
+        &TimeVal::seconds(2),
+    )
+    .map_err(display_error)?;
+    configure_provider_sockets(&provider_release, provider_proxy.as_ref())?;
+    Ok(ProviderChannels {
+        provider_proxy,
+        launcher_proxy,
+        provider_release,
+        launcher_release,
+    })
+}
+
+fn configure_provider_sockets(release: &OwnedFd, proxy: Option<&OwnedFd>) -> Result<(), String> {
+    setsockopt(release, sockopt::PassCred, &true).map_err(display_error)?;
+    let receive_timeout = TimeVal::seconds(5);
+    setsockopt(release, sockopt::ReceiveTimeout, &receive_timeout).map_err(display_error)?;
+    if let Some(proxy) = proxy {
+        setsockopt(proxy, sockopt::ReceiveTimeout, &receive_timeout).map_err(display_error)?;
+    }
+    Ok(())
+}
+
+fn load_image_authority(arguments: &[String]) -> Result<ImageAuthority, String> {
     let root_image = required_argument(arguments, "--root-image")?;
     let root_hash_path = required_argument(arguments, "--root-hash-file")?;
     let signature_path = required_argument(arguments, "--root-signature")?;
@@ -160,68 +420,35 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         certificate_path,
         certificate_fingerprint,
     )?;
-
     let root_hash_hex = std::fs::read_to_string(root_hash_path).map_err(display_error)?;
     let root_hash = hex::decode(root_hash_hex.trim()).map_err(display_error)?;
     if root_hash.len() != 32 {
         return Err("root hash is not 32 bytes".to_owned());
     }
-    let root_signature = std::fs::read(signature_path).map_err(display_error)?;
-    let sim1_digest = digest_file(Path::new(root_image))?;
-    let attempt_id = random_bytes()?;
-    let nonce = random_bytes()?;
-    let expected_layout = FdLayout {
-        mode: 0,
-        entries: vec![(3, 0), (4, 1)],
-    };
-    let expected_layout_digest = fd_layout_digest(&expected_layout)?;
-    let parameters = LaunchParameters {
-        attempt_id,
-        nonce,
-        sim1_digest,
-        adapter_path: ADAPTER_PATH.to_owned(),
-        adapter_arguments: vec![ADAPTER_PATH.to_owned(), "--release-adapter".to_owned()],
-        expected_fd_layout_digest: expected_layout_digest,
-    };
-    let encoded_parameters = encode_launch_parameters(&parameters)?;
-    let parameter_hex = hex::encode(&encoded_parameters);
+    Ok(ImageAuthority {
+        root_image: root_image.to_owned(),
+        root_hash,
+        root_signature: std::fs::read(signature_path).map_err(display_error)?,
+        sim1_digest: digest_file(Path::new(root_image))?,
+    })
+}
 
-    let (provider_proxy, launcher_proxy) = socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None,
-        SockFlag::SOCK_CLOEXEC,
-    )
-    .map_err(display_error)?;
-    let (provider_release, launcher_release) = socketpair(
-        AddressFamily::Unix,
-        SockType::SeqPacket,
-        None,
-        SockFlag::SOCK_CLOEXEC,
-    )
-    .map_err(display_error)?;
-    setsockopt(&provider_release, sockopt::PassCred, &true).map_err(display_error)?;
-    let receive_timeout = TimeVal::seconds(5);
-    setsockopt(&provider_release, sockopt::ReceiveTimeout, &receive_timeout)
-        .map_err(display_error)?;
-    setsockopt(&provider_proxy, sockopt::ReceiveTimeout, &receive_timeout)
-        .map_err(display_error)?;
-
-    let executable = std::env::current_exe().map_err(display_error)?;
-    ensure_static_native_elf(&executable)?;
-    let unit = format!("pigloros-release-{}.service", hex::encode(attempt_id));
-    let connection = zbus::Connection::system().await.map_err(display_error)?;
-    let manager = zbus_systemd::systemd1::ManagerProxy::new(&connection)
-        .await
-        .map_err(display_error)?;
-    let mut raw_descriptors = vec![
-        (PROXY_NAME.to_owned(), launcher_proxy),
-        (RELEASE_NAME.to_owned(), launcher_release),
-    ];
-    let mut _retained_defect_peers = Vec::new();
+fn descriptor_set(
+    proof_case: ProofCase,
+    launcher_proxy: Option<OwnedFd>,
+    launcher_release: OwnedFd,
+) -> Result<DescriptorSet, String> {
+    let mut descriptors = match launcher_proxy {
+        Some(proxy) => vec![
+            (PROXY_NAME.to_owned(), proxy),
+            (RELEASE_NAME.to_owned(), launcher_release),
+        ],
+        None => vec![(RELEASE_NAME.to_owned(), launcher_release)],
+    };
+    let mut retained_peers = Vec::new();
     match proof_case {
         ProofCase::MissingDescriptor => {
-            raw_descriptors.pop();
+            descriptors.pop();
         }
         ProofCase::ExtraDescriptor | ProofCase::HigherDescriptor => {
             let (provider_extra, launcher_extra) = socketpair(
@@ -231,15 +458,15 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
                 SockFlag::SOCK_CLOEXEC,
             )
             .map_err(display_error)?;
-            _retained_defect_peers.push(provider_extra);
-            raw_descriptors.push(("unexpected-extra".to_owned(), launcher_extra));
+            retained_peers.push(provider_extra);
+            descriptors.push(("unexpected-extra".to_owned(), launcher_extra));
         }
-        ProofCase::ReorderedDescriptors => raw_descriptors.swap(0, 1),
+        ProofCase::ReorderedDescriptors => descriptors.swap(0, 1),
         ProofCase::WrongDescriptorName => {
-            raw_descriptors[0].0 = "wrong-host-service-name".to_owned();
+            "wrong-host-service-name".clone_into(&mut descriptors[0].0);
         }
         ProofCase::WrongDescriptorType => {
-            raw_descriptors.pop();
+            descriptors.pop();
             let (provider_wrong_type, launcher_wrong_type) = socketpair(
                 AddressFamily::Unix,
                 SockType::Stream,
@@ -247,11 +474,14 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
                 SockFlag::SOCK_CLOEXEC,
             )
             .map_err(display_error)?;
-            _retained_defect_peers.push(provider_wrong_type);
-            raw_descriptors.push((RELEASE_NAME.to_owned(), launcher_wrong_type));
+            retained_peers.push(provider_wrong_type);
+            descriptors.push((RELEASE_NAME.to_owned(), launcher_wrong_type));
         }
         ProofCase::Positive
         | ProofCase::MalformedRelease
+        | ProofCase::DuplicateRelease
+        | ProofCase::ReorderedRelease
+        | ProofCase::ReleaseTimeout
         | ProofCase::MismatchedRelease
         | ProofCase::ReplayedRelease
         | ProofCase::ExpiredRelease
@@ -260,54 +490,10 @@ async fn run_provider(arguments: &[String]) -> Result<(), String> {
         | ProofCase::ProviderEof
         | ProofCase::ProviderDeathHold => {}
     }
-    let extra_descriptors = raw_descriptors
-        .into_iter()
-        .map(|(name, descriptor)| (name, ZbusOwnedFd::from(descriptor)))
-        .collect();
-    let properties = transient_properties(
-        &executable,
-        root_image,
-        root_hash,
-        root_signature,
-        &parameter_hex,
-        extra_descriptors,
-    )?;
-    manager
-        .start_transient_unit(unit.clone(), "fail".to_owned(), properties, vec![])
-        .await
-        .map_err(display_error)?;
-
-    let result = complete_release(
-        &manager,
-        &unit,
-        &parameters,
-        &encoded_parameters,
-        &provider_release,
-        &provider_proxy,
-        proof_case,
-    )
-    .await;
-    let _ = manager.stop_unit(unit.clone(), "replace".to_owned()).await;
-    let _ = manager.reset_failed_unit(unit.clone()).await;
-    if proof_case.is_descriptor_defect() {
-        if result.is_ok() {
-            return Err("descriptor defect unexpectedly reached release".to_owned());
-        }
-        ensure_no_adapter_marker(&provider_proxy)?;
-    } else {
-        result?;
-    }
-    if proof_case == ProofCase::Positive {
-        println!(
-            "release_barrier=typed-local-release-ok;unit={unit};fd3=proxy-only;fd4=closed-before-adapter"
-        );
-    } else {
-        println!(
-            "release_barrier_negative={};adapter=unexecuted;unit=terminated",
-            proof_case.name()
-        );
-    }
-    Ok(())
+    Ok(DescriptorSet {
+        descriptors,
+        retained_peers,
+    })
 }
 
 fn ensure_no_adapter_marker(proxy_socket: &OwnedFd) -> Result<(), String> {
@@ -331,12 +517,13 @@ fn transient_properties(
     root_hash: Vec<u8>,
     root_signature: Vec<u8>,
     parameter_hex: &str,
+    mode: ExecutionMode,
     extra_descriptors: Vec<(String, ZbusOwnedFd)>,
 ) -> Result<Vec<(String, OwnedValue)>, String> {
     let launcher_arguments = vec![
         RELEASE_LAUNCHER.to_owned(),
         "--release-launcher".to_owned(),
-        "--mode=local".to_owned(),
+        format!("--mode={}", mode.name()),
         format!("--launch-parameters={parameter_hex}"),
     ];
     let bind = format!("{}:{RELEASE_LAUNCHER}", executable.display());
@@ -381,7 +568,14 @@ fn transient_properties(
         property("SystemCallFilter", (true, syscalls))?,
         property(
             "RestrictAddressFamilies",
-            (true, vec!["AF_UNIX".to_owned()]),
+            (
+                true,
+                if mode == ExecutionMode::Local {
+                    vec!["AF_UNIX".to_owned()]
+                } else {
+                    Vec::<String>::new()
+                },
+            ),
         )?,
         property("UMask", 0o77_u32)?,
         property("KillMode", "control-group")?,
@@ -397,39 +591,18 @@ async fn complete_release(
     parameters: &LaunchParameters,
     encoded_parameters: &[u8],
     release_socket: &OwnedFd,
-    proxy_socket: &OwnedFd,
+    proxy_socket: Option<&OwnedFd>,
+    mode: ExecutionMode,
     proof_case: ProofCase,
 ) -> Result<(), String> {
     let (ready_bytes, credential_pid) = receive_ready(release_socket)?;
     let ready = crate::release_wire::decode_ready(&ready_bytes)?;
-    let main_pid = wait_for_main_pid(unit)?;
-    if credential_pid != main_pid
-        || ready.attempt_id != parameters.attempt_id
-        || ready.nonce != parameters.nonce
-        || ready.sim1_digest != parameters.sim1_digest
-        || ready.launch_parameter_digest != launch_parameter_digest(encoded_parameters)?
-        || ready.expected_fd_layout_digest != parameters.expected_fd_layout_digest
-        || ready.observed_fd_layout_digest != parameters.expected_fd_layout_digest
-    {
-        return Err("ReadyV1 binding or SCM_CREDENTIALS mismatch".to_owned());
-    }
-    let invocation_id = unit_property(unit, "InvocationID")?;
-    if ready.invocation_id != decode_fixed_hex(invocation_id.trim())? {
-        return Err("ReadyV1 invocation ID mismatch".to_owned());
-    }
-    validate_ready_executables(main_pid, &ready)?;
-    validate_namespaces(main_pid)?;
-    validate_requested_readback(unit, parameters)?;
-    let mut premature_marker = [0_u8; 64];
-    match recv(
-        proxy_socket.as_raw_fd(),
-        &mut premature_marker,
-        MsgFlags::MSG_DONTWAIT,
-    ) {
-        Err(nix::errno::Errno::EAGAIN) => {}
-        Ok(0) => return Err("Local proxy closed before release".to_owned()),
-        Ok(_) => return Err("adapter executed before ReleaseV1".to_owned()),
-        Err(error) => return Err(format!("Local proxy pre-release probe failed: {error}")),
+    let (main_pid, _namespace_descriptors) =
+        validate_ready_state(unit, parameters, encoded_parameters, &ready, credential_pid)?;
+    validate_requested_readback(unit, parameters, mode)?;
+    let network = configure_network(main_pid, parameters.attempt_id, mode)?;
+    if let Some(proxy_socket) = proxy_socket {
+        ensure_adapter_blocked(proxy_socket)?;
     }
 
     if proof_case == ProofCase::ProviderDeathHold {
@@ -445,31 +618,116 @@ async fn complete_release(
             .stop_unit(unit.to_owned(), "replace".to_owned())
             .await
             .map_err(display_error)?;
-        return confirm_negative_termination(unit, proxy_socket);
+        return confirm_negative_termination(unit, required_proxy(proxy_socket)?);
     }
     if proof_case == ProofCase::ProviderEof {
         shutdown(release_socket.as_raw_fd(), Shutdown::Both).map_err(display_error)?;
-        return confirm_negative_termination(unit, proxy_socket);
+        return confirm_negative_termination(unit, required_proxy(proxy_socket)?);
     }
     if proof_case == ProofCase::MalformedRelease {
         send_packet(release_socket.as_raw_fd(), b"not-canonical-release-v1")?;
-        return confirm_negative_termination(unit, proxy_socket);
+        return confirm_negative_termination(unit, required_proxy(proxy_socket)?);
+    }
+    if proof_case == ProofCase::ReleaseTimeout {
+        thread::sleep(Duration::from_millis(2_250));
+        return confirm_negative_termination(unit, required_proxy(proxy_socket)?);
     }
 
-    let ready_digest = ready_digest(&ready_bytes)?;
-    let observed = proof_digest("release-proof-observed-readback-v1");
+    let release_bytes = build_release(parameters, &ready_bytes, &network, proof_case)?;
+    let (_, release_digest, release_signature) = decode_release(&release_bytes)?;
+    verify_release_signature(
+        release_digest,
+        release_signature,
+        &proof_signing_key().verifying_key(),
+    )?;
+    let wire_bytes = if proof_case == ProofCase::ReorderedRelease {
+        reorder_release_fields(&release_bytes)?
+    } else {
+        release_bytes
+    };
+    send_packet(release_socket.as_raw_fd(), &wire_bytes)?;
+    if proof_case == ProofCase::DuplicateRelease {
+        let _ = send_packet(release_socket.as_raw_fd(), &wire_bytes);
+    }
+
+    if proof_case != ProofCase::Positive {
+        return confirm_negative_termination(unit, required_proxy(proxy_socket)?);
+    }
+
+    if let Some(proxy_socket) = proxy_socket {
+        let mut marker = [0_u8; 64];
+        let count = recv(proxy_socket.as_raw_fd(), &mut marker, MsgFlags::empty())
+            .map_err(display_error)?;
+        if &marker[..count] != b"ADAPTER_EXECUTED_FD3" {
+            return Err("adapter did not retain exactly the Local proxy on FD 3".to_owned());
+        }
+    }
+    wait_for_unit_terminal(manager, unit).await
+}
+
+fn required_proxy(proxy: Option<&OwnedFd>) -> Result<&OwnedFd, String> {
+    proxy.ok_or_else(|| "negative release case lacks Local proxy".to_owned())
+}
+
+fn ensure_adapter_blocked(proxy_socket: &OwnedFd) -> Result<(), String> {
+    let mut premature_marker = [0_u8; 64];
+    match recv(
+        proxy_socket.as_raw_fd(),
+        &mut premature_marker,
+        MsgFlags::MSG_DONTWAIT,
+    ) {
+        Err(nix::errno::Errno::EAGAIN) => Ok(()),
+        Ok(0) => Err("Local proxy closed before release".to_owned()),
+        Ok(_) => Err("adapter executed before ReleaseV1".to_owned()),
+        Err(error) => Err(format!("Local proxy pre-release probe failed: {error}")),
+    }
+}
+
+fn validate_ready_state(
+    unit: &str,
+    parameters: &LaunchParameters,
+    encoded_parameters: &[u8],
+    ready: &Ready,
+    credential_pid: u32,
+) -> Result<(u32, Vec<File>), String> {
+    let main_pid = wait_for_main_pid(unit)?;
+    if credential_pid != main_pid
+        || ready.attempt_id != parameters.attempt_id
+        || ready.nonce != parameters.nonce
+        || ready.sim1_digest != parameters.sim1_digest
+        || ready.launch_parameter_digest != launch_parameter_digest(encoded_parameters)?
+        || ready.expected_fd_layout_digest != parameters.expected_fd_layout_digest
+        || ready.observed_fd_layout_digest != parameters.expected_fd_layout_digest
+    {
+        return Err("ReadyV1 binding or SCM_CREDENTIALS mismatch".to_owned());
+    }
+    let invocation_id = unit_property(unit, "InvocationID")?;
+    if ready.invocation_id != decode_fixed_hex(invocation_id.trim())? {
+        return Err("ReadyV1 invocation ID mismatch".to_owned());
+    }
+    validate_ready_executables(main_pid, ready)?;
+    let namespaces = retain_and_validate_namespaces(main_pid)?;
+    Ok((main_pid, namespaces))
+}
+
+fn build_release(
+    parameters: &LaunchParameters,
+    ready_bytes: &[u8],
+    local_network: &LocalNetworkGuard,
+    proof_case: ProofCase,
+) -> Result<Vec<u8>, String> {
     let mut release = Release {
         attempt_id: parameters.attempt_id,
         nonce: parameters.nonce,
-        ready_digest,
+        ready_digest: ready_digest(ready_bytes)?,
         trs1_digest: proof_digest("TRS1-proof"),
         rvs1_digest: proof_digest("RVS1-proof"),
         apt1_digest: proof_digest("APT1-proof"),
         trust_epoch: 7,
         revocation_epoch: 11,
         policy_epoch: 13,
-        expected_readback_digest: observed,
-        observed_readback_digest: observed,
+        expected_readback_digest: local_network.expected_readback_digest,
+        observed_readback_digest: local_network.observed_readback_digest,
         deadline_monotonic_ns: monotonic_ns()?.saturating_add(5_000_000_000),
         runtime_key_id: "adr069-proof-runtime-key".to_owned(),
     };
@@ -482,6 +740,9 @@ async fn complete_release(
         ProofCase::ReadbackMismatch => release.observed_readback_digest[0] ^= 1,
         ProofCase::Positive
         | ProofCase::MalformedRelease
+        | ProofCase::DuplicateRelease
+        | ProofCase::ReorderedRelease
+        | ProofCase::ReleaseTimeout
         | ProofCase::Cancellation
         | ProofCase::ProviderEof
         | ProofCase::ProviderDeathHold
@@ -492,26 +753,7 @@ async fn complete_release(
         | ProofCase::WrongDescriptorType
         | ProofCase::HigherDescriptor => {}
     }
-    let release_bytes = crate::release_wire::encode_release(&release, &proof_signing_key())?;
-    let (_, release_digest, release_signature) = decode_release(&release_bytes)?;
-    verify_release_signature(
-        release_digest,
-        release_signature,
-        &proof_signing_key().verifying_key(),
-    )?;
-    send_packet(release_socket.as_raw_fd(), &release_bytes)?;
-
-    if proof_case != ProofCase::Positive {
-        return confirm_negative_termination(unit, proxy_socket);
-    }
-
-    let mut marker = [0_u8; 64];
-    let count =
-        recv(proxy_socket.as_raw_fd(), &mut marker, MsgFlags::empty()).map_err(display_error)?;
-    if &marker[..count] != b"ADAPTER_EXECUTED_FD3" {
-        return Err("adapter did not retain exactly the Local proxy on FD 3".to_owned());
-    }
-    wait_for_unit_terminal(manager, unit).await
+    crate::release_wire::encode_release(&release, &proof_signing_key())
 }
 
 fn confirm_negative_termination(unit: &str, proxy_socket: &OwnedFd) -> Result<(), String> {
@@ -529,26 +771,39 @@ fn confirm_negative_termination(unit: &str, proxy_socket: &OwnedFd) -> Result<()
 }
 
 fn run_launcher(arguments: &[String]) -> Result<(), String> {
-    if required_argument(arguments, "--mode")? != "local" {
-        return Err("proof launcher accepts only Local mode".to_owned());
-    }
+    let mode = ExecutionMode::parse(arguments)?;
     let encoded =
         hex::decode(required_argument(arguments, "--launch-parameters")?).map_err(display_error)?;
     let parameters = decode_launch_parameters(&encoded)?;
-    validate_systemd_descriptor_environment(&[(3, PROXY_NAME), (4, RELEASE_NAME)])?;
-    let observed = observed_layout(0, &[(3, SockType::Stream), (4, SockType::SeqPacket)])?;
+    let named_descriptors = if mode == ExecutionMode::Local {
+        vec![(3, PROXY_NAME), (4, RELEASE_NAME)]
+    } else {
+        vec![(3, RELEASE_NAME)]
+    };
+    let typed_descriptors = if mode == ExecutionMode::Local {
+        vec![(3, SockType::Stream), (4, SockType::SeqPacket)]
+    } else {
+        vec![(3, SockType::SeqPacket)]
+    };
+    validate_systemd_descriptor_environment(&named_descriptors)?;
+    let observed = observed_layout(mode.ordinal(), &typed_descriptors)?;
     if fd_layout_digest(&observed)? != parameters.expected_fd_layout_digest {
         return Err("observed descriptor layout does not match LPV1".to_owned());
     }
 
-    let proxy = take_inherited_fd(3)?;
-    let release = take_inherited_fd(4)?;
+    let (proxy, release) = if mode == ExecutionMode::Local {
+        (Some(take_inherited_fd(3)?), take_inherited_fd(4)?)
+    } else {
+        (None, take_inherited_fd(3)?)
+    };
     let provider_credentials =
         getsockopt(&release, sockopt::PeerCredentials).map_err(display_error)?;
     if provider_credentials.uid() != 0 {
         return Err("release peer is not the root provider".to_owned());
     }
-    set_close_on_exec(&proxy, true)?;
+    if let Some(proxy) = &proxy {
+        set_close_on_exec(proxy, true)?;
+    }
     set_close_on_exec(&release, true)?;
     let adapter = open_native_adapter(&parameters.adapter_path)?;
     let ready = build_ready(&parameters, &encoded, &adapter, &observed)?;
@@ -556,6 +811,7 @@ fn run_launcher(arguments: &[String]) -> Result<(), String> {
     send_packet(release.as_raw_fd(), &ready_bytes)?;
 
     let release_bytes = receive_packet(release.as_raw_fd())?;
+    reject_queued_release(release.as_raw_fd())?;
     let (release_record, digest, _signature) = decode_release(&release_bytes)?;
     if release_record.attempt_id != parameters.attempt_id
         || release_record.nonce != parameters.nonce
@@ -567,21 +823,67 @@ fn run_launcher(arguments: &[String]) -> Result<(), String> {
         return Err("ReleaseV1 binding, state, or deadline mismatch".to_owned());
     }
     drop(release);
-    set_close_on_exec(&proxy, false)?;
+    if let Some(proxy) = &proxy {
+        set_close_on_exec(proxy, false)?;
+    }
     exec_adapter(&adapter, &parameters.adapter_arguments)
 }
 
-fn run_adapter() -> Result<(), String> {
+fn reject_queued_release(descriptor: RawFd) -> Result<(), String> {
+    thread::sleep(Duration::from_millis(25));
+    let mut packet = [0_u8; 1];
+    match recv(
+        descriptor,
+        &mut packet,
+        MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_PEEK,
+    ) {
+        Err(nix::errno::Errno::EAGAIN) => Ok(()),
+        Ok(_) => Err("duplicate ReleaseV1 packet is queued".to_owned()),
+        Err(error) => Err(format!("ReleaseV1 duplicate probe failed: {error}")),
+    }
+}
+
+fn reorder_release_fields(encoded: &[u8]) -> Result<Vec<u8>, String> {
+    let mut value: ciborium::value::Value =
+        ciborium::from_reader(encoded).map_err(display_error)?;
+    let outer = value
+        .as_array_mut()
+        .ok_or_else(|| "ReleaseV1 wrapper is not an array".to_owned())?;
+    let prefix = outer
+        .first_mut()
+        .and_then(ciborium::value::Value::as_array_mut)
+        .ok_or_else(|| "ReleaseV1 prefix is not an array".to_owned())?;
+    if prefix.len() < 4 {
+        return Err("ReleaseV1 prefix is too short to reorder".to_owned());
+    }
+    prefix.swap(2, 3);
+    let mut reordered = Vec::new();
+    ciborium::into_writer(&value, &mut reordered).map_err(display_error)?;
+    Ok(reordered)
+}
+
+fn run_adapter(arguments: &[String]) -> Result<(), String> {
+    let mode = ExecutionMode::parse(arguments)?;
     if std::env::vars_os().next().is_some() {
         return Err("adapter environment was not empty".to_owned());
     }
     let descriptors = open_non_stdio_descriptors()?;
-    if descriptors != vec![3] || socket_type(3)? != SockType::Stream {
+    if mode == ExecutionMode::Local
+        && (descriptors != vec![3] || socket_type(3)? != SockType::Stream)
+    {
         return Err(format!(
             "adapter descriptor set is not exactly FD 3: {descriptors:?}"
         ));
     }
-    if send(3, b"ADAPTER_EXECUTED_FD3", MsgFlags::empty()).map_err(display_error)? != 20 {
+    if mode != ExecutionMode::Local && !descriptors.is_empty() {
+        return Err(format!(
+            "{} adapter inherited non-stdio descriptors: {descriptors:?}",
+            mode.name()
+        ));
+    }
+    if mode == ExecutionMode::Local
+        && send(3, b"ADAPTER_EXECUTED_FD3", MsgFlags::empty()).map_err(display_error)? != 20
+    {
         return Err("adapter FD 3 marker was truncated".to_owned());
     }
     Ok(())
@@ -924,17 +1226,311 @@ fn verify_image_signature(
     Ok(())
 }
 
-fn validate_namespaces(main_pid: u32) -> Result<(), String> {
+fn retain_and_validate_namespaces(main_pid: u32) -> Result<Vec<File>, String> {
+    let mut descriptors = Vec::new();
+    let mut evidence = Vec::new();
     for namespace in ["mnt", "pid", "ipc", "uts", "user", "net"] {
-        let provider =
-            std::fs::read_link(format!("/proc/self/ns/{namespace}")).map_err(display_error)?;
-        let launcher = std::fs::read_link(format!("/proc/{main_pid}/ns/{namespace}"))
-            .map_err(display_error)?;
+        let provider_path = format!("/proc/self/ns/{namespace}");
+        let launcher_path = format!("/proc/{main_pid}/ns/{namespace}");
+        let provider = std::fs::read_link(&provider_path).map_err(display_error)?;
+        let launcher = std::fs::read_link(&launcher_path).map_err(display_error)?;
         if provider == launcher {
             return Err(format!("{namespace} namespace was not isolated"));
         }
+        let descriptor = File::open(&launcher_path).map_err(display_error)?;
+        let descriptor_inode = descriptor.metadata().map_err(display_error)?.ino();
+        let linked_inode = namespace_link_inode(&launcher)?;
+        if descriptor_inode != linked_inode {
+            return Err(format!("{namespace} namespace descriptor identity changed"));
+        }
+        evidence.push(format!(
+            "{namespace}:provider={};launcher={};fd_inode={descriptor_inode}",
+            provider.display(),
+            launcher.display()
+        ));
+        descriptors.push(descriptor);
+    }
+    println!(
+        "namespace_descriptors=retained-and-validated;{}",
+        evidence.join(";")
+    );
+    Ok(descriptors)
+}
+
+fn namespace_link_inode(link: &Path) -> Result<u64, String> {
+    let value = link
+        .to_str()
+        .ok_or_else(|| "namespace link is not UTF-8".to_owned())?;
+    value
+        .strip_suffix(']')
+        .and_then(|value| value.rsplit_once('['))
+        .map(|(_, inode)| inode)
+        .ok_or_else(|| format!("invalid namespace identity {value}"))?
+        .parse()
+        .map_err(display_error)
+}
+
+fn configure_local_network(
+    main_pid: u32,
+    attempt_id: [u8; 16],
+) -> Result<LocalNetworkGuard, String> {
+    let suffix = &hex::encode(attempt_id)[..8];
+    let host_interface = format!("pgh{suffix}");
+    let guest_interface = format!("pgg{suffix}");
+    let table = format!("pgr{suffix}");
+    run_command(
+        Command::new("ip").args([
+            "link",
+            "add",
+            "name",
+            &host_interface,
+            "type",
+            "veth",
+            "peer",
+            "name",
+            &guest_interface,
+        ]),
+        "create Local veth",
+    )?;
+    let mut guard = LocalNetworkGuard {
+        host_interface: Some(host_interface.clone()),
+        expected_readback_digest: [0; 32],
+        observed_readback_digest: [0; 32],
+    };
+    let pid = main_pid.to_string();
+    run_command(
+        Command::new("ip").args(["link", "set", &guest_interface, "netns", &pid]),
+        "move Local veth peer",
+    )?;
+    run_command(
+        Command::new("ip").args(["address", "add", "192.0.2.1/30", "dev", &host_interface]),
+        "address Local host veth",
+    )?;
+    run_command(
+        Command::new("ip").args(["link", "set", "dev", &host_interface, "up"]),
+        "raise Local host veth",
+    )?;
+    run_in_network_namespace(&pid, ["ip", "link", "set", "dev", "lo", "up"])?;
+    run_in_network_namespace(
+        &pid,
+        [
+            "ip",
+            "address",
+            "add",
+            "192.0.2.2/30",
+            "dev",
+            &guest_interface,
+        ],
+    )?;
+    run_in_network_namespace(&pid, ["ip", "link", "set", "dev", &guest_interface, "up"])?;
+    install_local_firewall(&pid, &table)?;
+
+    let raw_readback = read_local_network(&pid, &host_interface, &guest_interface, &table)?;
+    validate_local_network_readback(&raw_readback, &host_interface, &guest_interface, &table)?;
+    let canonical = format!(
+        "local-network-v1;host={host_interface};host-address=192.0.2.1/30;guest={guest_interface};guest-address=192.0.2.2/30;default-route=absent;table=inet/{table};input=drop;output=drop;forward=drop;adapter-network=fd3-proxy-only"
+    );
+    guard.expected_readback_digest = *blake3::hash(canonical.as_bytes()).as_bytes();
+    guard.observed_readback_digest = *blake3::hash(canonical.as_bytes()).as_bytes();
+    println!(
+        "local_network_readback_begin\n{raw_readback}\ncanonical={canonical}\ndigest={}\nlocal_network_readback_end",
+        hex::encode(guard.observed_readback_digest)
+    );
+    Ok(guard)
+}
+
+fn configure_network(
+    main_pid: u32,
+    attempt_id: [u8; 16],
+    mode: ExecutionMode,
+) -> Result<LocalNetworkGuard, String> {
+    if mode == ExecutionMode::Local {
+        return configure_local_network(main_pid, attempt_id);
+    }
+    configure_closed_network(main_pid, attempt_id, mode)
+}
+
+fn configure_closed_network(
+    main_pid: u32,
+    attempt_id: [u8; 16],
+    mode: ExecutionMode,
+) -> Result<LocalNetworkGuard, String> {
+    let suffix = &hex::encode(attempt_id)[..8];
+    let table = format!("pgr{suffix}");
+    let pid = main_pid.to_string();
+    install_closed_firewall(&pid, &table)?;
+    let links = network_namespace_output(&pid, ["ip", "-oneline", "link", "show"])?;
+    let default_route =
+        network_namespace_output(&pid, ["ip", "-oneline", "route", "show", "default"])?;
+    let ruleset = network_namespace_output(&pid, ["nft", "list", "table", "inet", &table])?;
+    if links.lines().any(|line| !line.contains(": lo:"))
+        || !default_route.is_empty()
+        || ruleset.matches("policy drop").count() != 3
+        || !ruleset.contains(&format!("table inet {table}"))
+        || ruleset.contains(" accept")
+    {
+        return Err(format!(
+            "{} network namespace differs from the closed policy",
+            mode.name()
+        ));
+    }
+    let canonical = format!(
+        "closed-network-v1;mode={};external-interface=absent;default-route=absent;table=inet/{table};input=drop;output=drop;forward=drop;adapter-nonstdio=none",
+        mode.name()
+    );
+    let digest = *blake3::hash(canonical.as_bytes()).as_bytes();
+    println!(
+        "closed_network_readback_begin\nmode={}\nlinks={links}\ndefault_route={default_route}\nruleset=\n{ruleset}\ncanonical={canonical}\ndigest={}\nclosed_network_readback_end",
+        mode.name(),
+        hex::encode(digest)
+    );
+    Ok(LocalNetworkGuard {
+        host_interface: None,
+        expected_readback_digest: digest,
+        observed_readback_digest: digest,
+    })
+}
+
+fn install_local_firewall(pid: &str, table: &str) -> Result<(), String> {
+    let rules = format!(
+        "table inet {table} {{\n chain input {{ type filter hook input priority 0; policy drop; iifname \"lo\" accept; }}\n chain output {{ type filter hook output priority 0; policy drop; oifname \"lo\" accept; }}\n chain forward {{ type filter hook forward priority 0; policy drop; }}\n}}\n"
+    );
+    install_firewall(pid, &rules)
+}
+
+fn install_closed_firewall(pid: &str, table: &str) -> Result<(), String> {
+    let rules = format!(
+        "table inet {table} {{\n chain input {{ type filter hook input priority 0; policy drop; }}\n chain output {{ type filter hook output priority 0; policy drop; }}\n chain forward {{ type filter hook forward priority 0; policy drop; }}\n}}\n"
+    );
+    install_firewall(pid, &rules)
+}
+
+fn install_firewall(pid: &str, rules: &str) -> Result<(), String> {
+    let mut child = Command::new("nsenter")
+        .args(["--target", pid, "--net", "--", "nft", "--file", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(display_error)?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "nftables stdin was not piped".to_owned())?
+        .write_all(rules.as_bytes())
+        .map_err(display_error)?;
+    let output = child.wait_with_output().map_err(display_error)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "install nftables rules: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn read_local_network(
+    pid: &str,
+    host_interface: &str,
+    guest_interface: &str,
+    table: &str,
+) -> Result<String, String> {
+    let host_link = command_output(
+        Command::new("ip").args(["-details", "-oneline", "link", "show", host_interface]),
+        "read Local host link",
+    )?;
+    let host_address = command_output(
+        Command::new("ip").args(["-oneline", "-4", "address", "show", host_interface]),
+        "read Local host address",
+    )?;
+    let guest_link = network_namespace_output(
+        pid,
+        [
+            "ip",
+            "-details",
+            "-oneline",
+            "link",
+            "show",
+            guest_interface,
+        ],
+    )?;
+    let guest_address = network_namespace_output(
+        pid,
+        ["ip", "-oneline", "-4", "address", "show", guest_interface],
+    )?;
+    let default_route =
+        network_namespace_output(pid, ["ip", "-oneline", "route", "show", "default"])?;
+    let ruleset = network_namespace_output(pid, ["nft", "list", "table", "inet", table])?;
+    Ok(format!(
+        "host_link={host_link}\nhost_address={host_address}\nguest_link={guest_link}\nguest_address={guest_address}\ndefault_route={default_route}\nruleset=\n{ruleset}"
+    ))
+}
+
+fn validate_local_network_readback(
+    readback: &str,
+    host_interface: &str,
+    guest_interface: &str,
+    table: &str,
+) -> Result<(), String> {
+    let required = [
+        host_interface.to_owned(),
+        guest_interface.to_owned(),
+        "state UP".to_owned(),
+        "192.0.2.1/30".to_owned(),
+        "192.0.2.2/30".to_owned(),
+        format!("table inet {table}"),
+        "hook input".to_owned(),
+        "hook output".to_owned(),
+        "hook forward".to_owned(),
+        "iifname \"lo\" accept".to_owned(),
+        "oifname \"lo\" accept".to_owned(),
+    ];
+    if required.iter().any(|value| !readback.contains(value))
+        || readback.matches("policy drop").count() != 3
+        || !readback.contains("default_route=\nruleset=")
+    {
+        return Err("Local veth/nftables readback differs from the closed policy".to_owned());
     }
     Ok(())
+}
+
+fn run_in_network_namespace<const N: usize>(pid: &str, arguments: [&str; N]) -> Result<(), String> {
+    run_command(
+        Command::new("nsenter")
+            .args(["--target", pid, "--net", "--"])
+            .args(arguments),
+        "configure Local network namespace",
+    )
+}
+
+fn network_namespace_output<const N: usize>(
+    pid: &str,
+    arguments: [&str; N],
+) -> Result<String, String> {
+    command_output(
+        Command::new("nsenter")
+            .args(["--target", pid, "--net", "--"])
+            .args(arguments),
+        "read Local network namespace",
+    )
+}
+
+fn run_command(command: &mut Command, label: &str) -> Result<(), String> {
+    command_output(command, label).map(|_| ())
+}
+
+fn command_output(command: &mut Command, label: &str) -> Result<String, String> {
+    let output = command.output().map_err(display_error)?;
+    if !output.status.success() {
+        return Err(format!(
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_owned())
+        .map_err(display_error)
 }
 
 fn validate_ready_executables(main_pid: u32, ready: &Ready) -> Result<(), String> {
@@ -967,7 +1563,11 @@ fn validate_ready_executables(main_pid: u32, ready: &Ready) -> Result<(), String
     Ok(())
 }
 
-fn validate_requested_readback(unit: &str, parameters: &LaunchParameters) -> Result<(), String> {
+fn validate_requested_readback(
+    unit: &str,
+    parameters: &LaunchParameters,
+    mode: ExecutionMode,
+) -> Result<(), String> {
     let properties = [
         ("Type", "exec"),
         ("RootImagePolicy", "root=verity+signed+read-only-on:=absent"),
@@ -988,6 +1588,7 @@ fn validate_requested_readback(unit: &str, parameters: &LaunchParameters) -> Res
     let command = unit_property(unit, "ExecStart")?;
     if !command.contains(RELEASE_LAUNCHER)
         || !command.contains("--release-launcher")
+        || !command.contains(&format!("--mode={}", mode.name()))
         || !command.contains(&hex::encode(encode_launch_parameters(parameters)?))
     {
         return Err("ExecStart readback mismatch".to_owned());

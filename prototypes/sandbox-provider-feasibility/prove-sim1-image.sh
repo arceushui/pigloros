@@ -20,7 +20,8 @@ rm -rf "$evidence_dir" "$work_dir"
 mkdir -p "$evidence_dir" "$work_dir/definitions" "$work_dir/tree/.pigloros" \
   "$work_dir/tree/dev" "$work_dir/tree/proc" "$work_dir/tree/run" \
   "$work_dir/tree/sys" "$work_dir/tree/tmp" "$work_dir/tree/usr/bin" \
-  "$work_dir/tree/usr/lib"
+  "$work_dir/tree/usr/lib" "$work_dir/tree/var/tmp"
+chmod 01777 "$work_dir/tree/tmp" "$work_dir/tree/var/tmp"
 
 losetup --list --noheadings --output NAME,BACK-FILE | sort \
   >"$work_dir/loops-before.txt"
@@ -165,9 +166,27 @@ grep -F 'release_barrier=typed-local-release-ok' \
 grep -F 'fd3=proxy-only;fd4=closed-before-adapter' \
   "$evidence_dir/release-barrier.txt"
 
+: >"$evidence_dir/release-barrier-closed-modes.txt"
+for execution_mode in air-gapped replay fork; do
+  "$static_prototype" --release-barrier-proof \
+    "--mode=$execution_mode" \
+    "--root-image=$image_path" \
+    "--root-hash-file=$work_dir/sim1.roothash" \
+    "--root-signature=$work_dir/sim1.roothash.p7s" \
+    "--root-certificate=$work_dir/verity-certificate.pem" \
+    "--certificate-fingerprint=$certificate_fingerprint" \
+    | tee -a "$evidence_dir/release-barrier-closed-modes.txt"
+done
+test "$(grep -c '^release_barrier=typed-.*-release-ok;' \
+  "$evidence_dir/release-barrier-closed-modes.txt")" -eq 3
+test "$(grep -c \
+  'release_fd3=closed-before-adapter;adapter_nonstdio=none$' \
+  "$evidence_dir/release-barrier-closed-modes.txt")" -eq 3
+
 : >"$evidence_dir/release-barrier-negative.txt"
-for barrier_case in malformed-release mismatched-release replayed-release \
-  expired-release readback-mismatch cancellation provider-eof \
+for barrier_case in malformed-release duplicate-release reordered-release \
+  release-timeout mismatched-release replayed-release expired-release \
+  readback-mismatch cancellation provider-eof \
   missing-descriptor extra-descriptor reordered-descriptors \
   wrong-descriptor-name wrong-descriptor-type higher-descriptor; do
   "$static_prototype" --release-barrier-proof \
@@ -180,9 +199,9 @@ for barrier_case in malformed-release mismatched-release replayed-release \
     | tee -a "$evidence_dir/release-barrier-negative.txt"
 done
 test "$(grep -c '^release_barrier_negative=' \
-  "$evidence_dir/release-barrier-negative.txt")" -eq 13
+  "$evidence_dir/release-barrier-negative.txt")" -eq 16
 test "$(grep -c 'adapter=unexecuted;unit=terminated$' \
-  "$evidence_dir/release-barrier-negative.txt")" -eq 13
+  "$evidence_dir/release-barrier-negative.txt")" -eq 16
 
 : >"$evidence_dir/provider-death.txt"
 "$static_prototype" --release-barrier-proof \
@@ -315,17 +334,23 @@ if findmnt --raw --noheadings --output SOURCE,TARGET | grep -F "$image_path"; th
   exit 1
 fi
 test -z "$(systemctl list-units --all 'pigloros-release-*' --no-legend)"
+if ip -oneline link show | grep -E 'pgh[0-9a-f]{8}|pgg[0-9a-f]{8}'; then
+  printf 'residual release-barrier veth\n' >&2
+  exit 1
+fi
 
 printf '%s\n' \
   'valid_signature=provider-verified' \
   'valid_image=activated-and-executed' \
   'release_barrier=ready-before-adapter-and-local-fd3' \
+  'closed_modes=release-fd3-and-no-adapter-nonstdio' \
   'invalid_root_hash=rejected' \
   'invalid_signature=rejected-before-unit' \
   'residual_unit=absent' \
   'residual_loop=absent' \
   'residual_device_mapper=absent' \
   'residual_mount=absent' \
+  'residual_veth=absent' \
   >"$evidence_dir/outcome.txt"
 
 cat "$evidence_dir/identity.txt"
