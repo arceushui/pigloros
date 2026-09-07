@@ -200,26 +200,30 @@ async fn list_events(
         Ok(query) => query,
         Err(error) => return Err(error),
     };
-    let page = if state.gateway.has_authorization() {
-        match read_authorized_events(&state.gateway, &id, &q, &headers).await {
-            Ok(page) => page,
-            Err(error) => return Err(error),
-        }
-    } else {
-        match state
-            .gateway
-            .read_events_page(&id, q.from_seq, q.limit)
-            .await
-        {
-            Ok(page) => page,
-            Err(error) => return Err(error),
-        }
+    let page = match read_events_page(&state.gateway, &id, &q, &headers).await {
+        Ok(page) => page,
+        Err(error) => return Err(error),
     };
     let response = match bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES) {
         Ok(response) => response,
         Err(error) => return Err(error),
     };
     Ok(Json(response))
+}
+
+async fn read_events_page(
+    gateway: &Gateway,
+    timeline_id: &str,
+    query: &EventsQuery,
+    headers: &HeaderMap,
+) -> Result<EventPage, GatewayError> {
+    if gateway.has_authorization() {
+        read_authorized_events(gateway, timeline_id, query, headers).await
+    } else {
+        gateway
+            .read_events_page(timeline_id, query.from_seq, query.limit)
+            .await
+    }
 }
 
 async fn read_authorized_events(
