@@ -12,8 +12,7 @@ use pos_conformance::{
     IndependenceEvidenceV1, IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1,
     ProviderCapabilityV1, RedactionStateV1, ReplayClaimV1, ReproducibilityClassV1,
     SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
-    VerificationOutcomeV1, VerificationResultV1,
-    DETERMINISTIC_BUDGET_HARD_CAPS_V1,
+    VerificationOutcomeV1, VerificationResultV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;

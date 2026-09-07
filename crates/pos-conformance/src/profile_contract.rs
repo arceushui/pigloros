@@ -742,10 +742,7 @@ fn valid_sandbox_requirement(requirement: &SandboxRequirementV1) -> bool {
     !zero_digest(&requirement.lps1_digest)
         && !zero_digest(&requirement.sim1_digest)
         && !zero_digest(&requirement.apt1_digest)
-        && crate::identifier(
-            &requirement.required_provider_capability.capability_id,
-            128,
-        )
+        && crate::identifier(&requirement.required_provider_capability.capability_id, 128)
 }
 
 fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
