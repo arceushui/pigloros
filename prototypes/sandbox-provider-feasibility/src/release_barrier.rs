@@ -536,6 +536,8 @@ fn transient_properties(
     Ok(vec![
         property("Description", "PiglorOS ADR-069 release barrier proof")?,
         property("Type", "exec")?,
+        property("StandardOutput", "journal+console")?,
+        property("StandardError", "journal+console")?,
         property(
             "ExecStart",
             vec![(RELEASE_LAUNCHER.to_owned(), launcher_arguments, false)],
