@@ -4,9 +4,9 @@ use pos_core::{
     store::{export_timeline_raw, EventStore, SeqRange},
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, EntityId, ErasureArtifactClassV1,
-    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, EventDraft, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
-    SchemaVersion,
+    ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, EventDraft, Kind, RegisteredArtifactV1,
+    ReplayClaimEvaluatorV1, SchemaVersion,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -76,6 +76,53 @@ fn assert_blocked<S: EventStore>(mut store: S) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+struct SelectiveGate {
+    blocked: pos_core::TimelineId,
+}
+
+impl ErasureGate for SelectiveGate {
+    fn authorize(
+        &self,
+        timeline: pos_core::TimelineId,
+        _operation: ErasureProtectedOperationV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if timeline == self.blocked {
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn with_fence(
+        &self,
+        timeline: pos_core::TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(),
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        self.authorize(timeline, operation)?;
+        effect();
+        Ok(())
+    }
+}
+
+fn assert_listing_filters_frozen_scope<S: EventStore>(
+    mut store: S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let blocked = store.create_timeline("blocked")?;
+    let available = store.create_timeline("available")?;
+    store.bind_erasure_gate(Arc::new(SelectiveGate {
+        blocked: blocked.id(),
+    }))?;
+
+    let listed = store.list_timelines()?;
+    assert!(listed
+        .iter()
+        .any(|timeline| timeline.id() == available.id()));
+    assert!(!listed.iter().any(|timeline| timeline.id() == blocked.id()));
+    assert_eq!(store.root_timeline_count_bounded(usize::MAX)?, 1);
+    Ok(())
+}
+
 #[test]
 fn memory_store_fails_closed_for_unavailable_erasure_boundary(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -86,4 +133,16 @@ fn memory_store_fails_closed_for_unavailable_erasure_boundary(
 fn sqlite_store_fails_closed_for_unavailable_erasure_boundary(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_blocked(SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn memory_store_filters_frozen_scopes_from_listing_and_count(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_listing_filters_frozen_scope(MemoryStore::new())
+}
+
+#[test]
+fn sqlite_store_filters_frozen_scopes_from_listing_and_count(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_listing_filters_frozen_scope(SqliteStore::open_in_memory()?)
 }
