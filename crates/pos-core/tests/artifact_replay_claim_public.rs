@@ -23,7 +23,7 @@ const fn reference(byte: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([byte; 32])
 }
 
-fn input(
+const fn input(
     artifact_class: ErasureArtifactClassV1,
     byte: u8,
     optionality: ArtifactOptionalityV1,
