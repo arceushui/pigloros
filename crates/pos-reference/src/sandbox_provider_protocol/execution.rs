@@ -479,8 +479,10 @@ fn valid_lifecycle_prefix(events: &[u8]) -> bool {
     matches!(
         events,
         [] | [LAUNCHER_READY_EVENT]
-            | [LAUNCHER_READY_EVENT, EXECUTION_RELEASED_EVENT]
-            | [LAUNCHER_READY_EVENT, EXECUTION_RELEASE_DENIED_EVENT]
+            | [
+                LAUNCHER_READY_EVENT,
+                EXECUTION_RELEASED_EVENT | EXECUTION_RELEASE_DENIED_EVENT
+            ]
     )
 }
 
