@@ -68,6 +68,10 @@ impl Record {
         }
     }
 
+    const fn is_digest_protected(self) -> bool {
+        !matches!(self, Self::Sle1)
+    }
+
     const fn bytes(self) -> &'static [u8] {
         match self {
             Self::Spm1 => include_bytes!("../vectors/sandbox-provider-v1/spm1.cbor"),
@@ -211,9 +215,12 @@ fn assert_rejected(record: Record, value: &Value, mutation: &str) -> TestResult 
 }
 
 #[test]
-fn producer_and_independent_decoders_reject_every_scalar_mutation() -> TestResult {
+fn digest_protected_decoders_reject_every_scalar_mutation() -> TestResult {
     let mut exercised = 0_usize;
-    for record in Record::ALL {
+    for record in Record::ALL
+        .into_iter()
+        .filter(|record| record.is_digest_protected())
+    {
         let original = decode_value(record.bytes())?;
         let mut arrays = Vec::new();
         let mut scalars = Vec::new();
@@ -236,6 +243,60 @@ fn producer_and_independent_decoders_reject_every_scalar_mutation() -> TestResul
         }
     }
     assert!(exercised > 2_000, "mutation matrix unexpectedly narrowed");
+    Ok(())
+}
+
+#[test]
+fn unsigned_local_error_rejects_only_invalid_scalar_boundaries() -> TestResult {
+    let record = Record::Sle1;
+    let original = decode_value(record.bytes())?;
+    let invalid_fields = [
+        (vec![0], vec![Value::Text("not-sle1".to_owned())]),
+        (
+            vec![1],
+            vec![Value::Integer(0.into()), Value::Integer(2.into())],
+        ),
+        (
+            vec![2],
+            vec![Value::Integer(4.into()), Value::Text("execute".to_owned())],
+        ),
+        (
+            vec![3],
+            vec![
+                Value::Bytes(vec![0; 15]),
+                Value::Bytes(vec![0; 16]),
+                Value::Text("request-id".to_owned()),
+            ],
+        ),
+        (
+            vec![4],
+            vec![Value::Integer(4.into()), Value::Text("failure".to_owned())],
+        ),
+        (
+            vec![5],
+            vec![
+                Value::Text(String::new()),
+                Value::Text("x".repeat(257)),
+                Value::Bytes(vec![0]),
+            ],
+        ),
+    ];
+    for (path, replacements) in invalid_fields {
+        for replacement in replacements {
+            let mut mutated = original.clone();
+            *value_at_mut(&mut mutated, &path).ok_or("SLE1 field path must resolve")? = replacement;
+            assert_rejected(record, &mutated, &format!("invalid SLE1 field {path:?}"))?;
+        }
+    }
+
+    let mut nullable = original;
+    for path in [[2_usize], [3], [5]] {
+        *value_at_mut(&mut nullable, &path).ok_or("SLE1 nullable field path must resolve")? =
+            Value::Null;
+    }
+    let nullable_bytes = encode_value(&nullable)?;
+    assert!(record.producer_accepts(&nullable_bytes));
+    assert!(record.independent_accepts(&nullable_bytes));
     Ok(())
 }
 
