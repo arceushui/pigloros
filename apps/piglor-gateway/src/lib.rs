@@ -1172,6 +1172,26 @@ impl Gateway {
         Self::new_with_erasure_gate(store, gate)
     }
 
+    /// Recover verified ERS1 evidence and the opaque, complete topology proof
+    /// before starting the Gateway executor. A caller cannot whitelist an
+    /// unaffected Timeline by supplying a public digest or binding list.
+    ///
+    /// # Errors
+    /// Returns a recovery, verification, or store error when the durable
+    /// query cannot establish both state and topology proof.
+    pub fn new_with_verified_erasure_topology<Q: ErasureVerifiedStateQueryV1>(
+        store: Box<dyn EventStore>,
+        gate: Arc<ErasureContainmentGateV1>,
+        query: &mut Q,
+        request: ErasureReferenceV1,
+    ) -> Result<Self, GatewayError> {
+        gate.install_from_verified_query_with_topology(query, request)
+            .map_err(|error| {
+                GatewayError::Store(pos_core::store::erasure_containment_error(error))
+            })?;
+        Self::new_with_erasure_gate(store, gate)
+    }
+
     /// Wrap a store and configure the World body catalogue used for actions.
     #[must_use]
     pub fn new_with_world_bodies(
@@ -6199,6 +6219,14 @@ mod coverage_entrypoints {
         );
         assert!(recovery.is_err());
         drop(recovery);
+        let recovery_with_topology = Gateway::new_with_verified_erasure_topology(
+            open_store(StoreConfig::Memory)?,
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+            &mut query,
+            ErasureReferenceV1::from_digest([1; 32]),
+        );
+        assert!(recovery_with_topology.is_err());
+        drop(recovery_with_topology);
         Ok(())
     }
 }

@@ -902,6 +902,23 @@ fn containment_gate_installs_verified_query_and_scope_bindings() -> Result<(), E
 }
 
 #[test]
+fn containment_gate_requires_query_topology_proof() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new_fail_closed();
+    let mut query = TestVerifiedStateQuery {
+        state: Some(verified_state_for_containment(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(scope()?),
+            Vec::new(),
+        )?),
+    };
+    assert_eq!(
+        gate.install_from_verified_query_with_topology(&mut query, reference(1)),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
 fn containment_gate_blocks_bindings_when_verified_query_fails() {
     let gate = ErasureContainmentGateV1::new();
     let timeline = TimelineId::new();
