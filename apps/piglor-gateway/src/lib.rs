@@ -1832,7 +1832,10 @@ impl Gateway {
             Ok(draft) => draft,
             Err(error) => return Err(error),
         };
-        let decision = reauthorize_at_commit_fence(&authorization, &decision)?;
+        let decision = match reauthorize_at_commit_fence(&authorization, &decision) {
+            Ok(decision) => decision,
+            Err(error) => return Err(error),
+        };
         let event = match self.append_draft(timeline, draft).await {
             Ok(event) => event,
             Err(error) => return Err(error),
@@ -1965,7 +1968,10 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         drop(proposal);
-        let decision = reauthorize_at_commit_fence(&authorization, &decision)?;
+        let decision = match reauthorize_at_commit_fence(&authorization, &decision) {
+            Ok(decision) => decision,
+            Err(error) => return Err(error),
+        };
         let result = match self
             .append_identified_draft(timeline, draft, ingress_id)
             .await
