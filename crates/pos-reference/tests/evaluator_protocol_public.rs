@@ -350,6 +350,19 @@ fn request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
     let mut restored = valid;
     replace_path(&mut restored, &[13], valid_requirement)?;
     assert!(EvaluationRequest::from_canonical_cbor(&canonical(&restored)?).is_ok());
+
+    let mut invalid = request;
+    invalid
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .required_provider_capability
+        .capability_id
+        .clear();
+    assert_eq!(
+        invalid.to_canonical_cbor(),
+        Err(ProtocolError::FieldOutOfBounds)
+    );
     Ok(())
 }
 

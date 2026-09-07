@@ -265,8 +265,8 @@ macro_rules! signed_response_codec {
                 &self,
                 key: &ed25519_dalek::VerifyingKey,
             ) -> Result<(), SandboxProviderProtocolError> {
-                let unsigned: Value = ($unsigned)(self);
-                self.validate(array::<$width>(&unsigned)?)?;
+                let unsigned: [Value; $width] = ($unsigned)(self);
+                self.validate(&unsigned)?;
                 verify_signature($magic, &self.response_digest, &self.signature, key)
             }
         }
@@ -287,7 +287,7 @@ signed_response_codec!(
         response_digest: digest,
         signature,
     }),
-    |record: &SandboxDescribeResponse| Value::Array(vec![
+    |record: &SandboxDescribeResponse| [
         text_value("SDY1"),
         uint_value(1),
         bytes_value(&record.request_id),
@@ -296,7 +296,7 @@ signed_response_codec!(
         bytes_value(&record.hcp1_digest),
         bytes_value(&record.active_apt1_digest),
         text_value(&record.runtime_attestation_key_id),
-    ])
+    ]
 );
 
 impl SandboxDescribeResponse {
@@ -335,7 +335,7 @@ signed_response_codec!(
         response_digest: digest,
         signature,
     }),
-    |record: &SandboxCancelResponse| Value::Array(vec![
+    |record: &SandboxCancelResponse| [
         text_value("SCY1"),
         uint_value(1),
         bytes_value(&record.request_id),
@@ -346,7 +346,7 @@ signed_response_codec!(
         }),
         bytes_value(&record.terminal_spy1_digest),
         text_value(&record.runtime_attestation_key_id),
-    ])
+    ]
 );
 
 impl SandboxCancelResponse {
@@ -381,7 +381,7 @@ signed_response_codec!(
             signature,
         })
     },
-    |record: &SandboxReconcileResponse| Value::Array(vec![
+    |record: &SandboxReconcileResponse| [
         text_value("SRY1"),
         uint_value(1),
         bytes_value(&record.request_id),
@@ -389,7 +389,7 @@ signed_response_codec!(
         Value::Bool(record.clean),
         bytes_value(&record.reconciliation_evidence_digest),
         text_value(&record.runtime_attestation_key_id),
-    ])
+    ]
 );
 
 impl SandboxReconcileResponse {

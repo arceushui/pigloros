@@ -845,6 +845,18 @@ fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
         mismatched_describe.validate_for_request(&describe),
         Err(SandboxContractErrorV1::InconsistentFields)
     );
+    let mut invalid_describe = describe.clone();
+    invalid_describe.request_digest[0] ^= 1;
+    assert_eq!(
+        mismatched_describe.validate_for_request(&invalid_describe),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
+    let mut invalid_described = mismatched_describe;
+    invalid_described.response_digest[0] ^= 1;
+    assert_eq!(
+        invalid_described.validate_for_request(&describe),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
 
     let cancel = SandboxCancelRequestV1 {
         authority: operation_authority(),
@@ -870,6 +882,68 @@ fn signed_responses_reject_mismatched_request_bindings() -> TestResult {
     assert_eq!(
         mismatched_cancel.validate_for_request(&cancel),
         Err(SandboxContractErrorV1::InconsistentFields)
+    );
+
+    let mut invalid_cancel = cancel.clone();
+    invalid_cancel.request_digest[0] ^= 1;
+    assert_eq!(
+        mismatched_cancel.validate_for_request(&invalid_cancel),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
+    let mut invalid_cancelled = mismatched_cancel;
+    invalid_cancelled.response_digest[0] ^= 1;
+    assert_eq!(
+        invalid_cancelled.validate_for_request(&cancel),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
+
+    let reconcile = SandboxReconcileRequestV1 {
+        authority: operation_authority(),
+        attempt_id: [8; 16],
+        agr1_digest: digest(9),
+        request_digest: [0; 32],
+    }
+    .seal()?;
+    let reconciled = SandboxReconcileResponseV1 {
+        request_id: reconcile.authority.request_id,
+        attempt_id: reconcile.attempt_id,
+        clean: true,
+        reconciliation_evidence_digest: digest(11),
+        runtime_attestation_key_id: "runtime-key".to_owned(),
+        response_digest: [0; 32],
+        signature: [0; 64],
+    }
+    .sign(&key)?;
+    let mut invalid_reconcile = reconcile.clone();
+    invalid_reconcile.request_digest[0] ^= 1;
+    assert_eq!(
+        reconciled.validate_for_request(&invalid_reconcile),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
+    let mut invalid_reconciled = reconciled;
+    invalid_reconciled.response_digest[0] ^= 1;
+    assert_eq!(
+        invalid_reconciled.validate_for_request(&reconcile),
+        Err(SandboxContractErrorV1::DigestMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_encoders_propagate_nested_validation_failures() -> TestResult {
+    let mut execute = execute_request()?;
+    execute.network_plans[0].plan_digest = [0; 32];
+    assert_eq!(execute.seal(), Err(SandboxContractErrorV1::DigestMismatch));
+
+    let local_error = SandboxLocalErrorV1 {
+        operation: None,
+        request_id: Some([0; 16]),
+        code: SandboxLocalErrorCodeV1::ProviderUnavailable,
+        safe_detail: None,
+    };
+    assert_eq!(
+        local_error.to_canonical_cbor(),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
     Ok(())
 }

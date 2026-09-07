@@ -180,7 +180,7 @@ impl AdmissionGrant {
         key: &ed25519_dalek::VerifyingKey,
     ) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
-        self.validate(array::<26>(&unsigned)?)?;
+        self.validate(&unsigned)?;
         verify_signature("AGR1", &self.grant_digest, &self.signature, key)
     }
 
@@ -204,15 +204,25 @@ impl AdmissionGrant {
         verify_digest("AGR1", unsigned, self.grant_digest)
     }
 
-    fn unsigned_value(&self) -> Value {
-        let mut fields = vec![
+    fn unsigned_value(&self) -> [Value; 26] {
+        [
             text_value("AGR1"),
             uint_value(1),
             bytes_value(&self.request_id),
             bytes_value(&self.attempt_id),
-        ];
-        fields.extend(self.authority.values());
-        fields.extend([
+            bytes_value(&self.authority.evr1_digest),
+            bytes_value(&self.authority.fixture_contract_digest),
+            bytes_value(&self.authority.fixture_digest),
+            bytes_value(&self.authority.execution_profile_digest),
+            bytes_value(&self.authority.lps1_digest),
+            bytes_value(&self.authority.sim1_digest),
+            bytes_value(&self.authority.apt1_digest),
+            bytes_value(&self.authority.trs1_digest),
+            bytes_value(&self.authority.rvs1_digest),
+            bytes_value(&self.authority.spm1_digest),
+            bytes_value(&self.authority.pcf1_digest),
+            bytes_value(&self.authority.pcr1_digest),
+            bytes_value(&self.authority.hcp1_digest),
             uint_value(self.trust_epoch),
             uint_value(self.revocation_epoch),
             uint_value(self.policy_epoch),
@@ -222,8 +232,7 @@ impl AdmissionGrant {
             bytes_value(&self.expected_launch_policy_digest),
             bytes_value(&self.expected_readback_set_digest),
             text_value(&self.runtime_attestation_key_id),
-        ]);
-        Value::Array(fields)
+        ]
     }
 }
 
@@ -314,7 +323,7 @@ impl SandboxProviderResult {
         key: &ed25519_dalek::VerifyingKey,
     ) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
-        self.validate(array::<10>(&unsigned)?)?;
+        self.validate(&unsigned)?;
         verify_signature("SPY1", &self.result_digest, &self.signature, key)
     }
 
@@ -357,8 +366,8 @@ impl SandboxProviderResult {
         verify_digest("SPY1", unsigned, self.result_digest)
     }
 
-    fn unsigned_value(&self) -> Value {
-        Value::Array(vec![
+    fn unsigned_value(&self) -> [Value; 10] {
+        [
             text_value("SPY1"),
             uint_value(1),
             bytes_value(&self.request_id),
@@ -374,7 +383,7 @@ impl SandboxProviderResult {
                     .collect(),
             ),
             text_value(&self.runtime_attestation_key_id),
-        ])
+        ]
     }
 }
 
@@ -495,7 +504,7 @@ impl SandboxProviderError {
         key: &ed25519_dalek::VerifyingKey,
     ) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
-        self.validate(array::<9>(&unsigned)?)?;
+        self.validate(&unsigned)?;
         verify_signature("SPE1", &self.error_digest, &self.signature, key)
     }
 
@@ -521,8 +530,8 @@ impl SandboxProviderError {
         verify_digest("SPE1", unsigned, self.error_digest)
     }
 
-    fn unsigned_value(&self) -> Value {
-        Value::Array(vec![
+    fn unsigned_value(&self) -> [Value; 9] {
+        [
             text_value("SPE1"),
             uint_value(1),
             self.operation
@@ -535,7 +544,7 @@ impl SandboxProviderError {
                 .as_ref()
                 .map_or(Value::Null, |detail| text_value(detail)),
             text_value(&self.runtime_attestation_key_id),
-        ])
+        ]
     }
 }
 
@@ -615,7 +624,7 @@ impl SandboxProviderReceipt {
         key: &ed25519_dalek::VerifyingKey,
     ) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
-        self.validate(array::<25>(&unsigned)?)?;
+        self.validate(&unsigned)?;
         verify_signature("SPR1", &self.receipt_digest, &self.signature, key)
     }
 
@@ -644,14 +653,19 @@ impl SandboxProviderReceipt {
         verify_digest("SPR1", unsigned, self.receipt_digest)
     }
 
-    fn unsigned_value(&self) -> Value {
-        let mut fields = vec![
+    fn unsigned_value(&self) -> [Value; 25] {
+        [
             text_value("SPR1"),
             uint_value(1),
             bytes_value(&self.attempt_id),
-        ];
-        fields.extend(self.authority.values());
-        fields.extend([
+            bytes_value(&self.authority.agr1_digest),
+            bytes_value(&self.authority.spm1_digest),
+            bytes_value(&self.authority.provider_binary_digest),
+            bytes_value(&self.authority.lps1_digest),
+            bytes_value(&self.authority.sim1_digest),
+            bytes_value(&self.authority.apt1_digest),
+            bytes_value(&self.authority.trs1_digest),
+            bytes_value(&self.authority.rvs1_digest),
             uint_value(self.trust_epoch),
             uint_value(self.revocation_epoch),
             uint_value(self.policy_epoch),
@@ -666,8 +680,7 @@ impl SandboxProviderReceipt {
             bytes_value(&self.termination_evidence),
             bytes_value(&self.aud1_digest),
             text_value(&self.runtime_attestation_key_id),
-        ]);
-        Value::Array(fields)
+        ]
     }
 }
 
@@ -727,23 +740,14 @@ macro_rules! named_digest_authority {
                 let fields: &[Value; $count] = fields
                     .try_into()
                     .map_err(|_| SandboxProviderProtocolError::InvalidEncoding)?;
-                let mut values = fields.iter();
+                let [$($field),+] = fields;
                 Ok(Self {
-                    $($field: digest32(values.next().ok_or(
-                        SandboxProviderProtocolError::InvalidEncoding,
-                    )?)?),+
+                    $($field: digest32($field)?),+
                 })
             }
 
             const fn digests(&self) -> [[u8; 32]; $count] {
                 [$(self.$field),+]
-            }
-
-            fn values(&self) -> Vec<Value> {
-                self.digests()
-                    .into_iter()
-                    .map(|digest| bytes_value(&digest))
-                    .collect()
             }
 
             fn has_zero_digest(&self) -> bool {
@@ -842,14 +846,13 @@ fn validate_network_plans(
 ) -> Result<(), SandboxProviderProtocolError> {
     for (index, value) in values.iter().enumerate() {
         let encoded = network_plan_value(value);
-        validate_network_plan(value, array::<11>(&encoded)?)?;
-        let expected = u64::try_from(
-            values[..index]
-                .iter()
-                .filter(|candidate| candidate.exchange_id == value.exchange_id)
-                .count(),
-        )
-        .map_err(|_| SandboxProviderProtocolError::FieldOutOfBounds)?;
+        validate_network_plan(value, &encoded)?;
+        let mut expected = 0_u64;
+        for candidate in &values[..index] {
+            if candidate.exchange_id == value.exchange_id {
+                expected += 1;
+            }
+        }
         if value.occurrence != expected {
             return Err(SandboxProviderProtocolError::InconsistentFields);
         }
@@ -857,8 +860,8 @@ fn validate_network_plans(
     Ok(())
 }
 
-fn network_plan_value(value: &NetworkExchangePlan) -> Value {
-    Value::Array(vec![
+fn network_plan_value(value: &NetworkExchangePlan) -> [Value; 11] {
+    [
         text_value("NXP1"),
         uint_value(1),
         bytes_value(&value.exchange_id),
@@ -870,7 +873,7 @@ fn network_plan_value(value: &NetworkExchangePlan) -> Value {
         bytes_value(&value.expected_response_digest),
         bytes_value(&value.retention_policy_digest),
         bytes_value(&value.plan_digest),
-    ])
+    ]
 }
 
 fn decode_output(value: &Value) -> Result<Option<SandboxOutput>, SandboxProviderProtocolError> {

@@ -153,7 +153,7 @@ impl SandboxProviderManifest {
         key: &ed25519_dalek::VerifyingKey,
     ) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
-        self.validate(array::<18>(&unsigned)?)?;
+        self.validate(&unsigned)?;
         verify_signature("SPM1", &self.manifest_digest, &self.signature, key)
     }
 
@@ -201,8 +201,8 @@ impl SandboxProviderManifest {
         verify_digest("SPM1", unsigned, self.manifest_digest)
     }
 
-    fn unsigned_value(&self) -> Value {
-        Value::Array(vec![
+    fn unsigned_value(&self) -> [Value; 18] {
+        [
             text_value("SPM1"),
             uint_value(1),
             text_value(&self.provider_id),
@@ -226,7 +226,7 @@ impl SandboxProviderManifest {
             bytes_value(&self.pcf1_digest),
             bytes_value(&self.required_hcp1_feature_set_digest),
             text_value(&self.provider_release_key_id),
-        ])
+        ]
     }
 }
 
@@ -411,7 +411,7 @@ impl SignedImageManifest {
         key: &ed25519_dalek::VerifyingKey,
     ) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
-        self.validate(array::<20>(&unsigned)?)?;
+        self.validate(&unsigned)?;
         verify_signature("SIM1", &self.manifest_digest, &self.signature, key)
     }
 
@@ -440,8 +440,8 @@ impl SignedImageManifest {
         verify_digest("SIM1", unsigned, self.manifest_digest)
     }
 
-    fn unsigned_value(&self) -> Value {
-        Value::Array(vec![
+    fn unsigned_value(&self) -> [Value; 20] {
+        [
             text_value("SIM1"),
             uint_value(1),
             text_value(&self.image_id),
@@ -467,7 +467,7 @@ impl SignedImageManifest {
             ),
             uint_value(self.image_trust_epoch),
             text_value(&self.image_project_key_id),
-        ])
+        ]
     }
 }
 
@@ -604,13 +604,13 @@ fn validate_partitions(
     partitions: &[PartitionDescriptor; 3],
 ) -> Result<(), SandboxProviderProtocolError> {
     let mut ends = [0_u64; 3];
-    for (index, partition) in partitions.iter().enumerate() {
+    for (index, (expected_role, partition)) in [0_u64, 1, 2].into_iter().zip(partitions).enumerate()
+    {
         let end = partition
             .start_bytes
             .checked_add(partition.length_bytes)
             .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)?;
-        if partition.role.code()
-            != u64::try_from(index).map_err(|_| SandboxProviderProtocolError::FieldOutOfBounds)?
+        if partition.role.code() != expected_role
             || partition.partition_type_uuid != dps_uuid(architecture, partition.role)
             || partition.partition_instance_uuid == [0; 16]
             || partition.length_bytes == 0
