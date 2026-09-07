@@ -2208,6 +2208,24 @@ impl SqliteStore {
         .map(|visible| visible == Some(true))
     }
 
+    fn count_visible_root_timeline_ids(
+        &self,
+        maximum: usize,
+        timelines: impl IntoIterator<Item = TimelineId>,
+    ) -> Result<usize, CoreError> {
+        let stop_after = maximum.saturating_add(1);
+        let mut count = 0;
+        for timeline in timelines {
+            if count >= stop_after {
+                break;
+            }
+            if self.timeline_visible_for_read(timeline)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     fn root_timeline_ids(&self) -> Result<Vec<TimelineId>, CoreError> {
         let mut stmt = self
             .conn
@@ -4122,17 +4140,7 @@ impl EventStore for SqliteStore {
     }
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
-        let stop_after = maximum.saturating_add(1);
-        let mut count = 0;
-        for timeline in self.root_timeline_ids()? {
-            if count >= stop_after {
-                break;
-            }
-            if self.timeline_visible_for_read(timeline)? {
-                count += 1;
-            }
-        }
-        Ok(count)
+        self.count_visible_root_timeline_ids(maximum, self.root_timeline_ids()?)
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {

@@ -1169,6 +1169,24 @@ impl MemoryStore {
         .map(|visible| visible == Some(true))
     }
 
+    fn count_visible_root_timeline_ids(
+        &self,
+        maximum: usize,
+        timelines: impl IntoIterator<Item = TimelineId>,
+    ) -> Result<usize, CoreError> {
+        let stop_after = maximum.saturating_add(1);
+        let mut count = 0;
+        for timeline in timelines {
+            if count >= stop_after {
+                break;
+            }
+            if self.timeline_visible_for_read(timeline)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     fn append_visible(
         &mut self,
         timeline: TimelineId,
@@ -2666,22 +2684,13 @@ impl EventStore for MemoryStore {
     }
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
-        let stop_after = maximum.saturating_add(1);
-        let mut count = 0;
-        for timeline in self
-            .timelines
-            .values()
-            .filter(|state| state.timeline.meta.is_root())
-            .map(|state| state.timeline.id())
-        {
-            if count >= stop_after {
-                break;
-            }
-            if self.timeline_visible_for_read(timeline)? {
-                count += 1;
-            }
-        }
-        Ok(count)
+        self.count_visible_root_timeline_ids(
+            maximum,
+            self.timelines
+                .values()
+                .filter(|state| state.timeline.meta.is_root())
+                .map(|state| state.timeline.id()),
+        )
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
