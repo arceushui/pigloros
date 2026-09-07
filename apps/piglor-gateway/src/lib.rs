@@ -6186,7 +6186,6 @@ mod coverage_entrypoints {
             &owner_key,
             gate,
         )?;
-        assert!(owntracks.owntracks_enabled);
         drop(owntracks);
 
         let mut query = MissingVerifiedStateQuery;

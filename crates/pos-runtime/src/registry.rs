@@ -5241,40 +5241,22 @@ mod erasure_gate_error_paths {
         let timeline = TimelineId::new();
         let mut missing = PluginRegistry::new().without_erasure_gate();
         assert!(matches!(
-            missing.with_erasure_fence(timeline, ErasureProtectedOperationV1::Snapshot, |_| Ok::<
-                (),
-                RuntimeError,
-            >(
-                ()
-            ),),
+            missing.step_all(timeline),
             Err(RuntimeError::ErasureOperationUnavailable)
         ));
         assert!(matches!(
-            missing.with_erasure_mut_fence(
-                timeline,
-                ErasureProtectedOperationV1::PluginInput,
-                |_| Ok::<(), RuntimeError>(()),
-            ),
+            missing.step_all_anchored(timeline, Seq::ZERO),
             Err(RuntimeError::ErasureOperationUnavailable)
         ));
 
         let rejecting = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let mut bound = PluginRegistry::new().with_erasure_gate(rejecting);
         assert!(matches!(
-            bound.with_erasure_fence(timeline, ErasureProtectedOperationV1::Snapshot, |_| Ok::<
-                (),
-                RuntimeError,
-            >(
-                ()
-            ),),
+            bound.step_all(timeline),
             Err(RuntimeError::ErasureContainment(_))
         ));
         assert!(matches!(
-            bound.with_erasure_mut_fence(
-                timeline,
-                ErasureProtectedOperationV1::PluginInput,
-                |_| Ok::<(), RuntimeError>(()),
-            ),
+            bound.step_all_anchored(timeline, Seq::ZERO),
             Err(RuntimeError::ErasureContainment(_))
         ));
     }
