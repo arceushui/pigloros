@@ -400,10 +400,12 @@ fn create_provider_channels(mode: ExecutionMode) -> Result<ProviderChannels, Str
 
 fn configure_provider_sockets(release: &OwnedFd, proxy: Option<&OwnedFd>) -> Result<(), String> {
     setsockopt(release, sockopt::PassCred, &true).map_err(display_error)?;
-    let receive_timeout = TimeVal::seconds(5);
-    setsockopt(release, sockopt::ReceiveTimeout, &receive_timeout).map_err(display_error)?;
+    // StartTransientUnit returns before root-image activation and launcher exec
+    // complete. Keep that startup budget separate from the launcher's bounded
+    // two-second ReleaseV1 wait.
+    setsockopt(release, sockopt::ReceiveTimeout, &TimeVal::seconds(30)).map_err(display_error)?;
     if let Some(proxy) = proxy {
-        setsockopt(proxy, sockopt::ReceiveTimeout, &receive_timeout).map_err(display_error)?;
+        setsockopt(proxy, sockopt::ReceiveTimeout, &TimeVal::seconds(5)).map_err(display_error)?;
     }
     Ok(())
 }
