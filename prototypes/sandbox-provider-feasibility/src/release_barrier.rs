@@ -625,12 +625,13 @@ fn mount_verified_image(
         "read loop partition identities",
     )?;
     let mut loop_parents = Vec::new();
-    for (device, partition_number) in [(data_device, "1"), (hash_device, "2")] {
+    for (device, partition_index) in [(data_device, 0_usize), (hash_device, 1_usize)] {
+        let partition_query = format!(".partitiontable.partitions[{partition_index}].start");
         let expected_start = command_output(
-            Command::new("sfdisk").args([
-                "--part-start",
-                image.root_image.as_str(),
-                partition_number,
+            Command::new("jq").args([
+                "--raw-output",
+                partition_query.as_str(),
+                image.partition_table.as_str(),
             ]),
             "read admitted GPT partition offset",
         )?;
