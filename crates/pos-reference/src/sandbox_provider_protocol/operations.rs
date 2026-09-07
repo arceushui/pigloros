@@ -1,11 +1,86 @@
 use ciborium::value::Value;
 
 use super::codec::{
-    array, bool_value, bytes_value, decode_document, digest32, id16, key_id, require_signature,
-    self_digested, signed, text_value, uint, uint_value, valid_key_id, verify_digest,
-    verify_signature,
+    array, bool_value, bytes_value, decode_document, digest32, id16, key_id, optional_id16,
+    optional_text, require_signature, self_digested, signed, text_value, uint, uint_value,
+    valid_key_id, validate_magic, verify_digest, verify_signature,
 };
 use super::SandboxProviderProtocolError;
+
+const MAX_SAFE_DETAIL_BYTES: usize = 256;
+
+/// Closed Sandbox Provider operation identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxProviderOperation {
+    Describe,
+    Execute,
+    Cancel,
+    Reconcile,
+}
+
+impl SandboxProviderOperation {
+    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        match code {
+            0 => Ok(Self::Describe),
+            1 => Ok(Self::Execute),
+            2 => Ok(Self::Cancel),
+            3 => Ok(Self::Reconcile),
+            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
+        }
+    }
+}
+
+/// Closed unsigned local selector failure code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxLocalErrorCode {
+    ProviderUnavailable,
+    ProviderIdentityInvalid,
+    PolicyUnavailable,
+    ControlChannelUnavailable,
+}
+
+impl SandboxLocalErrorCode {
+    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        match code {
+            0 => Ok(Self::ProviderUnavailable),
+            1 => Ok(Self::ProviderIdentityInvalid),
+            2 => Ok(Self::PolicyUnavailable),
+            3 => Ok(Self::ControlChannelUnavailable),
+            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
+        }
+    }
+}
+
+/// Independently decoded unsigned SLE1 local selector evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxLocalError {
+    pub operation: Option<SandboxProviderOperation>,
+    pub request_id: Option<[u8; 16]>,
+    pub code: SandboxLocalErrorCode,
+    pub safe_detail: Option<String>,
+}
+
+impl SandboxLocalError {
+    /// Decode and fully validate exact canonical SLE1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error for malformed or inconsistent input.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxProviderProtocolError> {
+        let value = decode_document(bytes)?;
+        let fields = array::<6>(&value)?;
+        validate_magic(fields, "SLE1")?;
+        Ok(Self {
+            operation: if fields[2] == Value::Null {
+                None
+            } else {
+                Some(SandboxProviderOperation::decode(uint(&fields[2])?)?)
+            },
+            request_id: optional_id16(&fields[3])?,
+            code: SandboxLocalErrorCode::decode(uint(&fields[4])?)?,
+            safe_detail: optional_text(&fields[5], MAX_SAFE_DETAIL_BYTES)?,
+        })
+    }
+}
 
 /// Authority common to every request operation.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -21,8 +21,8 @@ pub use execution::{
 };
 pub use operations::{
     RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,
-    SandboxDescribeRequest, SandboxDescribeResponse, SandboxReconcileRequest,
-    SandboxReconcileResponse,
+    SandboxDescribeRequest, SandboxDescribeResponse, SandboxLocalError, SandboxLocalErrorCode,
+    SandboxProviderOperation, SandboxReconcileRequest, SandboxReconcileResponse,
 };
 
 /// Closed failures produced before a provider operation is trusted.

@@ -511,5 +511,6 @@ fn all_provider_operations_round_trip_and_bind_responses() -> TestResult {
         SandboxLocalErrorV1::from_canonical_cbor(&local_error.to_canonical_cbor()?)?,
         local_error
     );
+    independent::SandboxLocalError::from_canonical_cbor(&local_error.to_canonical_cbor()?)?;
     Ok(())
 }
