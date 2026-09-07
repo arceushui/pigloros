@@ -85,7 +85,7 @@ impl SandboxExecuteRequest {
             network_plans: decode_network_plans(&fields[21])?,
             request_digest,
         };
-        request.validate(&fields).map(|()| request)
+        request.validate(fields).map(|()| request)
     }
 
     fn validate(&self, unsigned: &[Value; 22]) -> Result<(), SandboxProviderProtocolError> {
@@ -168,7 +168,7 @@ impl AdmissionGrant {
             grant_digest,
             signature,
         };
-        grant.validate(&fields).map(|()| grant)
+        grant.validate(fields).map(|()| grant)
     }
 
     /// Verify AGR1 using a caller-authorized runtime-attestation key.
@@ -302,7 +302,7 @@ impl SandboxProviderResult {
             result_digest,
             signature,
         };
-        result.validate(&fields).map(|()| result)
+        result.validate(fields).map(|()| result)
     }
 
     /// Verify SPY1 using a caller-authorized runtime-attestation key.
@@ -483,7 +483,7 @@ impl SandboxProviderError {
             error_digest,
             signature,
         };
-        error.validate(&fields).map(|()| error)
+        error.validate(fields).map(|()| error)
     }
 
     /// Verify SPE1 using a caller-authorized runtime-attestation key.
@@ -603,7 +603,7 @@ impl SandboxProviderReceipt {
             receipt_digest,
             signature,
         };
-        receipt.validate(&fields).map(|()| receipt)
+        receipt.validate(fields).map(|()| receipt)
     }
 
     /// Verify SPR1 using a caller-authorized runtime-attestation key.
@@ -695,7 +695,7 @@ impl ExecuteAuthority {
         })
     }
 
-    fn digests(&self) -> [[u8; 32]; 15] {
+    const fn digests(&self) -> [[u8; 32]; 15] {
         [
             self.evr1_digest,
             self.cpf1_digest,
@@ -713,12 +713,6 @@ impl ExecuteAuthority {
             self.pcr1_digest,
             self.hcp1_digest,
         ]
-    }
-
-    fn values(&self) -> impl Iterator<Item = Value> {
-        self.digests()
-            .into_iter()
-            .map(|digest| bytes_value(&digest))
     }
 
     fn has_zero_digest(&self) -> bool {
@@ -741,12 +735,15 @@ macro_rules! named_digest_authority {
                 })
             }
 
-            fn digests(&self) -> [[u8; 32]; $count] {
+            const fn digests(&self) -> [[u8; 32]; $count] {
                 [$(self.$field),+]
             }
 
-            fn values(&self) -> impl Iterator<Item = Value> {
-                self.digests().into_iter().map(|digest| bytes_value(&digest))
+            fn values(&self) -> Vec<Value> {
+                self.digests()
+                    .into_iter()
+                    .map(|digest| bytes_value(&digest))
+                    .collect()
             }
 
             fn has_zero_digest(&self) -> bool {

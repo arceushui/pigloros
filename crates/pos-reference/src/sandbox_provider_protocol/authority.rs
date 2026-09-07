@@ -54,15 +54,6 @@ pub enum SandboxExecutionMode {
 }
 
 impl SandboxExecutionMode {
-    const fn code(self) -> u64 {
-        match self {
-            Self::Local => 0,
-            Self::AirGapped => 1,
-            Self::Replay => 2,
-            Self::Fork => 3,
-        }
-    }
-
     const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
             0 => Ok(Self::Local),
@@ -150,7 +141,7 @@ impl SandboxProviderManifest {
             manifest_digest,
             signature,
         };
-        manifest.validate(&fields).map(|()| manifest)
+        manifest.validate(fields).map(|()| manifest)
     }
 
     /// Verify SPM1 using a caller-authorized provider-release key.
@@ -266,7 +257,7 @@ impl LaunchPolicy {
             network_capabilities: decode_network_capabilities(&fields[6])?,
             policy_digest,
         };
-        policy.validate(&fields).map(|()| policy)
+        policy.validate(fields).map(|()| policy)
     }
 
     fn validate(&self, unsigned: &[Value; 7]) -> Result<(), SandboxProviderProtocolError> {
@@ -415,7 +406,7 @@ impl SignedImageManifest {
             manifest_digest,
             signature,
         };
-        manifest.validate(&fields).map(|()| manifest)
+        manifest.validate(fields).map(|()| manifest)
     }
 
     /// Verify SIM1 using a caller-authorized image-project key.
@@ -574,7 +565,7 @@ fn network_capability_value(value: &NetworkCapability) -> Value {
     Value::Array(vec![
         text_value(&value.capability_id),
         uint_value(0),
-        uint_value(if value.address.len() == 4 { 0 } else { 1 }),
+        uint_value(u64::from(value.address.len() != 4)),
         bytes_value(&value.address),
         uint_value(u64::from(value.destination_port)),
         uint_value(value.request_maximum),

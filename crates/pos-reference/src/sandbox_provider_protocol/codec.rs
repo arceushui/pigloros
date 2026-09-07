@@ -11,10 +11,12 @@ pub(super) const MAX_LIST_ENTRIES: usize = 256;
 pub(super) const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_EXECUTABLE_PATH_BYTES: usize = 512;
 
+type SignedFields<'a, const N: usize> = (&'a [Value; N], [u8; 32], [u8; 64]);
+
 pub(super) fn signed<'a, const N: usize>(
     value: &'a Value,
     magic: &str,
-) -> Result<(&'a [Value; N], [u8; 32], [u8; 64]), SandboxProviderProtocolError> {
+) -> Result<SignedFields<'a, N>, SandboxProviderProtocolError> {
     let wrapper = array::<3>(value)?;
     let unsigned = array::<N>(&wrapper[0])?;
     validate_magic(unsigned, magic)?;
@@ -228,10 +230,10 @@ pub(super) fn text(value: &Value) -> Result<&str, SandboxProviderProtocolError> 
 
 pub(super) fn identifier(value: &Value) -> Result<String, SandboxProviderProtocolError> {
     let value = text(value)?;
-    if !valid_identifier(value) {
-        Err(SandboxProviderProtocolError::FieldOutOfBounds)
-    } else {
+    if valid_identifier(value) {
         Ok(value.to_owned())
+    } else {
+        Err(SandboxProviderProtocolError::FieldOutOfBounds)
     }
 }
 
@@ -258,7 +260,7 @@ pub(super) fn key_id(value: &Value) -> Result<String, SandboxProviderProtocolErr
     }
 }
 
-pub(super) fn valid_key_id(value: &str) -> bool {
+pub(super) const fn valid_key_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_IDENTIFIER_BYTES
 }
 
@@ -269,7 +271,7 @@ pub(super) fn uint(value: &Value) -> Result<u64, SandboxProviderProtocolError> {
     u64::try_from(*value).map_err(|_| SandboxProviderProtocolError::InvalidEncoding)
 }
 
-pub(super) fn bool_value(value: &Value) -> Result<bool, SandboxProviderProtocolError> {
+pub(super) const fn bool_value(value: &Value) -> Result<bool, SandboxProviderProtocolError> {
     let Value::Bool(value) = value else {
         return Err(SandboxProviderProtocolError::InvalidEncoding);
     };
