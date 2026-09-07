@@ -5255,6 +5255,8 @@ fn validate_conformance_case<'a>(
             case.redaction_state,
             RedactionStateV1::None | RedactionStateV1::RedactedViews
         ) && case.outcome != CaseOutcomeStatusV1::Pass
+            && !(case.outcome == CaseOutcomeStatusV1::Unavailable
+                && case.replay_claim == ReplayClaimV1::UnverifiableArtifactsMissing)
             && case.expected_digest == case.actual_digest
             && case.expected_error == case.actual_error)
     {
