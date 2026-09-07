@@ -5231,7 +5231,7 @@ mod erasure_gate_coverage {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(on))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod erasure_gate_error_paths {
     use super::*;
     use pos_core::ids::TimelineId;

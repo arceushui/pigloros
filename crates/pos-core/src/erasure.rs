@@ -4898,7 +4898,7 @@ use evidence::{
 pub mod tests;
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(on))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_paths {
     use super::*;
 

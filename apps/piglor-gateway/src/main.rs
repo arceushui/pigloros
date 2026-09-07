@@ -1064,7 +1064,7 @@ mod shutdown_signal_tests {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(on))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
 
