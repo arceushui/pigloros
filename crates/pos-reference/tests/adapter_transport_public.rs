@@ -283,6 +283,17 @@ fn attempt_writer_reports_capability_and_artifact_frame_failures() {
 }
 
 #[test]
+fn attempt_writer_reports_artifact_frame_failures() {
+    let writer = FailAfterWrites {
+        successful_writes_remaining: 6,
+    };
+    assert_eq!(
+        write_attempt(writer, &attempt()),
+        Err(TransportError::InvalidEncoding)
+    );
+}
+
+#[test]
 fn attempt_reader_rejects_wrong_order_identity_digest_and_trailing_data() -> TestResult {
     let bytes = encoded_attempt(&attempt())?;
     let valid = frame_values(&bytes)?;

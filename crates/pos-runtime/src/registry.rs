@@ -1529,6 +1529,27 @@ impl PluginRegistry {
         authority_registry: &AuthorityRegistrySnapshotV1,
         authority_position: Seq,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
+        self.stage_authorized_driver_with_erasure_fence(
+            target,
+            observation,
+            artifact_evaluation,
+            knowledge,
+            authority,
+            authority_registry,
+            authority_position,
+        )
+    }
+
+    fn stage_authorized_driver_with_erasure_fence(
+        &mut self,
+        target: AuthorizedDriverTargetV1,
+        observation: AuthorizedObservationV1,
+        artifact_evaluation: &pos_core::ReplayClaimEvaluationV1,
+        knowledge: &KnowledgeSnapshotV1,
+        authority: &PersistedAuthorityV1,
+        authority_registry: &AuthorityRegistrySnapshotV1,
+        authority_position: Seq,
+    ) -> Result<Vec<EventDraft>, RuntimeError> {
         let AuthorizedDriverTargetV1 {
             plugin_id,
             timeline,

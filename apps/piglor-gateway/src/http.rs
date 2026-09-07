@@ -420,6 +420,15 @@ async fn post_ledger_prediction(
     ))
 }
 
+fn gateway_store_status(error: &CoreError) -> Option<StatusCode> {
+    match error {
+        CoreError::ErasureAccessFrozen => Some(StatusCode::FORBIDDEN),
+        CoreError::TimelineNotFound(_) => Some(StatusCode::NOT_FOUND),
+        CoreError::ErasureContainmentUnavailable => Some(StatusCode::SERVICE_UNAVAILABLE),
+        _ => None,
+    }
+}
+
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -451,13 +460,10 @@ impl IntoResponse for GatewayError {
             | Self::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
             Self::CompatibilityReadTruncated { .. } | Self::IngressConflict => StatusCode::CONFLICT,
-            Self::ResourceUnavailable | Self::Store(CoreError::TimelineNotFound(_)) => {
-                StatusCode::NOT_FOUND
+            Self::ResourceUnavailable => StatusCode::NOT_FOUND,
+            Self::Store(error) => {
+                gateway_store_status(error).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             }
-            Self::Store(CoreError::ErasureContainmentUnavailable) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ActionAuthorizationUnavailable | Self::AuthorizationUnavailable => {
                 StatusCode::UNAUTHORIZED
             }

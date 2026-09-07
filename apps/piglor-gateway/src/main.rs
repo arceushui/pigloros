@@ -193,6 +193,26 @@ where
     drop(signal.await);
 }
 
+fn gateway_for_startup(
+    sqlite_path: Option<&str>,
+    config: StoreConfig,
+    owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+    erasure_gate: Arc<ErasureContainmentGateV1>,
+) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
+    match (owntracks_owner_key, sqlite_path) {
+        (Some(owner_key), Some(path)) => Ok(Gateway::new_with_owntracks_ingress_and_erasure_gate(
+            pos_store::sqlite::SqliteStore::open(path)?,
+            owner_key,
+            erasure_gate,
+        )?),
+        (None, _) => Ok(Gateway::new_with_erasure_gate(
+            open_store(config)?,
+            erasure_gate,
+        )?),
+        (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 async fn serve(
     addr: SocketAddr,
@@ -226,15 +246,12 @@ async fn serve_with_owntracks(
     // Keep every protected boundary fail-closed until the host installs
     // verified evidence and Timeline/Fork bindings.
     let erasure_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
-    let gateway = match (owntracks_owner_key.as_ref(), sqlite_path) {
-        (Some(owner_key), Some(path)) => Gateway::new_with_owntracks_ingress_and_erasure_gate(
-            pos_store::sqlite::SqliteStore::open(path)?,
-            owner_key,
-            erasure_gate,
-        )?,
-        (None, _) => Gateway::new_with_erasure_gate(open_store(config)?, erasure_gate)?,
-        (Some(_), None) => return Err("OwnTracks ingress requires an SQLite path".into()),
-    };
+    let gateway = gateway_for_startup(
+        sqlite_path,
+        config,
+        owntracks_owner_key.as_ref(),
+        erasure_gate,
+    )?;
     let app = router_for_addr(
         addr,
         AppState {

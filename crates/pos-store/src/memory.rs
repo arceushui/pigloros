@@ -2614,6 +2614,13 @@ impl EventStore for MemoryStore {
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
+        self.create_timeline_with_meta_with_erasure_fence(meta)
+    }
+
+    fn create_timeline_with_meta_with_erasure_fence(
+        &mut self,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
         let mut create = |store: &mut Self| {
             // Resolve fork parent before duplicate-id check (parity with SqliteStore).
             let chain = if let Some((parent, at_seq)) = meta.fork_point {
