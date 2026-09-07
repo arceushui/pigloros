@@ -459,20 +459,8 @@ impl SandboxTerminalOutcome {
     }
 }
 
-fn unique_event_position(
-    events: &[u8],
-    event: u8,
-) -> Result<Option<usize>, SandboxProviderProtocolError> {
-    let mut positions = events
-        .iter()
-        .enumerate()
-        .filter_map(|(position, candidate)| (*candidate == event).then_some(position));
-    let position = positions.next();
-    if positions.next().is_some() {
-        Err(SandboxProviderProtocolError::InconsistentFields)
-    } else {
-        Ok(position)
-    }
+fn event_position(events: &[u8], event: u8) -> Option<usize> {
+    events.iter().position(|candidate| *candidate == event)
 }
 
 fn valid_lifecycle_prefix(events: &[u8]) -> bool {
@@ -518,9 +506,9 @@ fn validate_lifecycle_events(
     events: &[u8],
     receipt: &SandboxProviderReceipt,
 ) -> Result<(), SandboxProviderProtocolError> {
-    let ready = unique_event_position(events, LAUNCHER_READY_EVENT)?;
-    let released = unique_event_position(events, EXECUTION_RELEASED_EVENT)?;
-    let denied = unique_event_position(events, EXECUTION_RELEASE_DENIED_EVENT)?;
+    let ready = event_position(events, LAUNCHER_READY_EVENT);
+    let released = event_position(events, EXECUTION_RELEASED_EVENT);
+    let denied = event_position(events, EXECUTION_RELEASE_DENIED_EVENT);
     let stage_matches = if receipt.release1_digest.is_some() {
         denied.is_none()
             && ready
