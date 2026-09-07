@@ -19,7 +19,7 @@ impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
     }
 }
 
-fn reference(byte: u8) -> ErasureReferenceV1 {
+const fn reference(byte: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([byte; 32])
 }
 
@@ -56,12 +56,12 @@ fn every_artifact_class_uses_its_registered_one_way_transition() {
         ErasureArtifactClassV1::ForkOrSnapshot,
         ErasureArtifactClassV1::ConformanceReport,
     ];
-    for (index, artifact_class) in classes.into_iter().enumerate() {
+    for (byte, artifact_class) in (1_u8..).zip(classes) {
         let evaluation = ReplayClaimEvaluatorV1::evaluate(
             ErasureReplayClaimV1::Exact,
             &[input(
                 artifact_class,
-                index as u8 + 1,
+                byte,
                 ArtifactOptionalityV1::Required,
                 ArtifactTransitionRuleV1::RetainStructure,
                 ArtifactStateV1::TransitionApplied,
@@ -113,12 +113,12 @@ fn transition_rules_produce_the_adr_060_claims() {
             false,
         ),
     ];
-    for (index, (rule, expected, redaction, authoritative)) in cases.into_iter().enumerate() {
+    for (byte, (rule, expected, redaction, authoritative)) in (1_u8..).zip(cases) {
         let evaluation = ReplayClaimEvaluatorV1::evaluate(
             ErasureReplayClaimV1::Exact,
             &[input(
                 ErasureArtifactClassV1::ReproManifest,
-                index as u8 + 1,
+                byte,
                 ArtifactOptionalityV1::Required,
                 rule,
                 ArtifactStateV1::TransitionApplied,
