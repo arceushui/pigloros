@@ -3231,6 +3231,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn authority_bound_gateway_protects_reads_without_enumerating_missing_actor() {
         let actor = EntityId::new();
         let authorization = crate::authorization::test_authorization_for(actor);
