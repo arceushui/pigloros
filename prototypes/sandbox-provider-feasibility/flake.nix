@@ -11,26 +11,39 @@
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+      mkPrototype = pkgs: pkgs.rustPlatform.buildRustPackage {
+        pname = "sandbox-provider-feasibility";
+        version = "0.0.0";
+        src = pkgs.lib.cleanSource ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+        doCheck = false;
+      };
+      mkStaticPrototype = pkgs: pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+        pname = "sandbox-provider-feasibility-static";
+        version = "0.0.0";
+        src = pkgs.lib.cleanSource ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+        doCheck = false;
+      };
     in
     {
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          sandbox-provider-feasibility-static = mkStaticPrototype pkgs;
+          busybox-static = pkgs.pkgsStatic.busybox;
+        }
+      );
+
       checks = forAllSystems (
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          prototype = pkgs.rustPlatform.buildRustPackage {
-            pname = "sandbox-provider-feasibility";
-            version = "0.0.0";
-            src = pkgs.lib.cleanSource ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-            doCheck = false;
-          };
-          staticPrototype = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
-            pname = "sandbox-provider-feasibility-static";
-            version = "0.0.0";
-            src = pkgs.lib.cleanSource ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-            doCheck = false;
-          };
+          prototype = mkPrototype pkgs;
+          staticPrototype = mkStaticPrototype pkgs;
         in
         {
           sandbox-provider-host-profile = pkgs.testers.runNixOSTest {
@@ -156,22 +169,20 @@
               machine.succeed(
                   "nix --extra-experimental-features nix-command "
                   "path-info --json --recursive /run/current-system "
-                  "${staticPrototype} ${pkgs.pkgsStatic.busybox} "
-                  ">/tmp/guest-runtime-closure.json"
+                  ">/tmp/guest-system-closure.json"
               )
               closure_roots = machine.succeed(
                   "nix --extra-experimental-features nix-command "
-                  "path-info --json /run/current-system "
-                  "${staticPrototype} ${pkgs.pkgsStatic.busybox}"
+                  "path-info --json /run/current-system"
               )
               closure = machine.succeed(
-                  "cat /tmp/guest-runtime-closure.json"
+                  "cat /tmp/guest-system-closure.json"
               )
               closure_roots = __import__("json").loads(closure_roots)
               closure = __import__("json").loads(closure)
               closure_paths = set(closure)
               expected_roots = set(closure_roots)
-              assert len(expected_roots) == 3, expected_roots
+              assert len(expected_roots) == 1, expected_roots
               assert expected_roots.issubset(closure_paths), (
                   expected_roots,
                   closure_paths,
@@ -182,7 +193,16 @@
                       closure_paths
                   ), (path, entry)
               machine.copy_from_machine(
-                  "/tmp/guest-runtime-closure.json",
+                  "/tmp/guest-system-closure.json",
+                  "runtime-identity",
+              )
+              machine.succeed(
+                  "nix --extra-experimental-features nix-command "
+                  "path-info --json /run/current-system "
+                  ">/tmp/guest-system-root.json"
+              )
+              machine.copy_from_machine(
+                  "/tmp/guest-system-root.json",
                   "runtime-identity",
               )
 

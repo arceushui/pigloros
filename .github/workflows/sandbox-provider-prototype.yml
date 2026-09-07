@@ -72,9 +72,40 @@ jobs:
           grep -q 'invalid_signature=rejected-before-unit' pinned-host-profile.txt
           cp -RL result/sim1-evidence pinned-sim1-evidence
           cp -RL result/runtime-identity pinned-runtime-identity
-          test "$(find pinned-runtime-identity -name guest-runtime-closure.json -print -quit)"
-          test "$(jq 'length' "$(find pinned-runtime-identity \
-            -name guest-runtime-closure.json -print -quit)")" -gt 100
+          guest_closure=$(find pinned-runtime-identity \
+            -name guest-system-closure.json -print -quit)
+          guest_root=$(find pinned-runtime-identity \
+            -name guest-system-root.json -print -quit)
+          test -n "$guest_closure"
+          test -n "$guest_root"
+          static_prototype=$(nix build --no-write-lock-file --no-link \
+            --print-out-paths \
+            ".#packages.${NIX_SYSTEM}.sandbox-provider-feasibility-static")
+          static_busybox=$(nix build --no-write-lock-file --no-link \
+            --print-out-paths ".#packages.${NIX_SYSTEM}.busybox-static")
+          nix path-info --json --recursive "$static_prototype" "$static_busybox" \
+            >pinned-runtime-identity/static-runtime-closure.json
+          nix path-info --json "$static_prototype" "$static_busybox" \
+            >pinned-runtime-identity/static-runtime-roots.json
+          jq -s '.[0] * .[1]' "$guest_closure" \
+            pinned-runtime-identity/static-runtime-closure.json \
+            >pinned-runtime-identity/runtime-closure.json
+          jq -s '.[0] * .[1]' "$guest_root" \
+            pinned-runtime-identity/static-runtime-roots.json \
+            >pinned-runtime-identity/runtime-roots.json
+          jq -e --slurpfile roots pinned-runtime-identity/runtime-roots.json '
+            ($roots[0] | keys) as $root_paths
+            | (keys) as $closure_paths
+            | ($root_paths | length) == 3
+            and (($root_paths - $closure_paths) | length) == 0
+            and all(
+              .[];
+              (.narHash // "") != ""
+              and (((.references // []) - $closure_paths) | length) == 0
+            )
+          ' pinned-runtime-identity/runtime-closure.json
+          test "$(jq 'length' \
+            pinned-runtime-identity/runtime-closure.json)" -gt 100
       - name: Record pinned VM build closure
         working-directory: prototypes/sandbox-provider-feasibility
         run: |
