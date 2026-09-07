@@ -73,12 +73,12 @@ agr1-u = ["AGR1",1,id16,id16,digest32,digest32,digest32,digest32,digest32,
 agr1 = [agr1-u,digest32,bytes .size 64]
 
 spr1-u = ["SPR1",1,id16,digest32,digest32,digest32,digest32,digest32,digest32,
-  digest32,digest32,epoch,epoch,epoch,digest32,digest32,[* digest32],digest32,
-  digest32,digest32,digest32,digest32,digest32,digest32,key-id]
+  digest32,digest32,epoch,epoch,epoch,digest32,digest32,[* digest32],digest32 / null,
+  digest32 / null,digest32,digest32,digest32,digest32,digest32,key-id]
 spr1 = [spr1-u,digest32,bytes .size 64]
 
 spy1-u = ["SPY1",1,id16,id16,0..4,
-  payload-descriptor / null,digest32 / null,digest32 / null,[* 0..10],key-id]
+  payload-descriptor / null,digest32 / null,digest32 / null,[* 0..13],key-id]
 spy1 = [spy1-u,digest32,bytes .size 64]
 
 spe1-u = ["SPE1",1,(0..3) / null,id16 / null,digest32 / null,id16 / null,0..17,

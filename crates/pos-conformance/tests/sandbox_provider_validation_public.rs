@@ -275,6 +275,24 @@ fn independent_verifiers_propagate_public_validation_failures() -> TestResult {
         Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
     );
 
+    let mut release_without_ready = independent::SandboxProviderReceipt::from_canonical_cbor(
+        include_bytes!("../vectors/sandbox-provider-v1/spr1.cbor"),
+    )?;
+    release_without_ready.ready1_digest = None;
+    assert_eq!(
+        release_without_ready.verify_signature(&verifying_key),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+
+    let mut zero_ready = independent::SandboxProviderReceipt::from_canonical_cbor(include_bytes!(
+        "../vectors/sandbox-provider-v1/spr1.cbor"
+    ))?;
+    zero_ready.ready1_digest = Some([0; 32]);
+    assert_eq!(
+        zero_ready.verify_signature(&verifying_key),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+
     let mut response = independent::SandboxDescribeResponse::from_canonical_cbor(include_bytes!(
         "../vectors/sandbox-provider-v1/sdy1.cbor"
     ))?;

@@ -561,13 +561,13 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         hcp1_digest: digest(9),
         elm1_digest: digest(10),
         network_transcript_digests: vec![digest(11)],
-        ready1_digest: digest(12),
-        release1_digest: digest(13),
+        ready1_digest: Some(digest(12)),
+        release1_digest: Some(digest(13)),
         requested_configuration_evidence: digest(14),
         kernel_observation_evidence: digest(15),
         negative_probe_evidence: digest(16),
         termination_evidence: digest(17),
-        aud1_digest: digest(18),
+        sau1_digest: digest(18),
         runtime_attestation_key_id: "runtime-key".to_owned(),
         receipt_digest: [0; 32],
         signature: [0; 64],
@@ -583,15 +583,65 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         .verify_signature(&key.verifying_key())?;
     verify_and_materialize_vector("spr1", &receipt_bytes)?;
 
-    let mut missing_ready_evidence = receipt;
-    missing_ready_evidence.ready1_digest = [0; 32];
+    let mut before_ready = receipt.clone();
+    before_ready.ready1_digest = None;
+    before_ready.release1_digest = None;
+    let before_ready = before_ready.sign(&key)?;
+    let before_ready_bytes = before_ready.to_canonical_cbor()?;
     assert_eq!(
-        missing_ready_evidence.validate(),
+        SandboxProviderReceiptV1::from_canonical_cbor(&before_ready_bytes)?,
+        before_ready
+    );
+    assert_eq!(
+        independent::SandboxProviderReceipt::from_canonical_cbor(&before_ready_bytes)?
+            .ready1_digest,
+        None
+    );
+
+    let mut after_ready = receipt.clone();
+    after_ready.release1_digest = None;
+    let after_ready = after_ready.sign(&key)?;
+    let after_ready_bytes = after_ready.to_canonical_cbor()?;
+    assert_eq!(
+        SandboxProviderReceiptV1::from_canonical_cbor(&after_ready_bytes)?,
+        after_ready
+    );
+    assert_eq!(
+        independent::SandboxProviderReceipt::from_canonical_cbor(&after_ready_bytes)?
+            .release1_digest,
+        None
+    );
+
+    let mut release_without_ready = receipt.clone();
+    release_without_ready.ready1_digest = None;
+    assert_eq!(
+        release_without_ready.validate(),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+
+    let mut zero_ready_digest = receipt.clone();
+    zero_ready_digest.ready1_digest = Some([0; 32]);
+    assert_eq!(
+        zero_ready_digest.validate(),
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
 
+    let mut zero_release_digest = receipt.clone();
+    zero_release_digest.release1_digest = Some([0; 32]);
+    assert_eq!(
+        zero_release_digest.validate(),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+
+    let lifecycle_event = result_for_outcome(SandboxTerminalOutcomeV1::Completed)?;
+    for event in 11..=13 {
+        let mut result = lifecycle_event.clone();
+        result.operational_events = vec![event];
+        result.sign(&key)?;
+    }
+
     let mut unknown_event = result_for_outcome(SandboxTerminalOutcomeV1::Completed)?;
-    unknown_event.operational_events = vec![11];
+    unknown_event.operational_events = vec![14];
     assert_eq!(
         unknown_event.sign(&key).err(),
         Some(SandboxContractErrorV1::FieldOutOfBounds)

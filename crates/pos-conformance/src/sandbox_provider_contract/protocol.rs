@@ -438,10 +438,10 @@ pub struct SandboxProviderReceiptV1 {
     pub elm1_digest: [u8; 32],
     /// Ordered NXT1 transcript digests.
     pub network_transcript_digests: Vec<[u8; 32]>,
-    /// Exact `ReadyV1` digest.
-    pub ready1_digest: [u8; 32],
-    /// Exact `ReleaseV1` digest.
-    pub release1_digest: [u8; 32],
+    /// Exact `ReadyV1` digest, once a valid ready message existed.
+    pub ready1_digest: Option<[u8; 32]>,
+    /// Exact `ReleaseV1` digest, once a valid release was issued.
+    pub release1_digest: Option<[u8; 32]>,
     /// Final requested-configuration evidence digest.
     pub requested_configuration_evidence: [u8; 32],
     /// Final kernel-observation evidence digest.
@@ -450,8 +450,8 @@ pub struct SandboxProviderReceiptV1 {
     pub negative_probe_evidence: [u8; 32],
     /// Final termination evidence digest.
     pub termination_evidence: [u8; 32],
-    /// Terminal AUD1 digest.
-    pub aud1_digest: [u8; 32],
+    /// Terminal SAU1 digest.
+    pub sau1_digest: [u8; 32],
     /// Runtime-attestation signing-key identifier.
     pub runtime_attestation_key_id: String,
     /// Self-digest of the exact SPR1-U array.
@@ -1176,7 +1176,7 @@ impl SandboxProviderResultV1 {
             || self.attempt_id == [0; 16]
             || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
             || self.operational_events.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
-            || self.operational_events.iter().any(|code| *code > 10)
+            || self.operational_events.iter().any(|code| *code > 13)
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
@@ -1489,13 +1489,13 @@ impl SandboxProviderReceiptV1 {
             hcp1_digest: fixed(&unsigned[14])?,
             elm1_digest: fixed(&unsigned[15])?,
             network_transcript_digests: decode_digest_list(&unsigned[16])?,
-            ready1_digest: fixed(&unsigned[17])?,
-            release1_digest: fixed(&unsigned[18])?,
+            ready1_digest: optional_fixed(&unsigned[17])?,
+            release1_digest: optional_fixed(&unsigned[18])?,
             requested_configuration_evidence: fixed(&unsigned[19])?,
             kernel_observation_evidence: fixed(&unsigned[20])?,
             negative_probe_evidence: fixed(&unsigned[21])?,
             termination_evidence: fixed(&unsigned[22])?,
-            aud1_digest: fixed(&unsigned[23])?,
+            sau1_digest: fixed(&unsigned[23])?,
             runtime_attestation_key_id: text(&unsigned[24])?.to_owned(),
             receipt_digest: fixed(&fields[1])?,
             signature: fixed(&fields[2])?,
@@ -1507,22 +1507,25 @@ impl SandboxProviderReceiptV1 {
         let evidence = [
             self.hcp1_digest,
             self.elm1_digest,
-            self.ready1_digest,
-            self.release1_digest,
             self.requested_configuration_evidence,
             self.kernel_observation_evidence,
             self.negative_probe_evidence,
             self.termination_evidence,
-            self.aud1_digest,
+            self.sau1_digest,
         ];
         if self.attempt_id == [0; 16]
             || self.authority.has_zero_digest()
             || evidence.contains(&[0; 32])
             || self.network_transcript_digests.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
             || self.network_transcript_digests.contains(&[0; 32])
+            || self.ready1_digest == Some([0; 32])
+            || self.release1_digest == Some([0; 32])
             || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
+        }
+        if self.release1_digest.is_some() && self.ready1_digest.is_none() {
+            return Err(SandboxContractErrorV1::InconsistentFields);
         }
         Ok(())
     }
@@ -1546,13 +1549,13 @@ impl SandboxProviderReceiptV1 {
                     .map(|value| value_bytes(value))
                     .collect(),
             ),
-            value_bytes(&self.ready1_digest),
-            value_bytes(&self.release1_digest),
+            value_optional_bytes(self.ready1_digest.as_ref()),
+            value_optional_bytes(self.release1_digest.as_ref()),
             value_bytes(&self.requested_configuration_evidence),
             value_bytes(&self.kernel_observation_evidence),
             value_bytes(&self.negative_probe_evidence),
             value_bytes(&self.termination_evidence),
-            value_bytes(&self.aud1_digest),
+            value_bytes(&self.sau1_digest),
             value_text(&self.runtime_attestation_key_id),
         ]);
         Value::Array(fields)

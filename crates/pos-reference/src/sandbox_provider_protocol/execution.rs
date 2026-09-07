@@ -511,7 +511,7 @@ impl SandboxProviderResult {
         if self.request_id == [0; 16]
             || self.attempt_id == [0; 16]
             || self.operational_events.len() > MAX_LIST_ENTRIES
-            || self.operational_events.iter().any(|code| *code > 10)
+            || self.operational_events.iter().any(|code| *code > 13)
             || !valid_key_id(&self.runtime_attestation_key_id)
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
@@ -752,13 +752,13 @@ pub struct SandboxProviderReceipt {
     pub hcp1_digest: [u8; 32],
     pub elm1_digest: [u8; 32],
     pub network_transcript_digests: Vec<[u8; 32]>,
-    pub ready1_digest: [u8; 32],
-    pub release1_digest: [u8; 32],
+    pub ready1_digest: Option<[u8; 32]>,
+    pub release1_digest: Option<[u8; 32]>,
     pub requested_configuration_evidence: [u8; 32],
     pub kernel_observation_evidence: [u8; 32],
     pub negative_probe_evidence: [u8; 32],
     pub termination_evidence: [u8; 32],
-    pub aud1_digest: [u8; 32],
+    pub sau1_digest: [u8; 32],
     pub runtime_attestation_key_id: String,
     pub receipt_digest: [u8; 32],
     pub signature: [u8; 64],
@@ -781,13 +781,13 @@ impl SandboxProviderReceipt {
             hcp1_digest: digest32(&fields[14])?,
             elm1_digest: digest32(&fields[15])?,
             network_transcript_digests: decode_digest_list(&fields[16])?,
-            ready1_digest: digest32(&fields[17])?,
-            release1_digest: digest32(&fields[18])?,
+            ready1_digest: optional_digest(&fields[17])?,
+            release1_digest: optional_digest(&fields[18])?,
             requested_configuration_evidence: digest32(&fields[19])?,
             kernel_observation_evidence: digest32(&fields[20])?,
             negative_probe_evidence: digest32(&fields[21])?,
             termination_evidence: digest32(&fields[22])?,
-            aud1_digest: digest32(&fields[23])?,
+            sau1_digest: digest32(&fields[23])?,
             runtime_attestation_key_id: key_id(&fields[24])?,
             receipt_digest,
             signature,
@@ -814,16 +814,17 @@ impl SandboxProviderReceipt {
             || [
                 self.hcp1_digest,
                 self.elm1_digest,
-                self.ready1_digest,
-                self.release1_digest,
                 self.requested_configuration_evidence,
                 self.kernel_observation_evidence,
                 self.negative_probe_evidence,
                 self.termination_evidence,
-                self.aud1_digest,
+                self.sau1_digest,
             ]
             .contains(&[0; 32])
             || invalid_digest_list(&self.network_transcript_digests)
+            || self.ready1_digest == Some([0; 32])
+            || self.release1_digest == Some([0; 32])
+            || (self.release1_digest.is_some() && self.ready1_digest.is_none())
             || !valid_key_id(&self.runtime_attestation_key_id)
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
@@ -851,13 +852,13 @@ impl SandboxProviderReceipt {
             bytes_value(&self.hcp1_digest),
             bytes_value(&self.elm1_digest),
             digest_list_value(&self.network_transcript_digests),
-            bytes_value(&self.ready1_digest),
-            bytes_value(&self.release1_digest),
+            optional_digest_value(self.ready1_digest.as_ref()),
+            optional_digest_value(self.release1_digest.as_ref()),
             bytes_value(&self.requested_configuration_evidence),
             bytes_value(&self.kernel_observation_evidence),
             bytes_value(&self.negative_probe_evidence),
             bytes_value(&self.termination_evidence),
-            bytes_value(&self.aud1_digest),
+            bytes_value(&self.sau1_digest),
             text_value(&self.runtime_attestation_key_id),
         ]
     }
