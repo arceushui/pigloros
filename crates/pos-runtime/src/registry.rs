@@ -5258,7 +5258,7 @@ mod erasure_gate_coverage {
             .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
             .is_ok());
         let mut missing = missing.without_erasure_gate();
-        let mut missing_store = pos_store::MemoryStore::new();
+        let mut missing_store = pos_store::memory::MemoryStore::new();
         assert!(matches!(
             missing.append_and_commit_step_at(
                 &mut missing_store,
@@ -5274,7 +5274,7 @@ mod erasure_gate_coverage {
             .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
             .is_ok());
         rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
-        let mut rejecting_store = pos_store::MemoryStore::new();
+        let mut rejecting_store = pos_store::memory::MemoryStore::new();
         assert!(matches!(
             rejecting.append_and_commit_step_at(
                 &mut rejecting_store,
