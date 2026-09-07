@@ -1396,7 +1396,7 @@ impl PluginRegistry {
         observed_through: Seq,
         selection: AnchoredSelection,
         committed_events: &[Event],
-        operation: OperationContext,
+        operation: &OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_live_execution()?;
         self.step_anchored_transaction_live(
@@ -1404,7 +1404,7 @@ impl PluginRegistry {
             observed_through,
             selection,
             committed_events,
-            &operation,
+            operation,
         )
     }
 
@@ -2448,7 +2448,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
             &[],
-            OperationContext::Public,
+            &OperationContext::Public,
         )
     }
 
@@ -2468,7 +2468,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
             committed_events,
-            OperationContext::Public,
+            &OperationContext::Public,
         )
     }
 
@@ -2490,7 +2490,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
             committed_events,
-            OperationContext::Protected { token, now_secs },
+            &OperationContext::Protected { token, now_secs },
         )
     }
 
@@ -2561,7 +2561,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::All,
             &[],
-            OperationContext::Public,
+            &OperationContext::Public,
         )
     }
 
@@ -2580,7 +2580,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::All,
             committed_events,
-            OperationContext::Public,
+            &OperationContext::Public,
         )
     }
 
@@ -2601,7 +2601,7 @@ impl PluginRegistry {
             observed_through,
             AnchoredSelection::All,
             committed_events,
-            OperationContext::Protected { token, now_secs },
+            &OperationContext::Protected { token, now_secs },
         )
     }
 }
