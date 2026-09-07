@@ -2639,6 +2639,23 @@ mod tests {
                 .await,
             Err(GatewayError::ActionAuthorizationUnavailable)
         ));
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized(
+                    &TimelineId::new().to_string(),
+                    0,
+                    1,
+                    GatewayAuthorizationRequest::read(
+                        EntityId::new(),
+                        TimelineId::new(),
+                        0,
+                        1,
+                        WallTime::now(),
+                    ),
+                )
+                .await,
+            Err(GatewayError::AuthorizationUnavailable)
+        ));
         drop(gateway);
     }
 
@@ -2904,6 +2921,137 @@ mod tests {
             mismatched_target,
             GatewayError::AuthorizationDenied
         ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn authority_bound_gateway_action_paths_fail_closed_at_each_public_boundary() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_for(actor);
+        let audit_host = authorization.clone();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            authorization,
+        );
+        let timeline = gateway
+            .create_timeline("authority-action-boundaries")
+            .await
+            .test_ok();
+        let timeline_id = timeline.id().to_string();
+        let proposal = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_static(b"payload"),
+            Kind::new("world.action.submit"),
+        );
+
+        assert!(matches!(
+            gateway
+                .submit_proposed_action("not-a-timeline", proposal.clone())
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_proposed_action(&TimelineId::new().to_string(), proposal.clone())
+                .await,
+            Err(GatewayError::Store(CoreError::TimelineNotFound(_)))
+        ));
+        let malformed = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            CanonicalBytes::from_static(&[0xff]),
+            Kind::new("world.action.submit"),
+        );
+        assert!(matches!(
+            gateway
+                .submit_proposed_action(&timeline_id, malformed)
+                .await,
+            Err(GatewayError::ActionRejected(_))
+        ));
+
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    "not-a-timeline",
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "world.action.submit",
+                    "boundary-invalid-timeline",
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    &TimelineId::new().to_string(),
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "world.action.submit",
+                    "boundary-missing-timeline",
+                )
+                .await,
+            Err(GatewayError::Store(CoreError::TimelineNotFound(_)))
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    &timeline_id,
+                    "not-an-entity",
+                    EVENT_TYPE_ACTION,
+                    &payload,
+                    "world.action.submit",
+                    "boundary-invalid-entity",
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        let malformed_payload = serde_json::json!({"malformed": true});
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    &timeline_id,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &malformed_payload,
+                    "world.action.submit",
+                    "boundary-malformed-payload",
+                )
+                .await,
+            Err(GatewayError::ActionRejected(_))
+        ));
+        let appended = gateway
+            .submit_identified_json_action(
+                &timeline_id,
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "boundary-success",
+            )
+            .await
+            .test_ok();
+        assert_eq!(appended.event.entity, actor);
+        assert_eq!(audit_host.audits().await.len(), 1);
+        assert_eq!(
+            audit_host.audits().await[0].event_id(),
+            Some(appended.event.id)
+        );
+
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }

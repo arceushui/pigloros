@@ -897,6 +897,49 @@ mod tests {
     }
 
     #[test]
+    fn authorization_public_accessors_expose_the_bound_operation_and_audit() {
+        let fixture = fixture();
+        let mut request = action(&fixture);
+        request.capability_policy_revision = hash(10);
+        request.consent_policy_revision = hash(11);
+        let decision = fixture.authorization.evaluate(request.clone()).test_ok();
+        let audit = decision.audit();
+
+        assert_eq!(decision.authenticated(), &fixture.authenticated);
+        assert_eq!(decision.request(), &request);
+        assert_eq!(
+            decision.request_digest(),
+            decision.decision().request_digest()
+        );
+        assert_eq!(
+            decision.decision_digest(),
+            decision.decision().decision_digest()
+        );
+        assert_eq!(decision.operation_binding(), audit.operation_binding());
+        assert_eq!(audit.principal(), decision.principal());
+        assert_eq!(audit.actor_entity_id(), fixture.actor);
+        assert_eq!(audit.request_digest(), decision.request_digest());
+        assert_eq!(audit.decision_digest(), decision.decision_digest());
+        assert_eq!(audit.event_id(), None);
+        assert_eq!(
+            GatewayAuthorizationTarget::Action {
+                timeline_id: fixture.target_timeline,
+            }
+            .timeline_id(),
+            fixture.target_timeline
+        );
+        assert_eq!(
+            GatewayAuthorizationTarget::Read {
+                timeline_id: fixture.target_timeline,
+                from_position: Seq::from_u64(3),
+                limit: 2,
+            }
+            .timeline_id(),
+            fixture.target_timeline
+        );
+    }
+
+    #[test]
     fn denied_decision_does_not_enumerate_principal_or_entity() {
         let fixture = fixture();
         let mut request = action(&fixture);
