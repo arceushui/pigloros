@@ -424,6 +424,10 @@ impl GatewayAuthorization {
     ///
     /// The same commit lock used by Gateway appends prevents an update from
     /// racing a final authorization check and append.
+    ///
+    /// # Errors
+    /// Returns [`GatewayAuthorizationError::AuthorityUnavailable`] when the
+    /// host authority lock is poisoned and cannot be replaced safely.
     pub async fn replace_authority(
         &self,
         authority: PersistedAuthorityV1,
