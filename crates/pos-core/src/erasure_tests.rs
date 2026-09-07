@@ -938,14 +938,17 @@ fn containment_gate_allows_nested_store_fences() -> Result<(), ErasureErrorV1> {
     let gate = ErasureContainmentGateV1::new();
     let timeline = TimelineId::new();
     let mut invoked = false;
-    gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
-        assert_eq!(
-            gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
-                invoked = true;
-            }),
-            Ok(())
-        );
-    })?;
+    assert_eq!(
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
+            assert_eq!(
+                gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
+                    invoked = true;
+                }),
+                Ok(())
+            );
+        }),
+        Ok(())
+    );
     assert!(invoked);
     Ok(())
 }
@@ -963,14 +966,17 @@ fn containment_gate_rechecks_nested_timeline_authorization() -> Result<(), Erasu
     gate.bind_timeline(frozen, reference(7))
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     let mut invoked = false;
-    gate.with_fence(allowed, ErasureProtectedOperationV1::Read, &mut || {
-        assert_eq!(
-            gate.with_fence(frozen, ErasureProtectedOperationV1::Read, &mut || {
-                invoked = true;
-            }),
-            Err(ErasureContainmentErrorV1::AccessFrozen)
-        );
-    })?;
+    assert_eq!(
+        gate.with_fence(allowed, ErasureProtectedOperationV1::Read, &mut || {
+            assert_eq!(
+                gate.with_fence(frozen, ErasureProtectedOperationV1::Read, &mut || {
+                    invoked = true;
+                }),
+                Err(ErasureContainmentErrorV1::AccessFrozen)
+            );
+        }),
+        Ok(())
+    );
     assert!(!invoked);
     Ok(())
 }
