@@ -622,13 +622,13 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
     let causal_trace = causal_trace(events, &ids);
     let uncertainty = uncertainty_from_events(events);
     let participant_views = participant_views(events);
-    let contract = build_wave8_contract(
+    build_wave8_contract(
         context,
         &event_summaries,
         &factual_authoritative_events,
         &participant_views,
-    );
-    Ok(MoatProofEvidenceV1 {
+    )
+    .map(|contract| MoatProofEvidenceV1 {
         format_version: EVIDENCE_FORMAT_V1,
         manifest: ReproManifestV1 {
             format_version: EVIDENCE_FORMAT_V1,
@@ -663,6 +663,7 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
         host_closure: host_closure.clone(),
         contract,
     })
+    .map_err(MoatProofError::from)
 }
 
 fn causal_trace(events: &[Event], ids: &HashMap<EventId, u64>) -> Vec<CausalTraceEntryV1> {
@@ -1180,7 +1181,7 @@ fn build_counterfactual_contract(
     factual_events: &[AuthoritativeEventV1],
     policy_digest: [u8; 32],
     exogenous_digest: [u8; 32],
-) -> CounterfactualContractV1 {
+) -> Result<CounterfactualContractV1, pos_core::CoreError> {
     let parts =
         build_counterfactual_parts(input, fork_cut_seq, events, factual_events, policy_digest);
     let fork_id = id16_digest(&digest_domain(
@@ -1274,8 +1275,7 @@ fn build_counterfactual_contract(
         replay_claim: ReplayClaimV1::Exact,
         contract_digest: [0; 32],
     };
-    counterfactual.refresh_digest();
-    counterfactual
+    counterfactual.refresh_digest().map(|()| counterfactual)
 }
 
 fn build_atomicity(
@@ -1315,7 +1315,7 @@ fn build_wave8_contract(
     events: &[AuthoritativeEventV1],
     factual_events: &[AuthoritativeEventV1],
     participant_views: &[ParticipantViewV1],
-) -> Wave8ProofContractV1 {
+) -> Result<Wave8ProofContractV1, pos_core::CoreError> {
     let policy_digest = profile_digest();
     let room_parts = build_room_parts(
         context.input,
@@ -1330,7 +1330,7 @@ fn build_wave8_contract(
         &room_parts.principals,
         &room_parts.grants,
     );
-    let counterfactual = build_counterfactual_contract(
+    build_counterfactual_contract(
         context.input,
         context.timeline_id,
         context.fork_cut_seq,
@@ -1338,23 +1338,27 @@ fn build_wave8_contract(
         factual_events,
         policy_digest,
         room_parts.exogenous_digest,
-    );
-    let atomicity = build_atomicity(
-        context.input,
-        events,
-        context.failure_probes,
-        counterfactual.generation,
-        serialized_digest(&events.to_vec()),
-    );
-    Wave8ProofContractV1 {
-        scenario_room: room_parts.room,
-        plugin_boundary: wave8_plugin_boundary(),
-        knowledge_snapshots,
-        authorization_decisions,
-        counterfactual,
-        atomicity,
-        non_interference: wave8_non_interference_matrix(context.input.digest().unwrap_or([0; 32])),
-    }
+    )
+    .map(|counterfactual| {
+        let atomicity = build_atomicity(
+            context.input,
+            events,
+            context.failure_probes,
+            counterfactual.generation,
+            serialized_digest(&events.to_vec()),
+        );
+        Wave8ProofContractV1 {
+            scenario_room: room_parts.room,
+            plugin_boundary: wave8_plugin_boundary(),
+            knowledge_snapshots,
+            authorization_decisions,
+            counterfactual,
+            atomicity,
+            non_interference: wave8_non_interference_matrix(
+                context.input.digest().unwrap_or([0; 32]),
+            ),
+        }
+    })
 }
 
 fn owner_frontiers(nodes: &[DependencyNodeV1]) -> Vec<pos_conformance::OwnerFrontierV1> {

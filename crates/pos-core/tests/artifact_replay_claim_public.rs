@@ -82,6 +82,14 @@ fn every_artifact_class_uses_its_registered_one_way_transition() {
         );
         assert!(!evaluation.artifacts()[0].authoritative_use_permitted());
         assert_eq!(
+            evaluation.artifacts()[0].optionality(),
+            ArtifactOptionalityV1::Required
+        );
+        assert_eq!(
+            evaluation.require_complete_classes(&[artifact_class]),
+            Ok(())
+        );
+        assert_eq!(
             evaluation.artifacts()[0].redaction_state(),
             ArtifactRedactionStateV1::StructuralOnly
         );
@@ -284,6 +292,26 @@ fn empty_required_closure_cannot_claim_complete_evidence() {
             ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
             &[],
         ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+}
+
+#[test]
+fn optional_registration_does_not_satisfy_a_required_class_contract() {
+    let evaluation = ReplayClaimEvaluatorV1::evaluate(
+        ErasureReplayClaimV1::Exact,
+        &[input(
+            ErasureArtifactClassV1::Export,
+            41,
+            ArtifactOptionalityV1::Optional,
+            ArtifactTransitionRuleV1::PreserveExact,
+            ArtifactStateV1::Retained,
+        )],
+    )
+    .test_ok();
+
+    assert_eq!(
+        evaluation.require_complete_classes(&[ErasureArtifactClassV1::Export]),
         Err(ErasureErrorV1::ScopeInvalid)
     );
 }

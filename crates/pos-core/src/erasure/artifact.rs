@@ -236,6 +236,8 @@ pub struct EvaluatedArtifactClaimV1 {
     redaction_state: ArtifactRedactionStateV1,
     /// Whether this exact state may be used as authoritative runtime input.
     authoritative_use_permitted: bool,
+    /// Whether this member participates in the enclosing weakest-claim closure.
+    optionality: ArtifactOptionalityV1,
 }
 
 impl EvaluatedArtifactClaimV1 {
@@ -274,6 +276,12 @@ impl EvaluatedArtifactClaimV1 {
     pub const fn authoritative_use_permitted(&self) -> bool {
         self.authoritative_use_permitted
     }
+
+    /// Return whether this member is required by its enclosing claim.
+    #[must_use]
+    pub const fn optionality(&self) -> ArtifactOptionalityV1 {
+        self.optionality
+    }
 }
 
 /// Aggregate result plus canonically ordered per-artifact transitions.
@@ -304,6 +312,28 @@ impl ReplayClaimEvaluationV1 {
     #[must_use]
     pub fn artifacts(&self) -> &[EvaluatedArtifactClaimV1] {
         &self.artifacts
+    }
+
+    /// Require every class in an enclosing artifact contract to be represented
+    /// by at least one required member of this evaluation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when a required class is absent.
+    pub fn require_complete_classes(
+        &self,
+        required_classes: &[ErasureArtifactClassV1],
+    ) -> Result<(), ErasureErrorV1> {
+        if required_classes.iter().all(|required_class| {
+            self.artifacts.iter().any(|artifact| {
+                artifact.artifact_class == *required_class
+                    && artifact.optionality == ArtifactOptionalityV1::Required
+            })
+        }) {
+            Ok(())
+        } else {
+            Err(ErasureErrorV1::ScopeInvalid)
+        }
     }
 
     /// Require a registered artifact to remain eligible as authoritative input.
@@ -418,6 +448,7 @@ impl ReplayClaimEvaluatorV1 {
                         ErasureReplayClaimV1::Exact
                             | ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
                     ),
+                    optionality: input.registration.optionality,
                 }
             })
             .collect();

@@ -194,6 +194,7 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
 
 fn artifact_evaluation(
     transition_rule: pos_core::ArtifactTransitionRuleV1,
+    enclosing_claim: pos_core::ErasureReplayClaimV1,
 ) -> pos_core::ReplayClaimEvaluationV1 {
     use pos_core::{
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
@@ -201,7 +202,41 @@ fn artifact_evaluation(
         ReplayClaimEvaluatorV1,
     };
 
-    ok(ReplayClaimEvaluatorV1::evaluate(
+    let inputs = [
+        (ErasureArtifactClassV1::ReproManifest, 71),
+        (ErasureArtifactClassV1::CausalTrace, 72),
+        (ErasureArtifactClassV1::Export, 73),
+        (ErasureArtifactClassV1::ForkOrSnapshot, 74),
+    ]
+    .into_iter()
+    .map(|(artifact_class, digest_byte)| ArtifactClaimInputV1 {
+        registration: RegisteredArtifactV1::new(
+            artifact_class,
+            ErasureReferenceV1::from_digest([digest_byte; 32]),
+            ArtifactDataClassV1::PrivateSubjectData,
+            None,
+            ErasureReferenceV1::from_digest([72; 32]),
+            ArtifactOptionalityV1::Required,
+            transition_rule,
+        ),
+        current_claim: enclosing_claim,
+        state: ArtifactStateV1::TransitionApplied,
+    })
+    .collect::<Vec<_>>();
+    ok(ReplayClaimEvaluatorV1::evaluate(enclosing_claim, &inputs))
+}
+
+#[test]
+fn incomplete_artifact_closure_is_rejected_before_evidence_mutation() {
+    use pos_core::{
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1,
+        RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    };
+
+    let mut evidence = public_evidence_fixture();
+    let original = evidence.clone();
+    let incomplete = ok(ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::Exact,
         &[ArtifactClaimInputV1 {
             registration: RegisteredArtifactV1::new(
@@ -211,12 +246,18 @@ fn artifact_evaluation(
                 None,
                 ErasureReferenceV1::from_digest([72; 32]),
                 ArtifactOptionalityV1::Required,
-                transition_rule,
+                ArtifactTransitionRuleV1::PreserveExact,
             ),
             current_claim: ErasureReplayClaimV1::Exact,
-            state: ArtifactStateV1::TransitionApplied,
+            state: ArtifactStateV1::Retained,
         }],
-    ))
+    ));
+
+    assert_eq!(
+        evidence.apply_artifact_evaluation(&incomplete),
+        Err(EvidenceError::IncompleteArtifactClosure)
+    );
+    assert_eq!(evidence, original);
 }
 
 #[test]
@@ -227,9 +268,12 @@ fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
     let original_contract_digest = evidence.contract.counterfactual.contract_digest;
     evidence.causal_trace[0].relation = "deleted-subject-label".to_owned();
     evidence.causal_trace[0].visibility = "deleted-private-audience".to_owned();
-    let evaluation = artifact_evaluation(ArtifactTransitionRuleV1::RetainStructure);
+    let evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::RetainStructure,
+        pos_core::ErasureReplayClaimV1::Exact,
+    );
 
-    evidence.apply_artifact_evaluation(&evaluation);
+    ok(evidence.apply_artifact_evaluation(&evaluation));
 
     assert!(evidence.causal_trace.is_empty());
     assert_eq!(evidence.structural_causal_trace.len(), 1);
@@ -247,7 +291,7 @@ fn structural_evidence_export_replaces_causal_labels_with_minimized_edges() {
     );
     assert_eq!(
         evidence.contract.counterfactual.contract_digest,
-        evidence.contract.counterfactual.calculated_digest()
+        ok(evidence.contract.counterfactual.calculated_digest())
     );
     let json = ok(evidence.to_json());
     let cbor = ok(evidence.to_canonical_cbor());
@@ -268,9 +312,12 @@ fn redacted_view_export_removes_protected_causal_labels() {
     let mut evidence = public_evidence_fixture();
     evidence.causal_trace[0].relation = "deleted-subject-label".to_owned();
     evidence.causal_trace[0].visibility = "deleted-private-audience".to_owned();
-    let evaluation = artifact_evaluation(pos_core::ArtifactTransitionRuleV1::RedactViews);
+    let evaluation = artifact_evaluation(
+        pos_core::ArtifactTransitionRuleV1::RedactViews,
+        pos_core::ErasureReplayClaimV1::Exact,
+    );
 
-    evidence.apply_artifact_evaluation(&evaluation);
+    ok(evidence.apply_artifact_evaluation(&evaluation));
 
     assert_eq!(
         evidence.manifest.replay_claim,
@@ -289,11 +336,46 @@ fn redacted_view_export_removes_protected_causal_labels() {
 }
 
 #[test]
+fn incompatible_profile_remains_orthogonal_to_structural_and_view_redaction() {
+    use pos_core::{ArtifactTransitionRuleV1, ErasureReplayClaimV1};
+
+    let mut structural = public_evidence_fixture();
+    let structural_evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::RetainStructure,
+        ErasureReplayClaimV1::IncompatibleProfile,
+    );
+    ok(structural.apply_artifact_evaluation(&structural_evaluation));
+    assert_eq!(
+        structural.manifest.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert!(structural.causal_trace.is_empty());
+    assert_eq!(structural.structural_causal_trace.len(), 1);
+    assert_eq!(verify_evidence(&structural), Ok(()));
+    assert!(structural.to_canonical_cbor().is_ok());
+
+    let mut redacted = public_evidence_fixture();
+    let redacted_evaluation = artifact_evaluation(
+        ArtifactTransitionRuleV1::RedactViews,
+        ErasureReplayClaimV1::IncompatibleProfile,
+    );
+    ok(redacted.apply_artifact_evaluation(&redacted_evaluation));
+    assert_eq!(
+        redacted.manifest.replay_claim,
+        ReplayClaimV1::IncompatibleProfile
+    );
+    assert_eq!(redacted.causal_trace[0].relation, "redacted");
+    assert_eq!(redacted.causal_trace[0].visibility, "redacted");
+    assert_eq!(verify_evidence(&redacted), Ok(()));
+    assert!(redacted.to_canonical_cbor().is_ok());
+}
+
+#[test]
 fn public_serializers_reject_contradictory_structural_evidence() {
     let mut evidence = public_evidence_fixture();
     evidence.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
     evidence.contract.counterfactual.replay_claim = ReplayClaimV1::StructuralOnly;
-    evidence.contract.counterfactual.refresh_digest();
+    ok(evidence.contract.counterfactual.refresh_digest());
 
     expect_err(&evidence.to_json());
     expect_err(&evidence.to_canonical_cbor());
@@ -302,8 +384,11 @@ fn public_serializers_reject_contradictory_structural_evidence() {
 #[test]
 fn missing_artifacts_never_produce_an_exact_verification_outcome() {
     let mut evidence = public_evidence_fixture();
-    let evaluation = artifact_evaluation(pos_core::ArtifactTransitionRuleV1::Remove);
-    evidence.apply_artifact_evaluation(&evaluation);
+    let evaluation = artifact_evaluation(
+        pos_core::ArtifactTransitionRuleV1::Remove,
+        pos_core::ErasureReplayClaimV1::Exact,
+    );
+    ok(evidence.apply_artifact_evaluation(&evaluation));
 
     let result = ok(evidence.to_verification_result());
 
@@ -328,7 +413,7 @@ fn incompatible_profile_produces_a_typed_non_exact_verification_outcome() {
     let mut evidence = public_evidence_fixture();
     evidence.manifest.replay_claim = ReplayClaimV1::IncompatibleProfile;
     evidence.contract.counterfactual.replay_claim = ReplayClaimV1::IncompatibleProfile;
-    evidence.contract.counterfactual.refresh_digest();
+    ok(evidence.contract.counterfactual.refresh_digest());
 
     let result = ok(evidence.to_verification_result());
 
@@ -468,7 +553,7 @@ fn counterfactual_fixture() -> CounterfactualContractV1 {
         replay_claim: ReplayClaimV1::Exact,
         contract_digest: [0; 32],
     };
-    contract.refresh_digest();
+    ok(contract.refresh_digest());
     contract
 }
 
@@ -1297,9 +1382,27 @@ fn public_record_variants_round_trip_at_the_wire_seam() {
                 result.divergence_report_digest = Some([26; 32]);
             }
             VerificationOutcomeV1::InvalidManifest
-            | VerificationOutcomeV1::UnverifiableArtifactsMissing
-            | VerificationOutcomeV1::IncompatibleProfile
             | VerificationOutcomeV1::ResourceLimitExceeded => {
+                result.authoritative_result_digest = None;
+                result.first_error = Some(VerificationErrorV1 {
+                    code,
+                    field_ordinal: Some(1),
+                    canonical_coordinate: Some(vec![2, 3]),
+                    related_digest: Some([27; 32]),
+                });
+            }
+            VerificationOutcomeV1::UnverifiableArtifactsMissing => {
+                result.replay_claim = ReplayClaimV1::StructuralOnly;
+                result.authoritative_result_digest = None;
+                result.first_error = Some(VerificationErrorV1 {
+                    code,
+                    field_ordinal: Some(1),
+                    canonical_coordinate: Some(vec![2, 3]),
+                    related_digest: Some([27; 32]),
+                });
+            }
+            VerificationOutcomeV1::IncompatibleProfile => {
+                result.replay_claim = ReplayClaimV1::IncompatibleProfile;
                 result.authoritative_result_digest = None;
                 result.first_error = Some(VerificationErrorV1 {
                     code,
@@ -1336,6 +1439,10 @@ fn public_record_rejections_cover_semantic_boundaries() {
         mutate(&mut invalid);
         expect_err(&invalid.to_canonical_cbor());
     }
+    let mut overstated = result.clone();
+    overstated.replay_claim = ReplayClaimV1::StructuralOnly;
+    overstated.result_digest = ok(overstated.digest());
+    expect_err(&overstated.to_canonical_cbor());
     let mut oversized_coordinate = result.clone();
     oversized_coordinate.verification_outcome = VerificationOutcomeV1::InvalidManifest;
     oversized_coordinate.authoritative_result_digest = None;

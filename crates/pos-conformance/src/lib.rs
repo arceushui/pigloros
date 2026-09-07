@@ -1005,23 +1005,30 @@ impl CounterfactualContractV1 {
     pub fn apply_artifact_evaluation(
         &mut self,
         evaluation: &pos_core::ReplayClaimEvaluationV1,
-    ) {
-        self.replay_claim = self.replay_claim.after_artifact_evaluation(evaluation);
-        self.refresh_digest();
+    ) -> Result<(), pos_core::CoreError> {
+        let mut candidate = self.clone();
+        candidate.replay_claim = candidate.replay_claim.after_artifact_evaluation(evaluation);
+        candidate.refresh_digest().map(|()| {
+            *self = candidate;
+        })
     }
 
     /// Recompute the contract identity after a host-owned claim transition.
-    pub fn refresh_digest(&mut self) {
-        self.contract_digest = [0; 32];
-        self.contract_digest = self.calculated_digest();
+    pub fn refresh_digest(&mut self) -> Result<(), pos_core::CoreError> {
+        self.calculated_digest().map(|digest| {
+            self.contract_digest = digest;
+        })
     }
 
     /// Return the identity derived from the contract with its digest field zeroed.
-    #[must_use]
-    pub fn calculated_digest(&self) -> [u8; 32] {
+    ///
+    /// # Errors
+    /// Returns the canonical serialization error when the contract cannot be
+    /// represented by the shared deterministic codec.
+    pub fn calculated_digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
         let mut canonical = self.clone();
         canonical.contract_digest = [0; 32];
-        typed_digest(b"PiglorOS.Wave8.ContractValue.v1", &canonical).unwrap_or([0; 32])
+        typed_digest(b"PiglorOS.Wave8.ContractValue.v1", &canonical)
     }
 }
 
@@ -1569,29 +1576,53 @@ pub struct DivergenceReportV1 {
 
 impl MoatProofEvidenceV1 {
     /// Apply one host-owned artifact evaluation to every evidence closure.
-    pub fn apply_artifact_evaluation(&mut self, evaluation: &pos_core::ReplayClaimEvaluationV1) {
-        self.manifest.apply_artifact_evaluation(evaluation);
-        self.contract
-            .counterfactual
-            .apply_artifact_evaluation(evaluation);
-        let redaction = RedactionStateV1::None.after_artifact_evaluation(evaluation);
-        if redaction == RedactionStateV1::RedactedViews {
-            for edge in &mut self.causal_trace {
-                edge.relation = "redacted".to_owned();
-                edge.visibility = "redacted".to_owned();
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::IncompleteArtifactClosure`] when the evaluation
+    /// omits a required evidence class, or [`EvidenceError::InvalidDependencyGraph`]
+    /// when the counterfactual digest cannot be refreshed.
+    pub fn apply_artifact_evaluation(
+        &mut self,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) -> Result<(), EvidenceError> {
+        const REQUIRED_CLASSES: [pos_core::ErasureArtifactClassV1; 4] = [
+            pos_core::ErasureArtifactClassV1::ReproManifest,
+            pos_core::ErasureArtifactClassV1::CausalTrace,
+            pos_core::ErasureArtifactClassV1::Export,
+            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+        ];
+        let counterfactual_refreshed = evaluation
+            .require_complete_classes(&REQUIRED_CLASSES)
+            .map_err(|_| EvidenceError::IncompleteArtifactClosure)
+            .and_then(|()| {
+                self.contract
+                    .counterfactual
+                    .apply_artifact_evaluation(evaluation)
+                    .map_err(|_| EvidenceError::InvalidDependencyGraph)
+            });
+        counterfactual_refreshed.map(|()| {
+            self.manifest.apply_artifact_evaluation(evaluation);
+            let redaction = RedactionStateV1::None.after_artifact_evaluation(evaluation);
+            if redaction == RedactionStateV1::RedactedViews {
+                for edge in &mut self.causal_trace {
+                    edge.relation = "redacted".to_owned();
+                    edge.visibility = "redacted".to_owned();
+                }
+            } else if matches!(
+                self.manifest.replay_claim,
+                ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
+            ) || matches!(
+                redaction,
+                RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing
+            ) {
+                self.structural_causal_trace = self
+                    .causal_trace
+                    .iter()
+                    .map(CausalTraceEntryV1::structural)
+                    .collect();
+                self.causal_trace.clear();
             }
-        } else if matches!(
-            self.manifest.replay_claim,
-            ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
-        ) || matches!(redaction, RedactionStateV1::StructuralOnly | RedactionStateV1::EvidenceMissing)
-        {
-            self.structural_causal_trace = self
-                .causal_trace
-                .iter()
-                .map(CausalTraceEntryV1::structural)
-                .collect();
-            self.causal_trace.clear();
-        }
+        })
     }
 
     /// Serialize to the portable evidence envelope.
@@ -1961,7 +1992,10 @@ pub mod strict_codec {
             projections: decode_projections(&fields[4])?,
             causal_trace: decode_traces(&fields[5])?,
             structural_causal_trace: if structural {
-                decode_structural_traces(&fields[6])?
+                match decode_structural_traces(&fields[6]) {
+                    Ok(trace) => trace,
+                    Err(error) => return Err(error),
+                }
             } else {
                 Vec::new()
             },
@@ -2098,22 +2132,23 @@ pub mod strict_codec {
     }
 
     fn validate_verification_result(result: &VerificationResultV1) -> Result<(), StrictCborError> {
-        let valid = match result.verification_outcome {
-            VerificationOutcomeV1::VerifiedExact => {
-                result.authoritative_result_digest.is_some()
-                    && result.divergence_report_digest.is_none()
-                    && result.first_error.is_none()
-            }
-            VerificationOutcomeV1::Diverged => {
-                result.divergence_report_digest.is_some() && result.first_error.is_none()
-            }
-            VerificationOutcomeV1::InvalidManifest
-            | VerificationOutcomeV1::UnverifiableArtifactsMissing
-            | VerificationOutcomeV1::IncompatibleProfile
-            | VerificationOutcomeV1::ResourceLimitExceeded => {
-                result.first_error.is_some() && result.divergence_report_digest.is_none()
-            }
-        };
+        let valid = verification_outcome_matches_claim(result)
+            && match result.verification_outcome {
+                VerificationOutcomeV1::VerifiedExact => {
+                    result.authoritative_result_digest.is_some()
+                        && result.divergence_report_digest.is_none()
+                        && result.first_error.is_none()
+                }
+                VerificationOutcomeV1::Diverged => {
+                    result.divergence_report_digest.is_some() && result.first_error.is_none()
+                }
+                VerificationOutcomeV1::InvalidManifest
+                | VerificationOutcomeV1::UnverifiableArtifactsMissing
+                | VerificationOutcomeV1::IncompatibleProfile
+                | VerificationOutcomeV1::ResourceLimitExceeded => {
+                    result.first_error.is_some() && result.divergence_report_digest.is_none()
+                }
+            };
         if !valid
             || result.checked_artifact_count > 65_536
             || result.provenance_digest == [0; 32]
@@ -2135,6 +2170,24 @@ pub mod strict_codec {
             }
         }
         Ok(())
+    }
+
+    const fn verification_outcome_matches_claim(result: &VerificationResultV1) -> bool {
+        match result.verification_outcome {
+            VerificationOutcomeV1::VerifiedExact | VerificationOutcomeV1::Diverged => matches!(
+                result.replay_claim,
+                ReplayClaimV1::Exact | ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+            ),
+            VerificationOutcomeV1::UnverifiableArtifactsMissing => matches!(
+                result.replay_claim,
+                ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
+            ),
+            VerificationOutcomeV1::IncompatibleProfile => {
+                result.replay_claim == ReplayClaimV1::IncompatibleProfile
+            }
+            VerificationOutcomeV1::InvalidManifest
+            | VerificationOutcomeV1::ResourceLimitExceeded => true,
+        }
     }
 
     fn decode_verification_error(value: &Value) -> Result<VerificationErrorV1, StrictCborError> {
@@ -4716,11 +4769,19 @@ fn verify_causal_trace(
     if !event_causation_is_valid(events, sequences) {
         return Err(EvidenceError::InvalidCausalEdge);
     }
-    let structurally_redacted = matches!(
+    let structurally_redacted_by_claim = matches!(
         replay_claim,
         ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing
     );
-    let labels_redacted = replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
+    let incompatible = replay_claim == ReplayClaimV1::IncompatibleProfile;
+    let structurally_redacted = structurally_redacted_by_claim
+        || (incompatible && trace.is_empty() && !structural_trace.is_empty());
+    let labels_redacted = replay_claim == ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        || (incompatible
+            && !trace.is_empty()
+            && trace.iter().all(|edge| {
+                edge.relation == "redacted" && edge.visibility == "redacted"
+            }));
     if !causal_trace_shape_is_valid(
         trace,
         structural_trace,
@@ -5142,7 +5203,9 @@ fn counterfactual_header_is_valid(evidence: &MoatProofEvidenceV1) -> bool {
         .replay_claim
         .is_no_stronger_than(evidence.manifest.replay_claim)
         && counterfactual.contract_digest != [0; 32]
-        && counterfactual.contract_digest == counterfactual.calculated_digest()
+        && counterfactual
+            .calculated_digest()
+            .is_ok_and(|digest| counterfactual.contract_digest == digest)
         && counterfactual.frontier.frontier_digest != [0; 32]
         && counterfactual.invalidation.invalidation_digest != [0; 32]
         && counterfactual.frontier.unknown_edge_policy == UnknownEdgePolicyV1::Reject
@@ -5982,6 +6045,8 @@ pub enum EvidenceError {
     InvalidKnowledgeBoundary,
     #[error("counterfactual dependency graph or generation contract is invalid")]
     InvalidDependencyGraph,
+    #[error("artifact evaluation omits a required evidence class")]
+    IncompleteArtifactClosure,
     #[error("counterfactual contract does not prove a complete endogenous suffix")]
     IncompleteRecomputationContract,
     #[error("atomic Tick failure evidence is incomplete")]
@@ -6319,7 +6384,11 @@ pub mod tests {
             replay_claim: ReplayClaimV1::Exact,
             contract_digest: [0; 32],
         };
-        contract.refresh_digest();
+        contract.refresh_digest().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "counterfactual fixture digest failed: {error}"
+            )))
+        });
         contract
     }
 
