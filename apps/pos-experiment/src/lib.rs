@@ -8662,7 +8662,7 @@ mod fault_injection_tests {
             .is_err());
 
         let authority = ConsentAuthority::new();
-        let mut expired_store = pos_store::memory::MemoryStore::new();
+        let mut expired_store = open_store(StoreConfig::Memory).test_ok();
         let timeline = expired_store
             .create_timeline("branch-token-expired")
             .test_ok();
