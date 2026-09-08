@@ -877,12 +877,9 @@ fn capture_digest(
 ) -> [u8; 32] {
     let mut bytes = Vec::new();
     append_bytes(&mut bytes, fixture.fixture_id.as_bytes());
-    append_bytes(
-        &mut bytes,
-        non_interference_normalization_policy_v1(&fixture.fixture_id)
-            .unwrap_or_default()
-            .as_bytes(),
-    );
+    if let Some(profile) = capture_profile(&fixture.fixture_id) {
+        bytes.extend_from_slice(&profile.profile_digest);
+    }
     for (name, surface) in non_interference_surface_names_v1(&fixture.fixture_id)
         .unwrap_or_default()
         .iter()
