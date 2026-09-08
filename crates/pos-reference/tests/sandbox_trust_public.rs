@@ -4,7 +4,8 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
     SandboxAdministratorPolicy, SandboxProviderProtocolError as ProtocolError,
-    SandboxRevocationSnapshot, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    SandboxRevocationSnapshot, SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole,
+    SandboxTrustSnapshot, SelectorRevocationState,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -147,6 +148,66 @@ fn trusted_registry(role: u64) -> TestResult<SandboxTrustSnapshot> {
         "root",
         &root.verifying_key(),
     )?)
+}
+
+fn update_registry() -> TestResult<SandboxTrustSnapshot> {
+    let root = SigningKey::from_bytes(&[1; 32]);
+    let bytes = sign_trust_snapshot(
+        snapshot(
+            vec![key_record("policy", 1), key_record("runtime", 3)],
+            vec![],
+            "root",
+        ),
+        &root,
+    )?;
+    Ok(SandboxTrustSnapshot::authenticate(
+        &bytes,
+        "root",
+        &root.verifying_key(),
+    )?)
+}
+
+fn revocation_update(
+    current: &SandboxRevocationSnapshot,
+    next_bytes: &[u8],
+    next: &SandboxRevocationSnapshot,
+    signer: &SigningKey,
+    nonce: [u8; 16],
+) -> TestResult<Vec<u8>> {
+    sign_record(
+        "RCU1",
+        Value::Array(vec![
+            Value::Text("RCU1".to_owned()),
+            integer(1),
+            Value::Bytes(vec![21; 16]),
+            Value::Bytes(current.snapshot_digest().to_vec()),
+            Value::Bytes(next_bytes.to_vec()),
+            Value::Bytes(next.snapshot_digest().to_vec()),
+            Value::Bytes(nonce.to_vec()),
+            Value::Text("policy".to_owned()),
+        ]),
+        signer,
+    )
+}
+
+fn revocation_acknowledgement(
+    next: &SandboxRevocationSnapshot,
+    signer: &SigningKey,
+    cancelled: Vec<Value>,
+) -> TestResult<Vec<u8>> {
+    sign_record(
+        "RCA1",
+        Value::Array(vec![
+            Value::Text("RCA1".to_owned()),
+            integer(1),
+            Value::Bytes(vec![21; 16]),
+            Value::Bytes(next.snapshot_digest().to_vec()),
+            Value::Array(cancelled),
+            integer(0),
+            Value::Text("runtime".to_owned()),
+        ]),
+        signer,
+    )
 }
 
 fn policy_fields(
@@ -661,6 +722,55 @@ fn administrator_policy_rejects_each_malformed_field_and_collection() -> TestRes
     assert!(
         SandboxAdministratorPolicy::authenticate(&encode(&Value::Null)?, &trust, &revocation)
             .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn selector_revocation_state_requires_exact_timely_cancellation_acknowledgement() -> TestResult {
+    let trust = update_registry()?;
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let current = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&trust, 5, vec![]), &signer)?,
+        &trust,
+    )?;
+    let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
+    let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
+    let update = revocation_update(&current, &next_bytes, &next, &signer, [22; 16])?;
+    let cancelled = vec![[23; 16], [24; 16]];
+    let mut state = SelectorRevocationState::new(current.clone());
+    state.begin_update(&update, &trust, cancelled.clone(), 1_000)?;
+    state.begin_update(&update, &trust, cancelled.clone(), 1_001)?;
+
+    let wrong_ack = revocation_acknowledgement(&next, &signer, vec![Value::Bytes(vec![23; 16])])?;
+    assert_eq!(
+        state.acknowledge(&wrong_ack, "runtime", &signer.verifying_key(), 1_050),
+        Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+    );
+    let acknowledgement = revocation_acknowledgement(
+        &next,
+        &signer,
+        cancelled
+            .iter()
+            .map(|attempt| Value::Bytes(attempt.to_vec()))
+            .collect(),
+    )?;
+    state.acknowledge(&acknowledgement, "runtime", &signer.verifying_key(), 1_100)?;
+    assert_eq!(state.current().snapshot_digest(), next.snapshot_digest());
+    state.begin_update(&update, &trust, cancelled, 2_000)?;
+    state.acknowledge(&acknowledgement, "runtime", &signer.verifying_key(), 2_000)?;
+
+    let conflicting = revocation_update(&current, &next_bytes, &next, &signer, [25; 16])?;
+    assert_eq!(
+        state.begin_update(&conflicting, &trust, vec![], 2_000),
+        Err(SandboxRevocationUpdateError::RequestIdentityConflict)
+    );
+
+    let mut late = SelectorRevocationState::new(current);
+    late.begin_update(&update, &trust, vec![[23; 16], [24; 16]], 1_000)?;
+    assert_eq!(
+        late.acknowledge(&acknowledgement, "runtime", &signer.verifying_key(), 1_101,),
+        Err(SandboxRevocationUpdateError::AcknowledgementDeadline)
     );
     Ok(())
 }
