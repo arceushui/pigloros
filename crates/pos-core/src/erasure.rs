@@ -3914,6 +3914,22 @@ pub trait ErasureInventoryPersistencePortV1 {
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1>;
 }
 
+/// Adapter capability for the single atomic `ERSE1` and child-Fork commit.
+pub trait ErasureForkPersistencePortV1 {
+    /// Persist both prepared sides, or neither side, under one adapter boundary.
+    ///
+    /// A stable operation identity must return [`ErasureCasOutcomeV1::ExactRetry`]
+    /// only when its complete binding and both persisted effects are exact.
+    ///
+    /// # Errors
+    /// Returns a closed conflict, stale-generation, validation, or persistence
+    /// error without leaving either side visible.
+    fn commit_fork_admission(
+        &mut self,
+        admission: PreparedErasureForkAdmissionV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
+}
+
 /// `EventStore` adapter capability owned exclusively by the erasure execution host.
 ///
 /// This marker joins protected Event operations with the complete-inventory
@@ -4795,7 +4811,7 @@ pub struct ErasureForkAdmissionInputV1 {
 /// Adapters may inspect the bound values but cannot construct this capability.
 /// The value is produced only after coordinator recovery, lineage validation,
 /// and host admission have all succeeded.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedErasureForkAdmissionV1 {
     input: ErasureForkAdmissionInputV1,
     extension: ErasureScopeExtensionV1,
@@ -4855,6 +4871,62 @@ impl PreparedErasureForkAdmissionV1 {
     #[must_use]
     pub const fn mutation(&self) -> &PreparedErasureCasV1 {
         &self.mutation
+    }
+
+    /// Return the digest binding every idempotency-relevant admission field.
+    #[must_use]
+    pub fn binding_digest(&self) -> ErasureReferenceV1 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-admission/v1");
+        for reference in [
+            self.operation(),
+            self.expected_inventory_generation(),
+            self.child_scope(),
+            self.extension.reference(),
+            self.mutation.request(),
+            self.mutation.next_manifest().digest(),
+        ] {
+            hasher.update(&reference.digest());
+        }
+        match self.mutation.expected_manifest_digest() {
+            Some(reference) => {
+                hasher.update(&[1]);
+                hasher.update(&reference.digest());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&self.input.child.id.inner().to_bytes());
+        hasher.update(&[match self.input.child.mode {
+            crate::TimelineMode::Historical => 0,
+            crate::TimelineMode::Live => 1,
+            crate::TimelineMode::Future => 2,
+        }]);
+        match &self.input.child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        match self.input.child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        if let Some((parent, at_seq)) = self.input.child.fork_point {
+            hasher.update(&parent.inner().to_bytes());
+            hasher.update(&at_seq.as_u64().to_be_bytes());
+        }
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
     }
 }
 

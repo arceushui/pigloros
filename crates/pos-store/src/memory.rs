@@ -46,13 +46,13 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureGate, ErasureIndexInsertV1,
-    ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureGate,
+    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
+    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -181,6 +181,8 @@ pub struct MemoryStore {
     erasure_effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     erasure_effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
     erasure_recovery_errors: BTreeMap<ErasureReferenceV1, BTreeSet<ErasureReferenceV1>>,
+    /// Stable Fork operation identity to complete prepared-admission binding.
+    erasure_fork_admissions: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -511,6 +513,7 @@ impl MemoryStore {
             erasure_effects: BTreeMap::new(),
             erasure_effect_subjects: BTreeMap::new(),
             erasure_recovery_errors: BTreeMap::new(),
+            erasure_fork_admissions: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1398,6 +1401,67 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         }
         topology.sort_unstable();
         ErasurePersistenceInventorySnapshotV1::new(request_heads, topology, maximum_requests)
+    }
+}
+
+impl ErasureForkPersistencePortV1 for MemoryStore {
+    fn commit_fork_admission(
+        &mut self,
+        admission: PreparedErasureForkAdmissionV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        let binding = admission.binding_digest();
+        let operation = admission.operation();
+        let child = admission.child().clone();
+        let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
+        let chain_head = self
+            .compute_chain_hash_at_unchecked(parent, at_seq)
+            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
+
+        if let Some(stored_binding) = self.erasure_fork_admissions.get(&operation) {
+            let exact_child = self.timelines.get(&child.id).is_some_and(|state| {
+                state.timeline.meta == child
+                    && state.timeline.head == Seq::ZERO
+                    && state.events.is_empty()
+                    && state.chain_head == chain_head
+            });
+            let exact_manifest = self
+                .erasure_records
+                .get(&admission.mutation().request())
+                .is_some_and(|(digest, bytes)| {
+                    *digest == admission.mutation().next_manifest().digest()
+                        && bytes.as_slice() == admission.mutation().next_manifest().canonical_cbor()
+                });
+            return (*stored_binding == binding
+                && exact_child
+                && exact_manifest
+                && memory_mutation_is_exact(self, admission.mutation()))
+            .then_some(ErasureCasOutcomeV1::ExactRetry)
+            .ok_or(ErasureErrorV1::PolicyConflict);
+        }
+
+        let generation = self
+            .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+            .generation();
+        if generation != admission.expected_inventory_generation()
+            || self.timelines.contains_key(&child.id)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+
+        let timeline = Timeline::new(child);
+        let current_digest = self
+            .erasure_records
+            .get(&admission.mutation().request())
+            .map(|(digest, _)| *digest);
+        match apply_memory_erasure_cas(self, admission.mutation(), current_digest)? {
+            ErasureCasOutcomeV1::Applied => {
+                self.timelines
+                    .insert(timeline.id(), TimelineState::new(timeline, chain_head));
+                self.erasure_fork_admissions.insert(operation, binding);
+                Ok(ErasureCasOutcomeV1::Applied)
+            }
+            ErasureCasOutcomeV1::ExactRetry => Err(ErasureErrorV1::PolicyConflict),
+        }
     }
 }
 
@@ -2388,6 +2452,33 @@ impl MemoryStore {
         Ok(Seq::from_u64(logical_head))
     }
 
+    fn compute_chain_hash_at_unchecked(
+        &self,
+        timeline: TimelineId,
+        at_seq: Seq,
+    ) -> Result<Hash, CoreError> {
+        let logical_head = self.logical_head_unchecked(timeline)?;
+        if at_seq > logical_head {
+            return Err(CoreError::ForkBeyondHead {
+                fork_seq: at_seq.as_u64(),
+                head: logical_head.as_u64(),
+            });
+        }
+        let mut hash = self.hasher.genesis_hash();
+        if at_seq == Seq::ZERO {
+            return Ok(hash);
+        }
+        for event in
+            self.collect_events_in_range(timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))?
+        {
+            let id_str = event.id.to_string();
+            hash = self
+                .hasher
+                .hash_event(&hash, id_str.as_bytes(), &event.payload);
+        }
+        Ok(hash)
+    }
+
     fn create_timeline_with_meta_with_erasure_fence(
         &mut self,
         meta: &TimelineMeta,
@@ -2839,26 +2930,7 @@ impl EventStore for MemoryStore {
 impl MemoryStore {
     /// Compute the hash chain value at a specific seq in a timeline.
     fn compute_chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
-        let logical_head = self.logical_head(timeline)?;
-        if at_seq > logical_head {
-            return Err(CoreError::ForkBeyondHead {
-                fork_seq: at_seq.as_u64(),
-                head: logical_head.as_u64(),
-            });
-        }
-        let mut hash = self.hasher.genesis_hash();
-        if at_seq == Seq::ZERO {
-            return Ok(hash);
-        }
-        for event in
-            self.collect_events_in_range(timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))?
-        {
-            let id_str = event.id.to_string();
-            hash = self
-                .hasher
-                .hash_event(&hash, id_str.as_bytes(), &event.payload);
-        }
-        Ok(hash)
+        self.compute_chain_hash_at_unchecked(timeline, at_seq)
     }
 }
 

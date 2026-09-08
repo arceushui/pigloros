@@ -10,16 +10,18 @@ use pos_core::{
     ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
     ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1,
-    ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
+    ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureForkPersistencePortV1,
+    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
+    ErasureInventoryPersistencePortV1, ErasureInventoryResultV1, ErasureLifecycleV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
     ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureVerifiedTopologyObservationV1, ERASURE_MAX_RECOVERY_ERRORS,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureVerifiedTopologyObservationV1, EventStore, Seq, TimelineId, TimelineMeta, TimelineMode,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
 
@@ -91,6 +93,12 @@ struct Host<S> {
 
 type RetainedEffect = (ErasureReferenceV1, pos_core::ErasureCasEffectV1);
 type CompletedErasure<S> = (Rc<RefCell<S>>, ErasureRequestV1, Vec<RetainedEffect>);
+type PreparedMemoryFork = (
+    Rc<RefCell<MemoryStore>>,
+    ErasureReferenceV1,
+    TimelineId,
+    pos_core::PreparedErasureForkAdmissionV1,
+);
 
 impl<S: ErasurePersistencePortV1> ErasureStateResolverV1 for Host<S> {
     fn resolve_state(
@@ -221,7 +229,7 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
             request,
             scope_members: vec![reference(9)],
             target_closure: target_closure_digest(&targets),
-            lineage_rule: None,
+            lineage_rule: Some(reference(100)),
         };
         let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
         let evidence = requested.provenance.digest();
@@ -501,6 +509,70 @@ fn assert_empty_backend<S: ErasurePersistencePortV1>(
     Ok(())
 }
 
+fn prepared_memory_fork(
+    expected_generation: Option<ErasureReferenceV1>,
+) -> Result<PreparedMemoryFork, Box<dyn std::error::Error>> {
+    let mut store = MemoryStore::new();
+    let parent = store.create_timeline("fork-parent")?.id();
+    let shared = Rc::new(RefCell::new(store));
+    let request = request()?;
+    let required_target = target();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![required_target],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    coordinator.submit(request.clone(), request.provenance())?;
+    coordinator.authorize(request.reference(), reference(31))?;
+    coordinator.freeze_inventory(request.reference(), &transition())?;
+
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: request.reference(),
+        scope_members: vec![reference(9)],
+        target_closure: target_closure_digest(&[required_target]),
+        lineage_rule: Some(reference(100)),
+    })?;
+    let child_scope = reference(101);
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: request.reference(),
+        scope_commitment: scope.reference(),
+        fork: child_scope,
+        lineage_rule: reference(100),
+        predecessor_extension: None,
+        admission_provenance: reference(102),
+    })?;
+    let generation = match expected_generation {
+        Some(generation) => generation,
+        None => shared
+            .borrow_mut()
+            .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+            .generation(),
+    };
+    let child = TimelineId::new();
+    let prepared = coordinator.prepare_fork_admission(
+        request.reference(),
+        extension,
+        ErasureForkAdmissionInputV1 {
+            operation: reference(103),
+            expected_inventory_generation: generation,
+            child_scope,
+            child: TimelineMeta {
+                id: child,
+                mode: TimelineMode::Historical,
+                name: Some("admitted-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent, Seq::ZERO)),
+            },
+        },
+    )?;
+    Ok((shared, request.reference(), child, prepared))
+}
+
 #[test]
 fn memory_manifest_cas_survives_restart_and_retains_indexes(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -522,6 +594,51 @@ fn memory_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn
 fn memory_manifest_cas_accepts_exact_retry_for_every_effect(
 ) -> Result<(), Box<dyn std::error::Error>> {
     complete_with_retry_validation(MemoryStore::new(), true)?;
+    Ok(())
+}
+
+#[test]
+fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (store, request, child, prepared) = prepared_memory_fork(None)?;
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared.clone())?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    assert_eq!(store.borrow().scope_index_count(request)?, 1);
+    assert!(store
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (store, request, child, prepared) = prepared_memory_fork(Some(reference(104)))?;
+    let topology_before = store
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .to_vec();
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(store.borrow().scope_index_count(request)?, 0);
+    let topology_after = store
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .to_vec();
+    assert_eq!(topology_after, topology_before);
+    assert!(!topology_after.contains(&child));
     Ok(())
 }
 
