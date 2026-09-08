@@ -1301,8 +1301,7 @@ fn only_fork_mutation(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_fork_retry_rejects_corrupted_receipt_or_child() -> Result<(), Box<dyn std::error::Error>>
-{
+fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::error::Error>> {
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "UPDATE erasure_fork_admissions SET binding_digest=?1 WHERE operation_digest=?2",
@@ -1364,7 +1363,12 @@ fn sqlite_fork_retry_rejects_corrupted_receipt_or_child() -> Result<(), Box<dyn 
              WHERE operation_digest=?1",
             rusqlite::params![prepared.operation().digest().as_slice()],
         )
-    })?;
+    })
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_retry_rejects_corrupted_child() -> Result<(), Box<dyn std::error::Error>> {
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "DELETE FROM timelines WHERE id=?1",
