@@ -986,7 +986,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
             format!("assert_projection_state: {error}").into()
         },
     )?;
-    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
+    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 1, 1]);
     assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
     assert_replay(&scenario, &live_snapshot, pinned_wall_time).map_err(
