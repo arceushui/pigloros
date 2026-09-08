@@ -121,6 +121,8 @@ pub const ERASURE_RECOVERY_ERROR_TAG_V1: &str = "ERRE1";
 pub const ERASURE_MAX_RECOVERY_ERRORS: usize = 4_096;
 /// Largest complete erasure-request inventory admitted by the V1 host.
 pub const ERASURE_MAX_INVENTORY_REQUESTS: usize = 4_096;
+/// Largest complete Timeline/Fork topology admitted by the V1 host.
+pub const ERASURE_MAX_INVENTORY_TIMELINES: usize = 65_536;
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3743,6 +3745,73 @@ pub struct ErasureVerifiedTopologyObservationV1 {
     manifest_digest: ErasureReferenceV1,
     bindings: Vec<(TimelineId, ErasureReferenceV1)>,
     unaffected: Vec<TimelineId>,
+}
+
+/// Raw adapter snapshot of every durable erasure head and Timeline/Fork ID.
+///
+/// This value is intentionally not runtime authority. It proves what the
+/// adapter observed in one snapshot and is subsequently joined with
+/// independently verified authorization and scope classification by core.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasurePersistenceInventorySnapshotV1 {
+    request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    topology: Vec<TimelineId>,
+}
+
+impl ErasurePersistenceInventorySnapshotV1 {
+    /// Validate and retain one complete adapter observation.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when either collection exceeds
+    /// its admission ceiling, and [`ErasureErrorV1::ProvenanceMissing`] when
+    /// ordering or uniqueness is not canonical.
+    pub fn new(
+        request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+        topology: Vec<TimelineId>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureErrorV1> {
+        if maximum_requests == 0
+            || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS
+            || request_heads.len() > maximum_requests
+            || topology.len() > ERASURE_MAX_INVENTORY_TIMELINES
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if request_heads.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            || topology.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(Self {
+            request_heads,
+            topology,
+        })
+    }
+
+    /// Return canonical `(request reference, manifest head)` pairs.
+    #[must_use]
+    pub fn request_heads(&self) -> &[(ErasureReferenceV1, ErasureReferenceV1)] {
+        &self.request_heads
+    }
+
+    /// Return every Timeline/Fork ID in bytewise identity order.
+    #[must_use]
+    pub fn topology(&self) -> &[TimelineId] {
+        &self.topology
+    }
+}
+
+/// Adapter capability for one bounded, complete inventory read snapshot.
+pub trait ErasureInventoryPersistencePortV1 {
+    /// Read every durable erasure head and Timeline/Fork ID atomically.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, validation, provenance, or admission error.
+    /// The adapter must never truncate an over-limit result.
+    fn complete_erasure_inventory_snapshot(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1>;
 }
 
 /// One adapter-snapshot observation of every erasure head and Timeline/Fork.

@@ -47,11 +47,12 @@ use pos_core::{
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
     ErasureContainmentGateV1, ErasureErrorV1, ErasureGate, ErasureIndexInsertV1,
+    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
     ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
     KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
+    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -4611,6 +4612,70 @@ impl ErasureStateResolverV1 for SqliteStore {
         digest: ErasureReferenceV1,
     ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
         resolve_sqlite_erasure_state(&self.conn, digest)
+    }
+}
+
+impl ErasureInventoryPersistencePortV1 for SqliteStore {
+    fn complete_erasure_inventory_snapshot(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+        if maximum_requests == 0 || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let request_limit = i64::try_from(maximum_requests.saturating_add(1))
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        let topology_limit = i64::try_from(ERASURE_MAX_INVENTORY_TIMELINES.saturating_add(1))
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let request_heads = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT request_digest, manifest_digest FROM erasure_records
+                     ORDER BY request_digest LIMIT ?1",
+                )
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            let rows = statement
+                .query_map(params![request_limit], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            rows.map(|row| {
+                row.map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+                    .and_then(|(request, manifest)| {
+                        Ok((reference_from_sql(request)?, reference_from_sql(manifest)?))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        if request_heads.len() > maximum_requests {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let topology = {
+            let mut statement = transaction
+                .prepare("SELECT id FROM timelines ORDER BY id LIMIT ?1")
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            let rows = statement
+                .query_map(params![topology_limit], |row| row.get::<_, String>(0))
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            rows.map(|row| {
+                row.map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+                    .and_then(|id| {
+                        parse_timeline_id(&id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        if topology.len() > ERASURE_MAX_INVENTORY_TIMELINES {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        transaction
+            .commit()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        ErasurePersistenceInventorySnapshotV1::new(request_heads, topology, maximum_requests)
     }
 }
 

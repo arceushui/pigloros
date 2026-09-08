@@ -47,10 +47,12 @@ use pos_core::{
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
     ErasureContainmentGateV1, ErasureErrorV1, ErasureGate, ErasureIndexInsertV1,
-    ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
+    ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
     PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -1370,6 +1372,32 @@ impl ErasureStateResolverV1 for MemoryStore {
                 })
             })
             .transpose()
+    }
+}
+
+impl ErasureInventoryPersistencePortV1 for MemoryStore {
+    fn complete_erasure_inventory_snapshot(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+        if maximum_requests == 0 || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let request_heads = self
+            .erasure_records
+            .iter()
+            .take(maximum_requests.saturating_add(1))
+            .map(|(request, (manifest, _))| (*request, *manifest))
+            .collect::<Vec<_>>();
+        if request_heads.len() > maximum_requests {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let mut topology = self.timelines.keys().copied().collect::<Vec<_>>();
+        if topology.len() > ERASURE_MAX_INVENTORY_TIMELINES {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        topology.sort_unstable();
+        ErasurePersistenceInventorySnapshotV1::new(request_heads, topology, maximum_requests)
     }
 }
 
