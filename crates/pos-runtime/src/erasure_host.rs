@@ -710,6 +710,32 @@ mod tests {
             map_erasure_error(ErasureErrorV1::KeyRegistryUnavailable),
             ErasureHostErrorV1::AdapterFailure
         );
+        assert_eq!(
+            map_erasure_error(ErasureErrorV1::PolicyConflict),
+            ErasureHostErrorV1::Conflict
+        );
+        for error in [
+            ErasureErrorV1::UnsupportedVersion,
+            ErasureErrorV1::AccessFreezeFailed,
+            ErasureErrorV1::TrustSnapshotInvalid,
+            ErasureErrorV1::ProvenanceMissing,
+        ] {
+            assert_eq!(
+                map_erasure_error(error),
+                ErasureHostErrorV1::RecoveryUnavailable
+            );
+        }
+        for error in [
+            ErasureErrorV1::KeyDestructionFailed,
+            ErasureErrorV1::ArtifactDeletionFailed,
+            ErasureErrorV1::ReplicaTimeout,
+            ErasureErrorV1::ReplicaNegativeAcknowledgement,
+            ErasureErrorV1::BackupInventoryIncomplete,
+            ErasureErrorV1::BackupDeletionPending,
+            ErasureErrorV1::ReceiptCommitFailed,
+        ] {
+            assert_eq!(map_erasure_error(error), ErasureHostErrorV1::AdapterFailure);
+        }
     }
 
     #[test]
