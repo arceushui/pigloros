@@ -120,12 +120,12 @@ fn bind_backtest_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<Arc<dyn ErasureGate>, pos_core::CoreError> {
-    if let Some(existing) = registry.clone_erasure_gate() {
-        if !Arc::ptr_eq(&existing, &gate) {
+    match registry.clone_erasure_gate() {
+        Some(existing) if !Arc::ptr_eq(&existing, &gate) => {
             return Err(pos_core::CoreError::ErasureContainmentUnavailable);
         }
-    } else {
-        registry.bind_erasure_gate(Arc::clone(&gate));
+        Some(_) => {}
+        None => registry.bind_erasure_gate(Arc::clone(&gate)),
     }
     store.bind_erasure_gate(Arc::clone(&gate))?;
     Ok(gate)
@@ -135,12 +135,12 @@ fn inherit_backtest_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<(), pos_core::CoreError> {
-    if let Some(existing) = registry.clone_erasure_gate() {
-        if !Arc::ptr_eq(&existing, &gate) {
+    match registry.clone_erasure_gate() {
+        Some(existing) if !Arc::ptr_eq(&existing, &gate) => {
             return Err(pos_core::CoreError::ErasureContainmentUnavailable);
         }
-    } else {
-        registry.bind_erasure_gate(gate);
+        Some(_) => {}
+        None => registry.bind_erasure_gate(gate),
     }
     Ok(())
 }
