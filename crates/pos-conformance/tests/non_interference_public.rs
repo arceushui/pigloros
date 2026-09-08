@@ -211,6 +211,71 @@ fn fixture_admission_rejects_more_than_the_declared_unauthorized_delta() {
 }
 
 #[test]
+fn deserialized_fixture_validation_rechecks_fields_and_content_address() {
+    let valid = fixture();
+    assert_eq!(valid.validate(), Ok(()));
+
+    let mut stale_digest = valid.clone();
+    stale_digest.fixture_digest[0] ^= 1;
+    assert_eq!(
+        stale_digest.validate(),
+        Err(NonInterferenceExecutionErrorV1::FixtureInvalid)
+    );
+
+    let mut invalid_fields = valid;
+    invalid_fields.permitted_input.clear();
+    assert_eq!(
+        invalid_fields.validate(),
+        Err(NonInterferenceExecutionErrorV1::FixtureInvalid)
+    );
+}
+
+#[test]
+fn unknown_capture_profile_and_post_normalization_mutation_fail_closed() {
+    assert_eq!(
+        normalize_non_interference_capture_v1(
+            "unknown",
+            NonInterferenceRawCaptureV1 {
+                surface_names: Vec::new(),
+                authoritative: Vec::new(),
+                public: Vec::new(),
+                operational: Vec::new(),
+                unexpected_network_accesses: 0,
+                provenance_digest: [1; 32],
+            },
+        ),
+        Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+    );
+
+    for invalid_member in [
+        NonInterferenceMatrixMemberV1::Control,
+        NonInterferenceMatrixMemberV1::Canary,
+    ] {
+        assert_eq!(
+            execute_non_interference_pair(&fixture(), |run| {
+                let mut normalized = capture(b"captured");
+                if run.member == invalid_member {
+                    normalized.unexpected_network_accesses = 1;
+                }
+                Ok(normalized)
+            }),
+            Err(NonInterferenceExecutionErrorV1::UnexpectedNetworkAccess)
+        );
+
+        assert_eq!(
+            execute_non_interference_pair(&fixture(), |run| {
+                let mut normalized = capture(b"captured");
+                if run.member == invalid_member {
+                    normalized.authoritative.pop();
+                }
+                Ok(normalized)
+            }),
+            Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+        );
+    }
+}
+
+#[test]
 fn unavailable_capture_and_unexpected_network_access_fail_closed() {
     assert_eq!(
         execute_non_interference_pair(&fixture(), |_| {

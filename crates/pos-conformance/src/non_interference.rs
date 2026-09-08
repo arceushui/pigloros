@@ -735,11 +735,12 @@ where
         unauthorized_value: &fixture.canary_unauthorized_value,
     })?;
     canary.validate(&profile)?;
-    Ok(case_with_captures(fixture, control, canary))
+    Ok(case_with_captures(fixture, &profile, control, canary))
 }
 
 fn case_with_captures(
     fixture: &NonInterferenceFixturePairV1,
+    profile: &NonInterferenceCaptureProfileV1,
     control: NonInterferenceCaptureV1,
     canary: NonInterferenceCaptureV1,
 ) -> (
@@ -751,13 +752,15 @@ fn case_with_captures(
     let public_equal = control.public == canary.public;
     let operational_equal = control.operational == canary.operational;
     let first_divergence = first_divergence(fixture, &control, &canary);
-    let authoritative_digest = capture_digest(b"authoritative", fixture, &control.authoritative);
+    let authoritative_digest =
+        capture_digest(b"authoritative", fixture, profile, &control.authoritative);
     let canary_authoritative_digest =
-        capture_digest(b"authoritative", fixture, &canary.authoritative);
-    let public_digest = capture_digest(b"public", fixture, &control.public);
-    let canary_public_digest = capture_digest(b"public", fixture, &canary.public);
-    let operational_digest = capture_digest(b"operational", fixture, &control.operational);
-    let canary_operational_digest = capture_digest(b"operational", fixture, &canary.operational);
+        capture_digest(b"authoritative", fixture, profile, &canary.authoritative);
+    let public_digest = capture_digest(b"public", fixture, profile, &control.public);
+    let canary_public_digest = capture_digest(b"public", fixture, profile, &canary.public);
+    let operational_digest = capture_digest(b"operational", fixture, profile, &control.operational);
+    let canary_operational_digest =
+        capture_digest(b"operational", fixture, profile, &canary.operational);
     let mut provenance = Vec::new();
     provenance.extend_from_slice(&fixture.fixture_digest);
     provenance.extend_from_slice(&control.provenance_digest);
@@ -922,18 +925,13 @@ fn first_byte_difference(left: &[u8], right: &[u8]) -> Option<u64> {
 fn capture_digest(
     domain: &[u8],
     fixture: &NonInterferenceFixturePairV1,
+    profile: &NonInterferenceCaptureProfileV1,
     surfaces: &[Vec<u8>],
 ) -> [u8; 32] {
     let mut bytes = Vec::new();
     append_bytes(&mut bytes, fixture.fixture_id.as_bytes());
-    if let Some(profile) = capture_profile(&fixture.fixture_id) {
-        bytes.extend_from_slice(&profile.profile_digest);
-    }
-    for (name, surface) in non_interference_surface_names_v1(&fixture.fixture_id)
-        .unwrap_or_default()
-        .iter()
-        .zip(surfaces)
-    {
+    bytes.extend_from_slice(&profile.profile_digest);
+    for (name, surface) in profile.surface_names.iter().zip(surfaces) {
         append_bytes(&mut bytes, name.as_bytes());
         append_bytes(&mut bytes, surface);
     }
