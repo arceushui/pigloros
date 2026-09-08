@@ -20,17 +20,13 @@ fn encode(value: &Value) -> TestResult<Vec<u8>> {
     Ok(bytes)
 }
 
-fn test_nonce(label: &[u8]) -> TestResult<[u8; 16]> {
-    let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"PiglorOS.TestNonce.v1\0");
-    hasher.update(&std::process::id().to_be_bytes());
-    hasher.update(&elapsed.as_nanos().to_be_bytes());
-    hasher.update(label);
-    let mut nonce = [0; 16];
-    nonce.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
-    nonce[15] |= u8::from(nonce == [0; 16]);
-    Ok(nonce)
+fn test_nonce() -> [u8; 16] {
+    loop {
+        let nonce = rand::random();
+        if nonce != [0; 16] {
+            return nonce;
+        }
+    }
 }
 
 fn corrupt_signed_digest(bytes: &[u8]) -> TestResult<Vec<u8>> {
@@ -749,7 +745,7 @@ fn selector_revocation_state_requires_exact_timely_cancellation_acknowledgement(
     )?;
     let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
     let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
-    let update_id = test_nonce(b"accepted update")?;
+    let update_id = test_nonce();
     let update = revocation_update(&current, &next_bytes, &next, &signer, update_id)?;
     let cancelled = vec![[23; 16], [24; 16]];
     let mut state = SelectorRevocationState::new(current.clone());
@@ -774,13 +770,7 @@ fn selector_revocation_state_requires_exact_timely_cancellation_acknowledgement(
     state.begin_update(&update, &trust, cancelled, 2_000)?;
     state.acknowledge(&acknowledgement, "runtime", &signer.verifying_key(), 2_000)?;
 
-    let conflicting = revocation_update(
-        &current,
-        &next_bytes,
-        &next,
-        &signer,
-        test_nonce(b"conflicting update")?,
-    )?;
+    let conflicting = revocation_update(&current, &next_bytes, &next, &signer, test_nonce())?;
     assert_eq!(
         state.begin_update(&conflicting, &trust, vec![], 2_000),
         Err(SandboxRevocationUpdateError::RequestIdentityConflict)
