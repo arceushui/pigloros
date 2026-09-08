@@ -9,14 +9,13 @@
 //! projections on each tick until a [`StopCondition`] is met.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-#[cfg(test)]
-use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::WallTime,
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ErasureGate, ReproManifest, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ErasureContainmentGateV1, ErasureGate,
+    ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store as open_store_raw, StoreConfig};
@@ -63,13 +62,23 @@ fn test_registry() -> PluginRegistry {
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    let store = pos_store::open_store(config)?;
+    open_store_with_gate(config, None)
+}
+
+fn open_store_with_gate(
+    config: StoreConfig,
+    gate: Option<Arc<dyn ErasureGate>>,
+) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    let mut store = pos_store::open_store(config)?;
     #[cfg(test)]
-    let store = {
-        let mut store = store;
+    let supplied_gate = gate.is_some();
+    if let Some(gate) = gate {
+        store.bind_erasure_gate(gate)?;
+    }
+    #[cfg(test)]
+    if !supplied_gate {
         bind_test_store_gate(store.as_mut())?;
-        store
-    };
+    }
     Ok(store)
 }
 
@@ -238,7 +247,10 @@ impl RunResult {
         self.store_config
             .clone()
             .ok_or(ExperimentError::MissingStoreRecoveryRecipe)
-            .and_then(|config| open_store(config).map_err(ExperimentError::from))
+            .and_then(|config| {
+                open_store_with_gate(config, self.projections.clone_erasure_gate())
+                    .map_err(ExperimentError::from)
+            })
             .and_then(|store| {
                 store
                     .logical_head(self.timeline_id)
@@ -277,7 +289,7 @@ impl RunResult {
             .store_config
             .clone()
             .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
-        let mut store = open_store(store_config)?;
+        let mut store = open_store_with_gate(store_config, self.projections.clone_erasure_gate())?;
         let timelines = store.list_timelines()?;
         let timeline = timelines
             .iter()
@@ -344,7 +356,7 @@ impl RunResult {
                 .store_config
                 .clone()
                 .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
-            let store = open_store(config)?;
+            let store = open_store_with_gate(config, self.projections.clone_erasure_gate())?;
             Some(store.logical_head(self.timeline_id)?.as_u64())
         } else {
             None
@@ -2256,8 +2268,6 @@ impl BacktestRunner {
         self,
         store: &mut dyn pos_core::store::EventStore,
     ) -> Result<BacktestResult, ExperimentError> {
-        #[cfg(test)]
-        bind_test_store_gate(store)?;
         let store_config = self.config.store_config.clone();
 
         // --- Train phase ---
@@ -2266,8 +2276,16 @@ impl BacktestRunner {
         let train_tl_id = train_tl.id();
 
         let mut train_registry = (self.registry_factory)();
-        #[cfg(test)]
-        bind_test_erasure_gate(&mut train_registry);
+        let erasure_gate = if train_registry.erasure_gate_is_bound() {
+            train_registry
+                .clone_erasure_gate()
+                .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?
+        } else {
+            let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+            train_registry.bind_erasure_gate(Arc::clone(&gate));
+            gate
+        };
+        store.bind_erasure_gate(Arc::clone(&erasure_gate))?;
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
             store,
@@ -2286,8 +2304,9 @@ impl BacktestRunner {
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
-        #[cfg(test)]
-        bind_test_erasure_gate(&mut eval_registry);
+        if !eval_registry.erasure_gate_is_bound() {
+            eval_registry.bind_erasure_gate(erasure_gate);
+        }
         let inherited =
             restore_inherited_eval_events(store, eval_tl_id, train_head_seq, &mut eval_registry)?;
         hydrate_projections(&mut eval_registry, &inherited);

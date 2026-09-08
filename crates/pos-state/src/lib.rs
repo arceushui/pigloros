@@ -346,6 +346,14 @@ impl ProjectionRegistry {
         self.erasure_gate_bound = true;
     }
 
+    /// Return the host-bound erasure gate, when this registry has one.
+    #[must_use]
+    pub fn clone_erasure_gate(&self) -> Option<Arc<dyn ErasureGate>> {
+        self.erasure_gate_bound
+            .then_some(self.erasure_gate.clone())
+            .flatten()
+    }
+
     /// Remove the erasure gate so protected observations fail closed.
     #[must_use]
     pub fn without_erasure_gate(mut self) -> Self {

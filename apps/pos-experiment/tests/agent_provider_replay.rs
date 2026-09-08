@@ -362,6 +362,7 @@ enum ExpectedResult {
 #[derive(Default)]
 struct AdapterControl {
     append_batch_sizes: Vec<usize>,
+    erasure_gate_bound: bool,
     fail_next_append: bool,
     next_read_fault: Option<ReadFault>,
     logical_head_reads: usize,
@@ -521,7 +522,13 @@ impl SharedMemoryAdapter {
 
 impl EventStore for SharedMemoryAdapter {
     fn bind_erasure_gate(&mut self, gate: Arc<dyn pos_core::ErasureGate>) -> Result<(), CoreError> {
-        self.store().bind_erasure_gate(gate)
+        let mut control = self.control();
+        if control.erasure_gate_bound {
+            return Ok(());
+        }
+        self.store().bind_erasure_gate(gate)?;
+        control.erasure_gate_bound = true;
+        Ok(())
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
