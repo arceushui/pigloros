@@ -534,6 +534,45 @@ mod tests {
             map_store_error(&CoreError::IdGenerationOverflow),
             ErasureHostErrorV1::AdapterFailure
         );
+        assert_eq!(
+            map_erasure_error(ErasureErrorV1::Unauthorized),
+            ErasureHostErrorV1::AuthorizationDenied
+        );
+        assert_eq!(
+            map_erasure_error(ErasureErrorV1::ScopeInvalid),
+            ErasureHostErrorV1::Conflict
+        );
+        assert_eq!(
+            map_erasure_error(ErasureErrorV1::InvalidEncoding),
+            ErasureHostErrorV1::RecoveryUnavailable
+        );
+        assert_eq!(
+            map_erasure_error(ErasureErrorV1::KeyRegistryUnavailable),
+            ErasureHostErrorV1::AdapterFailure
+        );
+    }
+
+    #[test]
+    fn stale_or_internally_inconsistent_generation_fails_closed() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.ensure_generation(ErasureReferenceV1::from_digest([9; 32])),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        host.inventory = None;
+        assert_eq!(
+            host.ensure_generation(ErasureReferenceV1::from_digest([9; 32])),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(host.state, HostStateV1::Poisoned);
+        assert_eq!(
+            host.maximum_requests(),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
     }
 
     #[test]
@@ -681,6 +720,60 @@ mod tests {
             },
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn empty_inventory_rejects_invalid_fork_batch_shapes() {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let inventory = ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![parent], 4)
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let input = ErasureForkAdmissionInputV1 {
+            operation: ErasureReferenceV1::from_digest([6; 32]),
+            expected_inventory_generation: inventory.generation(),
+            child_scope: ErasureReferenceV1::from_digest([7; 32]),
+            child: TimelineMeta {
+                id: child,
+                mode: TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: Some((parent, Seq::ZERO)),
+            },
+        };
+        let mut root = input.clone();
+        root.child.fork_point = None;
+        assert_eq!(
+            inventory.clone().prepare_fork_batch(root, Vec::new()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        let mut live = input.clone();
+        live.child.mode = TimelineMode::Live;
+        assert_eq!(
+            inventory.clone().prepare_fork_batch(live, Vec::new()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        let mut stale = input.clone();
+        stale.expected_inventory_generation = ErasureReferenceV1::from_digest([8; 32]);
+        assert_eq!(
+            inventory.clone().prepare_fork_batch(stale, Vec::new()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        let mut existing = input.clone();
+        existing.child.id = parent;
+        assert_eq!(
+            inventory.clone().prepare_fork_batch(existing, Vec::new()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        let mut missing_parent = input;
+        missing_parent.child.fork_point = Some((TimelineId::new(), Seq::ZERO));
+        assert_eq!(
+            inventory.prepare_fork_batch(missing_parent, Vec::new()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
     }
 
     #[test]

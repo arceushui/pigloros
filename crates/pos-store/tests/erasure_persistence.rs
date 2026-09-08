@@ -708,6 +708,35 @@ fn overlapping_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
+fn assert_fork_batch_rejections(
+    inventory: &pos_core::ErasureVerifiedInventoryV1,
+    input: &ErasureForkAdmissionInputV1,
+    admissions: &[pos_core::PreparedErasureForkAdmissionV1],
+) {
+    assert_eq!(
+        inventory
+            .clone()
+            .prepare_fork_batch(input.clone(), vec![admissions[0].clone()]),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        inventory.clone().prepare_fork_batch(
+            input.clone(),
+            vec![admissions[0].clone(), admissions[0].clone()],
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let mut mismatched_input = input.clone();
+    mismatched_input.operation = reference(105);
+    assert_eq!(
+        inventory.clone().prepare_fork_batch(
+            mismatched_input,
+            vec![admissions[0].clone(), admissions[1].clone()],
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+}
+
 fn assert_overlapping_fork_batch<S>(mut store: S) -> Result<(), Box<dyn std::error::Error>>
 where
     S: EventStore
@@ -769,6 +798,7 @@ where
         )?,
     ];
     let inventory = first.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_fork_batch_rejections(&inventory, &input, &admissions);
     let batch = inventory.prepare_fork_batch(input, admissions)?;
     assert_eq!(batch.admissions().len(), 2);
     assert_eq!(
