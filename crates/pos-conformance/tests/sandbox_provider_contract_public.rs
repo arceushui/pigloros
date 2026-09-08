@@ -1311,6 +1311,24 @@ fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestR
     independent::SandboxProviderError::from_canonical_cbor(&bytes)?
         .verify_signature(&key.verifying_key())?;
 
+    let mut nul_detail = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
+    nul_detail.safe_detail = Some("unsafe\0detail".to_owned());
+    assert_eq!(
+        nul_detail.sign(&key),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+    let mut orphaned_digest = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
+    orphaned_digest.request_id = None;
+    assert_eq!(
+        orphaned_digest.sign(&key),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+    Ok(())
+}
+
+#[test]
+fn post_authentication_provider_errors_bind_available_identities() -> TestResult {
+    let key = signing_key();
     for code in [
         SandboxProviderErrorCodeV1::TrustRevoked,
         SandboxProviderErrorCodeV1::AuthorityMismatch,
@@ -1367,19 +1385,6 @@ fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestR
     impossible_describe_attempt.attempt_id = Some([3; 16]);
     assert_eq!(
         impossible_describe_attempt.sign(&key),
-        Err(SandboxContractErrorV1::InconsistentFields)
-    );
-
-    let mut nul_detail = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
-    nul_detail.safe_detail = Some("unsafe\0detail".to_owned());
-    assert_eq!(
-        nul_detail.sign(&key),
-        Err(SandboxContractErrorV1::FieldOutOfBounds)
-    );
-    let mut orphaned_digest = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
-    orphaned_digest.request_id = None;
-    assert_eq!(
-        orphaned_digest.sign(&key),
         Err(SandboxContractErrorV1::InconsistentFields)
     );
     Ok(())
