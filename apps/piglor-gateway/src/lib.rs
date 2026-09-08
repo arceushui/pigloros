@@ -1158,6 +1158,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup())
@@ -1335,6 +1336,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup())
@@ -1408,6 +1410,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            #[cfg(test)]
             action_principal: None,
         }
         .schedule_startup_consent_cleanup())
