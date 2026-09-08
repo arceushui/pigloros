@@ -720,7 +720,7 @@ where
             fork_point: Some((parent, Seq::from_u64(1))),
         },
     };
-    let prepare = |coordinator: &ErasureCoordinatorStateMachineV1<Host<S>>,
+    let prepare = |coordinator: &mut ErasureCoordinatorStateMachineV1<Host<S>>,
                    request: ErasureReferenceV1,
                    provenance: ErasureReferenceV1| {
         let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
@@ -740,8 +740,8 @@ where
         coordinator.prepare_fork_admission(request, extension, input.clone())
     };
     let admissions = vec![
-        prepare(&first, first_request.reference(), reference(102))?,
-        prepare(&second, second_request.reference(), reference(104))?,
+        prepare(&mut first, first_request.reference(), reference(102))?,
+        prepare(&mut second, second_request.reference(), reference(104))?,
     ];
     let inventory = first.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
     let batch = inventory.prepare_fork_batch(input, admissions)?;
