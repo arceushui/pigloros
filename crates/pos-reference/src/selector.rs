@@ -717,11 +717,12 @@ mod tests {
     }
 
     #[test]
-    fn selector_transport_rejects_a_zero_watchdog_before_exchange() {
+    fn selector_transport_rejects_a_zero_watchdog_before_exchange(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let request = selector_request();
         let mut attempt = selector_attempt();
         attempt.watchdog_ms = 0;
-        let encoded = encode_request(&request, b"evr1", &attempt, 0).expect("encode request");
+        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
         assert_eq!(
             SelectorAdapter::invoke_at(
                 Path::new("unused-for-invalid-attempt"),
@@ -732,6 +733,7 @@ mod tests {
             ),
             Err(AdapterError::ProtocolFailure)
         );
+        Ok(())
     }
 
     #[test]
