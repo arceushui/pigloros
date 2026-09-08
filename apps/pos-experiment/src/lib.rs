@@ -2317,7 +2317,7 @@ impl BacktestRunner {
     }
 
     /// Bind the one host-owned erasure gate shared by both registries and the
-    /// EventStore for the complete backtest.
+    /// `EventStore` for the complete backtest.
     #[must_use]
     pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
         self.erasure_gate = Some(gate);
