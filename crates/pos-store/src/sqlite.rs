@@ -8511,6 +8511,90 @@ mod tests {
     }
 
     #[test]
+    fn schema_validation_rejects_missing_erasure_and_authority_constraints() {
+        let store = SqliteStore::open_in_memory().test_ok();
+        let records = ERASURE_SCHEMA_TABLES
+            .iter()
+            .find(|table| table.name == "erasure_records")
+            .test_ok();
+        let incompatible_records = ErasureSchemaTable {
+            name: records.name,
+            columns_query: records.columns_query,
+            columns: records.columns,
+            constraints: &["CHECK (length(request_digest) = 31)"],
+        };
+        let erasure_error = store
+            .validate_erasure_schema_table(&incompatible_records)
+            .err()
+            .test_ok();
+        assert!(matches!(
+            erasure_error,
+            CoreError::Storage(message) if message.contains("erasure_records")
+        ));
+
+        store
+            .conn
+            .execute_batch(
+                "DROP TABLE authority_state;
+                 CREATE TABLE authority_state (
+                     singleton INTEGER PRIMARY KEY,
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                     state_cbor BLOB NOT NULL
+                 );",
+            )
+            .test_ok();
+        assert!(matches!(
+            store.validate_authority_schema(),
+            Err(CoreError::Storage(message)) if message.contains("authority_state")
+        ));
+    }
+
+    #[test]
+    fn complete_inventory_rejects_truncating_durable_requests() {
+        let mut store = SqliteStore::open_in_memory().test_ok();
+        for discriminator in [1_u8, 2] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO erasure_records
+                     (request_digest, manifest_digest, manifest_cbor)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        [discriminator; 32].as_slice(),
+                        [discriminator.saturating_add(10); 32].as_slice(),
+                        [discriminator].as_slice(),
+                    ],
+                )
+                .test_ok();
+        }
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot(1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    #[test]
+    fn authority_reader_rejects_an_unknown_schema_version() {
+        let store = SqliteStore::open_in_memory().test_ok();
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO authority_state (singleton, schema_version, state_cbor)
+                 VALUES (1, 2, X'80')",
+                [],
+            )
+            .test_ok();
+        assert_eq!(
+            read_authority_state(&store.conn),
+            Err(AuthorityPersistenceErrorV1::InvalidRecord)
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_rejects_incompatible_recovery_error_schema() {
         let file = tempfile::NamedTempFile::new().test_ok();
