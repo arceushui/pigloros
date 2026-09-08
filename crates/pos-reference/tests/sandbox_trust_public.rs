@@ -19,6 +19,15 @@ fn encode(value: &Value) -> TestResult<Vec<u8>> {
     Ok(bytes)
 }
 
+fn corrupt_signed_digest(bytes: &[u8]) -> TestResult<Vec<u8>> {
+    let mut wrapper: Value = ciborium::from_reader(bytes)?;
+    let Value::Array(fields) = &mut wrapper else {
+        return Err("expected signed test record".into());
+    };
+    fields[1] = Value::Bytes(vec![0; 32]);
+    encode(&wrapper)
+}
+
 fn key_record(id: &str, role: u64) -> Value {
     Value::Array(vec![
         Value::Text(id.to_owned()),
@@ -479,6 +488,12 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
     assert!(
         SandboxTrustSnapshot::authenticate(b"not-cbor", "root", &root.verifying_key()).is_err()
     );
+    assert!(SandboxTrustSnapshot::authenticate(
+        &encode(&Value::Null)?,
+        "root",
+        &root.verifying_key()
+    )
+    .is_err());
     Ok(())
 }
 
@@ -507,6 +522,37 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         )
         .is_err());
     }
+    for (index, values) in [
+        (
+            4,
+            vec![Value::Text("z".to_owned()), Value::Text("a".to_owned())],
+        ),
+        (
+            5,
+            vec![Value::Bytes(vec![8; 32]), Value::Bytes(vec![3; 32])],
+        ),
+        (
+            6,
+            vec![Value::Bytes(vec![8; 32]), Value::Bytes(vec![4; 32])],
+        ),
+    ] {
+        let mut changed = fields.clone();
+        changed[index] = Value::Array(values);
+        assert_eq!(
+            SandboxRevocationSnapshot::authenticate(
+                &sign_record("RVS1", Value::Array(changed), &signer)?,
+                &trust
+            ),
+            Err(SandboxTrustError::Protocol(
+                ProtocolError::NonCanonicalOrder
+            ))
+        );
+    }
+    let valid_rvs = sign_record("RVS1", Value::Array(fields.clone()), &signer)?;
+    assert_eq!(
+        SandboxRevocationSnapshot::authenticate(&corrupt_signed_digest(&valid_rvs)?, &trust),
+        Err(SandboxTrustError::Protocol(ProtocolError::DigestMismatch))
+    );
     let mut unknown_signer = fields;
     unknown_signer[7] = Value::Text("missing".to_owned());
     assert_eq!(
@@ -517,10 +563,13 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         Err(SandboxTrustError::UnknownKey)
     );
     let root = SigningKey::from_bytes(&[1; 32]);
+    let mut invalid_public_key = [u8::MAX; 32];
+    invalid_public_key[0] = 0xed;
+    invalid_public_key[31] = 0x7f;
     let invalid_key = Value::Array(vec![
         Value::Text("policy".to_owned()),
         integer(1),
-        Value::Bytes(vec![u8::MAX; 32]),
+        Value::Bytes(invalid_public_key.to_vec()),
         integer(2),
     ]);
     let invalid_trust = SandboxTrustSnapshot::authenticate(
@@ -557,6 +606,7 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         Err(SandboxTrustError::AuthorityMismatch)
     );
     assert!(SandboxRevocationSnapshot::authenticate(b"not-cbor", &trust).is_err());
+    assert!(SandboxRevocationSnapshot::authenticate(&encode(&Value::Null)?, &trust).is_err());
     Ok(())
 }
 
@@ -589,6 +639,19 @@ fn administrator_policy_rejects_each_malformed_field_and_collection() -> TestRes
         )
         .is_err());
     }
+    let valid_policy = sign_record("APT1", Value::Array(fields), &signer)?;
+    assert_eq!(
+        SandboxAdministratorPolicy::authenticate(
+            &corrupt_signed_digest(&valid_policy)?,
+            &trust,
+            &revocation
+        ),
+        Err(SandboxTrustError::Protocol(ProtocolError::DigestMismatch))
+    );
     assert!(SandboxAdministratorPolicy::authenticate(b"not-cbor", &trust, &revocation).is_err());
+    assert!(
+        SandboxAdministratorPolicy::authenticate(&encode(&Value::Null)?, &trust, &revocation)
+            .is_err()
+    );
     Ok(())
 }
