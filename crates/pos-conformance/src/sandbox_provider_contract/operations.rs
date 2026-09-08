@@ -843,7 +843,7 @@ impl SandboxLocalErrorV1 {
                     ) {
                         execute && request && attempt
                     } else {
-                        (!attempt && (!request || execute)) || (execute && request && attempt)
+                        (!request && !attempt) || (request && execute)
                     }
             }
             SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission => {
