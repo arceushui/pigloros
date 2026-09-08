@@ -321,6 +321,14 @@ fn digest_name(digest: [u8; 32]) -> String {
 }
 
 fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoundaryError> {
+    connect_at_with(path, expected_uid, UnixStream::connect)
+}
+
+fn connect_at_with(
+    path: &Path,
+    expected_uid: u32,
+    connect: impl FnOnce(&Path) -> std::io::Result<UnixStream>,
+) -> Result<UnixStream, SelectorBoundaryError> {
     let path = PathBuf::from(path);
     let before =
         std::fs::symlink_metadata(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
@@ -330,8 +338,7 @@ fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoun
     {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    let stream =
-        UnixStream::connect(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+    let stream = connect(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
     let credentials =
         socket_peercred(stream.as_fd()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     let after =
@@ -348,6 +355,7 @@ fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoun
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::os::fd::OwnedFd;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
     use std::thread;
@@ -520,6 +528,13 @@ mod tests {
             length: 0,
         };
         assert_eq!(artifact.read_bytes(), Err(SelectorBoundaryError::Io));
+        let (stream, _peer) = UnixStream::pair()?;
+        let artifact = ImmutableSandboxArtifact {
+            file: File::from(OwnedFd::from(stream)),
+            digest: [1; 32],
+            length: 0,
+        };
+        assert_eq!(artifact.read_bytes(), Err(SelectorBoundaryError::Io));
         Ok(())
     }
 
@@ -663,6 +678,62 @@ mod tests {
     }
 
     #[test]
+    fn selector_transport_rejects_endpoint_removal_and_replacement(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for replace in [false, true] {
+            let temporary = tempfile::tempdir()?;
+            let socket = temporary.path().join("selector.sock");
+            let listener = UnixListener::bind(&socket)?;
+            std::fs::set_permissions(
+                &socket,
+                std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+            )?;
+            let uid = std::fs::metadata(&socket)?.uid();
+            let result = connect_at_with(&socket, uid, |path| {
+                let stream = UnixStream::connect(path)?;
+                std::fs::remove_file(path)?;
+                if replace {
+                    let replacement = UnixListener::bind(path)?;
+                    drop(replacement);
+                }
+                Ok(stream)
+            });
+            let expected = if replace {
+                SelectorBoundaryError::ArtifactInvalid
+            } else {
+                SelectorBoundaryError::SelectorUnavailable
+            };
+            assert_eq!(result.map(|_| ()), Err(expected));
+            drop(listener);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selector_transport_rejects_a_zero_watchdog_before_exchange(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        let server = thread::spawn(move || listener.accept().map(|_| ()));
+        let request = selector_request();
+        let mut attempt = selector_attempt();
+        attempt.watchdog_ms = 0;
+        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
+        assert_eq!(
+            SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
+            Err(AdapterError::Unavailable)
+        );
+        server.join().map_err(|_| AdapterError::ProtocolFailure)??;
+        Ok(())
+    }
+
+    #[test]
     fn selector_transport_rejects_a_peer_that_closes_without_a_reply(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
@@ -734,6 +805,13 @@ mod tests {
         );
         assert_eq!(
             adapter.execute(&selector_attempt()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        let mut invalid = selector_attempt();
+        invalid.case_id.clear();
+        adapter.set_case_ordinal(0);
+        assert_eq!(
+            adapter.invoke_with_selector(&invalid, Path::new("/missing"), 0),
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(adapter.take_execution_provenance_digest(), None);

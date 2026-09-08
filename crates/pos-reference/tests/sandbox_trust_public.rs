@@ -1029,8 +1029,18 @@ fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
         &fixture.current
     )
     .is_err());
+    let null_record = encode(&Value::Null)?;
+    for malformed in [b"not-cbor".as_slice(), null_record.as_slice()] {
+        assert!(SelectorRevocationState::new(fixture.current.clone())
+            .begin_update(malformed, &fixture.trust, Vec::new(), 1_000)
+            .is_err());
+    }
     for field in 2..=7 {
         let changed = resign_unsigned_field(&update, "RCU1", field, Value::Null, &fixture.signer)?;
+        assert!(
+            RevocationUpdateRequest::authenticate(&changed, &fixture.trust, &fixture.current)
+                .is_err()
+        );
         let mut state = SelectorRevocationState::new(fixture.current.clone());
         assert!(matches!(
             state.begin_update(&changed, &fixture.trust, Vec::new(), 1_000),
@@ -1225,6 +1235,25 @@ fn selector_revocation_state_rejects_malformed_acknowledgement_fields() -> TestR
             1_000
         ),
         Err(SandboxRevocationUpdateError::Protocol(_))
+    ));
+    let noncanonical_cancelled_attempts = revocation_acknowledgement_fields(
+        fixture.next.snapshot_digest(),
+        &fixture.signer,
+        vec![Value::Bytes(vec![24; 16]), Value::Bytes(vec![23; 16])],
+        [21; 16],
+        0,
+        "runtime",
+    )?;
+    assert!(matches!(
+        SelectorRevocationState::new(fixture.current.clone()).acknowledge(
+            &noncanonical_cancelled_attempts,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_000
+        ),
+        Err(SandboxRevocationUpdateError::Protocol(
+            ProtocolError::NonCanonicalOrder
+        ))
     ));
     assert!(matches!(
         SelectorRevocationState::new(fixture.current).acknowledge(

@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn slx1_rejects_invalid_attempts_and_oversized_control() {
+    fn slx1_rejects_invalid_attempts_and_oversized_control() -> Result<(), AdapterError> {
         let mut invalid = attempt();
         invalid.case_id.clear();
         assert_eq!(
@@ -428,6 +428,21 @@ mod tests {
             encode_request(&request(), &oversized, &attempt(), 0).map(|_| ()),
             Err(AdapterError::ProtocolFailure)
         );
+        let empty = encode_request(&request(), &[], &attempt(), 0)?;
+        let value = decode_canonical_with_limit(&empty.control, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array(&value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
+        let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let payload_length = CONTROL_LIMIT
+            .checked_sub(unsigned.len() + 4)
+            .ok_or(AdapterError::ProtocolFailure)?;
+        let wrapper_overflow = vec![0; payload_length];
+        assert_eq!(
+            encode_request(&request(), &wrapper_overflow, &attempt(), 0).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
     }
 
     fn local_error(phase: u64) -> Result<Vec<u8>, AdapterError> {
