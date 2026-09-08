@@ -187,6 +187,16 @@ pub enum SandboxLocalErrorCodeV1 {
     PolicyUnavailable,
     /// The authenticated control channel could not be established.
     ControlChannelUnavailable,
+    /// The selector request was malformed or incomplete.
+    InvalidSelectorRequest,
+    /// Evaluator-supplied authority differed from immutable authority.
+    RequestAuthorityMismatch,
+    /// A selector control or payload limit was exceeded.
+    PayloadLimitExceeded,
+    /// Recovery failed to obtain authenticated terminal evidence.
+    ProviderTerminalUnavailable,
+    /// Provider evidence was malformed, substituted, or incomplete.
+    ProviderEvidenceInvalid,
 }
 
 impl SandboxLocalErrorCodeV1 {
@@ -196,6 +206,11 @@ impl SandboxLocalErrorCodeV1 {
             Self::ProviderIdentityInvalid => 1,
             Self::PolicyUnavailable => 2,
             Self::ControlChannelUnavailable => 3,
+            Self::InvalidSelectorRequest => 4,
+            Self::RequestAuthorityMismatch => 5,
+            Self::PayloadLimitExceeded => 6,
+            Self::ProviderTerminalUnavailable => 7,
+            Self::ProviderEvidenceInvalid => 8,
         }
     }
 
@@ -205,6 +220,41 @@ impl SandboxLocalErrorCodeV1 {
             1 => Ok(Self::ProviderIdentityInvalid),
             2 => Ok(Self::PolicyUnavailable),
             3 => Ok(Self::ControlChannelUnavailable),
+            4 => Ok(Self::InvalidSelectorRequest),
+            5 => Ok(Self::RequestAuthorityMismatch),
+            6 => Ok(Self::PayloadLimitExceeded),
+            7 => Ok(Self::ProviderTerminalUnavailable),
+            8 => Ok(Self::ProviderEvidenceInvalid),
+            _ => Err(SandboxContractErrorV1::FieldOutOfBounds),
+        }
+    }
+}
+
+/// Closed point in selector processing at which a local failure occurred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxLocalErrorPhaseV1 {
+    /// SLX1/SPX1 construction or authority validation was not complete.
+    BeforeSpx1,
+    /// SPX1 was complete but AGR1 had not been authenticated.
+    AfterSpx1BeforeAdmission,
+    /// AGR1 had been authenticated.
+    AfterAdmission,
+}
+
+impl SandboxLocalErrorPhaseV1 {
+    const fn code(self) -> u64 {
+        match self {
+            Self::BeforeSpx1 => 0,
+            Self::AfterSpx1BeforeAdmission => 1,
+            Self::AfterAdmission => 2,
+        }
+    }
+
+    const fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
+        match code {
+            0 => Ok(Self::BeforeSpx1),
+            1 => Ok(Self::AfterSpx1BeforeAdmission),
+            2 => Ok(Self::AfterAdmission),
             _ => Err(SandboxContractErrorV1::FieldOutOfBounds),
         }
     }
@@ -213,10 +263,16 @@ impl SandboxLocalErrorCodeV1 {
 /// Exact bounded unsigned SLE1 local selector evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxLocalErrorV1 {
+    /// Point in selector processing at which the failure occurred.
+    pub phase: SandboxLocalErrorPhaseV1,
     /// Operation, absent only when framing prevents its identification.
     pub operation: Option<SandboxProviderOperationV1>,
     /// Request identity, absent only when no complete canonical nonzero ID was decoded.
     pub request_id: Option<[u8; 16]>,
+    /// Attempt identity, present exactly after complete SPX1 construction.
+    pub attempt_id: Option<[u8; 16]>,
+    /// Authenticated AGR1 digest, present exactly after admission.
+    pub agr1_digest: Option<[u8; 32]>,
     /// Closed local failure code.
     pub code: SandboxLocalErrorCodeV1,
     /// Optional nonempty bounded diagnostic safe to disclose.
@@ -722,11 +778,18 @@ impl SandboxLocalErrorV1 {
         encode(&Value::Array(vec![
             value_text(SLE1),
             value_uint(1),
+            value_uint(self.phase.code()),
             self.operation
                 .map_or(Value::Null, |operation| value_uint(operation.code())),
             self.request_id
                 .as_ref()
                 .map_or(Value::Null, |request_id| value_bytes(request_id)),
+            self.attempt_id
+                .as_ref()
+                .map_or(Value::Null, |attempt_id| value_bytes(attempt_id)),
+            self.agr1_digest
+                .as_ref()
+                .map_or(Value::Null, |digest| value_bytes(digest)),
             value_uint(self.code.code()),
             self.safe_detail
                 .as_ref()
@@ -740,13 +803,16 @@ impl SandboxLocalErrorV1 {
     /// Returns a closed contract error for malformed or noncanonical input.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxContractErrorV1> {
         let value = decode(bytes)?;
-        let fields = array::<6>(&value)?;
+        let fields = array::<9>(&value)?;
         validate_magic(fields, SLE1)?;
         let error = Self {
-            operation: decode_optional_operation(&fields[2])?,
-            request_id: decode_optional_request_id(&fields[3])?,
-            code: SandboxLocalErrorCodeV1::from_code(uint(&fields[4])?)?,
-            safe_detail: decode_optional_detail(&fields[5])?,
+            phase: SandboxLocalErrorPhaseV1::from_code(uint(&fields[2])?)?,
+            operation: decode_optional_operation(&fields[3])?,
+            request_id: decode_optional_request_id(&fields[4])?,
+            attempt_id: decode_optional_request_id(&fields[5])?,
+            agr1_digest: decode_optional_digest(&fields[6])?,
+            code: SandboxLocalErrorCodeV1::from_code(uint(&fields[7])?)?,
+            safe_detail: decode_optional_detail(&fields[8])?,
         };
         error.validate().map(|()| error)
     }
@@ -756,7 +822,60 @@ impl SandboxLocalErrorV1 {
     /// # Errors
     /// Returns a closed contract error for invalid local evidence.
     pub fn validate(&self) -> Result<(), SandboxContractErrorV1> {
+        let execute = self.operation == Some(SandboxProviderOperationV1::Execute);
+        let request = self.request_id.is_some_and(|id| id != [0; 16]);
+        let attempt = self.attempt_id.is_some_and(|id| id != [0; 16]);
+        let admission = self.agr1_digest.is_some_and(|digest| digest != [0; 32]);
+        let valid_shape = match self.phase {
+            SandboxLocalErrorPhaseV1::BeforeSpx1 => {
+                !admission
+                    && matches!(
+                        self.code,
+                        SandboxLocalErrorCodeV1::PolicyUnavailable
+                            | SandboxLocalErrorCodeV1::InvalidSelectorRequest
+                            | SandboxLocalErrorCodeV1::RequestAuthorityMismatch
+                            | SandboxLocalErrorCodeV1::PayloadLimitExceeded
+                    )
+                    && if matches!(
+                        self.code,
+                        SandboxLocalErrorCodeV1::RequestAuthorityMismatch
+                            | SandboxLocalErrorCodeV1::PayloadLimitExceeded
+                    ) {
+                        execute && request && attempt
+                    } else {
+                        (!attempt && (!request || execute)) || (execute && request && attempt)
+                    }
+            }
+            SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission => {
+                execute
+                    && request
+                    && attempt
+                    && !admission
+                    && matches!(
+                        self.code,
+                        SandboxLocalErrorCodeV1::ProviderUnavailable
+                            | SandboxLocalErrorCodeV1::ProviderIdentityInvalid
+                            | SandboxLocalErrorCodeV1::ControlChannelUnavailable
+                            | SandboxLocalErrorCodeV1::ProviderEvidenceInvalid
+                    )
+            }
+            SandboxLocalErrorPhaseV1::AfterAdmission => {
+                execute
+                    && request
+                    && attempt
+                    && admission
+                    && matches!(
+                        self.code,
+                        SandboxLocalErrorCodeV1::ControlChannelUnavailable
+                            | SandboxLocalErrorCodeV1::ProviderTerminalUnavailable
+                            | SandboxLocalErrorCodeV1::ProviderEvidenceInvalid
+                    )
+            }
+        };
         if self.request_id == Some([0; 16])
+            || self.attempt_id == Some([0; 16])
+            || self.agr1_digest == Some([0; 32])
+            || !valid_shape
             || self.safe_detail.as_ref().is_some_and(|detail| {
                 detail.is_empty()
                     || detail.len() > MAX_SANDBOX_SAFE_DETAIL_BYTES_V1
@@ -781,6 +900,14 @@ fn decode_optional_operation(
 }
 
 fn decode_optional_request_id(value: &Value) -> Result<Option<[u8; 16]>, SandboxContractErrorV1> {
+    if value == &Value::Null {
+        Ok(None)
+    } else {
+        fixed(value).map(Some)
+    }
+}
+
+fn decode_optional_digest(value: &Value) -> Result<Option<[u8; 32]>, SandboxContractErrorV1> {
     if value == &Value::Null {
         Ok(None)
     } else {

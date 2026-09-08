@@ -3,14 +3,17 @@
 use ciborium::value::Value;
 
 use crate::adapter_transport::{read_observation, write_attempt};
-use crate::evaluator::{AdapterError, CaseAttempt, SubjectObservation, SubjectResult};
+use crate::evaluator::{
+    AdapterError, CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult,
+};
 use crate::evaluator_protocol::{
     array, array_values, decode_canonical_with_limit, encode_with_limit, fixed_bytes, text, uint,
     EvaluationRequest,
 };
 use crate::sandbox_provider_protocol::{
-    AdmissionGrant, SandboxAuditRecord, SandboxExecuteRequest, SandboxProviderError,
-    SandboxProviderReceipt, SandboxProviderResult, SandboxTerminalOutcome,
+    AdmissionGrant, SandboxAuditRecord, SandboxExecuteRequest, SandboxLocalError,
+    SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderReceipt, SandboxProviderResult,
+    SandboxTerminalOutcome,
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
@@ -19,21 +22,21 @@ const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
 const SLY1_DOMAIN: &[u8] = b"PiglorOS.SLY1.v1\0";
 
-pub(crate) struct EncodedSelectorRequest {
-    pub control: Vec<u8>,
-    pub attempt_stream: Vec<u8>,
-    pub provider_request_id: [u8; 16],
-    pub attempt_id: [u8; 16],
-    pub digest: [u8; 32],
+pub(super) struct EncodedSelectorRequest {
+    pub(super) control: Vec<u8>,
+    pub(super) attempt_stream: Vec<u8>,
+    pub(super) provider_request_id: [u8; 16],
+    pub(super) attempt_id: [u8; 16],
+    pub(super) digest: [u8; 32],
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct DecodedSelectorReply {
-    pub observation: Result<SubjectObservation, AdapterError>,
-    pub provenance: Option<[u8; 32]>,
+pub(super) struct DecodedSelectorReply {
+    pub(super) observation: Result<SubjectObservation, AdapterError>,
+    pub(super) provenance: Option<[u8; 32]>,
 }
 
-pub(crate) fn encode_request(
+pub(super) fn encode_request(
     request: &EvaluationRequest,
     request_bytes: &[u8],
     attempt: &CaseAttempt,
@@ -69,7 +72,7 @@ pub(crate) fn encode_request(
     })
 }
 
-pub(crate) fn decode_reply(
+pub(super) fn decode_reply(
     control: &[u8],
     trailing: &[u8],
     request: &EncodedSelectorRequest,
@@ -79,11 +82,12 @@ pub(crate) fn decode_reply(
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
         .map_err(|_| AdapterError::ProtocolFailure)?;
     if is_magic(&value, "SLE1") {
-        let fields = array(&value, 9).map_err(|_| AdapterError::ProtocolFailure)?;
         if !trailing.is_empty() {
             return Err(AdapterError::ProtocolFailure);
         }
-        let error = if uint(&fields[2]).map_err(|_| AdapterError::ProtocolFailure)? == 2 {
+        let local = SandboxLocalError::from_canonical_cbor(control)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
             AdapterError::AuthenticatedEvidenceFailure
         } else {
             AdapterError::Unavailable
@@ -145,7 +149,9 @@ fn decode_provider_result(
 ) -> Result<DecodedSelectorReply, AdapterError> {
     let result = SandboxProviderResult::from_canonical_cbor(bytes(&fields[7])?)
         .map_err(|_| AdapterError::ProtocolFailure)?;
-    if result.request_id != request.provider_request_id || result.attempt_id != request.attempt_id {
+    let request_id_matches = result.request_id == request.provider_request_id;
+    let attempt_id_matches = result.attempt_id == request.attempt_id;
+    if !request_id_matches || !attempt_id_matches {
         return Err(AdapterError::ProtocolFailure);
     }
     match result.outcome {
@@ -166,7 +172,7 @@ fn decode_provider_result(
                 }
                 Ok(SubjectObservation {
                     result: SubjectResult::Unavailable,
-                    usage: Default::default(),
+                    usage: ResourceUsage::default(),
                 })
             };
             Ok(DecodedSelectorReply {
@@ -179,7 +185,7 @@ fn decode_provider_result(
             Ok(DecodedSelectorReply {
                 observation: Ok(SubjectObservation {
                     result: SubjectResult::Unavailable,
-                    usage: Default::default(),
+                    usage: ResourceUsage::default(),
                 }),
                 provenance: None,
             })

@@ -23,6 +23,7 @@ pub const SANDBOX_ARTIFACT_ROOT: &str = "/var/lib/pigloros/sandbox";
 const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const FORBIDDEN_WRITE_MODE: u32 = 0o222;
 const SELECTOR_SOCKET_MODE: u32 = 0o600;
+const MAX_SELECTOR_TRAILING_BYTES: u64 = 129 * 1024 * 1024;
 
 /// Closed classes in the immutable sandbox artifact store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,7 +106,7 @@ pub struct SelectorAdapter {
     subject_artifact_digest: [u8; 32],
     request: EvaluationRequest,
     request_bytes: Vec<u8>,
-    next_case_ordinal: u32,
+    next_case_ordinal: Option<u16>,
     provenance: Option<[u8; 32]>,
 }
 
@@ -118,15 +119,16 @@ impl SelectorAdapter {
             subject_artifact_digest: request.subject_artifact_digest,
             request: request.clone(),
             request_bytes: request_bytes.to_vec(),
-            next_case_ordinal: 0,
+            next_case_ordinal: None,
             provenance: None,
         }
     }
 
     fn invoke(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
-        let ordinal =
-            u16::try_from(self.next_case_ordinal).map_err(|_| AdapterError::ProtocolFailure)?;
-        self.next_case_ordinal += 1;
+        let ordinal = self
+            .next_case_ordinal
+            .take()
+            .ok_or(AdapterError::ProtocolFailure)?;
         let request = encode_request(&self.request, &self.request_bytes, attempt, ordinal)?;
         let reply = Self::invoke_at(
             Path::new(SANDBOX_SELECTOR_SOCKET),
@@ -178,9 +180,14 @@ impl SelectorAdapter {
             .map_err(|_| AdapterError::ProtocolFailure)?;
         let mut trailing = Vec::new();
         stream
-            .take(129 * 1024 * 1024)
+            .take(MAX_SELECTOR_TRAILING_BYTES + 1)
             .read_to_end(&mut trailing)
             .map_err(|_| AdapterError::ProtocolFailure)?;
+        if u64::try_from(trailing.len()).map_err(|_| AdapterError::ProtocolFailure)?
+            > MAX_SELECTOR_TRAILING_BYTES
+        {
+            return Err(AdapterError::ProtocolFailure);
+        }
         decode_reply(
             &control,
             &trailing,
@@ -198,6 +205,10 @@ impl SubjectAdapter for SelectorAdapter {
 
     fn subject_artifact_digest(&self) -> [u8; 32] {
         self.subject_artifact_digest
+    }
+
+    fn set_case_ordinal(&mut self, ordinal: u16) {
+        self.next_case_ordinal = Some(ordinal);
     }
 
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
