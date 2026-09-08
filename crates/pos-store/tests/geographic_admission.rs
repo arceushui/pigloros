@@ -12,8 +12,9 @@ use pos_core::{
         GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         GeoLocationAdmissionStore,
     },
-    AdmissionClock, CanonicalBytes, CoreError, EntityId, EventStore, OwnTracksEnrollmentRequestV1,
-    OwnTracksEnrollmentStore, TimelineId, WallTime, APPEND_IDENTITY_RETENTION_MICROS,
+    AdmissionClock, CanonicalBytes, CoreError, EntityId, ErasureContainmentGateV1, EventStore,
+    OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, TimelineId, WallTime,
+    APPEND_IDENTITY_RETENTION_MICROS,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -392,12 +393,20 @@ where
 
 #[test]
 fn memory_admission_is_atomic_and_revalidates_before_deduplication() {
-    assert_admission_contract(&mut MemoryStore::default());
+    let mut store = MemoryStore::default();
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok();
+    assert_admission_contract(&mut store);
 }
 
 #[test]
 fn sqlite_admission_is_atomic_and_revalidates_before_deduplication() {
-    assert_admission_contract(&mut SqliteStore::open_in_memory().test_ok());
+    let mut store = SqliteStore::open_in_memory().test_ok();
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok();
+    assert_admission_contract(&mut store);
 }
 
 #[test]
