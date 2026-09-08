@@ -955,11 +955,10 @@ fn checked_event_coordinates(
 
 impl Gateway {
     #[cfg(test)]
-    fn bind_test_erasure_gate<S: EventStore>(mut store: S) -> S {
+    fn bind_test_erasure_gate(store: &mut dyn EventStore) {
         assert!(store
             .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
             .is_ok());
-        store
     }
 
     async fn enqueue_consent_cleanup(&self, scope: AppendDedupScope) {
@@ -1104,7 +1103,9 @@ impl Gateway {
     #[must_use]
     pub fn new(store: Box<dyn EventStore>) -> Self {
         #[cfg(test)]
-        let store = Self::bind_test_erasure_gate(store);
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(store.as_mut());
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1168,7 +1169,9 @@ impl Gateway {
         bodies: impl IntoIterator<Item = EntityId>,
     ) -> Self {
         #[cfg(test)]
-        let store = Self::bind_test_erasure_gate(store);
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(store.as_mut());
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1200,7 +1203,9 @@ impl Gateway {
         principal: ActionPrincipal,
     ) -> Self {
         #[cfg(test)]
-        let store = Self::bind_test_erasure_gate(store);
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(store.as_mut());
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1270,7 +1275,9 @@ impl Gateway {
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
         #[cfg(test)]
-        let store = Self::bind_test_erasure_gate(store);
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1305,7 +1312,9 @@ impl Gateway {
         owner_key: &OwnTracksOwnerKey,
     ) -> Self {
         #[cfg(test)]
-        let store = Self::bind_test_erasure_gate(store);
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1371,7 +1380,8 @@ impl Gateway {
     where
         S: EventStore + GeoLocationAdmissionStore + pos_core::OwnTracksIngressStore + 'static,
     {
-        let store = Self::bind_test_erasure_gate(store);
+        let mut store = store;
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -2352,7 +2362,7 @@ impl Gateway {
 
     #[cfg(test)]
     fn with_bus_capacity(mut store: Box<dyn EventStore>, capacity: usize) -> Self {
-        store = Self::bind_test_erasure_gate(store);
+        Self::bind_test_erasure_gate(store.as_mut());
         let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(
