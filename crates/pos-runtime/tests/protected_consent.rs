@@ -44,19 +44,53 @@ fn test_err<T: Debug, E>(result: Result<T, E>) -> E {
 struct PluginRegistry(RuntimePluginRegistry);
 
 impl PluginRegistry {
-    #[allow(clippy::new_ret_no_self)]
-    fn new() -> RuntimePluginRegistry {
-        RuntimePluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    fn new() -> Self {
+        Self(
+            RuntimePluginRegistry::new()
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new())),
+        )
     }
 
     fn new_replay() -> RuntimePluginRegistry {
         RuntimePluginRegistry::new_replay()
     }
+
+    #[must_use]
+    fn with_consent_authority(self, authority: ConsentAuthority) -> RuntimePluginRegistry {
+        self.0.with_consent_authority(authority)
+    }
+
+    #[must_use]
+    fn with_consent_gate(self, gate: Arc<dyn ConsentGate>) -> RuntimePluginRegistry {
+        self.0.with_consent_gate(gate)
+    }
+
+    #[must_use]
+    fn without_consent_gate(self) -> RuntimePluginRegistry {
+        self.0.without_consent_gate()
+    }
+
+    #[must_use]
+    fn with_resource_limit(self, limit: u64) -> RuntimePluginRegistry {
+        self.0.with_resource_limit(limit)
+    }
+
+    fn into_authorized_projections(
+        self,
+        timeline: TimelineId,
+        timeline_head: Seq,
+        now_secs: u64,
+        token: Option<&ConsentCapabilityToken>,
+        public_events: Option<&[Event]>,
+    ) -> Result<pos_state::ProjectionRegistry, RuntimeError> {
+        self.0
+            .into_authorized_projections(timeline, timeline_head, now_secs, token, public_events)
+    }
 }
 
 impl Default for PluginRegistry {
     fn default() -> Self {
-        Self(Self::new())
+        Self::new()
     }
 }
 
