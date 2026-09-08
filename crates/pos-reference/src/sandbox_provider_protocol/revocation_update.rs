@@ -174,7 +174,7 @@ struct CompletedRevocationUpdate {
 }
 
 impl CompletedRevocationUpdate {
-    const fn matches_request(self, identity: RequestIdentity) -> bool {
+    fn matches_request(self, identity: RequestIdentity) -> bool {
         self.request == identity.request_digest && self.wire == identity.wire_digest
     }
 }
