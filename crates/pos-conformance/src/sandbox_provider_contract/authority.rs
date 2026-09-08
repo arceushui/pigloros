@@ -4,8 +4,8 @@ use sha2::{Digest, Sha256};
 use crate::{identifier, ExecutionModeV1};
 
 use super::codec::{
-    array, bytes, canonically_ordered, decode, digest, encode, fixed, sign, text, uint,
-    validate_magic, value_bytes, value_text, value_uint, verify,
+    array, bounded_text, bytes, canonically_ordered, decode, digest, encode, fixed, sign, text,
+    uint, validate_magic, value_bytes, value_text, value_uint, verify,
 };
 use super::{
     NetworkCapabilityV1, ProviderCapabilityV1, SandboxArchitectureV1, SandboxContractErrorV1,
@@ -979,10 +979,6 @@ fn decode_texts(value: &Value) -> Result<Vec<String>, SandboxContractErrorV1> {
         .iter()
         .map(|value| text(value).map(ToOwned::to_owned))
         .collect()
-}
-
-const fn bounded_text(value: &str, maximum: usize) -> bool {
-    !value.is_empty() && value.len() <= maximum
 }
 
 fn normalized_absolute_path(value: &str) -> bool {

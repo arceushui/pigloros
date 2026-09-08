@@ -8,6 +8,10 @@ use super::{
     MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1,
 };
 
+pub(super) const fn bounded_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum
+}
+
 pub(super) fn decode(bytes: &[u8]) -> Result<Value, SandboxContractErrorV1> {
     if bytes.is_empty() || bytes.len() > MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1 {
         return Err(SandboxContractErrorV1::FieldOutOfBounds);

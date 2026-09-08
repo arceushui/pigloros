@@ -3,11 +3,11 @@
 use ciborium::value::Value;
 
 use super::codec::{
-    array, decode, digest, encode, fixed, sign, text, uint, validate_magic, value_bytes,
-    value_text, value_uint, verify,
+    array, bounded_text, decode, digest, encode, fixed, sign, text, uint, validate_magic,
+    value_bytes, value_text, value_uint, verify,
 };
 use super::protocol::{
-    bounded_text, decode_request_authority, request_authority_value, validate_request_authority,
+    decode_request_authority, request_authority_value, validate_request_authority,
     RequestAuthorityV1,
 };
 use super::{

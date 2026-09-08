@@ -5,8 +5,9 @@ use ciborium::value::Value;
 use crate::identifier;
 
 use super::codec::{
-    array, bytes, decode, digest, digest_with_domain, encode, fixed, optional_fixed, sign, text,
-    uint, validate_magic, value_bytes, value_optional_bytes, value_text, value_uint, verify,
+    array, bounded_text, bytes, decode, digest, digest_with_domain, encode, fixed, optional_fixed,
+    sign, text, uint, validate_magic, value_bytes, value_optional_bytes, value_text, value_uint,
+    verify,
 };
 use super::{
     SandboxContractErrorV1, MAX_SANDBOX_IDENTIFIER_BYTES_V1, MAX_SANDBOX_PAYLOAD_BYTES_V1,
@@ -1089,10 +1090,6 @@ fn decode_digest_list(value: &Value) -> Result<Vec<[u8; 32]>, SandboxContractErr
         return Err(SandboxContractErrorV1::InvalidEncoding);
     };
     values.iter().map(fixed).collect()
-}
-
-pub(super) const fn bounded_text(value: &str, maximum: usize) -> bool {
-    !value.is_empty() && value.len() <= maximum
 }
 
 impl SandboxTerminalOutcomeV1 {
