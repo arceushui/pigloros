@@ -396,7 +396,7 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
     open_store_with_hasher(config, Box::new(pos_crypto::chain::Blake3Hasher))
 }
 
-/// Construct the host-exclusive EventStore and complete-inventory adapter.
+/// Construct the host-exclusive `EventStore` and complete-inventory adapter.
 ///
 /// Unlike [`open_store`], the returned interface can enter
 /// `ErasureExecutionHostV1` recovery. It still exposes no raw erasure evidence
