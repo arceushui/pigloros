@@ -226,13 +226,13 @@ trait RemoveGate: EventStore {
 
 impl RemoveGate for MemoryStore {
     fn without_erasure_gate(self) -> Self {
-        MemoryStore::without_erasure_gate(self)
+        Self::without_erasure_gate(self)
     }
 }
 
 impl RemoveGate for SqliteStore {
     fn without_erasure_gate(self) -> Self {
-        SqliteStore::without_erasure_gate(self)
+        Self::without_erasure_gate(self)
     }
 }
 
