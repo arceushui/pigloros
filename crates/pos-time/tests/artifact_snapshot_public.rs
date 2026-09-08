@@ -1,12 +1,13 @@
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, State,
+    ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureKeyRoleV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, State,
 };
 use pos_state::ProjectionRegistry;
 use pos_store::{open_store, StoreConfig};
 use pos_time::{snapshot, verify_snapshot_consistency};
+use std::sync::Arc;
 
 trait TestValueExt<T> {
     fn test_ok(self) -> T;
@@ -63,6 +64,9 @@ fn registry() -> ProjectionRegistry {
 #[test]
 fn snapshot_verification_requires_authoritative_artifact_evidence() {
     let mut store = open_store(StoreConfig::Memory).test_ok();
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok();
     let timeline = store.create_timeline("artifact-snapshot").test_ok();
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
         let mut rejected_registry = registry();
