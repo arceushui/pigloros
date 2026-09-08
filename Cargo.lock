@@ -4277,6 +4277,7 @@ dependencies = [
  "libc",
  "pos-core",
  "pos-crypto",
+ "pos-reference",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -4498,6 +4499,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
 ]

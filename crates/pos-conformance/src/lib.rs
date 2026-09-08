@@ -19,6 +19,7 @@ use std::io::Cursor;
 mod bundle_contract;
 mod profile_contract;
 mod provider_contract;
+mod sandbox_provider_contract;
 include!("wire_syntax.rs");
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
 
@@ -42,8 +43,8 @@ pub use profile_contract::{
     DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1,
     EvaluatorRequestV1, FixtureContractTransitionV1, FixtureDescriptorV1, FixtureProvenanceV1,
     IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
-    StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, CONFORMANCE_PROFILE_MAGIC_V1,
-    DETERMINISTIC_BUDGET_HARD_CAPS_V1, EVALUATOR_REQUEST_MAGIC_V1,
+    SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
+    CONFORMANCE_PROFILE_MAGIC_V1, DETERMINISTIC_BUDGET_HARD_CAPS_V1, EVALUATOR_REQUEST_MAGIC_V1,
 };
 pub use provider_contract::{
     ArtifactDescriptorV1, FixtureFamilyV1, FixtureProviderEntryV1, FixtureProviderKeyV1,
@@ -51,6 +52,22 @@ pub use provider_contract::{
     ProviderContractErrorV1, ProviderFamilySchemaV1, FIXTURE_PROVIDER_PACKAGE_MAGIC_V1,
     FIXTURE_PROVIDER_REGISTRY_MAGIC_V1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
     MAX_PROVIDER_ARTIFACT_BYTES_V1,
+};
+pub use sandbox_provider_contract::{
+    AdmissionAuthorityV1, AdmissionGrantV1, LaunchPolicyV1, NetworkCapabilityV1,
+    NetworkExchangePlanV1, PartitionDescriptorV1, PartitionRoleV1, PayloadDescriptorV1,
+    PayloadDirectionV1, PayloadStreamValidatorV1, Pkcs7ProofV1, ProviderCapabilityV1,
+    ReceiptAuthorityV1, RequestAuthorityV1, SandboxArchitectureV1, SandboxCancelRequestV1,
+    SandboxCancelResponseV1, SandboxCancelResultV1, SandboxContractErrorV1,
+    SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxExecuteRequestV1, SandboxLimitV1,
+    SandboxLocalErrorCodeV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
+    SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
+    SandboxProviderOperationV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
+    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxSyscallSetV1,
+    SandboxTerminalOutcomeV1, SignedImageManifestV1, MAX_SANDBOX_PAYLOAD_BYTES_V1,
+    MAX_SANDBOX_PAYLOAD_CHUNKS_V1, MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1,
+    MAX_SANDBOX_PROVIDER_ENTRIES_V1, MAX_SANDBOX_SYSCALL_NAMES_V1, SANDBOX_PAYLOAD_CHUNK_BYTES_V1,
+    SANDBOX_RELEASE_TIMEOUT_SECONDS_V1,
 };
 
 fn encode_artifact_descriptor_value(value: &ArtifactDescriptorV1) -> Value {
@@ -4098,6 +4115,7 @@ pub mod strict_codec {
         {
             return Err(StrictCborError::UnsupportedVersion);
         }
+        let [passed, failed, skipped, unavailable, not_applicable] = decode_report_counts(fields)?;
         Ok(ConformanceReportV1 {
             report_id: bytes(&fields[2], "report_id")?,
             subject_artifact_digest: bytes(&fields[3], "report_subject")?,
@@ -4114,30 +4132,11 @@ pub mod strict_codec {
                 .iter()
                 .map(decode_case)
                 .collect::<Result<Vec<_>, _>>()?,
-            passed: u32::try_from(uint_value(&fields[14], "report_passed")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "report_passed".to_owned(),
-                }
-            })?,
-            failed: u32::try_from(uint_value(&fields[15], "report_failed")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "report_failed".to_owned(),
-                }
-            })?,
-            skipped: u32::try_from(uint_value(&fields[16], "report_skipped")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "report_skipped".to_owned(),
-                }
-            })?,
-            unavailable: u32::try_from(uint_value(&fields[17], "report_unavailable")?).map_err(
-                |_| StrictCborError::InvalidField {
-                    field: "report_unavailable".to_owned(),
-                },
-            )?,
-            not_applicable: u32::try_from(uint_value(&fields[18], "report_not_applicable")?)
-                .map_err(|_| StrictCborError::InvalidField {
-                    field: "report_not_applicable".to_owned(),
-                })?,
+            passed,
+            failed,
+            skipped,
+            unavailable,
+            not_applicable,
             replay_claim: decode_replay_claim(&fields[19])?,
             redaction_state: decode_redaction_state(&fields[20])?,
             limitations_digest: bytes(&fields[21], "report_limitations")?,
@@ -4147,6 +4146,25 @@ pub mod strict_codec {
             )?,
             report_digest: bytes(&fields[23], "report_digest")?,
         })
+    }
+
+    fn decode_report_counts(fields: &[Value]) -> Result<[u32; 5], StrictCborError> {
+        let names = [
+            "report_passed",
+            "report_failed",
+            "report_skipped",
+            "report_unavailable",
+            "report_not_applicable",
+        ];
+        let mut counts = [0_u32; 5];
+        for ((count, value), name) in counts.iter_mut().zip(&fields[14..19]).zip(names) {
+            *count = u32::try_from(uint_value(value, name)?).map_err(|_| {
+                StrictCborError::InvalidField {
+                    field: name.to_owned(),
+                }
+            })?;
+        }
+        Ok(counts)
     }
 
     fn encode_plugin_boundary(boundary: &PluginBoundaryV1) -> Value {

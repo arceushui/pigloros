@@ -14,16 +14,17 @@ evaluator-request-v1 = [
   output-capability: output-capability,
   evaluator-protocol-digest: digest,
   evaluator-hard-caps-digest: digest,
+  sandbox-requirement: null / sandbox-requirement,
   request-digest: digest
 ]
 
 implementation-identity = [
-  implementation-id: identifier,
+  implementation-id: identity-text,
   source-digest: digest,
   build-digest: digest,
   binary-digest: digest,
   public-contract-digest: digest,
-  organization-id: null / identifier
+  organization-id: null / identity-text
 ]
 
 output-capability = [
@@ -32,6 +33,22 @@ output-capability = [
   diagnostic-bytes-limit: uint
 ]
 
-identifier = tstr .size (1..128)
+sandbox-requirement = [
+  launch-policy-digest: digest,
+  signed-image-manifest-digest: digest,
+  required-provider-capability: provider-capability,
+  administrator-policy-digest: digest,
+  policy-epoch: uint
+]
+
+provider-capability = [
+  capability-id: provider-identifier,
+  capability-version: uint,
+  minimum-strength: uint
+]
+
+identity-text = tstr .size (1..128)
+provider-identifier = (tstr .size (1..128)) .and
+  (tstr .regexp "[a-z0-9][a-z0-9._/-]{0,127}")
 identifier-16 = bstr .size 16
 digest = bstr .size 32
