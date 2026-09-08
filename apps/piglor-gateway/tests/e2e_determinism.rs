@@ -927,14 +927,34 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
 
 async fn multi_rate_human_ai_replay_is_deterministic_impl(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut scenario = create_scenario().await?;
-    let (experiment, token, authority) = register_experiment(&mut scenario)?;
+    let mut scenario =
+        create_scenario()
+            .await
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("create_scenario: {error}").into()
+            })?;
+    let (experiment, token, authority) = register_experiment(&mut scenario).map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("register_experiment: {error}").into()
+        },
+    )?;
     let session = experiment
         .resume(scenario.timeline)
-        .test_ok()?
+        .test_ok()
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("resume: {error}").into()
+        })?
         .with_protected_token(token.clone());
-    let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await?;
-    let polled = poll_events(scenario.address, scenario.timeline, scenario.human_entity).await?;
+    let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await.map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("run_tick_boundaries: {error}").into()
+        },
+    )?;
+    let polled = poll_events(scenario.address, scenario.timeline, scenario.human_entity)
+        .await
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("poll_events: {error}").into()
+        })?;
     assert_event_order(
         scenario.human_entity,
         scenario.fast_entity,
@@ -942,12 +962,22 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         &polled,
     )?;
 
-    let live_snapshot = assert_projection_state(&scenario, &session, &authority)?;
+    let live_snapshot = assert_projection_state(&scenario, &session, &authority).map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("assert_projection_state: {error}").into()
+        },
+    )?;
     assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
     assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
-    assert_replay(&scenario, &live_snapshot, pinned_wall_time)?;
-    scenario.guard.shutdown().await?;
+    assert_replay(&scenario, &live_snapshot, pinned_wall_time).map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("assert_replay: {error}").into()
+        },
+    )?;
+    scenario.guard.shutdown().await.map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> { format!("shutdown: {error}").into() },
+    )?;
     Ok(())
 }
 
