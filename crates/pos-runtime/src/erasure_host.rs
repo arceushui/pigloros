@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use pos_core::{
-    store::{EventReadBounds, EventStore, SeqRange},
+    store::{EventReadBounds, SeqRange},
     CoreError, ErasureContainmentGateV1, ErasureGate, ErasureHostErrorV1, ErasureHostStoreV1,
     ErasureReferenceV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event,
     EventDraft, Seq, Timeline, TimelineId,
