@@ -691,7 +691,6 @@ pub enum SandboxProviderErrorCode {
     CleanupFailed,
     UnknownAttempt,
     RequestIdentityConflict,
-    AttemptInProgress,
     PayloadTransferTimeout,
 }
 
@@ -731,8 +730,7 @@ impl SandboxProviderErrorCode {
             Self::CleanupFailed => 14,
             Self::UnknownAttempt => 15,
             Self::RequestIdentityConflict => 16,
-            Self::AttemptInProgress => 17,
-            Self::PayloadTransferTimeout => 18,
+            Self::PayloadTransferTimeout => 17,
         }
     }
 
@@ -755,8 +753,7 @@ impl SandboxProviderErrorCode {
             14 => Ok(Self::CleanupFailed),
             15 => Ok(Self::UnknownAttempt),
             16 => Ok(Self::RequestIdentityConflict),
-            17 => Ok(Self::AttemptInProgress),
-            18 => Ok(Self::PayloadTransferTimeout),
+            17 => Ok(Self::PayloadTransferTimeout),
             _ => Err(SandboxProviderProtocolError::InvalidEncoding),
         }
     }
