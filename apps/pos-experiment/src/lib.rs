@@ -71,6 +71,10 @@ fn open_store_with_gate(
     gate: Option<Arc<dyn ErasureGate>>,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
     let mut store = pos_store::open_store(config)?;
+    #[cfg(test)]
+    if gate.is_none() {
+        drop(bind_test_store_gate(store.as_mut()));
+    }
     if let Some(gate) = gate {
         store.bind_erasure_gate(gate)?;
     }
