@@ -6,14 +6,17 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentError, ConsentGate, ConsentGrantedV1, Plugin, PluginId, ProposedAction, Reducer, State,
+    ConsentError, ConsentGate, ConsentGrantedV1, ErasureContainmentGateV1, Plugin, PluginId,
+    ProposedAction, Reducer, State,
 };
 use pos_runtime::{
-    Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
+    Driver, ObservationView, PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput,
+    TimelineHistorySegment,
 };
 use pos_store::{open_store, StoreConfig};
 use std::{
     fmt::Debug,
+    ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -32,6 +35,41 @@ fn test_err<T: Debug, E>(result: Result<T, E>) -> E {
             std::panic::resume_unwind(Box::new(format!("unexpected error-path value: {value:?}")))
         }
         Err(error) => error,
+    }
+}
+
+/// Bind the host-owned erasure gate for all ordinary live-registry fixtures.
+/// Individual tests that exercise an unbound consent gate still call
+/// `without_consent_gate`, which leaves erasure containment bound.
+struct PluginRegistry(RuntimePluginRegistry);
+
+impl PluginRegistry {
+    fn new() -> RuntimePluginRegistry {
+        RuntimePluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    }
+
+    fn new_replay() -> RuntimePluginRegistry {
+        RuntimePluginRegistry::new_replay()
+    }
+}
+
+impl Default for PluginRegistry {
+    fn default() -> Self {
+        Self(Self::new())
+    }
+}
+
+impl Deref for PluginRegistry {
+    type Target = RuntimePluginRegistry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for PluginRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
