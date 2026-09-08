@@ -671,7 +671,7 @@ where
 
 fn frozen_coordinator<S>(
     store: Rc<RefCell<S>>,
-    request: ErasureRequestV1,
+    request: &ErasureRequestV1,
     required_target: ErasureRequiredTargetV1,
 ) -> Result<ErasureCoordinatorStateMachineV1<Host<S>>, ErasureErrorV1>
 where
@@ -729,9 +729,8 @@ where
     let first_request = request()?;
     let second_request = overlapping_request()?;
     let required_target = target();
-    let mut first = frozen_coordinator(Rc::clone(&shared), first_request.clone(), required_target)?;
-    let mut second =
-        frozen_coordinator(Rc::clone(&shared), second_request.clone(), required_target)?;
+    let mut first = frozen_coordinator(Rc::clone(&shared), &first_request, required_target)?;
+    let mut second = frozen_coordinator(Rc::clone(&shared), &second_request, required_target)?;
 
     let generation = shared
         .borrow_mut()
