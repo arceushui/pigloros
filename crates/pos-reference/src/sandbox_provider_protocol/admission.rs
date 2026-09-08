@@ -8,11 +8,11 @@ use super::codec::{
     valid_identifier, valid_key_id, verify_digest, verify_signature,
 };
 use super::{
-    AdmissionGrant, LaunchPolicy, ProviderCapability, SandboxAdministratorPolicy,
-    SandboxArchitecture, SandboxExecuteRequest, SandboxProviderManifest,
-    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult,
-    SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError,
-    SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
+    AdmissionAuthority, AdmissionGrant, ExecuteAuthority, LaunchPolicy, ProviderCapability,
+    ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxExecuteRequest,
+    SandboxProviderManifest, SandboxProviderProtocolError, SandboxProviderReceipt,
+    SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome,
+    SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
@@ -41,17 +41,17 @@ struct ConformanceSubjectBinding {
 struct GrantBinding {
     request_id: [u8; 16],
     attempt_id: [u8; 16],
-    authority: [[u8; 32]; 13],
+    authority: AdmissionAuthority,
     epochs: [u64; 3],
     input: [u8; 32],
     exchange_plans: Vec<[u8; 32]>,
     launch_policy: [u8; 32],
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ReceiptBinding {
     attempt_id: [u8; 16],
-    authority: [[u8; 32]; 8],
+    authority: ReceiptAuthority,
     epochs: [u64; 3],
     host_profile: [u8; 32],
     effective_limits: [u8; 32],
@@ -61,7 +61,20 @@ struct ReceiptBinding {
 struct ExecuteBinding {
     policy: [u8; 32],
     policy_epoch: u64,
-    authority: [[u8; 32]; 9],
+    authority: SelectedExecuteAuthority,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SelectedExecuteAuthority {
+    launch_policy: [u8; 32],
+    image: [u8; 32],
+    administrator_policy: [u8; 32],
+    trust: [u8; 32],
+    revocation: [u8; 32],
+    provider_manifest: [u8; 32],
+    conformance_profile: [u8; 32],
+    conformance_report: [u8; 32],
+    host_profile: [u8; 32],
 }
 
 struct DecodedProviderAdmission {
@@ -343,10 +356,8 @@ pub struct AdmittedSandboxProvider {
     syscall_set: SandboxSyscallSet,
     host_profile: HostCapabilityProfile,
     conformance_report: ProviderConformanceReport,
-    trust_digest: [u8; 32],
-    trust_epoch: u64,
-    revocation_digest: [u8; 32],
-    revocation_epoch: u64,
+    trust: SandboxTrustSnapshot,
+    revocation: SandboxRevocationSnapshot,
     runtime_key: ed25519_dalek::VerifyingKey,
 }
 
@@ -396,10 +407,8 @@ impl AdmittedSandboxProvider {
             syscall_set: decoded.syscall_set,
             host_profile: decoded.host_profile,
             conformance_report: decoded.conformance_report,
-            trust_digest: trust.snapshot_digest(),
-            trust_epoch: trust.trust_epoch(),
-            revocation_digest: revocation.snapshot_digest(),
-            revocation_epoch: revocation.revocation_epoch(),
+            trust: trust.clone(),
+            revocation: revocation.clone(),
             runtime_key,
         })
     }
@@ -541,27 +550,28 @@ impl AdmittedSandboxProvider {
     /// certificate mappings, epochs, architecture, lengths, or byte digests.
     pub fn admit_image(
         &self,
-        policy: &SandboxAdministratorPolicy,
-        trust: &SandboxTrustSnapshot,
-        revocation: &SandboxRevocationSnapshot,
         manifest_bytes: &[u8],
         root_image: &[u8],
         executable: &[u8],
     ) -> Result<AdmittedSandboxImage, SandboxAdmissionError> {
         let image = SignedImageManifest::from_canonical_cbor(manifest_bytes)?;
-        if !policy.accepts_image(&image.manifest_digest) {
+        if !self.policy.accepts_image(&image.manifest_digest) {
             return Err(SandboxAdmissionError::PolicyMismatch);
         }
-        if revocation.image_revoked(&image.manifest_digest)
-            || revocation.image_revoked(&image.root_image_blake3_digest)
-            || revocation.image_revoked(&image.executable_blake3_digest)
+        if self.revocation.image_revoked(&image.manifest_digest)
+            || self
+                .revocation
+                .image_revoked(&image.root_image_blake3_digest)
+            || self
+                .revocation
+                .image_revoked(&image.executable_blake3_digest)
         {
             return Err(SandboxAdmissionError::Revoked);
         }
         if image.architecture != self.syscall_set.architecture {
             return Err(SandboxAdmissionError::ArchitectureMismatch);
         }
-        if image.image_trust_epoch != trust.trust_epoch() {
+        if image.image_trust_epoch != self.trust.trust_epoch() {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
         let image_length =
@@ -572,7 +582,7 @@ impl AdmittedSandboxProvider {
         {
             return Err(SandboxAdmissionError::ArtifactMismatch);
         }
-        let certificate_matches = trust.certificates().iter().any(|certificate| {
+        let certificate_matches = self.trust.certificates().iter().any(|certificate| {
             certificate.fingerprint == image.signing_certificate_sha256
                 && certificate.keyring_serial == image.kernel_keyring_serial
                 && certificate.epoch == image.image_trust_epoch
@@ -580,8 +590,8 @@ impl AdmittedSandboxProvider {
         if !certificate_matches {
             return Err(SandboxAdmissionError::CertificateMismatch);
         }
-        let image_key = revocation.active_key(
-            trust,
+        let image_key = self.revocation.active_key(
+            &self.trust,
             &image.image_project_key_id,
             SandboxTrustRole::ImageProject,
         )?;
@@ -636,21 +646,7 @@ impl AdmittedSandboxProvider {
         let actual = GrantBinding {
             request_id: grant.request_id,
             attempt_id: grant.attempt_id,
-            authority: [
-                grant_authority.evr1_digest,
-                grant_authority.fixture_contract_digest,
-                grant_authority.fixture_digest,
-                grant_authority.execution_profile_digest,
-                grant_authority.lps1_digest,
-                grant_authority.sim1_digest,
-                grant_authority.apt1_digest,
-                grant_authority.trs1_digest,
-                grant_authority.rvs1_digest,
-                grant_authority.spm1_digest,
-                grant_authority.pcf1_digest,
-                grant_authority.pcr1_digest,
-                grant_authority.hcp1_digest,
-            ],
+            authority: grant_authority.clone(),
             epochs: [
                 grant.trust_epoch,
                 grant.revocation_epoch,
@@ -663,31 +659,31 @@ impl AdmittedSandboxProvider {
         let expected = GrantBinding {
             request_id: request.request.request_id,
             attempt_id: request.attempt_id,
-            authority: [
-                request_authority.evr1_digest,
-                request_authority.fixture_contract_digest,
-                request_authority.fixture_digest,
-                request_authority.execution_profile_digest,
-                request_authority.lps1_digest,
-                request_authority.sim1_digest,
-                request_authority.apt1_digest,
-                request_authority.trs1_digest,
-                request_authority.rvs1_digest,
-                request_authority.spm1_digest,
-                request_authority.pcf1_digest,
-                request_authority.pcr1_digest,
-                request_authority.hcp1_digest,
-            ],
+            authority: AdmissionAuthority {
+                evr1_digest: request_authority.evr1_digest,
+                fixture_contract_digest: request_authority.fixture_contract_digest,
+                fixture_digest: request_authority.fixture_digest,
+                execution_profile_digest: request_authority.execution_profile_digest,
+                lps1_digest: request_authority.lps1_digest,
+                sim1_digest: request_authority.sim1_digest,
+                apt1_digest: request_authority.apt1_digest,
+                trs1_digest: request_authority.trs1_digest,
+                rvs1_digest: request_authority.rvs1_digest,
+                spm1_digest: request_authority.spm1_digest,
+                pcf1_digest: request_authority.pcf1_digest,
+                pcr1_digest: request_authority.pcr1_digest,
+                hcp1_digest: request_authority.hcp1_digest,
+            },
             epochs: [
-                self.trust_epoch,
-                self.revocation_epoch,
+                self.trust.trust_epoch(),
+                self.revocation.revocation_epoch(),
                 self.policy.policy_epoch(),
             ],
             input: request.adapter_input.digest,
             exchange_plans: expected_plans,
             launch_policy: launch.policy_digest,
         };
-        if actual != expected {
+        if actual != expected || !self.supports_capabilities(&request.capability_ids) {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
         Ok(grant)
@@ -710,16 +706,7 @@ impl AdmittedSandboxProvider {
         let authority = &receipt.authority;
         let actual = ReceiptBinding {
             attempt_id: receipt.attempt_id,
-            authority: [
-                authority.agr1_digest,
-                authority.spm1_digest,
-                authority.provider_binary_digest,
-                authority.lps1_digest,
-                authority.sim1_digest,
-                authority.apt1_digest,
-                authority.trs1_digest,
-                authority.rvs1_digest,
-            ],
+            authority: authority.clone(),
             epochs: [
                 receipt.trust_epoch,
                 receipt.revocation_epoch,
@@ -730,19 +717,19 @@ impl AdmittedSandboxProvider {
         };
         let expected = ReceiptBinding {
             attempt_id: grant.attempt_id,
-            authority: [
-                grant.grant_digest,
-                self.manifest.manifest_digest,
-                self.manifest.binary_digest,
-                grant.authority.lps1_digest,
-                grant.authority.sim1_digest,
-                self.policy.policy_digest(),
-                self.trust_digest,
-                self.revocation_digest,
-            ],
+            authority: ReceiptAuthority {
+                agr1_digest: grant.grant_digest,
+                spm1_digest: self.manifest.manifest_digest,
+                provider_binary_digest: self.manifest.binary_digest,
+                lps1_digest: grant.authority.lps1_digest,
+                sim1_digest: grant.authority.sim1_digest,
+                apt1_digest: self.policy.policy_digest(),
+                trs1_digest: self.trust.snapshot_digest(),
+                rvs1_digest: self.revocation.snapshot_digest(),
+            },
             epochs: [
-                self.trust_epoch,
-                self.revocation_epoch,
+                self.trust.trust_epoch(),
+                self.revocation.revocation_epoch(),
                 self.policy.policy_epoch(),
             ],
             host_profile: self.host_profile.profile_digest,
@@ -795,37 +782,36 @@ impl AdmittedSandboxProvider {
         let actual = ExecuteBinding {
             policy: request.request.apt1_digest,
             policy_epoch: request.request.policy_epoch,
-            authority: [
-                authority.lps1_digest,
-                authority.sim1_digest,
-                authority.apt1_digest,
-                authority.trs1_digest,
-                authority.rvs1_digest,
-                authority.spm1_digest,
-                authority.pcf1_digest,
-                authority.pcr1_digest,
-                authority.hcp1_digest,
-            ],
+            authority: SelectedExecuteAuthority::from_execute(authority),
         };
         let expected = ExecuteBinding {
             policy: self.policy.policy_digest(),
             policy_epoch: self.policy.policy_epoch(),
-            authority: [
-                launch.policy_digest,
-                image.manifest.manifest_digest,
-                self.policy.policy_digest(),
-                self.trust_digest,
-                self.revocation_digest,
-                self.manifest.manifest_digest,
-                self.manifest.pcf1_digest,
-                self.conformance_report.report_digest,
-                self.host_profile.profile_digest,
-            ],
+            authority: SelectedExecuteAuthority {
+                launch_policy: launch.policy_digest,
+                image: image.manifest.manifest_digest,
+                administrator_policy: self.policy.policy_digest(),
+                trust: self.trust.snapshot_digest(),
+                revocation: self.revocation.snapshot_digest(),
+                provider_manifest: self.manifest.manifest_digest,
+                conformance_profile: self.manifest.pcf1_digest,
+                conformance_report: self.conformance_report.report_digest,
+                host_profile: self.host_profile.profile_digest,
+            },
         };
         if actual != expected {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
         Ok(())
+    }
+
+    fn supports_capabilities(&self, requested: &[String]) -> bool {
+        requested.iter().all(|required| {
+            self.manifest
+                .capabilities
+                .iter()
+                .any(|available| available.capability_id == *required)
+        })
     }
 
     /// Authenticated SPM1 selected for this capability.
@@ -850,6 +836,22 @@ impl AdmittedSandboxProvider {
     #[must_use]
     pub const fn conformance_report(&self) -> &ProviderConformanceReport {
         &self.conformance_report
+    }
+}
+
+impl SelectedExecuteAuthority {
+    const fn from_execute(authority: &ExecuteAuthority) -> Self {
+        Self {
+            launch_policy: authority.lps1_digest,
+            image: authority.sim1_digest,
+            administrator_policy: authority.apt1_digest,
+            trust: authority.trs1_digest,
+            revocation: authority.rvs1_digest,
+            provider_manifest: authority.spm1_digest,
+            conformance_profile: authority.pcf1_digest,
+            conformance_report: authority.pcr1_digest,
+            host_profile: authority.hcp1_digest,
+        }
     }
 }
 

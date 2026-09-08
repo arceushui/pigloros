@@ -1,7 +1,5 @@
 //! Authenticated revocation snapshots and role-separated key resolution.
 
-use ed25519_dalek::VerifyingKey;
-
 use super::codec::{
     bounded_array, decode_document, digest32, key_id, require_canonical_order, signed, uint,
     verify_digest, verify_signature,
@@ -72,7 +70,7 @@ impl SandboxRevocationSnapshot {
         require_canonical_order(providers)?;
         require_canonical_order(images)?;
         verify_digest("RVS1", fields, snapshot_digest)?;
-        let key = resolve_key(trust, &signer, SandboxTrustRole::AdministratorPolicy)?;
+        let key = trust.key_for_role(&signer, SandboxTrustRole::AdministratorPolicy)?;
         verify_signature("RVS1", &snapshot_digest, &signature, &key)?;
         if trust_digest != trust.snapshot_digest() {
             return Err(SandboxTrustError::AuthorityMismatch);
@@ -96,14 +94,14 @@ impl SandboxRevocationSnapshot {
         trust: &SandboxTrustSnapshot,
         id: &str,
         role: SandboxTrustRole,
-    ) -> Result<VerifyingKey, SandboxTrustError> {
+    ) -> Result<ed25519_dalek::VerifyingKey, SandboxTrustError> {
         if self.trust_digest != trust.snapshot_digest() {
             return Err(SandboxTrustError::AuthorityMismatch);
         }
         if self.revoked_keys.iter().any(|revoked| revoked == id) {
             return Err(SandboxTrustError::Revoked);
         }
-        resolve_key(trust, id, role)
+        trust.key_for_role(id, role)
     }
 
     /// Check only immediate epoch continuity for snapshots from one registry.
@@ -150,21 +148,4 @@ impl SandboxRevocationSnapshot {
     pub fn image_revoked(&self, digest: &[u8; 32]) -> bool {
         self.revoked_images.binary_search(digest).is_ok()
     }
-}
-
-fn resolve_key(
-    trust: &SandboxTrustSnapshot,
-    id: &str,
-    role: SandboxTrustRole,
-) -> Result<VerifyingKey, SandboxTrustError> {
-    let key = trust
-        .keys()
-        .iter()
-        .find(|key| key.key_id == id)
-        .ok_or(SandboxTrustError::UnknownKey)?;
-    if key.role != role {
-        return Err(SandboxTrustError::WrongRole);
-    }
-    VerifyingKey::from_bytes(&key.public_key)
-        .map_err(|_| SandboxProviderProtocolError::SignatureInvalid.into())
 }
