@@ -466,10 +466,94 @@ const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
 mod tests {
     use super::*;
     use pos_core::{
-        CanonicalBytes, EntityId, ErasureForkAdmissionInputV1,
-        ErasurePersistenceInventorySnapshotV1, Kind, TimelineMeta, TimelineMode,
+        CanonicalBytes, EntityId, ErasureForkAdmissionInputV1, ErasureForkPersistencePortV1,
+        ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1, EventStore, Kind,
+        TimelineMeta, TimelineMode,
     };
     use pos_store::memory::MemoryStore;
+
+    struct FaultStoreV1 {
+        inner: MemoryStore,
+        fail_nonempty_inventory: bool,
+        misreport_exact_retry: bool,
+    }
+
+    impl pos_core::EventStore for FaultStoreV1 {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.inner.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            self.inner.append(timeline, drafts)
+        }
+
+        fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            self.inner.read(timeline, range)
+        }
+
+        fn fork(
+            &mut self,
+            parent: TimelineId,
+            at_seq: Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.inner.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.inner.list_timelines()
+        }
+
+        fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            self.inner.get_timeline(id)
+        }
+    }
+
+    impl pos_core::ErasureInventoryPersistencePortV1 for FaultStoreV1 {
+        fn complete_erasure_inventory_snapshot(
+            &mut self,
+            maximum_requests: usize,
+        ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+            let snapshot = self
+                .inner
+                .complete_erasure_inventory_snapshot(maximum_requests)?;
+            if self.fail_nonempty_inventory && !snapshot.topology().is_empty() {
+                Err(ErasureErrorV1::ProvenanceMissing)
+            } else {
+                Ok(snapshot)
+            }
+        }
+    }
+
+    impl pos_core::ErasureForkPersistencePortV1 for FaultStoreV1 {
+        fn commit_fork_admission(
+            &mut self,
+            admission: PreparedErasureForkBatchV1,
+        ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+            let outcome = self.inner.commit_fork_admission(admission)?;
+            if self.misreport_exact_retry && outcome == ErasureCasOutcomeV1::ExactRetry {
+                Ok(ErasureCasOutcomeV1::Applied)
+            } else {
+                Ok(outcome)
+            }
+        }
+    }
+
+    fn fault_store(fail_nonempty_inventory: bool, misreport_exact_retry: bool) -> FaultStoreV1 {
+        FaultStoreV1 {
+            inner: MemoryStore::new().without_erasure_gate(),
+            fail_nonempty_inventory,
+            misreport_exact_retry,
+        }
+    }
 
     struct FailingInventoryV1;
 
@@ -573,6 +657,44 @@ mod tests {
             host.maximum_requests(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
+    }
+
+    #[test]
+    fn active_requests_cannot_use_the_empty_topology_path() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let generation = host
+            .ready_generation()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.state = HostStateV1::Ready {
+            generation,
+            maximum_requests: 4,
+            request_count: 1,
+        };
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline("denied")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    #[test]
+    fn failed_successor_inventory_refresh_poisons_the_host() {
+        let mut host =
+            ErasureExecutionHostV1::recover_verified_empty(Box::new(fault_store(true, false)), 4)
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline("unpublishable")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert!(matches!(
+            host.read_sender(),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
     }
 
     #[test]
@@ -832,5 +954,35 @@ mod tests {
             sender.commit_fork_admission(batch),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
+    }
+
+    #[test]
+    fn impossible_applied_retry_poisons_the_host() {
+        let mut host =
+            ErasureExecutionHostV1::recover_verified_empty(Box::new(fault_store(false, true)), 4)
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let batch = empty_fork_batch(
+            parent.id(),
+            TimelineId::new(),
+            ErasureReferenceV1::from_digest([10; 32]),
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut sender = host
+            .command_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(sender.commit_fork_admission(batch.clone()).is_ok());
+        assert_eq!(
+            sender.commit_fork_admission(batch),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        drop(sender);
+        assert!(matches!(
+            host.command_sender(),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
     }
 }
