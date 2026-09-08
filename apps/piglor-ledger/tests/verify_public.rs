@@ -1,8 +1,8 @@
 use ed25519_dalek::SigningKey;
 use piglor_ledger::{run, verify_source, Source};
 use pos_core::{
-    CanonicalBytes, EntityId, Event, EventId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
-    KeyRoleV1, Kind, SchemaVersion, Seq, WallTime,
+    CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventId, KeyIdentityV1,
+    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Kind, SchemaVersion, Seq, WallTime,
 };
 use pos_crypto::key_roles::{sign_for_registered_role, SigningKeyMaterial};
 use rusqlite::params;
@@ -35,13 +35,14 @@ fn production_ledger_binary_reports_dispatch_errors() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
+fn public_store_verification_fails_closed_without_host_gate_on_signature_role(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
+    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
     let timeline = store.create_timeline("ledger")?;
     let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
@@ -89,20 +90,22 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
         Ok(report) => return Err(format!("malformed identity produced a report: {report}").into()),
         Err(error) => error,
     };
-    assert!(error
-        .to_string()
-        .contains("signed event must carry a TimelineIntegritySigning owner/role/epoch identity"));
+    assert_eq!(
+        error.to_string(),
+        "erasure containment boundary is unavailable"
+    );
     Ok(())
 }
 
 #[test]
-fn public_store_verification_rejects_an_invalid_registry_public_key(
+fn public_store_verification_fails_closed_without_host_gate_on_invalid_registry_key(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
+    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
     let timeline = store.create_timeline("ledger")?;
     let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let mut invalid_public_key = [0_u8; 32];
@@ -147,19 +150,19 @@ fn public_store_verification_rejects_an_invalid_registry_public_key(
     };
     assert_eq!(
         error.to_string(),
-        "invalid --key: signature verification failed"
+        "erasure containment boundary is unavailable"
     );
     Ok(())
 }
 
 #[test]
-fn public_store_verification_accepts_a_registry_bound_signature(
+fn public_store_verification_fails_closed_without_a_host_gate(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let database_path = directory.path().join("ledger.db");
     let key_path = directory.path().join("signing-key");
 
-    run(&[
+    let error = run(&[
         "piglor-ledger".to_owned(),
         "keygen".to_owned(),
         "--out".to_owned(),
@@ -186,27 +189,22 @@ fn public_store_verification_accepts_a_registry_bound_signature(
         "2026-08-01".to_owned(),
         "--osf".to_owned(),
         "https://osf.io/example".to_owned(),
-    ])?;
-
-    let secret = std::fs::read_to_string(&key_path)?;
-    let pubkey = piglor_ledger::test_helpers::derive_pubkey_hex(&secret);
-    let anchor = trust_anchor(
-        KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1),
-        &pubkey,
-    );
-    let report = verify_source(&Source::Store(database_path), Some(&anchor), None)?;
-    assert!(report.to_string().starts_with("OK: store"));
+    ])
+    .err()
+    .ok_or("production store command unexpectedly succeeded without a host gate")?;
+    assert!(error.to_string().contains("erasure containment boundary"));
     Ok(())
 }
 
 #[test]
-fn public_store_verification_accepts_a_rotated_timeline_key(
+fn public_store_verification_fails_closed_without_host_gate_on_rotated_key(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
+    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
     let timeline = store.create_timeline("ledger")?;
     let identity_one = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let identity_two = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 2);
@@ -274,8 +272,13 @@ fn public_store_verification_accepts_a_rotated_timeline_key(
         write!(&mut anchor_two, "{byte:02x}")?;
     }
     let anchors = format!("ledger-owner/2/1={anchor_one},ledger-owner/2/2={anchor_two}");
-    let report = verify_source(&Source::Store(database_path), Some(&anchors), None)?;
-    assert!(report.to_string().starts_with("OK: store"));
+    let error = verify_source(&Source::Store(database_path), Some(&anchors), None)
+        .err()
+        .ok_or("production store verification unexpectedly succeeded without a host gate")?;
+    assert_eq!(
+        error.to_string(),
+        "erasure containment boundary is unavailable"
+    );
 
     let single_public_key = material_one
         .public_verification_key()
