@@ -1179,3 +1179,46 @@ mod erasure_gate_coverage_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod coverage_startup_error_paths {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owner_key_fixture() -> (tempfile::TempDir, OwnTracksOwnerKey) {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("temporary directory failed: {error}")))
+        });
+        let path = directory.path().join("owner.key");
+        owntracks::create_or_load_owner_key(&path).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("owner key creation failed: {error}")))
+        });
+        let owner_key = OwnTracksOwnerKey::load(&path).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("owner key loading failed: {error}")))
+        });
+        (directory, owner_key)
+    }
+
+    #[test]
+    fn startup_gateway_reports_store_open_failures() {
+        let (_directory, owner_key) = owner_key_fixture();
+        assert!(gateway_for_startup(
+            Some("/dev/null/cannot/create/this/path"),
+            StoreConfig::Sqlite {
+                path: "/dev/null/cannot/create/this/path".to_owned(),
+            },
+            Some(&owner_key),
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+        )
+        .is_err());
+        assert!(gateway_for_startup(
+            Some("/dev/null/cannot/create/this/path"),
+            StoreConfig::Sqlite {
+                path: "/dev/null/cannot/create/this/path".to_owned(),
+            },
+            None,
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+        )
+        .is_err());
+    }
+}

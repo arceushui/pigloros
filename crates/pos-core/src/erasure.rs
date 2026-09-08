@@ -5182,23 +5182,26 @@ mod coverage_paths {
         ))
     }
 
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(on))]
-    fn frozen_scope_calls_the_verified_state_permission_check() -> Result<(), ErasureErrorV1> {
-        let gate = ErasureContainmentGateV1::new();
-        let timeline = TimelineId::new();
-        gate.publish_verified_state(frozen_state()?);
-        gate.bind_timeline(timeline, reference(7))
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        assert_eq!(
-            gate.authorize(timeline, ErasureProtectedOperationV1::Read),
-            Err(ErasureContainmentErrorV1::AccessFrozen)
-        );
-        Ok(())
+    fn coverage_state(manifest_digest: ErasureReferenceV1) -> ErasureVerifiedStateV1 {
+        frozen_state_with_manifest(manifest_digest).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("coverage state failed: {error:?}")))
+        })
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(on))]
+    fn frozen_scope_calls_the_verified_state_permission_check() {
+        let gate = ErasureContainmentGateV1::new();
+        let timeline = TimelineId::new();
+        gate.publish_verified_state(coverage_state(reference(6)));
+        assert!(gate.bind_timeline(timeline, reference(7)).is_ok());
+        assert_eq!(
+            gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+    }
+
+    #[test]
     fn topology_proof_is_opaque_and_manifest_bound() -> Result<(), ErasureErrorV1> {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let affected = TimelineId::new();
@@ -5277,7 +5280,6 @@ mod coverage_paths {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(on))]
     fn topology_proof_rejects_conflicting_unaffected_manifest() -> Result<(), ErasureErrorV1> {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let state = frozen_state_with_manifest(reference(6))?;
@@ -5300,5 +5302,32 @@ mod coverage_paths {
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn topology_proof_conflict_checks_existing_unaffected_manifest() {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let affected = TimelineId::new();
+        let unaffected = TimelineId::new();
+        let state = coverage_state(reference(6));
+        let initial = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![unaffected],
+        );
+        assert!(gate
+            .install_verified_state_with_topology(&state, &initial)
+            .is_ok());
+        let replacement = coverage_state(reference(8));
+        let conflicting = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            replacement.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![unaffected],
+        );
+        assert_eq!(
+            gate.install_verified_state_with_topology(&replacement, &conflicting),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
     }
 }
