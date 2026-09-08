@@ -94,27 +94,7 @@ impl Frame {
 pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<(), TransportError> {
     validate_attempt(attempt)?;
     let mut transcript = new_transcript(ATTEMPT_DOMAIN);
-    let members = attempt.auxiliary.len() + 2;
-    write_transcript_frame(
-        &mut writer,
-        Value::Array(vec![
-            text_value("EAI1"),
-            unsigned(1),
-            text_value(&attempt.case_id),
-            unsigned(u64::from(attempt.claim_layer)),
-            unsigned(u64::from(attempt.family)),
-            unsigned(u64::from(attempt.mode)),
-            bytes_value(&attempt.fixture_digest),
-            budget_value(attempt.budget),
-            unsigned(attempt.watchdog_ms),
-            Value::Bool(attempt.network_allowed),
-            unsigned(as_u64(attempt.capability_ids.len())?),
-            unsigned(as_u64(members)?),
-            unsigned(attempt.transport_caps.max_member_bytes),
-            unsigned(attempt.transport_caps.max_attempt_bytes),
-        ]),
-        &mut transcript,
-    )?;
+    write_attempt_header(&mut writer, attempt, &mut transcript)?;
     for (index, capability) in attempt.capability_ids.iter().enumerate() {
         write_transcript_frame(
             &mut writer,
@@ -132,15 +112,50 @@ pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<()
     for (index, artifact) in attempt.auxiliary.iter().enumerate() {
         write_artifact(&mut writer, &mut transcript, 2, as_u64(index)?, artifact)?;
     }
+    write_attempt_footer(&mut writer, transcript)?;
+    writer.flush().map_err(io_error)
+}
+
+fn write_attempt_header(
+    writer: &mut impl Write,
+    attempt: &CaseAttempt,
+    transcript: &mut blake3::Hasher,
+) -> Result<(), TransportError> {
+    let members = attempt.auxiliary.len() + 2;
+    write_transcript_frame(
+        writer,
+        Value::Array(vec![
+            text_value("EAI1"),
+            unsigned(1),
+            text_value(&attempt.case_id),
+            unsigned(u64::from(attempt.claim_layer)),
+            unsigned(u64::from(attempt.family)),
+            unsigned(u64::from(attempt.mode)),
+            bytes_value(&attempt.fixture_digest),
+            budget_value(attempt.budget),
+            unsigned(attempt.watchdog_ms),
+            Value::Bool(attempt.network_allowed),
+            unsigned(as_u64(attempt.capability_ids.len())?),
+            unsigned(as_u64(members)?),
+            unsigned(attempt.transport_caps.max_member_bytes),
+            unsigned(attempt.transport_caps.max_attempt_bytes),
+        ]),
+        transcript,
+    )
+}
+
+fn write_attempt_footer(
+    writer: &mut impl Write,
+    transcript: blake3::Hasher,
+) -> Result<(), TransportError> {
     write_frame(
-        &mut writer,
+        writer,
         Value::Array(vec![
             text_value("EIE1"),
             unsigned(1),
             bytes_value(transcript.finalize().as_bytes()),
         ]),
-    )?;
-    writer.flush().map_err(io_error)
+    )
 }
 
 /// Decode one complete EAI1 attempt stream.
