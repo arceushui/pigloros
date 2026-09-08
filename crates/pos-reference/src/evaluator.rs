@@ -112,6 +112,14 @@ pub trait SubjectAdapter {
     /// Returning an error means the subject operation was operationally
     /// unavailable; it is never converted into a deterministic typed failure.
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError>;
+
+    /// Return provenance authenticated for the immediately preceding attempt.
+    ///
+    /// Sandbox Provider adapters return the validated SPR1 self-digest. Other
+    /// adapters and attempts that ended before provider admission return none.
+    fn take_execution_provenance_digest(&mut self) -> Option<[u8; 32]> {
+        None
+    }
 }
 
 /// Operational adapter failure. Details are intentionally bounded and cannot
@@ -326,11 +334,42 @@ fn evaluate_case(
 ) -> Result<CaseOutcome, EvaluatorError> {
     let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
     let observation = adapter.execute(&attempt);
+    let provider_provenance = adapter.take_execution_provenance_digest();
     enforce_observed_coordinate_limit(
         &observation,
         profile.evaluator_hard_caps.max_coordinate_bytes,
     )?;
-    Ok(case_outcome(fixture, bundle.mode, observation))
+    let provenance_digest = case_provenance(request, fixture, &observation, provider_provenance)?;
+    Ok(case_outcome(
+        fixture,
+        bundle.mode,
+        observation,
+        provenance_digest,
+    ))
+}
+
+fn case_provenance(
+    request: &EvaluationRequest,
+    fixture: &Fixture,
+    observation: &Result<SubjectObservation, AdapterError>,
+    provider_provenance: Option<[u8; 32]>,
+) -> Result<[u8; 32], EvaluatorError> {
+    if request.sandbox_requirement.is_none() {
+        return Ok(fixture.provenance_digest);
+    }
+    if let Some(digest) = provider_provenance {
+        return (digest != [0; 32])
+            .then_some(digest)
+            .ok_or(EvaluatorError::AdapterIdentity);
+    }
+    match observation {
+        Err(_)
+        | Ok(SubjectObservation {
+            result: SubjectResult::Unavailable,
+            ..
+        }) => Ok(fixture.provenance_digest),
+        Ok(_) => Err(EvaluatorError::AdapterIdentity),
+    }
 }
 
 const fn enforce_observed_coordinate_limit(
@@ -398,6 +437,7 @@ fn case_outcome(
     fixture: &Fixture,
     mode: u8,
     observation: Result<SubjectObservation, AdapterError>,
+    provenance_digest: [u8; 32],
 ) -> CaseOutcome {
     let mut outcome = CaseOutcome {
         case_id: fixture.case_id.clone(),
@@ -413,7 +453,7 @@ fn case_outcome(
         actual_error: None,
         replay_claim: fixture.replay_claim,
         redaction_state: fixture.redaction_state,
-        provenance_digest: fixture.provenance_digest,
+        provenance_digest,
     };
     if outcome.redaction_state >= 2 {
         return outcome;
