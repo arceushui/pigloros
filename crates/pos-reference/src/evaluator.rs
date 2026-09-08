@@ -319,7 +319,7 @@ fn evaluate_cases(
         if !fixture.modes.contains(&bundle.mode) {
             continue;
         }
-        outcomes.push(evaluate_case(profile, bundle, fixture, adapter)?);
+        outcomes.push(evaluate_case(profile, bundle, request, fixture, adapter)?);
     }
     (!outcomes.is_empty())
         .then_some(outcomes)
@@ -329,6 +329,7 @@ fn evaluate_cases(
 fn evaluate_case(
     profile: &Profile,
     bundle: &VerifiedBundle,
+    request: &EvaluationRequest,
     fixture: &Fixture,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
