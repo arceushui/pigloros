@@ -36,8 +36,7 @@ pub const MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1: usize = 16 * 1024 * 1024;
 pub const MAX_SANDBOX_PROVIDER_ENTRIES_V1: usize = 256;
 /// Maximum number of syscall names in either SCS1 array.
 pub const MAX_SANDBOX_SYSCALL_NAMES_V1: usize = 512;
-pub(crate) const MAX_SANDBOX_PROVIDER_CBOR_COLLECTION_ENTRIES_V1: usize =
-    MAX_SANDBOX_SYSCALL_NAMES_V1;
+const MAX_SANDBOX_PROVIDER_CBOR_COLLECTION_ENTRIES_V1: usize = MAX_SANDBOX_SYSCALL_NAMES_V1;
 /// Largest input or output payload described by SPX1 or SPY1.
 pub const MAX_SANDBOX_PAYLOAD_BYTES_V1: u64 = 128 * 1024 * 1024;
 /// Exact nonfinal SBC1 payload size.
