@@ -937,8 +937,10 @@ async fn gateway_reloads_durable_consent_before_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let database = tempfile::NamedTempFile::new().test_ok()?;
     let path = database.path().to_str().test_ok()?.to_owned();
-    let first_gateway =
-        Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?);
+    let first_gateway = Gateway::new_with_erasure_gate(
+        open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+        Arc::new(ErasureContainmentGateV1::new()),
+    )?;
     let timeline = first_gateway
         .create_timeline("consent-recovery")
         .await
@@ -962,7 +964,10 @@ async fn gateway_reloads_durable_consent_before_revocation(
         .test_ok()?;
     drop(first_gateway);
 
-    let recovered_gateway = Gateway::new(open_store(StoreConfig::Sqlite { path }).test_ok()?);
+    let recovered_gateway = Gateway::new_with_erasure_gate(
+        open_store(StoreConfig::Sqlite { path }).test_ok()?,
+        Arc::new(ErasureContainmentGateV1::new()),
+    )?;
     let unknown_error = recovered_gateway
         .issue_consent_revocation(
             &timeline.id().to_string(),
@@ -1061,7 +1066,10 @@ async fn gateway_rejects_geo_admission_after_consent_revocation(
 #[tokio::test]
 async fn gateway_shutdown_drains_an_empty_executor(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok()?);
+    let gateway = Gateway::new_with_erasure_gate(
+        open_store(StoreConfig::Memory).test_ok()?,
+        Arc::new(ErasureContainmentGateV1::new()),
+    )?;
     gateway.shutdown().await.test_ok()?;
     drop(gateway);
     Ok(())
