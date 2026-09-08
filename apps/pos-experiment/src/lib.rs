@@ -871,7 +871,8 @@ impl Experiment {
         self
     }
 
-    /// Bind the host-owned erasure gate used by every EventStore and runtime
+    /// Bind the host-owned erasure gate used by every
+    /// [`pos_core::store::EventStore`] and runtime
     /// Tick Boundary created by this experiment.
     #[must_use]
     pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
