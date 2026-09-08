@@ -6505,7 +6505,7 @@ mod coverage_paths {
                 let _guard = poisoned.fence_lock.lock().unwrap_or_else(|error| {
                     std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
                 });
-                panic!("poison erasure fence");
+                std::panic::resume_unwind(Box::new("poison erasure fence"));
             })
             .join();
             assert!(result.is_err());
@@ -6517,7 +6517,7 @@ mod coverage_paths {
                 let _guard = poisoned.authority.write().unwrap_or_else(|error| {
                     std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
                 });
-                panic!("poison erasure authority");
+                std::panic::resume_unwind(Box::new("poison erasure authority"));
             })
             .join();
             assert!(result.is_err());
