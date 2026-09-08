@@ -961,6 +961,47 @@ fn selector_revocation_state_rejects_update_authority_and_signer_substitution() 
 }
 
 #[test]
+fn revocation_update_rejects_an_invalid_authenticated_policy_key() -> TestResult {
+    let root = SigningKey::from_bytes(&[1; 32]);
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let invalid_key = Value::Array(vec![
+        Value::Text("zzzzzz".to_owned()),
+        integer(1),
+        Value::Bytes(vec![0xff; 32]),
+        integer(2),
+    ]);
+    let trust = SandboxTrustSnapshot::authenticate(
+        &sign_trust_snapshot(
+            snapshot(vec![key_record("policy", 1), invalid_key], vec![], "root"),
+            &root,
+        )?,
+        "root",
+        &root.verifying_key(),
+    )?;
+    let current = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&trust, 5, vec![]), &signer)?,
+        &trust,
+    )?;
+    let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
+    let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
+    let update = revocation_update(&current, &next_bytes, &next, &signer, test_nonce())?;
+    let changed = resign_unsigned_field(
+        &update,
+        "RCU1",
+        7,
+        Value::Text("zzzzzz".to_owned()),
+        &signer,
+    )?;
+    assert!(matches!(
+        RevocationUpdateRequest::authenticate(&changed, &trust, &current),
+        Err(SandboxRevocationUpdateError::Trust(
+            SandboxTrustError::Protocol(ProtocolError::SignatureInvalid)
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
 fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
     let fixture = revocation_transition_fixture()?;
     let update = revocation_update(
@@ -1138,6 +1179,14 @@ fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
 fn selector_revocation_state_rejects_malformed_acknowledgement_fields() -> TestResult {
     let fixture = revocation_transition_fixture()?;
     let acknowledgement = revocation_acknowledgement(&fixture.next, &fixture.signer, Vec::new())?;
+    let null_record = encode(&Value::Null)?;
+    for malformed in [b"not-cbor".as_slice(), null_record.as_slice()] {
+        let mut state = SelectorRevocationState::new(fixture.current.clone());
+        assert!(matches!(
+            state.acknowledge(malformed, "runtime", &fixture.signer.verifying_key(), 1_000),
+            Err(SandboxRevocationUpdateError::Protocol(_))
+        ));
+    }
     for field in 2..=6 {
         let changed = resign_unsigned_field(
             &acknowledgement,

@@ -1379,6 +1379,14 @@ fn host_profile_rejects_non_boolean_feature_proof_status() -> TestResult {
         &fixture.authority.runtime,
     )?;
     assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
+    let changed = resign_unsigned_field(
+        &fixture.hcp1,
+        "HCP1",
+        4,
+        Value::Array(vec![Value::Null]),
+        &fixture.authority.runtime,
+    )?;
+    assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
     for (feature_field, replacement) in [(0, Value::Null), (1, Value::Null), (2, Value::Null)] {
         let feature = Value::Array(vec![
             Value::Text("cgroup-v2".to_owned()),
@@ -1514,6 +1522,14 @@ fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult 
     let non_record = encode(&Value::Null)?;
     assert!(HostCapabilityProfile::from_canonical_cbor(&non_record).is_err());
     assert!(ProviderConformanceReport::from_canonical_cbor(&non_record).is_err());
+    let invalid_architecture = resign_unsigned_field(
+        &fixture.hcp1,
+        "HCP1",
+        2,
+        integer(99),
+        &fixture.authority.runtime,
+    )?;
+    assert!(HostCapabilityProfile::from_canonical_cbor(&invalid_architecture).is_err());
     for field in 2..=8 {
         let changed = resign_unsigned_field(
             &fixture.hcp1,
@@ -1573,6 +1589,14 @@ fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult 
         )?;
         assert!(ProviderConformanceReport::from_canonical_cbor(&changed).is_err());
     }
+    let invalid_architecture = resign_unsigned_field(
+        &fixture.pcr1,
+        "PCR1",
+        7,
+        integer(99),
+        &fixture.authority.reviewer,
+    )?;
+    assert!(ProviderConformanceReport::from_canonical_cbor(&invalid_architecture).is_err());
     for (field, replacement) in [
         (2, bytes([0; 32])),
         (3, bytes([0; 32])),
@@ -1599,6 +1623,16 @@ fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult 
         )?)
         .is_err()
     );
+    let mut profile = HostCapabilityProfile::from_canonical_cbor(&fixture.hcp1)?;
+    profile.kernel_release.clear();
+    assert!(profile
+        .verify_signature(&fixture.authority.runtime.verifying_key())
+        .is_err());
+    let mut report = ProviderConformanceReport::from_canonical_cbor(&fixture.pcr1)?;
+    report.pcf1_digest = [0; 32];
+    assert!(report
+        .verify_signature(&fixture.authority.reviewer.verifying_key())
+        .is_err());
     Ok(())
 }
 
@@ -1861,6 +1895,17 @@ fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
         )?;
     assert!(admitted
         .authenticate_audit_chain(&audit, &receipt, &forged_result)
+        .is_err());
+    let mut forged_audit = audit.clone();
+    forged_audit[0] = replace_signed_signature(&forged_audit[0], [9; 64])?;
+    assert!(admitted
+        .authenticate_audit_chain(&forged_audit, &receipt, &result)
+        .is_err());
+
+    let mut invalid_receipt = receipt;
+    invalid_receipt.attempt_id = [0; 16];
+    assert!(admitted
+        .authenticate_terminal_result(&result_bytes, &request, &grant, &invalid_receipt)
         .is_err());
     Ok(())
 }

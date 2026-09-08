@@ -125,14 +125,23 @@ impl SelectorAdapter {
     }
 
     fn invoke(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        self.invoke_with_selector(attempt, Path::new(SANDBOX_SELECTOR_SOCKET), 0)
+    }
+
+    fn invoke_with_selector(
+        &mut self,
+        attempt: &CaseAttempt,
+        socket_path: &Path,
+        expected_uid: u32,
+    ) -> Result<SubjectObservation, AdapterError> {
         let ordinal = self
             .next_case_ordinal
             .take()
             .ok_or(AdapterError::ProtocolFailure)?;
         let request = encode_request(&self.request, &self.request_bytes, attempt, ordinal)?;
         let reply = Self::invoke_at(
-            Path::new(SANDBOX_SELECTOR_SOCKET),
-            0,
+            socket_path,
+            expected_uid,
             attempt,
             &request,
             self.request.request_digest,
@@ -502,6 +511,19 @@ mod tests {
     }
 
     #[test]
+    fn immutable_artifact_reports_a_retained_descriptor_read_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let artifact = ImmutableSandboxArtifact {
+            file: File::open(temporary.path())?,
+            digest: [1; 32],
+            length: 0,
+        };
+        assert_eq!(artifact.read_bytes(), Err(SelectorBoundaryError::Io));
+        Ok(())
+    }
+
+    #[test]
     fn artifact_kind_directories_are_closed_and_stable() {
         assert_eq!(SandboxArtifactKind::Authority.directory(), "authority");
         assert_eq!(SandboxArtifactKind::Provider.directory(), "providers");
@@ -535,13 +557,19 @@ mod tests {
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
 
-        let authority = root.join("authority");
-        std::fs::create_dir(&authority)?;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
         assert_eq!(
             open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        let authority = root.join("authority");
+        std::fs::create_dir(&authority)?;
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
+        assert_eq!(
+            open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
         std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o500))?;
         assert_eq!(
             open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
@@ -627,6 +655,71 @@ mod tests {
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         drop(listener);
+        assert_eq!(
+            connect_at(&socket, uid).map(|_| ()),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selector_transport_rejects_a_peer_that_closes_without_a_reply(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (stream, _) = listener.accept()?;
+            drop(stream);
+            Ok(())
+        });
+        let request = selector_request();
+        let attempt = selector_attempt();
+        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
+        assert_eq!(
+            SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
+            Err(AdapterError::ProtocolFailure)
+        );
+        server.join().map_err(|_| AdapterError::ProtocolFailure)??;
+        Ok(())
+    }
+
+    #[test]
+    fn selector_transport_rejects_a_peer_that_never_finishes_its_reply(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        let control = local_unavailable()?;
+        let control_length = u32::try_from(control.len())?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request)?;
+            stream.write_all(&control_length.to_be_bytes())?;
+            stream.write_all(&control)?;
+            thread::sleep(Duration::from_millis(250));
+            Ok(())
+        });
+        let request = selector_request();
+        let mut attempt = selector_attempt();
+        attempt.watchdog_ms = 50;
+        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
+        assert_eq!(
+            SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
+            Err(AdapterError::ProtocolFailure)
+        );
+        server.join().map_err(|_| AdapterError::ProtocolFailure)??;
         Ok(())
     }
 
@@ -652,6 +745,39 @@ mod tests {
         let reply = invoke_with_reply(local_unavailable()?, Vec::new())?;
         assert_eq!(reply.observation, Err(AdapterError::Unavailable));
         assert_eq!(reply.provenance, None);
+        Ok(())
+    }
+
+    #[test]
+    fn selector_adapter_retains_reply_state_through_the_endpoint_seam(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        let control = local_unavailable()?;
+        let control_length = u32::try_from(control.len())?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request)?;
+            stream.write_all(&control_length.to_be_bytes())?;
+            stream.write_all(&control)
+        });
+        let request = selector_request();
+        let attempt = selector_attempt();
+        let mut adapter = SelectorAdapter::new(&request, b"evr1");
+        adapter.set_case_ordinal(7);
+        assert_eq!(
+            adapter.invoke_with_selector(&attempt, &socket, uid),
+            Err(AdapterError::Unavailable)
+        );
+        assert_eq!(adapter.take_execution_provenance_digest(), None);
+        server.join().map_err(|_| AdapterError::ProtocolFailure)??;
         Ok(())
     }
 
