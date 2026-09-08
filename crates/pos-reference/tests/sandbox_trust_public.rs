@@ -964,10 +964,13 @@ fn selector_revocation_state_rejects_update_authority_and_signer_substitution() 
 fn revocation_update_rejects_an_invalid_authenticated_policy_key() -> TestResult {
     let root = SigningKey::from_bytes(&[1; 32]);
     let signer = SigningKey::from_bytes(&[7; 32]);
+    let mut noncanonical_point = [0xff; 32];
+    noncanonical_point[0] = 0xed;
+    noncanonical_point[31] = 0x7f;
     let invalid_key = Value::Array(vec![
         Value::Text("zzzzzz".to_owned()),
         integer(1),
-        Value::Bytes(vec![0xff; 32]),
+        Value::Bytes(noncanonical_point.to_vec()),
         integer(2),
     ]);
     let trust = SandboxTrustSnapshot::authenticate(
