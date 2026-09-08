@@ -158,6 +158,14 @@ fn signed_frames(
     Ok(bytes)
 }
 
+fn encode_frames(values: &[Value]) -> TestResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for value in values {
+        bytes.extend(framed(value)?);
+    }
+    Ok(bytes)
+}
+
 fn replace_field(value: &mut Value, index: usize, replacement: Value) -> TestResult {
     let Value::Array(fields) = value else {
         return Err("frame must be an array".into());
@@ -514,6 +522,227 @@ fn observation_reader_rejects_tampering_bad_offsets_and_nonexclusive_results() -
     trailing.push(0);
     assert_eq!(
         read_observation(trailing.as_slice(), 10),
+        Err(TransportError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn attempt_reader_rejects_every_header_and_capability_boundary() -> TestResult {
+    let valid = frame_values(&encoded_attempt(&attempt())?)?;
+    for (field, replacement, expected) in [
+        (4, integer(7), TransportError::InvalidEncoding),
+        (5, integer(4), TransportError::InvalidEncoding),
+        (
+            6,
+            Value::Bytes(vec![0; 32]),
+            TransportError::FieldOutOfBounds,
+        ),
+        (
+            7,
+            Value::Array(vec![integer(0); 8]),
+            TransportError::FieldOutOfBounds,
+        ),
+        (8, integer(0), TransportError::FieldOutOfBounds),
+        (9, integer(0), TransportError::InvalidEncoding),
+        (10, integer(257), TransportError::FieldOutOfBounds),
+        (11, integer(1), TransportError::FieldOutOfBounds),
+        (11, integer(259), TransportError::FieldOutOfBounds),
+        (12, integer(0), TransportError::FieldOutOfBounds),
+        (
+            12,
+            integer(64 * 1024 * 1024 + 1),
+            TransportError::FieldOutOfBounds,
+        ),
+        (13, integer(0), TransportError::FieldOutOfBounds),
+        (
+            13,
+            integer(512 * 1024 * 1024 + 1),
+            TransportError::FieldOutOfBounds,
+        ),
+        (12, integer(4097), TransportError::FieldOutOfBounds),
+    ] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[0], field, replacement)?;
+        assert_eq!(
+            read_attempt(signed_frames(changed, ATTEMPT_DOMAIN, 2)?.as_slice()),
+            Err(expected)
+        );
+    }
+
+    for (frame, field, replacement, expected) in [
+        (
+            1,
+            0,
+            Value::Text("wrong".to_owned()),
+            TransportError::UnsupportedVersion,
+        ),
+        (1, 1, integer(2), TransportError::UnsupportedVersion),
+        (1, 2, integer(1), TransportError::InvalidEncoding),
+        (
+            1,
+            3,
+            Value::Text(String::new()),
+            TransportError::FieldOutOfBounds,
+        ),
+        (
+            2,
+            3,
+            Value::Text("alpha".to_owned()),
+            TransportError::InvalidEncoding,
+        ),
+    ] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[frame], field, replacement)?;
+        assert_eq!(
+            read_attempt(signed_frames(changed, ATTEMPT_DOMAIN, 2)?.as_slice()),
+            Err(expected)
+        );
+    }
+    Ok(())
+}
+
+fn integer(value: u64) -> Value {
+    Value::Integer(value.into())
+}
+
+#[test]
+fn attempt_reader_rejects_every_artifact_and_terminal_boundary() -> TestResult {
+    let valid = frame_values(&encoded_attempt(&attempt())?)?;
+    for (frame, field, replacement, expected) in [
+        (
+            3,
+            0,
+            Value::Text("wrong".to_owned()),
+            TransportError::UnsupportedVersion,
+        ),
+        (3, 2, integer(1), TransportError::InvalidEncoding),
+        (3, 3, integer(1), TransportError::InvalidEncoding),
+        (3, 4, integer(1025), TransportError::FieldOutOfBounds),
+        (
+            3,
+            5,
+            Value::Bytes(vec![0; 32]),
+            TransportError::FieldOutOfBounds,
+        ),
+        (3, 6, integer(0), TransportError::InvalidEncoding),
+        (
+            4,
+            0,
+            Value::Text("wrong".to_owned()),
+            TransportError::UnsupportedVersion,
+        ),
+        (4, 2, integer(1), TransportError::InvalidEncoding),
+        (4, 3, integer(1), TransportError::InvalidEncoding),
+        (4, 4, integer(1), TransportError::InvalidEncoding),
+        (
+            4,
+            5,
+            Value::Bytes(Vec::new()),
+            TransportError::FieldOutOfBounds,
+        ),
+    ] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[frame], field, replacement)?;
+        assert_eq!(
+            read_attempt(signed_frames(changed, ATTEMPT_DOMAIN, 2)?.as_slice()),
+            Err(expected)
+        );
+    }
+
+    let mut changed = valid.clone();
+    replace_field(
+        changed.last_mut().ok_or("end missing")?,
+        0,
+        Value::Text("wrong".to_owned()),
+    )?;
+    assert_eq!(
+        read_attempt(encode_frames(&changed)?.as_slice()),
+        Err(TransportError::UnsupportedVersion)
+    );
+
+    let mut changed = valid;
+    replace_field(
+        changed.last_mut().ok_or("end missing")?,
+        2,
+        Value::Bytes(vec![9; 32]),
+    )?;
+    assert_eq!(
+        read_attempt(encode_frames(&changed)?.as_slice()),
+        Err(TransportError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn observation_reader_rejects_every_chunk_terminal_and_usage_boundary() -> TestResult {
+    let valid = frame_values(&encoded_observation(&observation(SubjectResult::Output(
+        vec![1, 2],
+    )))?)?;
+    for (frame, field, replacement, expected) in [
+        (
+            1,
+            0,
+            Value::Text("wrong".to_owned()),
+            TransportError::InvalidEncoding,
+        ),
+        (1, 1, integer(2), TransportError::InvalidEncoding),
+        (1, 2, integer(1), TransportError::InvalidEncoding),
+        (
+            1,
+            3,
+            Value::Bytes(Vec::new()),
+            TransportError::FieldOutOfBounds,
+        ),
+        (2, 2, integer(4), TransportError::InvalidEncoding),
+        (2, 3, integer(3), TransportError::InvalidEncoding),
+        (
+            2,
+            4,
+            Value::Bytes(vec![0; 32]),
+            TransportError::InvalidEncoding,
+        ),
+        (
+            2,
+            5,
+            Value::Array(Vec::new()),
+            TransportError::InvalidEncoding,
+        ),
+        (
+            2,
+            6,
+            Value::Array(Vec::new()),
+            TransportError::InvalidEncoding,
+        ),
+        (
+            2,
+            7,
+            Value::Array(vec![integer(0); 7]),
+            TransportError::InvalidEncoding,
+        ),
+    ] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[frame], field, replacement)?;
+        assert_eq!(
+            read_observation(
+                signed_frames(changed, OBSERVATION_DOMAIN, 8)?.as_slice(),
+                10,
+            ),
+            Err(expected)
+        );
+    }
+
+    let mut unknown = valid.clone();
+    replace_field(&mut unknown[1], 0, Value::Text("unknown".to_owned()))?;
+    assert_eq!(
+        read_observation(encode_frames(&unknown)?.as_slice(), 10),
+        Err(TransportError::InvalidEncoding)
+    );
+
+    let mut bad_transcript = valid;
+    replace_field(&mut bad_transcript[2], 8, Value::Bytes(vec![9; 32]))?;
+    assert_eq!(
+        read_observation(encode_frames(&bad_transcript)?.as_slice(), 10),
         Err(TransportError::InvalidEncoding)
     );
     Ok(())
