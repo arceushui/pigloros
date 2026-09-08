@@ -6056,8 +6056,42 @@ mod coverage_paths {
         );
         assert_eq!(
             ErasureVerifiedInventoryV1::from_verified_recovery(
-                vec![(state.clone(), proof)],
+                vec![(state.clone(), proof.clone())],
                 vec![timeline, TimelineId::new()],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), proof.clone())],
+                vec![timeline, timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let invalid_scope = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(254))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), invalid_scope)],
+                vec![timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let duplicate_unaffected = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            Vec::new(),
+            vec![timeline, timeline],
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), duplicate_unaffected)],
+                vec![timeline],
                 4,
             ),
             Err(ErasureErrorV1::ProvenanceMissing)

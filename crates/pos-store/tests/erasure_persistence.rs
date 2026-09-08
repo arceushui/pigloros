@@ -891,6 +891,67 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
 }
 
 #[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_corruption(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkAdmissionV1,
+    ) -> rusqlite::Result<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, _, _, prepared) = prepared_fork(SqliteStore::open(path)?, None)?;
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared.clone())?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(corrupt(&connection, &prepared)?, 1);
+    drop(connection);
+    assert_eq!(
+        SqliteStore::open(path)?.commit_fork_admission(prepared),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_retry_rejects_each_corrupted_durable_binding(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET binding_digest=?1 WHERE operation_digest=?2",
+            rusqlite::params![
+                [0_u8; 32].as_slice(),
+                prepared.operation().digest().as_slice()
+            ],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM timelines WHERE id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE timelines SET name='corrupted' WHERE id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_records WHERE request_digest=?1",
+            rusqlite::params![prepared.mutation().request().digest().as_slice()],
+        )
+    })
+}
+
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -901,6 +962,29 @@ fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 0);
+    assert!(!store
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_admission_rejects_an_unreceipted_existing_successor(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (store, _, child, prepared) = prepared_fork(SqliteStore::open_in_memory()?, None)?;
+    assert_eq!(
+        store
+            .borrow_mut()
+            .compare_and_swap(prepared.mutation().clone())?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     assert!(!store
         .borrow_mut()
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?

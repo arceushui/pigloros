@@ -4734,9 +4734,6 @@ fn sqlite_erasure_inventory_snapshot(
     conn: &Connection,
     maximum_requests: usize,
 ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-    if maximum_requests == 0 || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS {
-        return Err(ErasureErrorV1::ScopeInvalid);
-    }
     let request_limit = i64::try_from(maximum_requests.saturating_add(1))
         .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
     let topology_limit = i64::try_from(ERASURE_MAX_INVENTORY_TIMELINES.saturating_add(1))
@@ -4804,10 +4801,13 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             )
             .map_err(|_| ErasureErrorV1::PolicyConflict)?;
 
-            if sqlite_fork_admission_receipt(&self.conn, admission.operation())?.is_some() {
-                return sqlite_fork_admission_is_exact(&self.conn, &admission, chain_head)?
-                    .then_some(ErasureCasOutcomeV1::ExactRetry)
-                    .ok_or(ErasureErrorV1::PolicyConflict);
+            if let Some(receipt) = sqlite_fork_admission_receipt(&self.conn, admission.operation())?
+            {
+                return sqlite_fork_admission_is_exact(
+                    &self.conn, &admission, chain_head, receipt,
+                )?
+                .then_some(ErasureCasOutcomeV1::ExactRetry)
+                .ok_or(ErasureErrorV1::PolicyConflict);
             }
 
             let generation =
@@ -4873,11 +4873,9 @@ fn sqlite_fork_admission_is_exact(
     conn: &Connection,
     admission: &PreparedErasureForkAdmissionV1,
     chain_head: Hash,
+    receipt: (ErasureReferenceV1, String),
 ) -> Result<bool, ErasureErrorV1> {
-    let Some((binding, child_id)) = sqlite_fork_admission_receipt(conn, admission.operation())?
-    else {
-        return Ok(false);
-    };
+    let (binding, child_id) = receipt;
     let child = admission.child();
     if binding != admission.binding_digest() || child_id != child.id.to_string() {
         return Ok(false);
