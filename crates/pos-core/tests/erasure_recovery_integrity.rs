@@ -42,15 +42,16 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureContainmentGateV1,
     ErasureCoordinator, ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
-    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureGate, ErasureInventoryCategoryV1,
-    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1,
-    ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureRecoveryErrorQueryV1, ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
-    ErasureVerifiedTopologyProofV1, TimelineId,
+    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureGate,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1,
+    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureRecoveryErrorQueryV1, ErasureRecoveryErrorV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1, Seq,
+    TimelineId, TimelineMeta, TimelineMode,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -1340,6 +1341,119 @@ fn recovery_rejects_a_malformed_scope_extension() -> Result<(), ErasureErrorV1> 
         .adapter
         .object_reference_field(scope_node, SCOPE_NODE_EXTENSION_FIELD)?;
     assert_malformed_recovery_object(graph.adapter, &graph.request, subject)
+}
+
+#[test]
+fn coordinator_prepares_bound_erse1_and_child_without_committing() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let extension = extension(graph.request.reference(), &scope, lineage_rule)?;
+    let predecessor = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let parent = TimelineId::new();
+    let child = TimelineId::new();
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(180),
+        expected_inventory_generation: reference(181),
+        child_scope: extension.fork(),
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("prepared-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::from_u64(4))),
+        },
+    };
+    let prepared = ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .prepare_fork_admission(graph.request.reference(), extension, input.clone())?;
+
+    assert_eq!(prepared.operation(), input.operation);
+    assert_eq!(
+        prepared.expected_inventory_generation(),
+        input.expected_inventory_generation
+    );
+    assert_eq!(prepared.child_scope(), extension.fork());
+    assert_eq!(prepared.child(), &input.child);
+    assert_eq!(prepared.extension(), &extension);
+    assert_eq!(
+        prepared.mutation().expected_manifest_digest(),
+        Some(predecessor)
+    );
+    assert_eq!(
+        graph
+            .adapter
+            .current_manifest(graph.request.reference())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .digest(),
+        predecessor
+    );
+
+    assert_eq!(
+        graph.adapter.scope_index_count(graph.request.reference())?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn fork_preparation_rejects_unbound_child_metadata() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let extension = extension(graph.request.reference(), &scope, lineage_rule)?;
+    let base = ErasureForkAdmissionInputV1 {
+        operation: reference(180),
+        expected_inventory_generation: reference(181),
+        child_scope: extension.fork(),
+        child: TimelineMeta {
+            id: TimelineId::new(),
+            mode: TimelineMode::Historical,
+            name: Some("invalid-child".to_owned()),
+            owner: None,
+            fork_point: None,
+        },
+    };
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+            .prepare_fork_admission(graph.request.reference(), extension, base.clone()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR).prepare_fork_admission(
+            graph.request.reference(),
+            extension,
+            ErasureForkAdmissionInputV1 {
+                child_scope: reference(182),
+                child: TimelineMeta {
+                    fork_point: Some((TimelineId::new(), Seq::from_u64(1))),
+                    ..base.child.clone()
+                },
+                ..base.clone()
+            },
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR).prepare_fork_admission(
+            graph.request.reference(),
+            extension,
+            ErasureForkAdmissionInputV1 {
+                child: TimelineMeta {
+                    mode: TimelineMode::Live,
+                    fork_point: Some((TimelineId::new(), Seq::from_u64(1))),
+                    ..base.child.clone()
+                },
+                ..base
+            },
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
 }
 
 #[test]

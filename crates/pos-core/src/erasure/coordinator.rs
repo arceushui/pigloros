@@ -13,14 +13,14 @@ use super::{
     ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1, ErasureCasEffectV1,
     ErasureCoordinator, ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1,
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
-    ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
-    ErasureIndexInsertV1, ErasureLifecycleV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
-    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorQueryV1,
-    ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureForkAdmissionInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
+    ErasureFreezeProvenanceV1, ErasureIndexInsertV1, ErasureLifecycleV1, ErasurePersistedStateV1,
+    ErasurePersistenceObjectV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
+    ErasureRecoveryErrorQueryV1, ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureStateV1,
     ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
-    ErasureVerifiedTopologyProofV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1,
+    ErasureVerifiedTopologyProofV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
 };
 use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
@@ -1202,6 +1202,54 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     ErasureCasEffectV1::None,
                 )
             })
+    }
+
+    /// Prepare one atomic ERSE1 and child-Timeline admission without committing it.
+    ///
+    /// The returned capability is bound to the recovered manifest predecessor,
+    /// current inventory generation, stable operation identity, and preallocated
+    /// child. Only the owning adapter may consume it in one atomic transaction.
+    ///
+    /// # Errors
+    /// Returns a closed recovery, lineage, authorization, or preparation error.
+    pub fn prepare_fork_admission(
+        &mut self,
+        request: ErasureReferenceV1,
+        extension: ErasureScopeExtensionV1,
+        input: ErasureForkAdmissionInputV1,
+    ) -> Result<PreparedErasureForkAdmissionV1, ErasureErrorV1> {
+        let mut record = self.record(request)?;
+        let scope = record
+            .scope
+            .as_ref()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let lineage_rule = scope.lineage_rule().ok_or(ErasureErrorV1::PolicyConflict)?;
+        if (
+            extension.request(),
+            extension.scope_commitment(),
+            extension.lineage_rule(),
+            extension.predecessor_extension(),
+        ) != (
+            request,
+            scope.reference(),
+            lineage_rule,
+            record.scope_head.map(|head| head.extension),
+        ) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.port.admit_fork_scope_extension(&extension, &input)?;
+        let expected = record.manifest_digest;
+        let (extension_object, node_object, index) = record.append_scope_extension(extension)?;
+        record.scope_extensions.push(extension);
+        let state = record.state_object()?;
+        let mutation = record.prepare(
+            Some(expected),
+            vec![extension_object, node_object],
+            vec![state],
+            vec![index],
+            ErasureCasEffectV1::None,
+        )?;
+        PreparedErasureForkAdmissionV1::new(input, extension, mutation)
     }
     /// Append one authorized administrative recovery resolution.
     ///

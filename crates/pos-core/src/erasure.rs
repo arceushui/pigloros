@@ -4767,6 +4767,87 @@ pub struct PreparedErasureCasV1 {
     effect: ErasureCasEffectV1,
 }
 
+/// Host-resolved inputs bound into one atomic future-Fork admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureForkAdmissionInputV1 {
+    /// Stable idempotency identity for the logical Fork operation.
+    pub operation: ErasureReferenceV1,
+    /// Complete inventory generation observed during host authorization.
+    pub expected_inventory_generation: ErasureReferenceV1,
+    /// Canonical scope reference assigned to the preallocated child.
+    pub child_scope: ErasureReferenceV1,
+    /// Preallocated child metadata, including parent and Fork position.
+    pub child: crate::TimelineMeta,
+}
+
+/// Opaque core-prepared ERSE1 and child-Timeline transaction.
+///
+/// Adapters may inspect the bound values but cannot construct this capability.
+/// The value is produced only after coordinator recovery, lineage validation,
+/// and host admission have all succeeded.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PreparedErasureForkAdmissionV1 {
+    input: ErasureForkAdmissionInputV1,
+    extension: ErasureScopeExtensionV1,
+    mutation: PreparedErasureCasV1,
+}
+
+impl PreparedErasureForkAdmissionV1 {
+    pub(crate) fn new(
+        input: ErasureForkAdmissionInputV1,
+        extension: ErasureScopeExtensionV1,
+        mutation: PreparedErasureCasV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        if input.child.fork_point.is_none()
+            || input.child.mode != crate::TimelineMode::Historical
+            || input.child_scope != extension.fork()
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Ok(Self {
+            input,
+            extension,
+            mutation,
+        })
+    }
+
+    /// Return the stable operation identity.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureReferenceV1 {
+        self.input.operation
+    }
+
+    /// Return the expected complete-inventory generation.
+    #[must_use]
+    pub const fn expected_inventory_generation(&self) -> ErasureReferenceV1 {
+        self.input.expected_inventory_generation
+    }
+
+    /// Return the canonical child scope reference.
+    #[must_use]
+    pub const fn child_scope(&self) -> ErasureReferenceV1 {
+        self.input.child_scope
+    }
+
+    /// Return the preallocated child metadata.
+    #[must_use]
+    pub const fn child(&self) -> &crate::TimelineMeta {
+        &self.input.child
+    }
+
+    /// Return the independently admitted ERSE1 record.
+    #[must_use]
+    pub const fn extension(&self) -> &ErasureScopeExtensionV1 {
+        &self.extension
+    }
+
+    /// Return the prepared ERCRP1 successor mutation.
+    #[must_use]
+    pub const fn mutation(&self) -> &PreparedErasureCasV1 {
+        &self.mutation
+    }
+}
+
 impl PreparedErasureCasV1 {
     pub(crate) const fn new(
         request: ErasureReferenceV1,
@@ -5267,6 +5348,20 @@ pub trait ErasureCoordinatorPortV1:
     fn admit_scope_extension(
         &self,
         extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1>;
+    /// Authenticate the complete host-resolved future-Fork admission.
+    ///
+    /// Implementations must bind the stable operation identity, parent,
+    /// preallocated child, Fork position, child scope, admission provenance,
+    /// and current inventory generation. Requiring this separate method means
+    /// an ERSE1-only verifier cannot authorize child persistence.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, lineage, scope, or generation error.
+    fn admit_fork_scope_extension(
+        &self,
+        extension: &ErasureScopeExtensionV1,
+        input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1>;
     /// Authenticate one administrative recovery resolution before its CAS append.
     ///

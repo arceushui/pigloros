@@ -15,13 +15,13 @@ use pos_core::{
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureCoordinatorPortV1,
     ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1, ErasureErrorV1,
-    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureForkAdmissionInputV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1,
+    ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -194,6 +194,14 @@ impl ErasureCoordinatorPortV1 for BenchmarkErasureHost {
     fn admit_scope_extension(
         &self,
         _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_fork_scope_extension(
+        &self,
+        _extension: &ErasureScopeExtensionV1,
+        _input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
