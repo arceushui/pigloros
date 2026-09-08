@@ -970,15 +970,16 @@ mod tests {
             ErasureReferenceV1::from_digest([10; 32]),
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let mut sender = host
-            .command_sender()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert!(sender.commit_fork_admission(batch.clone()).is_ok());
-        assert_eq!(
-            sender.commit_fork_admission(batch),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        );
-        drop(sender);
+        {
+            let mut sender = host
+                .command_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            assert!(sender.commit_fork_admission(batch.clone()).is_ok());
+            assert_eq!(
+                sender.commit_fork_admission(batch),
+                Err(ErasureHostErrorV1::RecoveryUnavailable)
+            );
+        }
         assert!(matches!(
             host.command_sender(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
