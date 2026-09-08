@@ -964,13 +964,18 @@ fn selector_revocation_state_rejects_update_authority_and_signer_substitution() 
 fn revocation_update_rejects_an_invalid_authenticated_policy_key() -> TestResult {
     let root = SigningKey::from_bytes(&[1; 32]);
     let signer = SigningKey::from_bytes(&[7; 32]);
-    let mut noncanonical_point = [0xff; 32];
-    noncanonical_point[0] = 0xed;
-    noncanonical_point[31] = 0x7f;
+    let invalid_public_key = (0_u64..1024)
+        .find_map(|candidate| {
+            let bytes = *blake3::hash(&candidate.to_be_bytes()).as_bytes();
+            ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                .is_err()
+                .then_some(bytes)
+        })
+        .ok_or("could not construct an invalid Ed25519 public key")?;
     let invalid_key = Value::Array(vec![
         Value::Text("zzzzzz".to_owned()),
         integer(1),
-        Value::Bytes(noncanonical_point.to_vec()),
+        Value::Bytes(invalid_public_key.to_vec()),
         integer(2),
     ]);
     let trust = SandboxTrustSnapshot::authenticate(
