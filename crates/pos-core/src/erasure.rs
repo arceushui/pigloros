@@ -119,6 +119,8 @@ pub const ERASURE_CAS_EFFECT_TAG_V1: &str = "ERCE1";
 pub const ERASURE_RECOVERY_ERROR_TAG_V1: &str = "ERRE1";
 /// Maximum number of recovery errors retained for one ERQ1 request.
 pub const ERASURE_MAX_RECOVERY_ERRORS: usize = 4_096;
+/// Largest complete erasure-request inventory admitted by the V1 host.
+pub const ERASURE_MAX_INVENTORY_REQUESTS: usize = 4_096;
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,6 +248,7 @@ pub trait ErasureGate: Send + Sync {
 /// published here. A Timeline is bound to an opaque scope reference by the
 /// authoritative topology resolver; no selector is re-evaluated by this gate.
 pub struct ErasureContainmentGateV1 {
+    inventory: RwLock<Option<ErasureVerifiedInventoryV1>>,
     timeline_scopes: RwLock<BTreeMap<TimelineId, ErasureReferenceV1>>,
     verified_unaffected: RwLock<BTreeMap<TimelineId, ErasureReferenceV1>>,
     states: RwLock<BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>>,
@@ -281,6 +284,7 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            inventory: RwLock::new(None),
             timeline_scopes: RwLock::new(BTreeMap::new()),
             verified_unaffected: RwLock::new(BTreeMap::new()),
             states: RwLock::new(BTreeMap::new()),
@@ -295,6 +299,7 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub const fn new_fail_closed() -> Self {
         Self {
+            inventory: RwLock::new(None),
             timeline_scopes: RwLock::new(BTreeMap::new()),
             verified_unaffected: RwLock::new(BTreeMap::new()),
             states: RwLock::new(BTreeMap::new()),
@@ -547,6 +552,49 @@ impl ErasureContainmentGateV1 {
         self.install_verified_state_with_topology(&state, &proof)
     }
 
+    /// Replace the complete installed recovery generation in one host fence.
+    ///
+    /// This is the production installation seam. The query, rather than the
+    /// caller, chooses the durable members. Validation completes before the
+    /// current immutable inventory is replaced.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// query fails, exceeds its admission ceiling, or a host lock is poisoned.
+    pub fn install_from_verified_inventory_query<Q: ErasureVerifiedInventoryQueryV1>(
+        &self,
+        query: &mut Q,
+        maximum_requests: usize,
+    ) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        let candidate = query
+            .verified_inventory(maximum_requests)
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        let generation = candidate.generation();
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        *self
+            .inventory
+            .write()
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)? = Some(candidate);
+        Ok(generation)
+    }
+
+    /// Return the installed complete-inventory generation.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] before a
+    /// complete inventory is installed or after lock poisoning.
+    pub fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        self.inventory
+            .read()
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .as_ref()
+            .map(ErasureVerifiedInventoryV1::generation)
+            .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)
+    }
+
     const fn containment_rank(lifecycle: ErasureLifecycleV1) -> u8 {
         match lifecycle {
             ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected => 0,
@@ -578,6 +626,14 @@ impl ErasureContainmentGateV1 {
         _operation: ErasureProtectedOperationV1,
         states: &BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
     ) -> Result<(), ErasureContainmentErrorV1> {
+        if let Some(inventory) = self
+            .inventory
+            .read()
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .as_ref()
+        {
+            return inventory.authorize(timeline);
+        }
         if self
             .blocked_timelines
             .read()
@@ -3689,6 +3745,45 @@ pub struct ErasureVerifiedTopologyObservationV1 {
     unaffected: Vec<TimelineId>,
 }
 
+/// One adapter-snapshot observation of every erasure head and Timeline/Fork.
+///
+/// This is untrusted recovery input, not runtime authority. Core checks every
+/// observed head against a fully recovered manifest and transforms the whole
+/// value into [`ErasureVerifiedInventoryV1`] only when no member is omitted,
+/// duplicated, stale, malformed, or conflicting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureInventoryObservationV1 {
+    request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    topology: Vec<TimelineId>,
+    request_topology: Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
+}
+
+impl ErasureInventoryObservationV1 {
+    /// Package one host-owned adapter snapshot for core verification.
+    #[must_use]
+    pub const fn new(
+        request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+        topology: Vec<TimelineId>,
+        request_topology: Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
+    ) -> Self {
+        Self {
+            request_heads,
+            topology,
+            request_topology,
+        }
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+        Vec<TimelineId>,
+        Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
+    ) {
+        (self.request_heads, self.topology, self.request_topology)
+    }
+}
+
 impl ErasureVerifiedTopologyObservationV1 {
     /// Construct one host observation for a verified manifest revision.
     ///
@@ -3740,6 +3835,208 @@ impl ErasureVerifiedTopologyProofV1 {
             unaffected,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ErasureInventoryMembershipV1 {
+    Included(ErasureReferenceV1),
+    Excluded,
+}
+
+impl ErasureInventoryMembershipV1 {
+    const fn included_scope(self) -> Option<ErasureReferenceV1> {
+        match self {
+            Self::Included(scope) => Some(scope),
+            Self::Excluded => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ErasureInventoryClassificationV1 {
+    request: ErasureReferenceV1,
+    membership: ErasureInventoryMembershipV1,
+    frozen: bool,
+}
+
+/// Opaque proof of the complete durable erasure set and Timeline/Fork topology.
+///
+/// The value has no public constructor or wire representation. A successful
+/// [`ErasureVerifiedInventoryQueryV1`] call is the only public way to obtain
+/// it, so an empty inventory is positive host evidence rather than an absent
+/// caller-supplied request list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureVerifiedInventoryV1 {
+    generation: ErasureReferenceV1,
+    request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    classifications: BTreeMap<TimelineId, Vec<ErasureInventoryClassificationV1>>,
+}
+
+impl ErasureVerifiedInventoryV1 {
+    pub(crate) fn from_verified_recovery(
+        mut recovered: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
+        mut topology: Vec<TimelineId>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureErrorV1> {
+        if maximum_requests == 0
+            || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS
+            || recovered.len() > maximum_requests
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        topology.sort_unstable();
+        if topology.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        recovered.sort_unstable_by_key(|(state, _)| state.request().reference());
+        if recovered
+            .windows(2)
+            .any(|pair| pair[0].0.request().reference() == pair[1].0.request().reference())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+
+        let mut request_heads = Vec::new();
+        request_heads
+            .try_reserve(recovered.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        let mut classifications = topology
+            .iter()
+            .copied()
+            .map(|timeline| (timeline, Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        for (state, proof) in &recovered {
+            Self::validate_member(state, proof, &topology)?;
+            let request = state.request().reference();
+            request_heads.push((request, state.manifest_digest()));
+            for (timeline, timeline_classifications) in &mut classifications {
+                let membership = proof
+                    .bindings
+                    .iter()
+                    .find_map(|(candidate, scope)| (*candidate == *timeline).then_some(*scope))
+                    .map_or(ErasureInventoryMembershipV1::Excluded, |scope| {
+                        ErasureInventoryMembershipV1::Included(scope)
+                    });
+                timeline_classifications.push(ErasureInventoryClassificationV1 {
+                    request,
+                    membership,
+                    frozen: ErasureContainmentGateV1::containment_rank(state.lifecycle()) >= 2,
+                });
+            }
+        }
+        let generation = Self::compute_generation(&request_heads, &topology);
+        Ok(Self {
+            generation,
+            request_heads,
+            classifications,
+        })
+    }
+
+    fn validate_member(
+        state: &ErasureVerifiedStateV1,
+        proof: &ErasureVerifiedTopologyProofV1,
+        topology: &[TimelineId],
+    ) -> Result<(), ErasureErrorV1> {
+        if proof.manifest_digest != state.manifest_digest() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let mut observed = BTreeSet::new();
+        for (timeline, scope) in &proof.bindings {
+            if !state.scope_contains(*scope) || !observed.insert(*timeline) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        for timeline in &proof.unaffected {
+            if !observed.insert(*timeline) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        (observed.iter().copied().eq(topology.iter().copied()))
+            .then_some(())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn compute_generation(
+        request_heads: &[(ErasureReferenceV1, ErasureReferenceV1)],
+        topology: &[TimelineId],
+    ) -> ErasureReferenceV1 {
+        let mut topology_hasher = blake3::Hasher::new();
+        topology_hasher.update(b"pigloros/erasure-inventory-topology/v1");
+        topology_hasher.update(
+            &u64::try_from(topology.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for timeline in topology {
+            topology_hasher.update(&timeline.inner().to_bytes());
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-verified-inventory/v1");
+        hasher.update(
+            &u64::try_from(request_heads.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for (request, head) in request_heads {
+            hasher.update(&request.digest());
+            hasher.update(&head.digest());
+        }
+        hasher.update(topology_hasher.finalize().as_bytes());
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+    }
+
+    /// Return the complete-inventory generation bound to cache and cursor use.
+    #[must_use]
+    pub const fn generation(&self) -> ErasureReferenceV1 {
+        self.generation
+    }
+
+    /// Return the positively verified durable request-head count.
+    #[must_use]
+    pub const fn request_count(&self) -> usize {
+        self.request_heads.len()
+    }
+
+    fn authorize(&self, timeline: TimelineId) -> Result<(), ErasureContainmentErrorV1> {
+        let classifications = self
+            .classifications
+            .get(&timeline)
+            .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        if classifications
+            .iter()
+            .map(|classification| classification.request)
+            .ne(self.request_heads.iter().map(|(request, _)| *request))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if classifications.iter().any(|classification| {
+            classification.frozen && classification.membership.included_scope().is_some()
+        }) {
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        } else if classifications.len() == self.request_heads.len() {
+            Ok(())
+        } else {
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        }
+    }
+}
+
+/// Least-privilege host capability for one complete erasure recovery snapshot.
+pub trait ErasureVerifiedInventoryQueryV1 {
+    /// Recover and verify every durable request head and the complete topology.
+    ///
+    /// The configured ceiling must be no larger than
+    /// [`ERASURE_MAX_INVENTORY_REQUESTS`]. An over-limit or partial result
+    /// fails closed; a verified empty result succeeds with a deterministic
+    /// generation.
+    ///
+    /// # Errors
+    /// Returns a closed validation, authorization, admission-bound, or adapter
+    /// error. No partial inventory is returned.
+    fn verified_inventory(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1>;
 }
 
 /// Public recovery/query seam for consumers that enforce erasure containment.
@@ -4716,6 +5013,24 @@ pub trait ErasureCoordinatorPortV1:
     + ErasureFreezeAuthorizationVerifierV1
     + ErasureRecoveryAuthorizationVerifierV1
 {
+    /// Observe every durable erasure head and the complete Timeline/Fork
+    /// classification from one adapter snapshot.
+    ///
+    /// The default fails closed so an older host cannot treat a configured
+    /// request list as complete recovery. SQLite implementations hold one read
+    /// transaction for the observation; an exclusively owned MemoryStore
+    /// observes its current candidate state.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, admission-bound, or provenance error. A
+    /// partial observation must never be returned.
+    fn complete_erasure_inventory_observation(
+        &self,
+        _maximum_requests: usize,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
     /// Recover the complete Timeline/Fork topology observation for one pinned
     /// manifest revision.
     ///
@@ -5190,6 +5505,193 @@ mod coverage_paths {
         frozen_state_with_manifest(manifest_digest).unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("coverage state failed: {error:?}")))
         })
+    }
+
+    fn inventory_state(
+        request_reference: ErasureReferenceV1,
+        manifest: ErasureReferenceV1,
+        scope_reference: ErasureReferenceV1,
+        lifecycle: ErasureLifecycleV1,
+    ) -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
+        let request = ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: request_reference,
+            subject: reference(22),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![scope_reference],
+            requester: reference(23),
+            authorization: reference(24),
+            policy: reference(25),
+            request_position: 9,
+            horizon_position: 10,
+            provenance: reference(26),
+        })?;
+        let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: request_reference,
+            scope_members: vec![scope_reference],
+            target_closure: reference(27),
+            lineage_rule: Some(reference(28)),
+        })?;
+        Ok(ErasureVerifiedStateV1::from_parts(
+            manifest,
+            request,
+            ErasureStateV1 {
+                request: request_reference,
+                lifecycle,
+                freeze_position: (ErasureContainmentGateV1::containment_rank(lifecycle) >= 2)
+                    .then_some(10),
+                coordinator: reference(29),
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                replay_claim: ErasureReplayClaimV1::Exact,
+                previous_state: Some(reference(30)),
+                provenance: reference(31),
+                state_digest: reference(32),
+            },
+            Some(scope),
+            Vec::new(),
+        ))
+    }
+
+    struct InventoryQuery(Option<ErasureVerifiedInventoryV1>);
+
+    impl ErasureVerifiedInventoryQueryV1 for InventoryQuery {
+        fn verified_inventory(
+            &mut self,
+            _maximum_requests: usize,
+        ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+            self.0.take().ok_or(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
+    #[test]
+    fn complete_inventory_proves_empty_and_many_to_many_classification(
+    ) -> Result<(), ErasureErrorV1> {
+        let affected = TimelineId::new();
+        let unaffected = TimelineId::new();
+        let empty = ErasureVerifiedInventoryV1::from_verified_recovery(
+            Vec::new(),
+            vec![unaffected, affected],
+            4,
+        )?;
+        assert_eq!(empty.request_count(), 0);
+        assert_eq!(empty.authorize(affected), Ok(()));
+
+        let first = inventory_state(
+            reference(41),
+            reference(42),
+            reference(43),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let second = inventory_state(
+            reference(44),
+            reference(45),
+            reference(46),
+            ErasureLifecycleV1::Authorized,
+        )?;
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![
+                (
+                    second.clone(),
+                    ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                        second.manifest_digest(),
+                        vec![(unaffected, reference(46))],
+                        vec![affected],
+                    ),
+                ),
+                (
+                    first.clone(),
+                    ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                        first.manifest_digest(),
+                        vec![(affected, reference(43))],
+                        vec![unaffected],
+                    ),
+                ),
+            ],
+            vec![affected, unaffected],
+            4,
+        )?;
+        assert_eq!(inventory.request_count(), 2);
+        assert_eq!(
+            inventory.authorize(affected),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+        assert_eq!(inventory.authorize(unaffected), Ok(()));
+
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let generation = inventory.generation();
+        let mut query = InventoryQuery(Some(inventory));
+        assert_eq!(
+            gate.install_from_verified_inventory_query(&mut query, 4),
+            Ok(generation)
+        );
+        assert_eq!(gate.inventory_generation(), Ok(generation));
+        assert_eq!(
+            gate.authorize(affected, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+        assert_eq!(
+            gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_inventory_rejects_partial_duplicate_stale_and_over_limit(
+    ) -> Result<(), ErasureErrorV1> {
+        let timeline = TimelineId::new();
+        let state = inventory_state(
+            reference(51),
+            reference(52),
+            reference(53),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(53))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), proof.clone())],
+                vec![timeline],
+                0,
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![
+                    (state.clone(), proof.clone()),
+                    (state.clone(), proof.clone())
+                ],
+                vec![timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), proof)],
+                vec![timeline, TimelineId::new()],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let stale = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            reference(54),
+            vec![(timeline, reference(53))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state, stale)],
+                vec![timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
     }
 
     #[test]

@@ -17,7 +17,8 @@ use super::{
     ErasureIndexInsertV1, ErasureLifecycleV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
     ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorQueryV1,
     ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedStateQueryV1,
+    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
     ErasureVerifiedTopologyProofV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
     StoredErasureManifestV1,
 };
@@ -1255,6 +1256,60 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     )
                 })
         }
+    }
+}
+
+impl<P: ErasureCoordinatorPortV1> ErasureVerifiedInventoryQueryV1
+    for ErasureCoordinatorStateMachineV1<P>
+{
+    fn verified_inventory(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        let observation = self
+            .port
+            .complete_erasure_inventory_observation(maximum_requests)?;
+        let (request_heads, topology, request_topology) = observation.into_parts();
+        if maximum_requests == 0
+            || maximum_requests > super::ERASURE_MAX_INVENTORY_REQUESTS
+            || request_heads.len() > maximum_requests
+            || request_heads.len() != request_topology.len()
+            || request_heads.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            || request_topology
+                .windows(2)
+                .any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+
+        let mut recovered = Vec::new();
+        recovered
+            .try_reserve(request_heads.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        for ((request, expected_head), (topology_request, topology_observation)) in
+            request_heads.into_iter().zip(request_topology)
+        {
+            if request != topology_request
+                || topology_observation.manifest_digest() != expected_head
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let record = self
+                .recover(request)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let state = record.verified_state();
+            if state.manifest_digest() != expected_head {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                expected_head,
+                topology_observation.bindings().to_vec(),
+                topology_observation.unaffected().to_vec(),
+            );
+            self.cache(record);
+            recovered.push((state, proof));
+        }
+        ErasureVerifiedInventoryV1::from_verified_recovery(recovered, topology, maximum_requests)
     }
 }
 
