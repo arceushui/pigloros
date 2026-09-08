@@ -3758,6 +3758,12 @@ pub struct ErasureInventoryObservationV1 {
     request_topology: Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
 }
 
+type ErasureInventoryObservationPartsV1 = (
+    Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    Vec<TimelineId>,
+    Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
+);
+
 impl ErasureInventoryObservationV1 {
     /// Package one host-owned adapter snapshot for core verification.
     #[must_use]
@@ -3773,13 +3779,7 @@ impl ErasureInventoryObservationV1 {
         }
     }
 
-    fn into_parts(
-        self,
-    ) -> (
-        Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
-        Vec<TimelineId>,
-        Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
-    ) {
+    fn into_parts(self) -> ErasureInventoryObservationPartsV1 {
         (self.request_heads, self.topology, self.request_topology)
     }
 }
@@ -5017,8 +5017,8 @@ pub trait ErasureCoordinatorPortV1:
     /// classification from one adapter snapshot.
     ///
     /// The default fails closed so an older host cannot treat a configured
-    /// request list as complete recovery. SQLite implementations hold one read
-    /// transaction for the observation; an exclusively owned MemoryStore
+    /// request list as complete recovery. `SQLite` implementations hold one read
+    /// transaction for the observation; an exclusively owned `MemoryStore`
     /// observes its current candidate state.
     ///
     /// # Errors
