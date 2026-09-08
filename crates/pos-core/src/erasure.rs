@@ -338,7 +338,7 @@ impl ErasureContainmentGateV1 {
     /// remain available; a failed recovery can be made explicit with
     /// [`Self::block_timeline`].
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: None,
@@ -355,7 +355,7 @@ impl ErasureContainmentGateV1 {
     /// Construct a gate that refuses protected operations for every Timeline
     /// until the host installs verified evidence and topology bindings.
     #[must_use]
-    pub const fn new_fail_closed() -> Self {
+    pub fn new_fail_closed() -> Self {
         Self {
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: None,
@@ -417,7 +417,7 @@ impl ErasureContainmentGateV1 {
     /// monotonic state recovered from the durable predecessor chain.
     #[cfg(test)]
     pub(crate) fn publish_verified_state(&self, state: ErasureVerifiedStateV1) {
-        let Ok(_fence) = self.fence_lock.lock() else {
+        let Ok(fence) = self.fence_lock.lock() else {
             return;
         };
         let request = state.request().reference();
@@ -431,9 +431,12 @@ impl ErasureContainmentGateV1 {
         }
         let mut candidate = (*current).clone();
         candidate.states.insert(request, state);
-        if let Ok(mut authority) = self.authority.write() {
-            *authority = Arc::new(candidate);
-        }
+        let Ok(mut authority) = self.authority.write() else {
+            return;
+        };
+        *authority = Arc::new(candidate);
+        drop(authority);
+        drop(fence);
     }
 
     /// Atomically install one recovered ERS1 snapshot and its host-resolved
@@ -672,7 +675,7 @@ impl ErasureContainmentGateV1 {
     /// Mark the narrowest authenticated boundary unavailable after recovery
     /// cannot establish its effective erasure scope.
     pub fn block_timeline(&self, timeline: TimelineId) {
-        let Ok(_fence) = self.fence_lock.lock() else {
+        let Ok(fence) = self.fence_lock.lock() else {
             return;
         };
         let Ok(current) = self.authority.read().map(|state| state.clone()) else {
@@ -680,9 +683,12 @@ impl ErasureContainmentGateV1 {
         };
         let mut candidate = (*current).clone();
         candidate.blocked_timelines.insert(timeline);
-        if let Ok(mut authority) = self.authority.write() {
-            *authority = Arc::new(candidate);
-        }
+        let Ok(mut authority) = self.authority.write() else {
+            return;
+        };
+        *authority = Arc::new(candidate);
+        drop(authority);
+        drop(fence);
     }
 
     fn authorize_state(
