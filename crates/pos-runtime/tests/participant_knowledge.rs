@@ -272,7 +272,8 @@ fn fixture() -> Fixture {
 }
 
 fn empty_profile_projections() -> ProjectionRegistry {
-    let mut projections = ProjectionRegistry::new();
+    let mut projections =
+        ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
     projections
         .register_observable(
             "profile",
