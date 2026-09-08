@@ -6,7 +6,7 @@ use pos_reference::evaluator_protocol::RequiredProviderCapability;
 use pos_reference::sandbox_provider_protocol::{
     AdmissionGrant, AdmittedSandboxProvider, HostCapabilityProfile, LaunchPolicy,
     ProviderConformanceReport, SandboxAdministratorPolicy, SandboxAdmissionError,
-    SandboxArchitecture, SandboxExecuteRequest, SandboxProviderAdmissionInputs,
+    SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest, SandboxProviderAdmissionInputs,
     SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
@@ -85,6 +85,24 @@ fn resign_unsigned_fields(
         *unsigned.get_mut(*field).ok_or("unsigned field missing")? = replacement.clone();
     }
     sign_record(magic, Value::Array(unsigned), key)
+}
+
+fn replace_signed_signature(encoded: &[u8], signature: [u8; 64]) -> TestResult<Vec<u8>> {
+    let Value::Array(mut wrapper) = ciborium::from_reader(encoded)? else {
+        return Err("signed wrapper must be an array".into());
+    };
+    *wrapper
+        .get_mut(2)
+        .ok_or("signed wrapper signature missing")? = Value::Bytes(signature.to_vec());
+    encode(&Value::Array(wrapper))
+}
+
+fn corrupt_signed_digest(encoded: &[u8]) -> TestResult<Vec<u8>> {
+    let Value::Array(mut wrapper) = ciborium::from_reader(encoded)? else {
+        return Err("signed wrapper must be an array".into());
+    };
+    *wrapper.get_mut(1).ok_or("signed wrapper digest missing")? = Value::Bytes(vec![0; 32]);
+    encode(&Value::Array(wrapper))
 }
 
 fn self_digested_record(magic: &str, unsigned: Value) -> TestResult<Vec<u8>> {
@@ -1361,6 +1379,32 @@ fn host_profile_rejects_non_boolean_feature_proof_status() -> TestResult {
         &fixture.authority.runtime,
     )?;
     assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
+    for (feature_field, replacement) in [(0, Value::Null), (1, Value::Null), (2, Value::Null)] {
+        let feature = Value::Array(vec![
+            Value::Text("cgroup-v2".to_owned()),
+            integer(1),
+            bytes([18; 32]),
+        ]);
+        let Value::Array(mut feature_fields) = feature else {
+            return Err("feature proof must be an array".into());
+        };
+        feature_fields[feature_field] = replacement;
+        let changed = resign_unsigned_field(
+            &fixture.hcp1,
+            "HCP1",
+            4,
+            Value::Array(vec![Value::Array(feature_fields)]),
+            &fixture.authority.runtime,
+        )?;
+        assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
+    }
+    assert!(
+        HostCapabilityProfile::from_canonical_cbor(&replace_signed_signature(
+            &fixture.hcp1,
+            [0; 64]
+        )?)
+        .is_err()
+    );
     Ok(())
 }
 
@@ -1467,6 +1511,19 @@ fn provider_terminal_audit_authority_covers_failure_and_denial_paths() -> TestRe
 #[test]
 fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult {
     let fixture = Fixture::new()?;
+    let non_record = encode(&Value::Null)?;
+    assert!(HostCapabilityProfile::from_canonical_cbor(&non_record).is_err());
+    assert!(ProviderConformanceReport::from_canonical_cbor(&non_record).is_err());
+    for field in 2..=8 {
+        let changed = resign_unsigned_field(
+            &fixture.hcp1,
+            "HCP1",
+            field,
+            Value::Null,
+            &fixture.authority.runtime,
+        )?;
+        assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
+    }
     for (field, replacement) in [
         (3, Value::Text(String::new())),
         (4, Value::Array(Vec::new())),
@@ -1506,6 +1563,16 @@ fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult 
     )?;
     assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
 
+    for field in 2..=10 {
+        let changed = resign_unsigned_field(
+            &fixture.pcr1,
+            "PCR1",
+            field,
+            Value::Null,
+            &fixture.authority.reviewer,
+        )?;
+        assert!(ProviderConformanceReport::from_canonical_cbor(&changed).is_err());
+    }
     for (field, replacement) in [
         (2, bytes([0; 32])),
         (3, bytes([0; 32])),
@@ -1525,6 +1592,92 @@ fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult 
         )?;
         assert!(ProviderConformanceReport::from_canonical_cbor(&changed).is_err());
     }
+    assert!(
+        ProviderConformanceReport::from_canonical_cbor(&replace_signed_signature(
+            &fixture.pcr1,
+            [0; 64]
+        )?)
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_entry_points_reject_malformed_records() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let grant = admitted.authenticate_grant(
+        &admission_grant(&fixture, &request, &launch)?,
+        &request,
+        &image,
+        &launch,
+    )?;
+    let audit = audit_chain(&fixture, &grant)?;
+    let receipt = admitted.authenticate_receipt(
+        &provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?,
+        &grant,
+    )?;
+
+    assert!(admitted
+        .admit_image(b"not-cbor", &fixture.root_image, &fixture.executable)
+        .is_err());
+    assert!(admitted.admit_launch_policy(b"not-cbor", &image).is_err());
+    assert!(admitted
+        .authenticate_grant(b"not-cbor", &request, &image, &launch)
+        .is_err());
+    assert!(admitted.authenticate_receipt(b"not-cbor", &grant).is_err());
+    assert!(admitted
+        .authenticate_terminal_result(b"not-cbor", &request, &grant, &receipt)
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn admission_entry_points_reject_forged_signatures() -> TestResult {
+    let fixture = Fixture::new()?;
+    for record in 0..3 {
+        let forged = match record {
+            0 => replace_signed_signature(&fixture.spm1, [9; 64])?,
+            1 => replace_signed_signature(&fixture.hcp1, [9; 64])?,
+            2 => replace_signed_signature(&fixture.pcr1, [9; 64])?,
+            _ => return Err("unsupported provider admission record".into()),
+        };
+        let inputs = match record {
+            0 => SandboxProviderAdmissionInputs {
+                provider_manifest: &forged,
+                ..fixture.inputs()
+            },
+            1 => SandboxProviderAdmissionInputs {
+                host_profile: &forged,
+                ..fixture.inputs()
+            },
+            2 => SandboxProviderAdmissionInputs {
+                conformance_report: &forged,
+                ..fixture.inputs()
+            },
+            _ => return Err("unsupported provider admission record".into()),
+        };
+        assert!(AdmittedSandboxProvider::admit(
+            &fixture.policy,
+            &fixture.trust,
+            &fixture.revocation,
+            inputs
+        )
+        .is_err());
+    }
+
+    let admitted = fixture.admit()?;
+    let forged_image = replace_signed_signature(&fixture.sim1, [9; 64])?;
+    assert!(admitted
+        .admit_image(&forged_image, &fixture.root_image, &fixture.executable)
+        .is_err());
     Ok(())
 }
 
@@ -1651,5 +1804,112 @@ fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> Te
     assert!(admitted
         .authenticate_audit_chain(&[audit[0].clone(), changed_authority], &receipt, &result)
         .is_err());
+    Ok(())
+}
+
+#[test]
+fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let grant_bytes = admission_grant(&fixture, &request, &launch)?;
+    assert!(admitted
+        .authenticate_grant(
+            &replace_signed_signature(&grant_bytes, [9; 64])?,
+            &request,
+            &image,
+            &launch,
+        )
+        .is_err());
+    let grant = admitted.authenticate_grant(&grant_bytes, &request, &image, &launch)?;
+    let audit = audit_chain(&fixture, &grant)?;
+    let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
+    assert!(admitted
+        .authenticate_receipt(&replace_signed_signature(&receipt_bytes, [9; 64])?, &grant)
+        .is_err());
+    let receipt = admitted.authenticate_receipt(&receipt_bytes, &grant)?;
+    let result_bytes = terminal_result(&fixture, &request, &grant, &receipt)?;
+    assert!(admitted
+        .authenticate_terminal_result(
+            &replace_signed_signature(&result_bytes, [9; 64])?,
+            &request,
+            &grant,
+            &receipt,
+        )
+        .is_err());
+
+    let forged_receipt = SandboxProviderReceipt::from_canonical_cbor(&replace_signed_signature(
+        &receipt_bytes,
+        [9; 64],
+    )?)?;
+    let result =
+        pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+            &result_bytes,
+        )?;
+    assert!(admitted
+        .authenticate_audit_chain(&audit, &forged_receipt, &result)
+        .is_err());
+    let forged_result =
+        pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+            &replace_signed_signature(&result_bytes, [9; 64])?,
+        )?;
+    assert!(admitted
+        .authenticate_audit_chain(&audit, &receipt, &forged_result)
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn audit_record_rejects_every_malformed_wire_field() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let grant = admitted.authenticate_grant(
+        &admission_grant(&fixture, &request, &launch)?,
+        &request,
+        &image,
+        &launch,
+    )?;
+    let record = audit_record(&fixture, &grant, 0, 11, None)?;
+    assert!(SandboxAuditRecord::from_canonical_cbor(b"not-cbor").is_err());
+    assert!(SandboxAuditRecord::from_canonical_cbor(&encode(&Value::Null)?).is_err());
+    for field in 2..=7 {
+        let replacement = if field == 6 {
+            Value::Bool(true)
+        } else {
+            Value::Null
+        };
+        let changed = resign_unsigned_field(
+            &record,
+            "SAU1",
+            field,
+            replacement,
+            &fixture.authority.runtime,
+        )?;
+        assert!(SandboxAuditRecord::from_canonical_cbor(&changed).is_err());
+    }
+    for (field, replacement) in [(4, integer(256)), (5, Value::Array(vec![Value::Null]))] {
+        let changed = resign_unsigned_field(
+            &record,
+            "SAU1",
+            field,
+            replacement,
+            &fixture.authority.runtime,
+        )?;
+        assert!(SandboxAuditRecord::from_canonical_cbor(&changed).is_err());
+    }
+    assert!(SandboxAuditRecord::from_canonical_cbor(&corrupt_signed_digest(&record)?).is_err());
     Ok(())
 }
