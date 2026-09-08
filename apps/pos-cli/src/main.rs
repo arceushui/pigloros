@@ -50,13 +50,35 @@ use pos_experiment::{
     Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
     StopCondition,
 };
-use pos_store::{open_store, StoreConfig};
+use pos_store::StoreConfig;
 use ulid::Ulid;
 
 const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
+
+/// Open a store through the CLI composition seam.
+///
+/// Production callers must install the authoritative recovered erasure gate
+/// before using protected operations. In-process tests provide an empty gate
+/// so they can exercise the command wiring without fabricating ERS1 evidence.
+fn open_store(
+    config: StoreConfig,
+) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    #[cfg(test)]
+    {
+        let mut store = pos_store::open_store(config)?;
+        store.bind_erasure_gate(std::sync::Arc::new(
+            pos_core::ErasureContainmentGateV1::new(),
+        ))?;
+        Ok(store)
+    }
+    #[cfg(not(test))]
+    {
+        pos_store::open_store(config)
+    }
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -615,6 +637,10 @@ fn run_builtin_reference_experiment(
         stop: StopCondition::MaxTicks(ticks),
         store_config,
     });
+    #[cfg(test)]
+    let mut exp = exp.with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new(),
+    ));
 
     // Register reference plugins
     let agent_entity = EntityId::new();
@@ -1314,7 +1340,7 @@ mod tests {
     fn cmd_experiment_verify_with_companion_db() {
         // Cover the "if path.exists()" SQLite branch in cmd_experiment_verify.
         // Also covers the `if matched { Ok(()) }` path when head_hash matches.
-        use pos_store::{open_store, StoreConfig};
+        use pos_store::StoreConfig;
 
         let dir = tempfile::tempdir().test_ok();
         let db_path = dir.path().join("test.db").to_str().test_ok().to_owned();
@@ -1920,7 +1946,7 @@ mod main_coverage {
         // So if manifest.head_hash = Hash::zero() and the store has the same timeline
         // with no events after it, matched = (zero == zero) = true.
         use pos_core::clock::WallTime;
-        use pos_store::{open_store, StoreConfig};
+        use pos_store::StoreConfig;
         use tempfile::NamedTempFile;
 
         // Create a SQLite store, create a timeline in it
@@ -1994,7 +2020,7 @@ mod final_coverage {
     }
 
     use super::*;
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::StoreConfig;
 
     #[test]
     fn verify_manifest_ok_path_when_hash_matches() {
@@ -2054,7 +2080,7 @@ mod final_coverage {
     fn verify_manifest_against_store_timeline_not_found() {
         // Cover the `else { false }` branch (line 248): store exists but timeline_id is absent.
         use pos_core::ids::TimelineId;
-        use pos_store::{open_store, StoreConfig};
+        use pos_store::StoreConfig;
 
         let store = open_store(StoreConfig::Memory).test_ok();
         // Manifest points at a timeline that was never created in this store.
