@@ -323,7 +323,7 @@ fn evaluate_cases(
     adapter: &mut impl SubjectAdapter,
 ) -> Result<Vec<CaseOutcome>, EvaluatorError> {
     let mut outcomes = Vec::new();
-    for (ordinal, fixture) in profile.selected_fixtures(request).enumerate() {
+    for (ordinal, fixture) in profile.selected_fixtures(request).into_iter().enumerate() {
         if !fixture.modes.contains(&bundle.mode) {
             continue;
         }
