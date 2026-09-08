@@ -12,7 +12,11 @@ use pos_core::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HostStateV1 {
     Closed,
-    Ready(ErasureReferenceV1),
+    Ready {
+        generation: ErasureReferenceV1,
+        maximum_requests: usize,
+        request_count: usize,
+    },
     Poisoned,
 }
 
@@ -74,19 +78,14 @@ impl ErasureExecutionHostV1 {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         }
         self.state = HostStateV1::Closed;
-        let generation = match self
-            .gate
-            .install_from_verified_inventory_query(query, maximum_requests)
-            .map_err(ErasureHostErrorV1::from)
-        {
-            Ok(generation) => generation,
-            Err(error) => {
+        let inventory = match query.verified_inventory(maximum_requests) {
+            Ok(inventory) => inventory,
+            Err(_) => {
                 self.state = HostStateV1::Poisoned;
-                return Err(error);
+                return Err(ErasureHostErrorV1::RecoveryUnavailable);
             }
         };
-        self.state = HostStateV1::Ready(generation);
-        Ok(generation)
+        self.publish_inventory(inventory, maximum_requests)
     }
 
     /// Borrow the mutation-capable sender for the installed generation.
@@ -115,12 +114,12 @@ impl ErasureExecutionHostV1 {
 
     fn ready_generation(&self) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
         match self.state {
-            HostStateV1::Ready(generation)
+            HostStateV1::Ready { generation, .. }
                 if self.gate.inventory_generation() == Ok(generation) =>
             {
                 Ok(generation)
             }
-            HostStateV1::Closed | HostStateV1::Ready(_) | HostStateV1::Poisoned => {
+            HostStateV1::Closed | HostStateV1::Ready { .. } | HostStateV1::Poisoned => {
                 Err(ErasureHostErrorV1::RecoveryUnavailable)
             }
         }
@@ -138,6 +137,55 @@ impl ErasureExecutionHostV1 {
                 Err(error)
             }
         }
+    }
+
+    fn publish_inventory(
+        &mut self,
+        inventory: ErasureVerifiedInventoryV1,
+        maximum_requests: usize,
+    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        let request_count = inventory.request_count();
+        let mut query = OneShotInventoryV1(Some(inventory));
+        let generation = match self
+            .gate
+            .install_from_verified_inventory_query(&mut query, maximum_requests)
+            .map_err(ErasureHostErrorV1::from)
+        {
+            Ok(generation) => generation,
+            Err(error) => {
+                self.state = HostStateV1::Poisoned;
+                return Err(error);
+            }
+        };
+        self.state = HostStateV1::Ready {
+            generation,
+            maximum_requests,
+            request_count,
+        };
+        Ok(generation)
+    }
+
+    fn refresh_verified_empty_inventory(
+        &mut self,
+    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        let maximum_requests = match self.state {
+            HostStateV1::Ready {
+                maximum_requests,
+                request_count: 0,
+                ..
+            } => maximum_requests,
+            HostStateV1::Closed | HostStateV1::Ready { .. } | HostStateV1::Poisoned => {
+                return Err(ErasureHostErrorV1::RecoveryUnavailable)
+            }
+        };
+        let snapshot = self
+            .store
+            .complete_erasure_inventory_snapshot(maximum_requests)
+            .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+                .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
+        self.publish_inventory(inventory, maximum_requests)
     }
     /// Recover a new store only when its complete durable request set is empty.
     ///
@@ -169,6 +217,35 @@ pub struct ErasureCommandSenderV1<'host> {
 }
 
 impl ErasureCommandSenderV1<'_> {
+    /// Create a root Timeline and publish its successor inventory generation.
+    ///
+    /// Topology changes are admitted only for a positively verified empty
+    /// active-request inventory. Once any erasure request exists, topology
+    /// changes require the atomic scope-extension path rather than this seam.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error. If persistence succeeds but successor
+    /// publication fails, the host is poisoned and no further sender is issued.
+    pub fn create_timeline(&mut self, name: &str) -> Result<Timeline, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        if !matches!(
+            self.host.state,
+            HostStateV1::Ready {
+                request_count: 0,
+                ..
+            }
+        ) {
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
+        }
+        let timeline = self
+            .host
+            .store
+            .create_timeline(name)
+            .map_err(|error| map_store_error(&error))?;
+        self.generation = self.host.refresh_verified_empty_inventory()?;
+        Ok(timeline)
+    }
+
     /// Append authoritative Events inside the installed erasure fence.
     ///
     /// # Errors
@@ -411,5 +488,35 @@ mod tests {
         );
         assert_eq!(reader.root_timeline_count_bounded(1), Ok(1));
         assert_eq!(reader.logical_head(timeline.id()), Ok(Seq::from_u64(2)));
+    }
+
+    #[test]
+    fn root_creation_republishes_the_empty_inventory_generation() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let (first, second) = host
+            .command_sender()
+            .and_then(|mut sender| {
+                let first = sender.create_timeline("first")?;
+                let second = sender.create_timeline("second")?;
+                Ok((first, second))
+            })
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("host creation failed: {error:?}")))
+            });
+
+        let mut reader = host
+            .read_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            reader
+                .timelines()
+                .map(|items| items.into_iter().map(|item| item.id()).collect()),
+            Ok(vec![first.id(), second.id()])
+        );
+        assert_eq!(reader.root_timeline_count_bounded(2), Ok(2));
     }
 }
