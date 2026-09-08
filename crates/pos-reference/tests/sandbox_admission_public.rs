@@ -69,9 +69,9 @@ fn wrapped_digest(encoded: &[u8]) -> TestResult<[u8; 32]> {
     Ok(digest.as_slice().try_into()?)
 }
 
-fn ordered(mut values: Vec<Value>) -> TestResult<Vec<Value>> {
+fn ordered(values: Vec<Value>) -> TestResult<Vec<Value>> {
     let mut encoded = values
-        .drain(..)
+        .into_iter()
         .map(|value| encode(&value).map(|bytes| (bytes, value)))
         .collect::<TestResult<Vec<_>>>()?;
     encoded.sort_by(|left, right| left.0.cmp(&right.0));
@@ -331,33 +331,37 @@ fn image_manifest(
     )
 }
 
+struct PolicySelectionDigests {
+    provider_manifest: [u8; 32],
+    provider_binary: [u8; 32],
+    conformance_report: [u8; 32],
+    syscall_set: [u8; 32],
+    launch_policy: [u8; 32],
+    image_manifest: [u8; 32],
+}
+
 fn administrator_policy(
     trust: &SandboxTrustSnapshot,
     revocation: &SandboxRevocationSnapshot,
     authority: &SigningAuthority,
-    spm1_digest: [u8; 32],
-    binary_digest: [u8; 32],
-    pcr1_digest: [u8; 32],
-    scs1_digest: [u8; 32],
-    lps1_digest: [u8; 32],
-    sim1_digest: [u8; 32],
+    selection: PolicySelectionDigests,
 ) -> TestResult<SandboxAdministratorPolicy> {
     let unsigned = Value::Array(vec![
         Value::Text("APT1".to_owned()),
         integer(1),
         integer(4),
-        bytes(spm1_digest),
-        bytes(binary_digest),
-        Value::Array(vec![bytes(lps1_digest)]),
-        Value::Array(vec![bytes(sim1_digest)]),
+        bytes(selection.provider_manifest),
+        bytes(selection.provider_binary),
+        Value::Array(vec![bytes(selection.launch_policy)]),
+        Value::Array(vec![bytes(selection.image_manifest)]),
         bytes([24; 32]),
         bytes([17; 32]),
-        bytes(pcr1_digest),
+        bytes(selection.conformance_report),
         bytes(trust.snapshot_digest()),
         bytes(revocation.snapshot_digest()),
         integer(trust.trust_epoch()),
         integer(revocation.revocation_epoch()),
-        bytes(scs1_digest),
+        bytes(selection.syscall_set),
         Value::Text("policy".to_owned()),
     ]);
     Ok(SandboxAdministratorPolicy::authenticate(
@@ -556,7 +560,7 @@ impl Fixture {
         let feature_digest = feature_set_digest(&required_features)?;
         let provider_binary = b"exact provider binary".to_vec();
         let binary_digest = *blake3::hash(&provider_binary).as_bytes();
-        let spm1 = provider_manifest(&authority, binary_digest, feature_digest)?;
+        let provider_record = provider_manifest(&authority, binary_digest, feature_digest)?;
         let scs1 = syscall_set(0)?;
         let hcp1 = host_profile(&authority, "cgroup-v2", 1, 0)?;
         let pcr1 = conformance_report(
@@ -568,18 +572,20 @@ impl Fixture {
         )?;
         let root_image = b"img".to_vec();
         let executable = b"adapter executable".to_vec();
-        let sim1 = image_manifest(&authority, &root_image, &executable, 0)?;
-        let lps1 = launch_policy(wrapped_digest(&sim1)?)?;
+        let image_record = image_manifest(&authority, &root_image, &executable, 0)?;
+        let lps1 = launch_policy(wrapped_digest(&image_record)?)?;
         let policy = administrator_policy(
             &trust,
             &revocation,
             &authority,
-            wrapped_digest(&spm1)?,
-            binary_digest,
-            wrapped_digest(&pcr1)?,
-            wrapped_digest(&scs1)?,
-            wrapped_digest(&lps1)?,
-            wrapped_digest(&sim1)?,
+            PolicySelectionDigests {
+                provider_manifest: wrapped_digest(&provider_record)?,
+                provider_binary: binary_digest,
+                conformance_report: wrapped_digest(&pcr1)?,
+                syscall_set: wrapped_digest(&scs1)?,
+                launch_policy: wrapped_digest(&lps1)?,
+                image_manifest: wrapped_digest(&image_record)?,
+            },
         )?;
         Ok(Self {
             authority,
@@ -588,13 +594,13 @@ impl Fixture {
             policy,
             required_features,
             provider_binary,
-            spm1,
+            spm1: provider_record,
             scs1,
             hcp1,
             pcr1,
             root_image,
             executable,
-            sim1,
+            sim1: image_record,
             lps1,
         })
     }
@@ -686,12 +692,14 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
         &fixture.trust,
         &fixture.revocation,
         &fixture.authority,
-        wrapped_digest(&fixture.spm1)?,
-        *blake3::hash(&fixture.provider_binary).as_bytes(),
-        wrapped_digest(&failed_pcr1)?,
-        wrapped_digest(&fixture.scs1)?,
-        wrapped_digest(&fixture.lps1)?,
-        wrapped_digest(&fixture.sim1)?,
+        PolicySelectionDigests {
+            provider_manifest: wrapped_digest(&fixture.spm1)?,
+            provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
+            conformance_report: wrapped_digest(&failed_pcr1)?,
+            syscall_set: wrapped_digest(&fixture.scs1)?,
+            launch_policy: wrapped_digest(&fixture.lps1)?,
+            image_manifest: wrapped_digest(&fixture.sim1)?,
+        },
     )?;
     let failed_input = SandboxProviderAdmissionInputs {
         conformance_report: &failed_pcr1,
@@ -725,12 +733,14 @@ fn provider_admission_rejects_cross_record_architecture_mismatch() -> TestResult
         &fixture.trust,
         &fixture.revocation,
         &fixture.authority,
-        wrapped_digest(&fixture.spm1)?,
-        *blake3::hash(&fixture.provider_binary).as_bytes(),
-        wrapped_digest(&pcr1)?,
-        wrapped_digest(&fixture.scs1)?,
-        wrapped_digest(&fixture.lps1)?,
-        wrapped_digest(&fixture.sim1)?,
+        PolicySelectionDigests {
+            provider_manifest: wrapped_digest(&fixture.spm1)?,
+            provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
+            conformance_report: wrapped_digest(&pcr1)?,
+            syscall_set: wrapped_digest(&fixture.scs1)?,
+            launch_policy: wrapped_digest(&fixture.lps1)?,
+            image_manifest: wrapped_digest(&fixture.sim1)?,
+        },
     )?;
     let inputs = SandboxProviderAdmissionInputs {
         conformance_report: &pcr1,
