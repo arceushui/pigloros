@@ -701,7 +701,7 @@ fn overlapping_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
         selectors: vec![reference(43)],
         requester: reference(44),
         authorization: reference(45),
-        policy: reference(46),
+        policy: reference(6),
         request_position: 9,
         horizon_position: 20,
         provenance: reference(47),
