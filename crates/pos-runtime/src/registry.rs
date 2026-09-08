@@ -5295,6 +5295,7 @@ mod coverage_public_error_paths {
 #[cfg(test)]
 mod erasure_gate_coverage {
     use super::*;
+    use pos_store::EventStore;
 
     #[test]
     fn with_erasure_gate_binds_the_shared_gate() {
