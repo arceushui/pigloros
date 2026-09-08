@@ -44,7 +44,11 @@ fn bind_test_store_gate(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn test_memory_store() -> pos_store::memory::MemoryStore {
     let mut store = pos_store::memory::MemoryStore::new();
-    bind_test_store_gate(&mut store).expect("test MemoryStore must accept the erasure gate");
+    bind_test_store_gate(&mut store).unwrap_or_else(|error| {
+        std::panic::resume_unwind(Box::new(format!(
+            "test MemoryStore must accept the erasure gate: {error}"
+        )))
+    });
     store
 }
 
