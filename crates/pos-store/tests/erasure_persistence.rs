@@ -641,6 +641,73 @@ where
     Ok((shared, request.reference(), child, prepared))
 }
 
+fn prepare_overlap_admission<S>(
+    coordinator: &mut ErasureCoordinatorStateMachineV1<Host<S>>,
+    request: ErasureReferenceV1,
+    provenance: ErasureReferenceV1,
+    required_target: ErasureRequiredTargetV1,
+    child_scope: ErasureReferenceV1,
+    input: &ErasureForkAdmissionInputV1,
+) -> Result<pos_core::PreparedErasureForkAdmissionV1, ErasureErrorV1>
+where
+    S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request,
+        scope_members: vec![reference(9)],
+        target_closure: target_closure_digest(&[required_target]),
+        lineage_rule: Some(reference(100)),
+    })?;
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        fork: child_scope,
+        lineage_rule: reference(100),
+        predecessor_extension: None,
+        admission_provenance: provenance,
+    })?;
+    coordinator.prepare_fork_admission(request, extension, input.clone())
+}
+
+fn frozen_coordinator<S>(
+    store: Rc<RefCell<S>>,
+    request: ErasureRequestV1,
+    required_target: ErasureRequiredTargetV1,
+) -> Result<ErasureCoordinatorStateMachineV1<Host<S>>, ErasureErrorV1>
+where
+    S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store,
+            targets: vec![required_target],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    coordinator.submit(request.clone(), request.provenance())?;
+    coordinator.authorize(request.reference(), reference(31))?;
+    coordinator.freeze_inventory(request.reference(), &transition())?;
+    Ok(coordinator)
+}
+
+fn overlapping_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+    erasure_support::request(RequestFixtureInput {
+        request: reference(41),
+        subject: reference(42),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(43)],
+        requester: reference(44),
+        authorization: reference(45),
+        policy: reference(46),
+        request_position: 9,
+        horizon_position: 20,
+        provenance: reference(47),
+    })
+}
+
 fn assert_overlapping_fork_batch<S>(mut store: S) -> Result<(), Box<dyn std::error::Error>>
 where
     S: EventStore
@@ -660,47 +727,11 @@ where
     )?;
     let shared = Rc::new(RefCell::new(store));
     let first_request = request()?;
-    let second_request = erasure_support::request(RequestFixtureInput {
-        request: reference(41),
-        subject: reference(42),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(43)],
-        requester: reference(44),
-        authorization: reference(45),
-        policy: reference(46),
-        request_position: 9,
-        horizon_position: 20,
-        provenance: reference(47),
-    })?;
+    let second_request = overlapping_request()?;
     let required_target = target();
-    let mut first = ErasureCoordinatorStateMachineV1::new(
-        Host {
-            store: Rc::clone(&shared),
-            targets: vec![required_target],
-            verify_exact_retry: false,
-            fail_read_object: false,
-            manifest_sequence: None,
-        },
-        reference(30),
-    );
-    let mut second = ErasureCoordinatorStateMachineV1::new(
-        Host {
-            store: Rc::clone(&shared),
-            targets: vec![required_target],
-            verify_exact_retry: false,
-            fail_read_object: false,
-            manifest_sequence: None,
-        },
-        reference(30),
-    );
-    for (coordinator, request) in [
-        (&mut first, first_request.clone()),
-        (&mut second, second_request.clone()),
-    ] {
-        coordinator.submit(request.clone(), request.provenance())?;
-        coordinator.authorize(request.reference(), reference(31))?;
-        coordinator.freeze_inventory(request.reference(), &transition())?;
-    }
+    let mut first = frozen_coordinator(Rc::clone(&shared), first_request.clone(), required_target)?;
+    let mut second =
+        frozen_coordinator(Rc::clone(&shared), second_request.clone(), required_target)?;
 
     let generation = shared
         .borrow_mut()
@@ -720,28 +751,23 @@ where
             fork_point: Some((parent, Seq::from_u64(1))),
         },
     };
-    let prepare = |coordinator: &mut ErasureCoordinatorStateMachineV1<Host<S>>,
-                   request: ErasureReferenceV1,
-                   provenance: ErasureReferenceV1| {
-        let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
-            request,
-            scope_members: vec![reference(9)],
-            target_closure: target_closure_digest(&[required_target]),
-            lineage_rule: Some(reference(100)),
-        })?;
-        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
-            request,
-            scope_commitment: scope.reference(),
-            fork: child_scope,
-            lineage_rule: reference(100),
-            predecessor_extension: None,
-            admission_provenance: provenance,
-        })?;
-        coordinator.prepare_fork_admission(request, extension, input.clone())
-    };
     let admissions = vec![
-        prepare(&mut first, first_request.reference(), reference(102))?,
-        prepare(&mut second, second_request.reference(), reference(104))?,
+        prepare_overlap_admission(
+            &mut first,
+            first_request.reference(),
+            reference(102),
+            required_target,
+            child_scope,
+            &input,
+        )?,
+        prepare_overlap_admission(
+            &mut second,
+            second_request.reference(),
+            reference(104),
+            required_target,
+            child_scope,
+            &input,
+        )?,
     ];
     let inventory = first.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
     let batch = inventory.prepare_fork_batch(input, admissions)?;
