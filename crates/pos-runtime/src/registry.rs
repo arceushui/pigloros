@@ -5340,7 +5340,11 @@ mod erasure_gate_coverage {
         let mut rejecting_store = pos_store::memory::MemoryStore::new();
         rejecting_store
             .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
-            .expect("test store erasure gate binding should succeed");
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "test store erasure gate binding should succeed: {error:?}"
+                )))
+            });
         assert!(rejecting
             .append_and_commit_step_at(&mut rejecting_store, pos_core::clock::Seq::ZERO, 0, &[],)
             .is_ok());
