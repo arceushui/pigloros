@@ -705,6 +705,28 @@ impl Fixture {
     fn admit(&self) -> Result<AdmittedSandboxProvider, SandboxAdmissionError> {
         AdmittedSandboxProvider::admit(&self.policy, &self.trust, &self.revocation, self.inputs())
     }
+
+    fn policy_for_provider(
+        &self,
+        revocation: &SandboxRevocationSnapshot,
+        provider_manifest: &[u8],
+        conformance_report: &[u8],
+    ) -> TestResult<SandboxAdministratorPolicy> {
+        administrator_policy(
+            &self.trust,
+            revocation,
+            &self.authority,
+            &PolicySelectionDigests {
+                provider_manifest: wrapped_digest(provider_manifest)?,
+                provider_binary: *blake3::hash(&self.provider_binary).as_bytes(),
+                broker_hard_caps: *blake3::hash(&self.broker_hard_caps).as_bytes(),
+                conformance_report: wrapped_digest(conformance_report)?,
+                syscall_set: wrapped_digest(&self.scs1)?,
+                launch_policy: wrapped_digest(&self.lps1)?,
+                image_manifest: wrapped_digest(&self.sim1)?,
+            },
+        )
+    }
 }
 
 #[test]
@@ -866,6 +888,163 @@ fn provider_admission_rejects_cross_record_architecture_mismatch() -> TestResult
         AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs),
         Err(SandboxAdmissionError::ArchitectureMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn provider_admission_rejects_each_malformed_input_record() -> TestResult {
+    let fixture = Fixture::new()?;
+    for field in 0..4 {
+        let malformed = b"not-cbor";
+        let mut inputs = fixture.inputs();
+        match field {
+            0 => inputs.provider_manifest = malformed,
+            1 => inputs.syscall_set = malformed,
+            2 => inputs.host_profile = malformed,
+            3 => inputs.conformance_report = malformed,
+            _ => return Err("unknown admission input field".into()),
+        }
+        assert!(matches!(
+            AdmittedSandboxProvider::admit(
+                &fixture.policy,
+                &fixture.trust,
+                &fixture.revocation,
+                inputs,
+            ),
+            Err(SandboxAdmissionError::Protocol(_))
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn provider_admission_rejects_each_revoked_provider_identity() -> TestResult {
+    let fixture = Fixture::new()?;
+    for revoked_identity in [
+        wrapped_digest(&fixture.spm1)?,
+        *blake3::hash(&fixture.provider_binary).as_bytes(),
+    ] {
+        let revocation = revocation(
+            &fixture.trust,
+            &fixture.authority,
+            vec![bytes(revoked_identity)],
+            vec![],
+        )?;
+        let policy = fixture.policy_for_provider(&revocation, &fixture.spm1, &fixture.pcr1)?;
+        assert_eq!(
+            AdmittedSandboxProvider::admit(&policy, &fixture.trust, &revocation, fixture.inputs(),),
+            Err(SandboxAdmissionError::Revoked)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn provider_admission_rejects_each_untrusted_provider_signer() -> TestResult {
+    let fixture = Fixture::new()?;
+    for (field, replacement) in [
+        (17, Value::Text("other-release".to_owned())),
+        (7, Value::Text("other-runtime".to_owned())),
+    ] {
+        let manifest = resign_unsigned_field(
+            &fixture.spm1,
+            "SPM1",
+            field,
+            replacement,
+            &fixture.authority.release,
+        )?;
+        let policy = fixture.policy_for_provider(&fixture.revocation, &manifest, &fixture.pcr1)?;
+        let inputs = SandboxProviderAdmissionInputs {
+            provider_manifest: &manifest,
+            ..fixture.inputs()
+        };
+        assert!(matches!(
+            AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs,),
+            Err(SandboxAdmissionError::Trust(_))
+        ));
+    }
+
+    let report = resign_unsigned_field(
+        &fixture.pcr1,
+        "PCR1",
+        10,
+        Value::Text("other-reviewer".to_owned()),
+        &fixture.authority.reviewer,
+    )?;
+    let policy = fixture.policy_for_provider(&fixture.revocation, &fixture.spm1, &report)?;
+    let inputs = SandboxProviderAdmissionInputs {
+        conformance_report: &report,
+        ..fixture.inputs()
+    };
+    assert!(matches!(
+        AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs,),
+        Err(SandboxAdmissionError::Trust(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn provider_admission_rejects_each_cross_record_binding_substitution() -> TestResult {
+    let fixture = Fixture::new()?;
+    let wrong_epoch = resign_unsigned_field(
+        &fixture.spm1,
+        "SPM1",
+        14,
+        integer(fixture.trust.trust_epoch() + 1),
+        &fixture.authority.release,
+    )?;
+    let policy = fixture.policy_for_provider(&fixture.revocation, &wrong_epoch, &fixture.pcr1)?;
+    let inputs = SandboxProviderAdmissionInputs {
+        provider_manifest: &wrong_epoch,
+        ..fixture.inputs()
+    };
+    assert_eq!(
+        AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs,),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    let wrong_runtime = resign_unsigned_field(
+        &fixture.hcp1,
+        "HCP1",
+        8,
+        Value::Text("other-runtime".to_owned()),
+        &fixture.authority.runtime,
+    )?;
+    let inputs = SandboxProviderAdmissionInputs {
+        host_profile: &wrong_runtime,
+        ..fixture.inputs()
+    };
+    assert_eq!(
+        AdmittedSandboxProvider::admit(
+            &fixture.policy,
+            &fixture.trust,
+            &fixture.revocation,
+            inputs,
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    for (record, magic, field, signer) in [
+        (&fixture.pcr1, "PCR1", 4, &fixture.authority.reviewer),
+        (&fixture.spm1, "SPM1", 16, &fixture.authority.release),
+    ] {
+        let changed = resign_unsigned_field(record, magic, field, bytes([99; 32]), signer)?;
+        let (manifest, report) = if magic == "SPM1" {
+            (changed.as_slice(), fixture.pcr1.as_slice())
+        } else {
+            (fixture.spm1.as_slice(), changed.as_slice())
+        };
+        let policy = fixture.policy_for_provider(&fixture.revocation, manifest, report)?;
+        let inputs = SandboxProviderAdmissionInputs {
+            provider_manifest: manifest,
+            conformance_report: report,
+            ..fixture.inputs()
+        };
+        assert_eq!(
+            AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs,),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+    }
     Ok(())
 }
 
