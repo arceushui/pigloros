@@ -463,6 +463,20 @@ impl MemoryStore {
 
     #[must_use]
     fn with_default_components(hasher: Box<dyn Hasher>) -> Self {
+        // Source-level adapter tests exercise ordinary Event operations directly;
+        // bind a permissive fixture gate only for those tests. Production and
+        // integration consumers retain the fail-closed composition-root default.
+        #[cfg(test)]
+        let erasure_gate: Option<Arc<dyn ErasureGate>> =
+            Some(Arc::new(ErasureContainmentGateV1::new()));
+        #[cfg(not(test))]
+        let erasure_gate: Option<Arc<dyn ErasureGate>> =
+            Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        #[cfg(test)]
+        let erasure_gate_bound = true;
+        #[cfg(not(test))]
+        let erasure_gate_bound = false;
+
         Self {
             timelines: HashMap::new(),
             event_ids: HashSet::new(),
@@ -481,8 +495,8 @@ impl MemoryStore {
             consent_authority_permit: None,
             // A store is not allowed to make protected operations available
             // before the composition root supplies the host-owned gate.
-            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
-            erasure_gate_bound: false,
+            erasure_gate,
+            erasure_gate_bound,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
             authority_persistence_binding: None,

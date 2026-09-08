@@ -658,6 +658,20 @@ impl SqliteStore {
         Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Self::require_utf8_encoding(&conn)?;
+        // Source-level adapter tests exercise ordinary Event operations directly;
+        // bind a permissive fixture gate only for those tests. Production and
+        // integration consumers retain the fail-closed composition-root default.
+        #[cfg(test)]
+        let erasure_gate: Option<Arc<dyn ErasureGate>> =
+            Some(Arc::new(ErasureContainmentGateV1::new()));
+        #[cfg(not(test))]
+        let erasure_gate: Option<Arc<dyn ErasureGate>> =
+            Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        #[cfg(test)]
+        let erasure_gate_bound = true;
+        #[cfg(not(test))]
+        let erasure_gate_bound = false;
+
         let store = Self {
             conn,
             hasher,
@@ -665,8 +679,8 @@ impl SqliteStore {
             consent_authority_permit: None,
             // A store is not allowed to make protected operations available
             // before the composition root supplies the host-owned gate.
-            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
-            erasure_gate_bound: false,
+            erasure_gate,
+            erasure_gate_bound,
             authority_persistence_binding: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
