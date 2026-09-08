@@ -31,6 +31,14 @@ pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
+pub(crate) fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(value);
+    *hasher.finalize().as_bytes()
+}
+
 pub use bundle_contract::{
     draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
     draft_trust_policy_snapshot_bytes_v1, expected_result_member_path, fixture_input_member_path,
@@ -5197,6 +5205,9 @@ fn verify_non_interference_contract(contract: &Wave8ProofContractV1) -> Result<(
         }
         NonInterferenceExecutionStatusV1::Executed => {
             verify_non_interference_matrix(&contract.non_interference)?;
+            // This legacy envelope cannot bind the signed NIR1 report and NIA1 artifacts.
+            // Executed evidence is admitted only through the dedicated signed verifier.
+            return Err(EvidenceError::InvalidNonInterferenceMatrix);
         }
     }
     Ok(())
@@ -7291,8 +7302,9 @@ pub mod tests {
                 committed: true,
                 failure_class: None,
             }],
-            non_interference_status: NonInterferenceExecutionStatusV1::Executed,
-            non_interference: executed_non_interference_matrix(),
+            non_interference_status:
+                NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable,
+            non_interference: Vec::new(),
         }
     }
 
@@ -8096,8 +8108,11 @@ pub mod tests {
                 }),
                 Box::new(|value| value.contract.non_interference[0].provenance_digest = [0; 32]),
             ];
+            let mut executed = value.clone();
+            executed.contract.non_interference_status = NonInterferenceExecutionStatusV1::Executed;
+            executed.contract.non_interference = executed_non_interference_matrix();
             for mutate in matrix_mutations {
-                let mut invalid = value.clone();
+                let mut invalid = executed.clone();
                 mutate(&mut invalid);
                 assert_eq!(
                     verify_wave8_contract(&invalid),

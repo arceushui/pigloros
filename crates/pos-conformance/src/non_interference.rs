@@ -1,5 +1,5 @@
 use crate::{
-    ExecutionModeV1, NonInterferenceCaseV1, NonInterferenceDivergenceCoordinateV1,
+    domain_digest, ExecutionModeV1, NonInterferenceCaseV1, NonInterferenceDivergenceCoordinateV1,
     NonInterferenceVariantV1, NON_INTERFERENCE_CASE_COUNT_V1, NON_INTERFERENCE_FIXTURE_IDS_V1,
 };
 use serde::{Deserialize, Serialize};
@@ -962,14 +962,6 @@ fn matrix_value(
 fn append_bytes(target: &mut Vec<u8>, value: &[u8]) {
     target.extend_from_slice(&(value.len() as u64).to_be_bytes());
     target.extend_from_slice(value);
-}
-
-fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(&[0]);
-    hasher.update(value);
-    *hasher.finalize().as_bytes()
 }
 
 const fn variant_code(variant: NonInterferenceVariantV1) -> u8 {

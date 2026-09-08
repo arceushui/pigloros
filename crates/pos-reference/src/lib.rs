@@ -210,7 +210,13 @@ fn validate_non_interference_contract(
         {
             Ok(())
         }
-        Some("executed") => validate_non_interference_matrix(matrix),
+        Some("executed") => {
+            validate_non_interference_matrix(matrix)?;
+            // This legacy JSON envelope cannot bind NIR1/NIA1 signatures or trusted keys.
+            Err(ReferenceError::InvalidForkEvidence(
+                "signed non-interference execution evidence is required",
+            ))
+        }
         _ => Err(ReferenceError::InvalidForkEvidence(
             "non-interference execution status is invalid",
         )),
@@ -1327,8 +1333,8 @@ mod tests {
                 "authorization_decisions": [],
                 "counterfactual": {},
                 "atomicity": [],
-                "non_interference_status": "executed",
-                "non_interference": non_interference_fixture()
+                "non_interference_status": "not_executed_capture_unavailable",
+                "non_interference": []
             }
         });
         let mut counterfactual = baseline.clone();
@@ -1352,6 +1358,14 @@ mod tests {
             event(5, "society", "society.signal", 7, serde_json::json!(4))
         ]);
         (baseline.to_string(), counterfactual.to_string())
+    }
+
+    fn executed_fork_fixture() -> Result<(String, String), ReferenceError> {
+        let (baseline, counterfactual) = fork_fixture();
+        let mut counterfactual = parse_json(&counterfactual)?;
+        counterfactual["contract"]["non_interference_status"] = serde_json::json!("executed");
+        counterfactual["contract"]["non_interference"] = non_interference_fixture();
+        Ok((baseline, counterfactual.to_string()))
     }
 
     #[test]
@@ -1756,17 +1770,18 @@ mod tests {
                 "contract shape is invalid"
             ))
         ));
-        for status in [
-            serde_json::json!("unknown"),
-            serde_json::json!("not_executed_capture_unavailable"),
-        ] {
-            let mut value = parse_json(&counterfactual)?;
-            value["contract"]["non_interference_status"] = status;
-            assert_fork_error_contains(
-                verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
-                "non-interference execution status is invalid",
-            );
-        }
+        let mut unknown_status = parse_json(&counterfactual)?;
+        unknown_status["contract"]["non_interference_status"] = serde_json::json!("unknown");
+        assert_fork_error_contains(
+            verify_fork_json(&baseline, &unknown_status.to_string(), "world.action.v1"),
+            "non-interference execution status is invalid",
+        );
+        let mut placeholder = parse_json(&counterfactual)?;
+        placeholder["contract"]["non_interference"] = non_interference_fixture();
+        assert_fork_error_contains(
+            verify_fork_json(&baseline, &placeholder.to_string(), "world.action.v1"),
+            "non-interference execution status is invalid",
+        );
         Ok(())
     }
 
@@ -1830,7 +1845,7 @@ mod tests {
     }
 
     fn rejects_matrix_shapes() -> Result<(), ReferenceError> {
-        let (baseline, counterfactual) = fork_fixture();
+        let (baseline, counterfactual) = executed_fork_fixture()?;
         let matrix_cases = [
             ("fixture_id", serde_json::json!("wrong")),
             ("variant", serde_json::json!("wrong")),
@@ -1915,7 +1930,7 @@ mod tests {
     }
 
     fn rejects_matrix_digest_and_cross_mode_shapes() -> Result<(), ReferenceError> {
-        let (baseline, counterfactual) = fork_fixture();
+        let (baseline, counterfactual) = executed_fork_fixture()?;
         let mut invalid_digest_byte = parse_json(&counterfactual)?;
         invalid_digest_byte["contract"]["non_interference"][0]["provenance_digest"] =
             serde_json::json!(vec![256_u64; 32]);

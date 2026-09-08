@@ -1,6 +1,7 @@
 use crate::{
-    non_interference_capture_profiles_v1, ExecutionModeV1, NonInterferenceDivergenceCoordinateV1,
-    NonInterferenceVariantV1, NON_INTERFERENCE_FIXTURE_IDS_V1,
+    domain_digest, non_interference_capture_profiles_v1, ExecutionModeV1,
+    NonInterferenceDivergenceCoordinateV1, NonInterferenceVariantV1,
+    NON_INTERFERENCE_FIXTURE_IDS_V1,
 };
 use ed25519_dalek::{Signer, Verifier};
 use pos_core::{CanonicalBytes, Signature};
@@ -693,14 +694,6 @@ fn execution_artifact_signature_message(unsigned: &[u8]) -> Vec<u8> {
     let mut message = b"PiglorOS.NonInterference.ExecutionArtifact.Signature.v1\0".to_vec();
     message.extend_from_slice(unsigned);
     message
-}
-
-fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(&[0]);
-    hasher.update(value);
-    *hasher.finalize().as_bytes()
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, NonInterferenceReportErrorV1> {

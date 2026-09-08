@@ -271,9 +271,16 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
     }
 }
 
+fn unsigned_executed_evidence_fixture() -> MoatProofEvidenceV1 {
+    let mut evidence = public_evidence_fixture();
+    evidence.contract.non_interference_status = NonInterferenceExecutionStatusV1::Executed;
+    evidence.contract.non_interference = executed_non_interference_matrix();
+    evidence
+}
+
 #[test]
-fn executed_public_evidence_round_trips_through_the_independent_fork_verifier() {
-    let serialized = ok(public_evidence_fixture().to_json());
+fn unsigned_executed_public_evidence_is_rejected_by_the_independent_fork_verifier() {
+    let serialized = ok(serde_json::to_string(&unsigned_executed_evidence_fixture()));
     let mut baseline: serde_json::Value = ok(serde_json::from_str(&serialized));
     let mut counterfactual = baseline.clone();
     baseline["manifest"]["fork_cut_seq"] = serde_json::json!(1);
@@ -292,24 +299,17 @@ fn executed_public_evidence_round_trips_through_the_independent_fork_verifier() 
     ]);
     let baseline_json = baseline.to_string();
     let counterfactual_json = counterfactual.to_string();
-    if let Err(error) =
-        pos_reference::verify_fork_json(&baseline_json, &counterfactual_json, "world.action.v1")
-    {
-        std::panic::resume_unwind(Box::new(format!(
-            "independent verifier rejected public evidence: {error}"
-        )));
-    }
-
-    let mut rebound: serde_json::Value = ok(serde_json::from_str(&counterfactual_json));
-    rebound["contract"]["non_interference"][1]["fixture_digest"][0] = serde_json::json!(255);
-    match pos_reference::verify_fork_json(&baseline_json, &rebound.to_string(), "world.action.v1") {
-        Err(pos_reference::ReferenceError::InvalidForkEvidence(message)) => {
-            assert_eq!(message, "non-interference modes diverged");
-        }
-        other => std::panic::resume_unwind(Box::new(format!(
-            "fixture-digest rebinding was not rejected as mode divergence: {other:?}"
-        ))),
-    }
+    let result =
+        pos_reference::verify_fork_json(&baseline_json, &counterfactual_json, "world.action.v1");
+    assert!(
+        matches!(
+            &result,
+            Err(pos_reference::ReferenceError::InvalidForkEvidence(
+                "signed non-interference execution evidence is required"
+            ))
+        ),
+        "unexpected verification result: {result:?}"
+    );
 }
 
 fn event_json(
@@ -775,8 +775,9 @@ fn proof_contract_fixture() -> Wave8ProofContractV1 {
             committed: true,
             failure_class: None,
         }],
-        non_interference_status: pos_conformance::NonInterferenceExecutionStatusV1::Executed,
-        non_interference: executed_non_interference_matrix(),
+        non_interference_status:
+            pos_conformance::NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable,
+        non_interference: Vec::new(),
     }
 }
 
@@ -1443,10 +1444,26 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &ciborium::Value::Array(short_evidence),
     )));
+    let mut exhaustive_fields =
+        cloned_array_fields(&value, "decode evidence fixture for exhaustive mutation");
+    let mut exhaustive_contract = cloned_array_fields(
+        &exhaustive_fields[EvidenceField::Contract.index()],
+        "decode proof contract for exhaustive mutation",
+    );
+    exhaustive_contract[6] = ciborium::Value::Integer(1_u64.into());
+    exhaustive_contract[7] = ciborium::Value::Array(
+        executed_non_interference_matrix()
+            .iter()
+            .map(|case| decode_value(ok(case.to_canonical_cbor())))
+            .collect(),
+    );
+    exhaustive_fields[EvidenceField::Contract.index()] =
+        ciborium::Value::Array(exhaustive_contract);
+    let exhaustive_value = ciborium::Value::Array(exhaustive_fields);
     let mut paths = Vec::new();
-    structural_paths(&value, &mut Vec::new(), &mut paths);
+    structural_paths(&exhaustive_value, &mut Vec::new(), &mut paths);
     assert!(paths.len() > 512);
-    let mut mutant = value.clone();
+    let mut mutant = exhaustive_value.clone();
     for path in paths {
         let displaced = replace_at_path(
             &mut mutant,
@@ -1458,7 +1475,10 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
         )));
         drop(replace_at_path(&mut mutant, &path, displaced));
     }
-    assert_eq!(mutant, value, "tag mutation helper must restore its input");
+    assert_eq!(
+        mutant, exhaustive_value,
+        "tag mutation helper must restore its input"
+    );
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &replace_field(
             value.clone(),
@@ -1641,9 +1661,14 @@ fn public_moat_proof_contract_excludes_cnr1_and_rejects_the_retired_field() {
 
 #[test]
 fn non_interference_execution_status_cannot_turn_missing_or_placeholder_results_into_a_pass() {
+    let unsigned_executed = unsigned_executed_evidence_fixture();
+    assert_eq!(
+        verify_evidence(&unsigned_executed),
+        Err(EvidenceError::InvalidNonInterferenceMatrix)
+    );
+
     let mut evidence = public_evidence_fixture();
-    evidence.contract.non_interference_status =
-        pos_conformance::NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable;
+    evidence.contract.non_interference = executed_non_interference_matrix();
     assert!(verify_evidence(&evidence).is_err());
 
     evidence.contract.non_interference.clear();
