@@ -6498,6 +6498,49 @@ mod coverage_paths {
     }
 
     #[test]
+    fn gate_mutations_fail_closed_after_lock_poisoning() {
+        fn poison_fence(gate: &Arc<ErasureContainmentGateV1>) {
+            let poisoned = Arc::clone(gate);
+            let result = std::thread::spawn(move || {
+                let _guard = poisoned.fence_lock.lock().unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+                });
+                panic!("poison erasure fence");
+            })
+            .join();
+            assert!(result.is_err());
+        }
+
+        fn poison_authority(gate: &Arc<ErasureContainmentGateV1>) {
+            let poisoned = Arc::clone(gate);
+            let result = std::thread::spawn(move || {
+                let _guard = poisoned.authority.write().unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+                });
+                panic!("poison erasure authority");
+            })
+            .join();
+            assert!(result.is_err());
+        }
+
+        let publish_fence = Arc::new(ErasureContainmentGateV1::new());
+        poison_fence(&publish_fence);
+        publish_fence.publish_verified_state(coverage_state(reference(6)));
+
+        let publish_authority = Arc::new(ErasureContainmentGateV1::new());
+        poison_authority(&publish_authority);
+        publish_authority.publish_verified_state(coverage_state(reference(6)));
+
+        let block_fence = Arc::new(ErasureContainmentGateV1::new());
+        poison_fence(&block_fence);
+        block_fence.block_timeline(TimelineId::new());
+
+        let block_authority = Arc::new(ErasureContainmentGateV1::new());
+        poison_authority(&block_authority);
+        block_authority.block_timeline(TimelineId::new());
+    }
+
+    #[test]
     fn topology_proof_is_opaque_and_manifest_bound() -> Result<(), ErasureErrorV1> {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let affected = TimelineId::new();

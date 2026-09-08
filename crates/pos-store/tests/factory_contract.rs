@@ -2,8 +2,9 @@
 
 use pos_core::ErasureContainmentGateV1;
 use pos_store::{
-    open_store, AppendDedupKey, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome,
-    CanonicalBytes, EntityId, EventDraft, EventStore, Kind, StoreConfig, WallTime,
+    open_erasure_host_store, open_store, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    AppendOrDuplicateOutcome, CanonicalBytes, EntityId, EventDraft, EventStore, Kind, StoreConfig,
+    WallTime,
 };
 use std::sync::Arc;
 
@@ -86,4 +87,15 @@ fn sqlite_factory_runs_the_bounded_root_count_contract() {
     let mut store = gated_sqlite_store();
     store.create_timeline("root").test_ok();
     assert_eq!(store.root_timeline_count_bounded(1).test_ok(), 1);
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn file_backed_erasure_host_factory_exposes_one_complete_snapshot() {
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_string_lossy().into_owned();
+    let mut store = open_erasure_host_store(StoreConfig::Sqlite { path }).test_ok();
+    let snapshot = store.complete_erasure_inventory_snapshot(1).test_ok();
+    assert_eq!(snapshot.request_heads(), &[]);
+    assert_eq!(snapshot.topology(), &[]);
 }
