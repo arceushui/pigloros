@@ -1,5 +1,8 @@
 //! Canonical SLX1/SLY1 codec for the root selector boundary.
 
+// The private module is shared with its selector sibling through the crate root.
+#![allow(clippy::redundant_pub_crate)]
+
 use ciborium::value::Value;
 
 use crate::adapter_transport::{read_observation, write_attempt};
@@ -516,64 +519,59 @@ mod tests {
         )
     }
 
-    fn admitted_reply(
+    type AdmittedReply = (Vec<u8>, Vec<u8>, [u8; 32]);
+
+    fn admission_grant(
         request: &EncodedSelectorRequest,
         evr1_digest: [u8; 32],
-        outcome: u64,
-    ) -> Result<(Vec<u8>, Vec<u8>, [u8; 32]), AdapterError> {
-        let (grant, grant_digest) = protocol_record(
-            "AGR1",
-            {
-                let mut fields = vec![
-                    Value::Text("AGR1".to_owned()),
-                    integer(1),
-                    Value::Bytes(request.provider_request_id.to_vec()),
-                    Value::Bytes(request.attempt_id.to_vec()),
-                ];
-                for digest in 40_u8..53 {
-                    fields.push(Value::Bytes(vec![digest; 32]));
-                }
-                fields.extend([
-                    integer(1),
-                    integer(2),
-                    integer(3),
-                    Value::Bytes(vec![53; 32]),
-                    Value::Bytes(vec![54; 32]),
-                    Value::Array(Vec::new()),
-                    Value::Bytes(vec![55; 32]),
-                    Value::Bytes(vec![56; 32]),
-                    Value::Text("runtime-key".to_owned()),
-                ]);
-                fields[4] = Value::Bytes(evr1_digest.to_vec());
-                fields
-            },
-            true,
-        )?;
-        let (events, ready, release) = match outcome {
-            0 => (vec![11, 12], Some([61; 32]), Some([62; 32])),
-            1 => (vec![1], None, None),
-            4 => (vec![0], None, None),
-            _ => return Err(AdapterError::ProtocolFailure),
-        };
-        let observed = [63; 32];
-        let elm = [64; 32];
-        let termination = [65; 32];
-        let mut audit_bytes = Vec::new();
+    ) -> Result<(Vec<u8>, [u8; 32]), AdapterError> {
+        let mut fields = vec![
+            Value::Text("AGR1".to_owned()),
+            integer(1),
+            Value::Bytes(request.provider_request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
+        ];
+        for digest in 40_u8..53 {
+            fields.push(Value::Bytes(vec![digest; 32]));
+        }
+        fields.extend([
+            integer(1),
+            integer(2),
+            integer(3),
+            Value::Bytes(vec![53; 32]),
+            Value::Bytes(vec![54; 32]),
+            Value::Array(Vec::new()),
+            Value::Bytes(vec![55; 32]),
+            Value::Bytes(vec![56; 32]),
+            Value::Text("runtime-key".to_owned()),
+        ]);
+        fields[4] = Value::Bytes(evr1_digest.to_vec());
+        protocol_record("AGR1", fields, true)
+    }
+
+    fn audit_chain(
+        request: &EncodedSelectorRequest,
+        grant_digest: [u8; 32],
+        events: &[u8],
+        ready: Option<[u8; 32]>,
+        release: Option<[u8; 32]>,
+    ) -> Result<(Vec<Vec<u8>>, [u8; 32]), AdapterError> {
+        let mut records = Vec::new();
         let mut previous = None;
         for (sequence, event) in events.iter().copied().enumerate() {
             let authority = match event {
                 11 => vec![
                     grant_digest,
                     ready.ok_or(AdapterError::ProtocolFailure)?,
-                    observed,
+                    [63; 32],
                 ],
                 12 => vec![
                     grant_digest,
                     ready.ok_or(AdapterError::ProtocolFailure)?,
                     release.ok_or(AdapterError::ProtocolFailure)?,
-                    observed,
+                    [63; 32],
                 ],
-                _ => vec![grant_digest, elm, termination],
+                _ => vec![grant_digest, [64; 32], [65; 32]],
             };
             let (bytes, digest) = audit_record(
                 request,
@@ -582,11 +580,20 @@ mod tests {
                 authority,
                 previous,
             )?;
-            audit_bytes.push(bytes);
+            records.push(bytes);
             previous = Some(digest);
         }
-        let sau1_digest = previous.ok_or(AdapterError::ProtocolFailure)?;
-        let (receipt, receipt_digest) = protocol_record(
+        Ok((records, previous.ok_or(AdapterError::ProtocolFailure)?))
+    }
+
+    fn provider_receipt(
+        request: &EncodedSelectorRequest,
+        grant_digest: [u8; 32],
+        sau1_digest: [u8; 32],
+        ready: Option<[u8; 32]>,
+        release: Option<[u8; 32]>,
+    ) -> Result<(Vec<u8>, [u8; 32]), AdapterError> {
+        protocol_record(
             "SPR1",
             vec![
                 Value::Text("SPR1".to_owned()),
@@ -604,19 +611,72 @@ mod tests {
                 integer(2),
                 integer(3),
                 Value::Bytes(vec![73; 32]),
-                Value::Bytes(elm.to_vec()),
+                Value::Bytes(vec![64; 32]),
                 Value::Array(Vec::new()),
                 optional_digest(ready),
                 optional_digest(release),
                 Value::Bytes(vec![74; 32]),
-                Value::Bytes(observed.to_vec()),
+                Value::Bytes(vec![63; 32]),
                 Value::Bytes(vec![75; 32]),
-                Value::Bytes(termination.to_vec()),
+                Value::Bytes(vec![65; 32]),
                 Value::Bytes(sau1_digest.to_vec()),
                 Value::Text("runtime-key".to_owned()),
             ],
             true,
-        )?;
+        )
+    }
+
+    fn provider_result(
+        request: &EncodedSelectorRequest,
+        outcome: u64,
+        grant_digest: [u8; 32],
+        receipt_digest: [u8; 32],
+        events: &[u8],
+        output: Option<(u64, [u8; 32])>,
+    ) -> Result<Vec<u8>, AdapterError> {
+        protocol_record(
+            "SPY1",
+            vec![
+                Value::Text("SPY1".to_owned()),
+                integer(1),
+                Value::Bytes(request.provider_request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(outcome),
+                output.as_ref().map_or(Value::Null, |(length, digest)| {
+                    Value::Array(vec![integer(*length), Value::Bytes(digest.to_vec())])
+                }),
+                Value::Bytes(grant_digest.to_vec()),
+                Value::Bytes(receipt_digest.to_vec()),
+                Value::Array(
+                    events
+                        .iter()
+                        .copied()
+                        .map(|event| integer(u64::from(event)))
+                        .collect(),
+                ),
+                Value::Text("runtime-key".to_owned()),
+            ],
+            true,
+        )
+        .map(|(bytes, _)| bytes)
+    }
+
+    fn admitted_reply(
+        request: &EncodedSelectorRequest,
+        evr1_digest: [u8; 32],
+        outcome: u64,
+    ) -> Result<AdmittedReply, AdapterError> {
+        let (grant, grant_digest) = admission_grant(request, evr1_digest)?;
+        let (events, ready, release) = match outcome {
+            0 => (vec![11, 12], Some([61; 32]), Some([62; 32])),
+            1 => (vec![1], None, None),
+            4 => (vec![0], None, None),
+            _ => return Err(AdapterError::ProtocolFailure),
+        };
+        let (audit_bytes, sau1_digest) =
+            audit_chain(request, grant_digest, &events, ready, release)?;
+        let (receipt, receipt_digest) =
+            provider_receipt(request, grant_digest, sau1_digest, ready, release)?;
         let mut trailing = Vec::new();
         let output = if outcome == 0 {
             let observation = SubjectObservation {
@@ -632,28 +692,13 @@ mod tests {
         } else {
             None
         };
-        let (result, _) = protocol_record(
-            "SPY1",
-            vec![
-                Value::Text("SPY1".to_owned()),
-                integer(1),
-                Value::Bytes(request.provider_request_id.to_vec()),
-                Value::Bytes(request.attempt_id.to_vec()),
-                integer(outcome),
-                output.as_ref().map_or(Value::Null, |(length, digest)| {
-                    Value::Array(vec![integer(*length), Value::Bytes(digest.to_vec())])
-                }),
-                Value::Bytes(grant_digest.to_vec()),
-                Value::Bytes(receipt_digest.to_vec()),
-                Value::Array(
-                    events
-                        .into_iter()
-                        .map(|event| integer(u64::from(event)))
-                        .collect(),
-                ),
-                Value::Text("runtime-key".to_owned()),
-            ],
-            true,
+        let result = provider_result(
+            request,
+            outcome,
+            grant_digest,
+            receipt_digest,
+            &events,
+            output,
         )?;
         let fields = vec![
             Value::Text("SLY1".to_owned()),
