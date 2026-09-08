@@ -42,6 +42,7 @@ struct RecordingAdapter {
     subject_digest: [u8; 32],
     output: Vec<u8>,
     attempts: Vec<CaseAttempt>,
+    case_ordinals: Vec<u16>,
 }
 
 struct FaultingArchive {
@@ -217,6 +218,10 @@ impl SubjectAdapter for RecordingAdapter {
 
     fn subject_artifact_digest(&self) -> [u8; 32] {
         self.subject_digest
+    }
+
+    fn set_case_ordinal(&mut self, ordinal: u16) {
+        self.case_ordinals.push(ordinal);
     }
 
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
@@ -868,6 +873,7 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
         subject_digest: corpus.subject_digest,
         output: corpus.expected_output,
         attempts: Vec::new(),
+        case_ordinals: Vec::new(),
     };
     let result = evaluate(
         &corpus.request,
@@ -878,6 +884,7 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
     )?;
     assert_eq!(result.report.cases.len(), 7);
     assert_eq!(adapter.attempts.len(), 7);
+    assert_eq!(adapter.case_ordinals, (0..7).collect::<Vec<_>>());
     assert!(adapter.attempts.iter().all(|attempt| {
         attempt.mode == 1
             && !attempt.network_allowed
