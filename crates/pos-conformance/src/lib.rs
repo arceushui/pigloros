@@ -4351,9 +4351,7 @@ pub mod strict_codec {
         decode_contract_fields(fields)
     }
 
-    fn decode_contract_fields(
-        fields: &[Value],
-    ) -> Result<Wave8ProofContractV1, StrictCborError> {
+    fn decode_contract_fields(fields: &[Value]) -> Result<Wave8ProofContractV1, StrictCborError> {
         Ok(Wave8ProofContractV1 {
             scenario_room: decode_room(&fields[0])?,
             plugin_boundary: decode_plugin_boundary(&fields[1])?,
