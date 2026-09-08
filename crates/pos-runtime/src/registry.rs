@@ -5334,9 +5334,6 @@ mod erasure_gate_coverage {
         // A second binding is ignored, so a host cannot replace the original
         // gate after composition and reopen the protected path.
         rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
-        assert!(rejecting
-            .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
-            .is_ok());
         let mut rejecting_store = pos_store::memory::MemoryStore::new();
         rejecting_store
             .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
@@ -5345,6 +5342,17 @@ mod erasure_gate_coverage {
                     "test store erasure gate binding should succeed: {error:?}"
                 )))
             });
+        let rejecting_timeline = rejecting_store
+            .create_timeline("erasure-gate-coverage")
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "test timeline creation should succeed: {error:?}"
+                )))
+            })
+            .id();
+        assert!(rejecting
+            .step_all_anchored(rejecting_timeline, pos_core::clock::Seq::ZERO)
+            .is_ok());
         assert!(rejecting
             .append_and_commit_step_at(&mut rejecting_store, pos_core::clock::Seq::ZERO, 0, &[],)
             .is_ok());
