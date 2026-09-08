@@ -908,11 +908,12 @@ fn assert_sqlite_fork_retry_corruption(
         pos_core::ErasureCasOutcomeV1::Applied
     );
     drop(store);
+    let mut reopened = SqliteStore::open(path)?;
     let connection = rusqlite::Connection::open(path)?;
     assert_eq!(corrupt(&connection, &prepared)?, 1);
     drop(connection);
     assert_eq!(
-        SqliteStore::open(path)?.commit_fork_admission(prepared),
+        reopened.commit_fork_admission(prepared),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
@@ -964,6 +965,12 @@ fn sqlite_fork_retry_rejects_corrupted_receipt_or_child() -> Result<(), Box<dyn 
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "UPDATE timelines SET fork_seq=0 WHERE id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE timelines SET head_seq=1 WHERE id=?1",
             rusqlite::params![prepared.child().id.to_string()],
         )
     })?;
