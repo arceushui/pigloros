@@ -5170,7 +5170,8 @@ mod tests {
                 maximum: MAX_EVENTS_PER_TIMELINE
             }
         ));
-        let fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let mut fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        Gateway::bind_test_erasure_gate(fresh.as_mut());
         assert_eq!(
             fresh.get_timeline(timeline.id()).test_ok().test_ok().head,
             Seq::from_u64(MAX_EVENTS_PER_TIMELINE)
