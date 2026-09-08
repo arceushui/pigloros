@@ -1,7 +1,5 @@
 use piglor_gateway::{Gateway, GatewayError};
-use pos_core::{
-    EntityId, ErasureContainmentErrorV1, ErasureGate, ErasureProtectedOperationV1, TimelineId,
-};
+use pos_core::{ErasureContainmentErrorV1, ErasureGate, ErasureProtectedOperationV1, TimelineId};
 use pos_store::{open_store, StoreConfig};
 use std::sync::{Arc, Mutex};
 
@@ -18,13 +16,6 @@ impl SelectiveGate {
         if !blocked.contains(&operation) {
             blocked.push(operation);
         }
-    }
-
-    fn unblock(&self, operation: ErasureProtectedOperationV1) {
-        self.blocked
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|blocked| *blocked != operation);
     }
 
     fn authorize_operation(

@@ -520,7 +520,7 @@ mod tests {
     };
     use pos_plugin_ledger::LedgerStore;
     use pos_store::{open_store, StoreConfig};
-    use std::{path::PathBuf, sync::Arc};
+    use std::path::PathBuf;
     use tower::ServiceExt;
 
     fn test_world_body() -> EntityId {
