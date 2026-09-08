@@ -245,10 +245,6 @@ fn digest_name(digest: [u8; 32]) -> String {
     name
 }
 
-fn connect_selector() -> Result<UnixStream, SelectorBoundaryError> {
-    connect_at(Path::new(SANDBOX_SELECTOR_SOCKET), 0)
-}
-
 fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoundaryError> {
     let path = PathBuf::from(path);
     let before =
