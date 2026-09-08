@@ -82,12 +82,11 @@ async fn one_host_gate_covers_gateway_store_and_action_boundaries(
     let timeline = gateway.create_timeline("shared-gate").await?;
 
     gate.block(ErasureProtectedOperationV1::Read);
-    let read_error = match gateway
+    let Err(read_error) = gateway
         .read_events_page(&timeline.id().to_string(), 0, 1)
         .await
-    {
-        Ok(_) => return Err("the shared gate must fence EventStore reads".into()),
-        Err(error) => error,
+    else {
+        return Err("the shared gate must fence EventStore reads".into());
     };
     assert!(matches!(
         read_error,
@@ -96,7 +95,7 @@ async fn one_host_gate_covers_gateway_store_and_action_boundaries(
 
     gate.unblock(ErasureProtectedOperationV1::Read);
     gate.block(ErasureProtectedOperationV1::ProposedAction);
-    let action_error = match gateway
+    let Err(action_error) = gateway
         .submit_proposed_action(
             &timeline.id().to_string(),
             ProposedAction::new(
@@ -107,9 +106,8 @@ async fn one_host_gate_covers_gateway_store_and_action_boundaries(
             ),
         )
         .await
-    {
-        Ok(_) => return Err("the shared gate must fence proposed actions".into()),
-        Err(error) => error,
+    else {
+        return Err("the shared gate must fence proposed actions".into());
     };
     assert!(matches!(
         action_error,
