@@ -105,7 +105,7 @@ fn snapshot(keys: Vec<Value>, certificates: Vec<Value>, signer: &str) -> Value {
     ])
 }
 
-fn sign(unsigned: Value, root: &SigningKey) -> TestResult<Vec<u8>> {
+fn sign_trust_snapshot(unsigned: Value, root: &SigningKey) -> TestResult<Vec<u8>> {
     sign_record("TRS1", unsigned, root)
 }
 
@@ -138,7 +138,7 @@ fn revocation(trust: &SandboxTrustSnapshot, epoch: u64, keys: Vec<Value>) -> Val
 
 fn trusted_registry(role: u64) -> TestResult<SandboxTrustSnapshot> {
     let root = SigningKey::from_bytes(&[1; 32]);
-    let bytes = sign(
+    let bytes = sign_trust_snapshot(
         snapshot(vec![key_record("policy", role)], vec![], "root"),
         &root,
     )?;
@@ -308,17 +308,17 @@ fn revocation_enforces_roles_registry_binding_and_revoked_keys() -> TestResult {
         &policy,
     )?;
     let next = SandboxRevocationSnapshot::authenticate(&bytes, &trust)?;
-    current.validate_successor(&next)?;
+    current.validate_immediate_epoch_for_same_registry(&next)?;
     assert_eq!(
         next.active_key(&trust, "policy", SandboxTrustRole::AdministratorPolicy),
         Err(SandboxTrustError::Revoked)
     );
     assert_eq!(
-        next.validate_successor(&current),
+        next.validate_immediate_epoch_for_same_registry(&current),
         Err(SandboxTrustError::EpochDiscontinuity)
     );
     assert_eq!(
-        current.validate_successor(&current),
+        current.validate_immediate_epoch_for_same_registry(&current),
         Err(SandboxTrustError::EpochDiscontinuity)
     );
     Ok(())
@@ -358,11 +358,11 @@ fn revocation_rejects_untrusted_signatures_roles_and_epoch_gaps() -> TestResult 
             &trust,
         )?;
         assert_eq!(
-            current.validate_successor(&next),
+            current.validate_immediate_epoch_for_same_registry(&next),
             Err(SandboxTrustError::EpochDiscontinuity)
         );
         assert_eq!(
-            next.validate_successor(&current),
+            next.validate_immediate_epoch_for_same_registry(&current),
             Err(SandboxTrustError::EpochDiscontinuity)
         );
     }
@@ -381,7 +381,7 @@ fn authenticates_each_role_and_certificate_with_external_root() -> TestResult {
         SandboxTrustRole::ImageProject,
     ];
     for (code, expected) in (0_u64..).zip(roles) {
-        let bytes = sign(
+        let bytes = sign_trust_snapshot(
             snapshot(vec![key_record("key", code)], vec![certificate(3)], "root"),
             &root,
         )?;
@@ -395,7 +395,7 @@ fn authenticates_each_role_and_certificate_with_external_root() -> TestResult {
         assert_eq!(trusted.certificates()[0].keyring_serial, 3);
         assert_eq!(trusted.certificates()[0].epoch, 2);
     }
-    let bytes = sign(snapshot(vec![], vec![], "root"), &root)?;
+    let bytes = sign_trust_snapshot(snapshot(vec![], vec![], "root"), &root)?;
     let empty = SandboxTrustSnapshot::authenticate(&bytes, "root", &root.verifying_key())?;
     assert!(empty.keys().is_empty());
     assert!(empty.certificates().is_empty());
@@ -406,7 +406,7 @@ fn authenticates_each_role_and_certificate_with_external_root() -> TestResult {
 fn rejects_untrusted_root_and_wrong_named_signer() -> TestResult {
     let root = SigningKey::from_bytes(&[1; 32]);
     let attacker = SigningKey::from_bytes(&[2; 32]);
-    let forged = sign(
+    let forged = sign_trust_snapshot(
         snapshot(vec![key_record("root", 0)], vec![], "root"),
         &attacker,
     )?;
@@ -414,7 +414,7 @@ fn rejects_untrusted_root_and_wrong_named_signer() -> TestResult {
         SandboxTrustSnapshot::authenticate(&forged, "root", &root.verifying_key()),
         Err(ProtocolError::SignatureInvalid)
     );
-    let renamed = sign(snapshot(vec![], vec![], "other"), &root)?;
+    let renamed = sign_trust_snapshot(snapshot(vec![], vec![], "other"), &root)?;
     assert_eq!(
         SandboxTrustSnapshot::authenticate(&renamed, "root", &root.verifying_key()),
         Err(ProtocolError::SignatureInvalid)
@@ -436,7 +436,7 @@ fn rejects_ambiguous_registry_identities_even_with_valid_root_signature() -> Tes
     ] {
         assert_eq!(
             SandboxTrustSnapshot::authenticate(
-                &sign(unsigned, &root)?,
+                &sign_trust_snapshot(unsigned, &root)?,
                 "root",
                 &root.verifying_key()
             ),
@@ -449,7 +449,7 @@ fn rejects_ambiguous_registry_identities_even_with_valid_root_signature() -> Tes
 #[test]
 fn rejects_unknown_roles_malformed_fields_and_tampering() -> TestResult {
     let root = SigningKey::from_bytes(&[1; 32]);
-    let unknown = sign(snapshot(vec![key_record("key", 6)], vec![], "root"), &root)?;
+    let unknown = sign_trust_snapshot(snapshot(vec![key_record("key", 6)], vec![], "root"), &root)?;
     assert_eq!(
         SandboxTrustSnapshot::authenticate(&unknown, "root", &root.verifying_key()),
         Err(ProtocolError::FieldOutOfBounds)
@@ -460,13 +460,13 @@ fn rejects_unknown_roles_malformed_fields_and_tampering() -> TestResult {
         snapshot(vec![key_record("", 1)], vec![], "root"),
     ] {
         assert!(SandboxTrustSnapshot::authenticate(
-            &sign(unsigned, &root)?,
+            &sign_trust_snapshot(unsigned, &root)?,
             "root",
             &root.verifying_key()
         )
         .is_err());
     }
-    let bytes = sign(snapshot(vec![], vec![], "root"), &root)?;
+    let bytes = sign_trust_snapshot(snapshot(vec![], vec![], "root"), &root)?;
     let mut wrapper: Value = ciborium::from_reader(bytes.as_slice())?;
     let Value::Array(ref mut fields) = wrapper else {
         return Err("expected test CBOR array".into());
@@ -491,7 +491,7 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
         let mut changed = fields.clone();
         changed[index] = Value::Null;
         assert!(SandboxTrustSnapshot::authenticate(
-            &sign(Value::Array(changed), &root)?,
+            &sign_trust_snapshot(Value::Array(changed), &root)?,
             "root",
             &root.verifying_key()
         )
@@ -504,7 +504,7 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
         let mut changed = key_fields.clone();
         changed[index] = Value::Null;
         assert!(SandboxTrustSnapshot::authenticate(
-            &sign(snapshot(vec![Value::Array(changed)], vec![], "root"), &root)?,
+            &sign_trust_snapshot(snapshot(vec![Value::Array(changed)], vec![], "root"), &root)?,
             "root",
             &root.verifying_key()
         )
@@ -517,7 +517,7 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
         let mut changed = certificate_fields.clone();
         changed[index] = Value::Null;
         assert!(SandboxTrustSnapshot::authenticate(
-            &sign(snapshot(vec![], vec![Value::Array(changed)], "root"), &root)?,
+            &sign_trust_snapshot(snapshot(vec![], vec![Value::Array(changed)], "root"), &root)?,
             "root",
             &root.verifying_key()
         )
@@ -527,7 +527,7 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
     let second = Value::Array(vec![Value::Bytes(vec![8; 32]), integer(1), integer(2)]);
     assert_eq!(
         SandboxTrustSnapshot::authenticate(
-            &sign(snapshot(vec![], vec![second, first], "root"), &root)?,
+            &sign_trust_snapshot(snapshot(vec![], vec![second, first], "root"), &root)?,
             "root",
             &root.verifying_key()
         ),
@@ -582,7 +582,7 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         integer(2),
     ]);
     let invalid_trust = SandboxTrustSnapshot::authenticate(
-        &sign(snapshot(vec![invalid_key], vec![], "root"), &root)?,
+        &sign_trust_snapshot(snapshot(vec![invalid_key], vec![], "root"), &root)?,
         "root",
         &root.verifying_key(),
     )?;
@@ -595,7 +595,7 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         Err(SandboxTrustError::Protocol(ProtocolError::SignatureInvalid))
     );
     let foreign_trust = SandboxTrustSnapshot::authenticate(
-        &sign(
+        &sign_trust_snapshot(
             snapshot(vec![key_record("policy", 1)], vec![certificate(9)], "root"),
             &root,
         )?,
@@ -611,7 +611,7 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         &trust,
     )?;
     assert_eq!(
-        current.validate_successor(&foreign),
+        current.validate_immediate_epoch_for_same_registry(&foreign),
         Err(SandboxTrustError::AuthorityMismatch)
     );
     assert!(SandboxRevocationSnapshot::authenticate(b"not-cbor", &trust).is_err());

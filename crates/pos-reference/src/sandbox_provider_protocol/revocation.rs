@@ -106,11 +106,18 @@ impl SandboxRevocationSnapshot {
         resolve_key(trust, id, role)
     }
 
-    /// Check continuity before accepting an authenticated control update.
+    /// Check only immediate epoch continuity for snapshots from one registry.
+    ///
+    /// This is not full RCU1/RCA1 update validation: the stateful selector must
+    /// additionally authenticate the request, previous digest, nonce, replay
+    /// identity and provider acknowledgement before accepting an update.
     ///
     /// # Errors
     /// Rejects a different registry, skipped epoch, replay or epoch overflow.
-    pub fn validate_successor(&self, next: &Self) -> Result<(), SandboxTrustError> {
+    pub fn validate_immediate_epoch_for_same_registry(
+        &self,
+        next: &Self,
+    ) -> Result<(), SandboxTrustError> {
         if self.trust_digest != next.trust_digest {
             return Err(SandboxTrustError::AuthorityMismatch);
         }
