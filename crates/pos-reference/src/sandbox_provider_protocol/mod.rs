@@ -7,6 +7,9 @@ mod authority;
 mod codec;
 mod execution;
 mod operations;
+mod trust;
+
+pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
