@@ -157,6 +157,9 @@ impl SelectorAdapter {
         request: &EncodedSelectorRequest,
         evr1_digest: [u8; 32],
     ) -> Result<crate::selector_protocol::DecodedSelectorReply, AdapterError> {
+        if attempt.watchdog_ms == 0 {
+            return Err(AdapterError::ProtocolFailure);
+        }
         let mut stream =
             connect_at(socket_path, expected_uid).map_err(|_| AdapterError::Unavailable)?;
         let watchdog = Duration::from_millis(attempt.watchdog_ms);
@@ -714,27 +717,21 @@ mod tests {
     }
 
     #[test]
-    fn selector_transport_rejects_a_zero_watchdog_before_exchange(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let socket = temporary.path().join("selector.sock");
-        let listener = UnixListener::bind(&socket)?;
-        std::fs::set_permissions(
-            &socket,
-            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
-        )?;
-        let uid = std::fs::metadata(&socket)?.uid();
-        let server = thread::spawn(move || listener.accept().map(|_| ()));
+    fn selector_transport_rejects_a_zero_watchdog_before_exchange() {
         let request = selector_request();
         let mut attempt = selector_attempt();
         attempt.watchdog_ms = 0;
-        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
+        let encoded = encode_request(&request, b"evr1", &attempt, 0).expect("encode request");
         assert_eq!(
-            SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
-            Err(AdapterError::Unavailable)
+            SelectorAdapter::invoke_at(
+                Path::new("unused-for-invalid-attempt"),
+                0,
+                &attempt,
+                &encoded,
+                [14; 32]
+            ),
+            Err(AdapterError::ProtocolFailure)
         );
-        server.join().map_err(|_| AdapterError::ProtocolFailure)??;
-        Ok(())
     }
 
     #[test]
