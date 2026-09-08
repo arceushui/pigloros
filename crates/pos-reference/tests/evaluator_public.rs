@@ -10,7 +10,8 @@ use pos_reference::evaluator::{
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_protocol::{
-    CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
+    CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence,
+    RequiredProviderCapability, SandboxRequirement, SubjectAdapterKind,
 };
 use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
@@ -23,6 +24,12 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 struct PublicAdapter {
     subject_digest: [u8; 32],
     output: Vec<u8>,
+}
+
+struct ProvenanceAdapter {
+    subject_digest: [u8; 32],
+    output: Vec<u8>,
+    provenance_digest: [u8; 32],
 }
 
 struct KindAdapter {
@@ -162,6 +169,27 @@ impl SubjectAdapter for PublicAdapter {
             result: SubjectResult::Output(self.output.clone()),
             usage: ResourceUsage::default(),
         })
+    }
+}
+
+impl SubjectAdapter for ProvenanceAdapter {
+    fn kind(&self) -> SubjectAdapterKind {
+        SubjectAdapterKind::ExportedArtifact
+    }
+
+    fn subject_artifact_digest(&self) -> [u8; 32] {
+        self.subject_digest
+    }
+
+    fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        Ok(SubjectObservation {
+            result: SubjectResult::Output(self.output.clone()),
+            usage: ResourceUsage::default(),
+        })
+    }
+
+    fn take_execution_provenance_digest(&mut self) -> Option<[u8; 32]> {
+        Some(self.provenance_digest)
     }
 }
 
@@ -391,6 +419,70 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
     assert_eq!(
         ConformanceReport::from_canonical_cbor(&first.report_bytes),
         Ok(first.report)
+    );
+    Ok(())
+}
+
+#[test]
+fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = request_with(&corpus.request, |request| {
+        request.sandbox_requirement = Some(SandboxRequirement {
+            lps1_digest: [31; 32],
+            sim1_digest: [32; 32],
+            required_provider_capability: RequiredProviderCapability {
+                capability_id: "sandbox.execute".to_owned(),
+                capability_version: 1,
+                minimum_strength: 1,
+            },
+            apt1_digest: [33; 32],
+            policy_epoch: 1,
+        });
+    })?;
+    let receipt_digest = [91; 32];
+    let mut admitted = ProvenanceAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output.clone(),
+        provenance_digest: receipt_digest,
+    };
+    let report = evaluate(
+        &request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity()?,
+        &mut admitted,
+    )?
+    .report;
+    assert!(report
+        .cases
+        .iter()
+        .all(|case| case.provenance_digest == receipt_digest));
+
+    let mut missing = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output.clone(),
+    };
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut missing,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
+    );
+
+    admitted.provenance_digest = [0; 32];
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut admitted,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
     );
     Ok(())
 }
