@@ -19,8 +19,8 @@ use pos_core::{
     ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
     ErasureFreezeFailureV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
-    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
-    ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureInventoryObservationV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
@@ -297,6 +297,7 @@ pub struct PublicCoordinatorPort {
     allow_overbound_recovery_errors: bool,
     topology_observation: Rc<RefCell<Option<VerifiedTopologyObservation>>>,
     topology_manifest_override: Rc<RefCell<Option<ErasureReferenceV1>>>,
+    inventory_observation: Rc<RefCell<Option<ErasureInventoryObservationV1>>>,
     config: PublicCoordinatorPortConfig,
 }
 
@@ -312,6 +313,7 @@ impl PublicCoordinatorPort {
             allow_overbound_recovery_errors: false,
             topology_observation: Rc::new(RefCell::new(None)),
             topology_manifest_override: Rc::new(RefCell::new(None)),
+            inventory_observation: Rc::new(RefCell::new(None)),
             config,
         }
     }
@@ -329,6 +331,15 @@ impl PublicCoordinatorPort {
     #[must_use]
     pub fn with_topology_manifest_override(self, manifest: ErasureReferenceV1) -> Self {
         *self.topology_manifest_override.borrow_mut() = Some(manifest);
+        self
+    }
+
+    #[must_use]
+    pub fn with_complete_inventory_observation(
+        self,
+        observation: ErasureInventoryObservationV1,
+    ) -> Self {
+        *self.inventory_observation.borrow_mut() = Some(observation);
         self
     }
 
@@ -1549,6 +1560,16 @@ impl ErasureRecoveryAuthorizationVerifierV1 for PublicCoordinatorPort {
 }
 
 impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
+    fn complete_erasure_inventory_observation(
+        &self,
+        _maximum_requests: usize,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
+        self.inventory_observation
+            .borrow()
+            .clone()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
     fn verified_topology_observation(
         &self,
         request: ErasureReferenceV1,

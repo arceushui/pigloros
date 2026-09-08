@@ -363,6 +363,7 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_core::{CanonicalBytes, EntityId, Kind};

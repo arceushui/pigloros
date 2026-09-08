@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crate::ids::TimelineId;
+use crate::{clock::Seq, ids::TimelineId};
 
 const VERSION: u64 = 1;
 const ERQ1: &str = "ERQ1";
@@ -4201,10 +4201,8 @@ impl ErasureVerifiedInventoryV1 {
             classification.frozen && classification.membership.included_scope().is_some()
         }) {
             Err(ErasureContainmentErrorV1::AccessFrozen)
-        } else if classifications.len() == self.request_heads.len() {
-            Ok(())
         } else {
-            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+            Ok(())
         }
     }
 }
@@ -4816,6 +4814,7 @@ pub struct PreparedErasureForkAdmissionV1 {
     input: ErasureForkAdmissionInputV1,
     extension: ErasureScopeExtensionV1,
     mutation: PreparedErasureCasV1,
+    binding_digest: ErasureReferenceV1,
 }
 
 impl PreparedErasureForkAdmissionV1 {
@@ -4824,17 +4823,78 @@ impl PreparedErasureForkAdmissionV1 {
         extension: ErasureScopeExtensionV1,
         mutation: PreparedErasureCasV1,
     ) -> Result<Self, ErasureErrorV1> {
-        if input.child.fork_point.is_none()
-            || input.child.mode != crate::TimelineMode::Historical
+        let Some((parent, at_seq)) = input.child.fork_point else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        let Some(predecessor) = mutation.expected_manifest_digest() else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        if input.child.mode != crate::TimelineMode::Historical
             || input.child_scope != extension.fork()
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
+        let binding_digest = Self::compute_binding_digest(
+            &input,
+            &extension,
+            &mutation,
+            predecessor,
+            parent,
+            at_seq,
+        );
         Ok(Self {
             input,
             extension,
             mutation,
+            binding_digest,
         })
+    }
+
+    fn compute_binding_digest(
+        input: &ErasureForkAdmissionInputV1,
+        extension: &ErasureScopeExtensionV1,
+        mutation: &PreparedErasureCasV1,
+        predecessor: ErasureReferenceV1,
+        parent: TimelineId,
+        at_seq: Seq,
+    ) -> ErasureReferenceV1 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-admission/v1");
+        for reference in [
+            input.operation,
+            input.expected_inventory_generation,
+            input.child_scope,
+            extension.reference(),
+            mutation.request(),
+            predecessor,
+            mutation.next_manifest().digest(),
+        ] {
+            hasher.update(&reference.digest());
+        }
+        hasher.update(&input.child.id.inner().to_bytes());
+        hasher.update(&[0]);
+        match &input.child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        match input.child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&parent.inner().to_bytes());
+        hasher.update(&at_seq.as_u64().to_be_bytes());
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
     }
 
     /// Return the stable operation identity.
@@ -4875,58 +4935,8 @@ impl PreparedErasureForkAdmissionV1 {
 
     /// Return the digest binding every idempotency-relevant admission field.
     #[must_use]
-    pub fn binding_digest(&self) -> ErasureReferenceV1 {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"pigloros/erasure-fork-admission/v1");
-        for reference in [
-            self.operation(),
-            self.expected_inventory_generation(),
-            self.child_scope(),
-            self.extension.reference(),
-            self.mutation.request(),
-            self.mutation.next_manifest().digest(),
-        ] {
-            hasher.update(&reference.digest());
-        }
-        match self.mutation.expected_manifest_digest() {
-            Some(reference) => {
-                hasher.update(&[1]);
-                hasher.update(&reference.digest());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
-        hasher.update(&self.input.child.id.inner().to_bytes());
-        hasher.update(&[match self.input.child.mode {
-            crate::TimelineMode::Historical => 0,
-            crate::TimelineMode::Live => 1,
-            crate::TimelineMode::Future => 2,
-        }]);
-        match &self.input.child.name {
-            Some(name) => {
-                hasher.update(&[1]);
-                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
-                hasher.update(name.as_bytes());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
-        match self.input.child.owner {
-            Some(owner) => {
-                hasher.update(&[1]);
-                hasher.update(&owner.inner().to_bytes());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
-        if let Some((parent, at_seq)) = self.input.child.fork_point {
-            hasher.update(&parent.inner().to_bytes());
-            hasher.update(&at_seq.as_u64().to_be_bytes());
-        }
-        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+    pub const fn binding_digest(&self) -> ErasureReferenceV1 {
+        self.binding_digest
     }
 }
 
@@ -5988,6 +5998,29 @@ mod coverage_paths {
     fn complete_inventory_rejects_partial_duplicate_stale_and_over_limit(
     ) -> Result<(), ErasureErrorV1> {
         let timeline = TimelineId::new();
+        assert_eq!(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 0),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasurePersistenceInventorySnapshotV1::new(
+                vec![(reference(1), reference(2)), (reference(1), reference(3))],
+                Vec::new(),
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
+                ErasurePersistenceInventorySnapshotV1::new(
+                    vec![(reference(1), reference(2))],
+                    Vec::new(),
+                    4,
+                )?,
+                4,
+            ),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
         let state = inventory_state(
             reference(51),
             reference(52),

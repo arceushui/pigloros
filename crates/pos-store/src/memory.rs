@@ -1453,15 +1453,26 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
             .erasure_records
             .get(&admission.mutation().request())
             .map(|(digest, _)| *digest);
-        match apply_memory_erasure_cas(self, admission.mutation(), current_digest)? {
-            ErasureCasOutcomeV1::Applied => {
-                self.timelines
-                    .insert(timeline.id(), TimelineState::new(timeline, chain_head));
-                self.erasure_fork_admissions.insert(operation, binding);
-                Ok(ErasureCasOutcomeV1::Applied)
-            }
-            ErasureCasOutcomeV1::ExactRetry => Err(ErasureErrorV1::PolicyConflict),
+        if current_digest != admission.mutation().expected_manifest_digest() {
+            return Err(ErasureErrorV1::PolicyConflict);
         }
+        let delta = stage_memory_erasure_delta(self, admission.mutation())?;
+        apply_memory_erasure_delta(self, delta);
+        self.erasure_records.insert(
+            admission.mutation().request(),
+            (
+                admission.mutation().next_manifest().digest(),
+                admission
+                    .mutation()
+                    .next_manifest()
+                    .canonical_cbor()
+                    .to_vec(),
+            ),
+        );
+        self.timelines
+            .insert(timeline.id(), TimelineState::new(timeline, chain_head));
+        self.erasure_fork_admissions.insert(operation, binding);
+        Ok(ErasureCasOutcomeV1::Applied)
     }
 }
 
@@ -6116,6 +6127,37 @@ mod coverage_entrypoints {
         store.key_registry = Some(invalid.clone());
         assert!(store.load_key_registry().is_err());
         assert!(store.save_key_registry(&invalid).is_err());
+    }
+
+    #[test]
+    fn memory_erasure_inventory_rejects_corrupt_state_and_request_overflow() {
+        let mut store = MemoryStore::new();
+        let state = ok(pos_core::ErasureStateV1::submitted(
+            ErasureReferenceV1::from_digest([1; 32]),
+            ErasureReferenceV1::from_digest([2; 32]),
+            ErasureReferenceV1::from_digest([3; 32]),
+        ));
+        store.erasure_states.insert(
+            ErasureReferenceV1::from_digest([5; 32]),
+            ok(state.to_canonical_cbor()),
+        );
+        assert_eq!(
+            store.resolve_state(ErasureReferenceV1::from_digest([5; 32])),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store.erasure_records.insert(
+            ErasureReferenceV1::from_digest([6; 32]),
+            (ErasureReferenceV1::from_digest([7; 32]), Vec::new()),
+        );
+        store.erasure_records.insert(
+            ErasureReferenceV1::from_digest([8; 32]),
+            (ErasureReferenceV1::from_digest([9; 32]), Vec::new()),
+        );
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot(1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
     }
 
     #[test]
