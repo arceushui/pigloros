@@ -331,19 +331,32 @@ fn evaluate_cases(
         if !fixture.modes.contains(&bundle.mode) {
             continue;
         }
-        adapter.set_case_ordinal(case_ordinal(ordinal)?);
-        outcomes.push(evaluate_case(profile, bundle, request, fixture, adapter)?);
+        outcomes.push(evaluate_selected_case(
+            ordinal, profile, bundle, request, fixture, adapter,
+        )?);
     }
     (!outcomes.is_empty())
         .then_some(outcomes)
         .ok_or(EvaluatorError::Profile)
 }
 
+fn evaluate_selected_case(
+    ordinal: usize,
+    profile: &Profile,
+    bundle: &VerifiedBundle,
+    request: &EvaluationRequest,
+    fixture: &Fixture,
+    adapter: &mut impl SubjectAdapter,
+) -> Result<CaseOutcome, EvaluatorError> {
+    adapter.set_case_ordinal(case_ordinal(ordinal)?);
+    evaluate_case_with_provenance(profile, bundle, request, fixture, adapter)
+}
+
 fn case_ordinal(ordinal: usize) -> Result<u16, EvaluatorError> {
     u16::try_from(ordinal).map_err(|_| EvaluatorError::Profile)
 }
 
-fn evaluate_case(
+fn evaluate_case_with_provenance(
     profile: &Profile,
     bundle: &VerifiedBundle,
     request: &EvaluationRequest,
