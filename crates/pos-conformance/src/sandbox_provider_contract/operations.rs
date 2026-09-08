@@ -8,9 +8,11 @@ use super::codec::{
 };
 use super::protocol::{
     bounded_text, decode_request_authority, request_authority_value, validate_request_authority,
-    RequestAuthorityV1, MAX_IDENTIFIER_BYTES,
+    RequestAuthorityV1,
 };
-use super::SandboxContractErrorV1;
+use super::{
+    SandboxContractErrorV1, MAX_SANDBOX_IDENTIFIER_BYTES_V1, MAX_SANDBOX_SAFE_DETAIL_BYTES_V1,
+};
 
 const SDQ1: &str = "SDQ1";
 const SDY1: &str = "SDY1";
@@ -19,7 +21,6 @@ const SCY1: &str = "SCY1";
 const SRQ1: &str = "SRQ1";
 const SRY1: &str = "SRY1";
 const SLE1: &str = "SLE1";
-const MAX_SAFE_DETAIL_BYTES: usize = 256;
 
 /// Closed Sandbox Provider operation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -680,7 +681,7 @@ fn validate_response_fields(
 ) -> Result<(), SandboxContractErrorV1> {
     if request_id == [0; 16]
         || digests.contains(&[0; 32])
-        || !bounded_text(key_id, MAX_IDENTIFIER_BYTES)
+        || !bounded_text(key_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
     {
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     } else {
@@ -757,7 +758,9 @@ impl SandboxLocalErrorV1 {
     pub fn validate(&self) -> Result<(), SandboxContractErrorV1> {
         if self.request_id == Some([0; 16])
             || self.safe_detail.as_ref().is_some_and(|detail| {
-                detail.is_empty() || detail.len() > MAX_SAFE_DETAIL_BYTES || detail.contains('\0')
+                detail.is_empty()
+                    || detail.len() > MAX_SANDBOX_SAFE_DETAIL_BYTES_V1
+                    || detail.contains('\0')
             })
         {
             Err(SandboxContractErrorV1::FieldOutOfBounds)

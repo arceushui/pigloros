@@ -34,6 +34,8 @@ use thiserror::Error;
 pub const MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1: usize = 16 * 1024 * 1024;
 /// Maximum number of capabilities or exchanges in one control document.
 pub const MAX_SANDBOX_PROVIDER_ENTRIES_V1: usize = 256;
+const MAX_SANDBOX_IDENTIFIER_BYTES_V1: usize = 128;
+const MAX_SANDBOX_SAFE_DETAIL_BYTES_V1: usize = 256;
 /// Maximum number of syscall names in either SCS1 array.
 pub const MAX_SANDBOX_SYSCALL_NAMES_V1: usize = 512;
 const MAX_SANDBOX_PROVIDER_CBOR_COLLECTION_ENTRIES_V1: usize = MAX_SANDBOX_SYSCALL_NAMES_V1;

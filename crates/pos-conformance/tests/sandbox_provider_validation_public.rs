@@ -1,3 +1,4 @@
+use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
     AdmissionGrantV1, LaunchPolicyV1, SandboxCancelRequestV1, SandboxCancelResponseV1,
@@ -10,6 +11,23 @@ use pos_conformance::{
 use pos_reference::sandbox_provider_protocol as independent;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn replace_unsigned_field(bytes: &[u8], index: usize, replacement: Value) -> TestResult<Vec<u8>> {
+    let mut document: Value = ciborium::from_reader(bytes)?;
+    let Value::Array(envelope) = &mut document else {
+        return Err("signed document must be an array".into());
+    };
+    let Some(Value::Array(unsigned)) = envelope.first_mut() else {
+        return Err("signed document must contain an unsigned array".into());
+    };
+    let Some(field) = unsigned.get_mut(index) else {
+        return Err(format!("unsigned field {index} is missing").into());
+    };
+    *field = replacement;
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&document, &mut encoded)?;
+    Ok(encoded)
+}
 
 macro_rules! assert_signed_surface_rejects {
     ($valid:expr_2021, $invalidate:expr_2021, $digest:ident, $key:expr_2021) => {{
@@ -289,7 +307,7 @@ fn independent_verifiers_propagate_public_validation_failures() -> TestResult {
     release_without_ready.ready1_digest = None;
     assert_eq!(
         release_without_ready.verify_signature(&verifying_key),
-        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
     );
 
     let mut zero_ready = independent::SandboxProviderReceipt::from_canonical_cbor(include_bytes!(
@@ -307,6 +325,38 @@ fn independent_verifiers_propagate_public_validation_failures() -> TestResult {
     response.request_id = [0; 16];
     assert_eq!(
         response.verify_signature(&verifying_key),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn operation_decoders_agree_on_closed_scalar_errors() -> TestResult {
+    let invalid_cancel = replace_unsigned_field(
+        include_bytes!("../vectors/sandbox-provider-v1/scy1.cbor"),
+        4,
+        Value::Integer(2.into()),
+    )?;
+    assert_eq!(
+        SandboxCancelResponseV1::from_canonical_cbor(&invalid_cancel),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        independent::SandboxCancelResponse::from_canonical_cbor(&invalid_cancel),
+        Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+
+    let invalid_reconcile = replace_unsigned_field(
+        include_bytes!("../vectors/sandbox-provider-v1/sry1.cbor"),
+        4,
+        Value::Bool(false),
+    )?;
+    assert_eq!(
+        SandboxReconcileResponseV1::from_canonical_cbor(&invalid_reconcile),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        independent::SandboxReconcileResponse::from_canonical_cbor(&invalid_reconcile),
         Err(independent::SandboxProviderProtocolError::FieldOutOfBounds)
     );
     Ok(())

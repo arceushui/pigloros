@@ -397,7 +397,7 @@ signed_response_codec!(
         result: match uint(&fields[4])? {
             0 => SandboxCancellationResult::AlreadyTerminal,
             1 => SandboxCancellationResult::CancelledAndCleaned,
-            _ => return Err(SandboxProviderProtocolError::InvalidEncoding),
+            _ => return Err(SandboxProviderProtocolError::FieldOutOfBounds),
         },
         terminal_spy1_digest: digest32(&fields[5])?,
         runtime_attestation_key_id: key_id(&fields[6])?,
@@ -456,7 +456,7 @@ signed_response_codec!(
     7,
     |fields: &[Value; 7], digest, signature| {
         if !bool_value(&fields[4])? {
-            return Err(SandboxProviderProtocolError::InvalidEncoding);
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
         Ok(Self {
             request_id: id16(&fields[2])?,

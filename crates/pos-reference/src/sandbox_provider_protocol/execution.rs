@@ -939,10 +939,12 @@ impl SandboxProviderReceipt {
             || invalid_digest_list(&self.network_transcript_digests)
             || self.ready1_digest == Some([0; 32])
             || self.release1_digest == Some([0; 32])
-            || (self.release1_digest.is_some() && self.ready1_digest.is_none())
             || !valid_key_id(&self.runtime_attestation_key_id)
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
+        if self.release1_digest.is_some() && self.ready1_digest.is_none() {
+            return Err(SandboxProviderProtocolError::InconsistentFields);
         }
         require_signature(&self.signature)?;
         verify_digest("SPR1", unsigned, self.receipt_digest)

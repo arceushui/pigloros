@@ -9,14 +9,14 @@ use super::codec::{
 };
 use super::{
     NetworkCapabilityV1, ProviderCapabilityV1, SandboxArchitectureV1, SandboxContractErrorV1,
-    SandboxLimitV1, MAX_SANDBOX_PROVIDER_ENTRIES_V1, MAX_SANDBOX_SYSCALL_NAMES_V1,
+    SandboxLimitV1, MAX_SANDBOX_IDENTIFIER_BYTES_V1, MAX_SANDBOX_PAYLOAD_BYTES_V1,
+    MAX_SANDBOX_PROVIDER_ENTRIES_V1, MAX_SANDBOX_SYSCALL_NAMES_V1,
 };
 
 const SPM1: &str = "SPM1";
 const SCS1: &str = "SCS1";
 const LPS1: &str = "LPS1";
 const SIM1: &str = "SIM1";
-const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_SIGNATURE_DER_BYTES: usize = 1024 * 1024;
 const MAX_EXECUTABLE_PATH_BYTES: usize = 512;
@@ -159,16 +159,21 @@ impl SandboxProviderManifestV1 {
             self.pcf1_digest,
             self.required_hcp1_feature_set_digest,
         ];
-        if !identifier(&self.provider_id, MAX_IDENTIFIER_BYTES)
-            || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
-            || !bounded_text(&self.provider_release_key_id, MAX_IDENTIFIER_BYTES)
+        if !identifier(&self.provider_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
+            || !bounded_text(
+                &self.runtime_attestation_key_id,
+                MAX_SANDBOX_IDENTIFIER_BYTES_V1,
+            )
+            || !bounded_text(
+                &self.provider_release_key_id,
+                MAX_SANDBOX_IDENTIFIER_BYTES_V1,
+            )
             || digests.contains(&[0; 32])
             || self.capabilities.is_empty()
             || self.capabilities.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
-            || self
-                .capabilities
-                .iter()
-                .any(|capability| !identifier(&capability.capability_id, MAX_IDENTIFIER_BYTES))
+            || self.capabilities.iter().any(|capability| {
+                !identifier(&capability.capability_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
+            })
             || self.architectures.is_empty()
             || self.architectures.len() > 2
         {
@@ -387,7 +392,7 @@ impl LaunchPolicyV1 {
     }
 
     fn validate_unsigned(&self) -> Result<(), SandboxContractErrorV1> {
-        if !identifier(&self.policy_id, MAX_IDENTIFIER_BYTES)
+        if !identifier(&self.policy_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
             || self.sim1_digest == [0; 32]
             || self.effective_limits.is_empty()
             || self.effective_limits.len() > 17
@@ -639,7 +644,7 @@ impl SignedImageManifestV1 {
     }
 
     fn validate_unsigned(&self) -> Result<(), SandboxContractErrorV1> {
-        if !identifier(&self.image_id, MAX_IDENTIFIER_BYTES)
+        if !identifier(&self.image_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
             || self.root_image_length == 0
             || self.root_image_length > MAX_IMAGE_BYTES
             || self.root_image_blake3_digest == [0; 32]
@@ -654,7 +659,7 @@ impl SignedImageManifestV1 {
                     || argument.len() > MAX_ARGUMENT_BYTES
                     || argument.contains('\0')
             })
-            || !bounded_text(&self.image_project_key_id, MAX_IDENTIFIER_BYTES)
+            || !bounded_text(&self.image_project_key_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
             || !valid_pkcs7(&self.root_hash_signature)
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
@@ -773,11 +778,11 @@ fn network_capability_value(value: &NetworkCapabilityV1) -> Value {
 }
 
 fn valid_network_capability(value: &NetworkCapabilityV1) -> bool {
-    identifier(&value.capability_id, MAX_IDENTIFIER_BYTES)
+    identifier(&value.capability_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
         && matches!(value.address.len(), 4 | 16)
         && value.destination_port != 0
-        && (1..=128 * 1024 * 1024).contains(&value.request_maximum)
-        && (1..=128 * 1024 * 1024).contains(&value.response_maximum)
+        && (1..=MAX_SANDBOX_PAYLOAD_BYTES_V1).contains(&value.request_maximum)
+        && (1..=MAX_SANDBOX_PAYLOAD_BYTES_V1).contains(&value.response_maximum)
 }
 
 fn decode_network_capabilities(

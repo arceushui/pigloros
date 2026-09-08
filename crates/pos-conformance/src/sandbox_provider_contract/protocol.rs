@@ -9,8 +9,9 @@ use super::codec::{
     uint, validate_magic, value_bytes, value_optional_bytes, value_text, value_uint, verify,
 };
 use super::{
-    SandboxContractErrorV1, MAX_SANDBOX_PAYLOAD_BYTES_V1, MAX_SANDBOX_PAYLOAD_CHUNKS_V1,
-    MAX_SANDBOX_PROVIDER_ENTRIES_V1, SANDBOX_PAYLOAD_CHUNK_BYTES_V1,
+    SandboxContractErrorV1, MAX_SANDBOX_IDENTIFIER_BYTES_V1, MAX_SANDBOX_PAYLOAD_BYTES_V1,
+    MAX_SANDBOX_PAYLOAD_CHUNKS_V1, MAX_SANDBOX_PROVIDER_ENTRIES_V1,
+    MAX_SANDBOX_SAFE_DETAIL_BYTES_V1, SANDBOX_PAYLOAD_CHUNK_BYTES_V1,
 };
 
 const SPX1: &str = "SPX1";
@@ -21,9 +22,6 @@ const SPR1: &str = "SPR1";
 const SBC1: &str = "SBC1";
 const NXP1: &str = "NXP1";
 const NXP1_DIGEST_DOMAIN: &[u8] = b"PiglorOS.NetworkExchangePlan.v1\0";
-pub(super) const MAX_IDENTIFIER_BYTES: usize = 128;
-const MAX_INPUT_BYTES: usize = 128 * 1024 * 1024;
-const MAX_SAFE_DETAIL_BYTES: usize = 256;
 const LAUNCHER_READY_EVENT: u64 = 11;
 const EXECUTION_RELEASED_EVENT: u64 = 12;
 const EXECUTION_RELEASE_DENIED_EVENT: u64 = 13;
@@ -176,10 +174,10 @@ impl NetworkExchangePlanV1 {
 
     fn validate_unsigned(&self) -> Result<(), SandboxContractErrorV1> {
         if self.exchange_id == [0; 16]
-            || !identifier(&self.capability_id, MAX_IDENTIFIER_BYTES)
-            || self.request_length > MAX_INPUT_BYTES as u64
+            || !identifier(&self.capability_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
+            || self.request_length > MAX_SANDBOX_PAYLOAD_BYTES_V1
             || self.request_digest == [0; 32]
-            || !(1..=128 * 1024 * 1024).contains(&self.response_maximum)
+            || !(1..=MAX_SANDBOX_PAYLOAD_BYTES_V1).contains(&self.response_maximum)
             || self.expected_response_digest == [0; 32]
             || self.retention_policy_digest == [0; 32]
         {
@@ -748,7 +746,7 @@ impl SandboxExecuteRequestV1 {
             || self
                 .capability_ids
                 .iter()
-                .any(|value| !identifier(value, MAX_IDENTIFIER_BYTES))
+                .any(|value| !identifier(value, MAX_SANDBOX_IDENTIFIER_BYTES_V1))
             || self.network_plans.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
@@ -975,7 +973,10 @@ impl AdmissionGrantV1 {
             || trailing.contains(&[0; 32])
             || self.exchange_plan_digests.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
             || self.exchange_plan_digests.contains(&[0; 32])
-            || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
+            || !bounded_text(
+                &self.runtime_attestation_key_id,
+                MAX_SANDBOX_IDENTIFIER_BYTES_V1,
+            )
         {
             Err(SandboxContractErrorV1::FieldOutOfBounds)
         } else {
@@ -1279,7 +1280,10 @@ impl SandboxProviderResultV1 {
     fn validate_unsigned(&self) -> Result<(), SandboxContractErrorV1> {
         if self.request_id == [0; 16]
             || self.attempt_id == [0; 16]
-            || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
+            || !bounded_text(
+                &self.runtime_attestation_key_id,
+                MAX_SANDBOX_IDENTIFIER_BYTES_V1,
+            )
             || self.operational_events.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
             || self.operational_events.iter().any(|code| *code > 13)
         {
@@ -1479,9 +1483,14 @@ impl SandboxProviderErrorV1 {
             || self.request_digest == Some([0; 32])
             || self.attempt_id == Some([0; 16])
             || self.safe_detail.as_ref().is_some_and(|value| {
-                value.is_empty() || value.len() > MAX_SAFE_DETAIL_BYTES || value.contains('\0')
+                value.is_empty()
+                    || value.len() > MAX_SANDBOX_SAFE_DETAIL_BYTES_V1
+                    || value.contains('\0')
             })
-            || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
+            || !bounded_text(
+                &self.runtime_attestation_key_id,
+                MAX_SANDBOX_IDENTIFIER_BYTES_V1,
+            )
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
@@ -1636,7 +1645,10 @@ impl SandboxProviderReceiptV1 {
             || self.network_transcript_digests.contains(&[0; 32])
             || self.ready1_digest == Some([0; 32])
             || self.release1_digest == Some([0; 32])
-            || !bounded_text(&self.runtime_attestation_key_id, MAX_IDENTIFIER_BYTES)
+            || !bounded_text(
+                &self.runtime_attestation_key_id,
+                MAX_SANDBOX_IDENTIFIER_BYTES_V1,
+            )
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
