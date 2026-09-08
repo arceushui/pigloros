@@ -543,8 +543,10 @@ fn audit_record(
     previous: Option<[u8; 32]>,
 ) -> TestResult<Vec<u8>> {
     let authority = match event {
+        0..=10 => vec![grant.grant_digest, grant.elm1_digest, [46; 32]],
         11 => vec![grant.grant_digest, [41; 32], [44; 32]],
         12 => vec![grant.grant_digest, [41; 32], [42; 32], [44; 32]],
+        13 => vec![grant.grant_digest, [41; 32], [44; 32]],
         _ => return Err("unsupported audit fixture event".into()),
     };
     sign_record(
@@ -564,15 +566,44 @@ fn audit_record(
 }
 
 fn audit_chain(fixture: &Fixture, grant: &AdmissionGrant) -> TestResult<Vec<Vec<u8>>> {
-    let ready = audit_record(fixture, grant, 0, 11, None)?;
-    let released = audit_record(fixture, grant, 1, 12, Some(wrapped_digest(&ready)?))?;
-    Ok(vec![ready, released])
+    audit_chain_for_events(fixture, grant, &[11, 12])
+}
+
+fn audit_chain_for_events(
+    fixture: &Fixture,
+    grant: &AdmissionGrant,
+    events: &[u8],
+) -> TestResult<Vec<Vec<u8>>> {
+    let mut records = Vec::with_capacity(events.len());
+    let mut previous = None;
+    for (sequence, event) in events.iter().copied().enumerate() {
+        let record = audit_record(
+            fixture,
+            grant,
+            u64::try_from(sequence)?,
+            u64::from(event),
+            previous,
+        )?;
+        previous = Some(wrapped_digest(&record)?);
+        records.push(record);
+    }
+    Ok(records)
 }
 
 fn provider_receipt(
     fixture: &Fixture,
     grant: &AdmissionGrant,
     audit_digest: [u8; 32],
+) -> TestResult<Vec<u8>> {
+    provider_receipt_for_lifecycle(fixture, grant, audit_digest, Some([41; 32]), Some([42; 32]))
+}
+
+fn provider_receipt_for_lifecycle(
+    fixture: &Fixture,
+    grant: &AdmissionGrant,
+    audit_digest: [u8; 32],
+    ready: Option<[u8; 32]>,
+    release: Option<[u8; 32]>,
 ) -> TestResult<Vec<u8>> {
     sign_record(
         "SPR1",
@@ -594,8 +625,8 @@ fn provider_receipt(
             bytes(grant.authority.hcp1_digest),
             bytes(grant.elm1_digest),
             Value::Array(vec![]),
-            bytes([41; 32]),
-            bytes([42; 32]),
+            ready.map_or(Value::Null, bytes),
+            release.map_or(Value::Null, bytes),
             bytes([43; 32]),
             bytes([44; 32]),
             bytes([45; 32]),
@@ -613,6 +644,17 @@ fn terminal_result(
     grant: &AdmissionGrant,
     receipt: &SandboxProviderReceipt,
 ) -> TestResult<Vec<u8>> {
+    terminal_result_for_outcome(fixture, request, grant, receipt, 0, &[11, 12])
+}
+
+fn terminal_result_for_outcome(
+    fixture: &Fixture,
+    request: &SandboxExecuteRequest,
+    grant: &AdmissionGrant,
+    receipt: &SandboxProviderReceipt,
+    outcome: u64,
+    events: &[u8],
+) -> TestResult<Vec<u8>> {
     let output = b"output";
     sign_record(
         "SPY1",
@@ -621,14 +663,24 @@ fn terminal_result(
             integer(1),
             Value::Bytes(request.request.request_id.to_vec()),
             Value::Bytes(request.attempt_id.to_vec()),
-            integer(0),
-            Value::Array(vec![
-                integer(u64::try_from(output.len())?),
-                bytes(payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", output)),
-            ]),
+            integer(outcome),
+            if outcome == 0 {
+                Value::Array(vec![
+                    integer(u64::try_from(output.len())?),
+                    bytes(payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", output)),
+                ])
+            } else {
+                Value::Null
+            },
             bytes(grant.grant_digest),
             bytes(receipt.receipt_digest),
-            Value::Array(vec![integer(11), integer(12)]),
+            Value::Array(
+                events
+                    .iter()
+                    .copied()
+                    .map(|event| integer(u64::from(event)))
+                    .collect(),
+            ),
             Value::Text("runtime".to_owned()),
         ]),
         &fixture.authority.runtime,
@@ -1364,6 +1416,52 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         ),
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn provider_terminal_audit_authority_covers_failure_and_denial_paths() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let grant = admitted.authenticate_grant(
+        &admission_grant(&fixture, &request, &launch)?,
+        &request,
+        &image,
+        &launch,
+    )?;
+
+    for (outcome, events, ready) in [(4, vec![0], None), (1, vec![11, 13, 1], Some([41; 32]))] {
+        let audit = audit_chain_for_events(&fixture, &grant, &events)?;
+        let receipt = admitted.authenticate_receipt(
+            &provider_receipt_for_lifecycle(
+                &fixture,
+                &grant,
+                wrapped_digest(audit.last().ok_or("audit chain must not be empty")?)?,
+                ready,
+                None,
+            )?,
+            &grant,
+        )?;
+        let result = admitted.authenticate_terminal_result(
+            &terminal_result_for_outcome(&fixture, &request, &grant, &receipt, outcome, &events)?,
+            &request,
+            &grant,
+            &receipt,
+        )?;
+        assert_eq!(
+            admitted
+                .authenticate_audit_chain(&audit, &receipt, &result)?
+                .len(),
+            events.len()
+        );
+    }
     Ok(())
 }
 
