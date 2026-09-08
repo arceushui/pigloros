@@ -1152,6 +1152,31 @@ fn containment_gate_covers_public_error_codes_and_safe_scope_paths() -> Result<(
 }
 
 #[test]
+fn erasure_host_errors_have_stable_payload_free_codes() {
+    let errors = [
+        ErasureHostErrorV1::RecoveryUnavailable,
+        ErasureHostErrorV1::AccessFrozen,
+        ErasureHostErrorV1::StaleGeneration,
+        ErasureHostErrorV1::AuthorizationDenied,
+        ErasureHostErrorV1::Conflict,
+        ErasureHostErrorV1::AdapterFailure,
+    ];
+    assert_eq!(errors.map(ErasureHostErrorV1::code), [0_u64, 1, 2, 3, 4, 5]);
+    assert_eq!(
+        ErasureHostErrorV1::from(ErasureContainmentErrorV1::AccessFrozen),
+        ErasureHostErrorV1::AccessFrozen
+    );
+    assert_eq!(
+        ErasureHostErrorV1::from(ErasureContainmentErrorV1::RecoveryUnavailable),
+        ErasureHostErrorV1::RecoveryUnavailable
+    );
+    assert_eq!(
+        ErasureHostErrorV1::Conflict.to_string(),
+        "erasure host error 4"
+    );
+}
+
+#[test]
 fn fail_closed_gate_rejects_unbound_timeline() {
     let gate = ErasureContainmentGateV1::new_fail_closed();
     assert_eq!(

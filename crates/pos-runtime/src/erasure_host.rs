@@ -188,7 +188,7 @@ impl<S: EventStore> ErasureCommandSenderV1<'_, S> {
         self.host
             .store
             .append(timeline, drafts)
-            .map_err(map_store_error)
+            .map_err(|error| map_store_error(&error))
     }
 }
 
@@ -213,7 +213,7 @@ impl<S: EventStore> ErasureReadSenderV1<'_, S> {
         self.host
             .store
             .read_bounded(timeline, range, bounds)
-            .map_err(map_store_error)
+            .map_err(|error| map_store_error(&error))
     }
 
     /// Read one Timeline's metadata under the current inventory generation.
@@ -228,11 +228,11 @@ impl<S: EventStore> ErasureReadSenderV1<'_, S> {
         self.host
             .store
             .get_timeline(timeline)
-            .map_err(map_store_error)
+            .map_err(|error| map_store_error(&error))
     }
 }
 
-fn map_store_error(error: CoreError) -> ErasureHostErrorV1 {
+fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     match error {
         CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
         CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
@@ -297,15 +297,15 @@ mod tests {
     #[test]
     fn host_error_mapping_is_payload_free() {
         assert_eq!(
-            map_store_error(CoreError::ErasureAccessFrozen),
+            map_store_error(&CoreError::ErasureAccessFrozen),
             ErasureHostErrorV1::AccessFrozen
         );
         assert_eq!(
-            map_store_error(CoreError::ErasureContainmentUnavailable),
+            map_store_error(&CoreError::ErasureContainmentUnavailable),
             ErasureHostErrorV1::RecoveryUnavailable
         );
         assert_eq!(
-            map_store_error(CoreError::IdGenerationOverflow),
+            map_store_error(&CoreError::IdGenerationOverflow),
             ErasureHostErrorV1::AdapterFailure
         );
     }
