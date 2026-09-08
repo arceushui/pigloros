@@ -421,19 +421,16 @@ impl ErasureContainmentGateV1 {
             return;
         };
         let request = state.request().reference();
-        let Ok(current) = self.authority.read().map(|state| state.clone()) else {
+        let Ok(mut authority) = self.authority.write() else {
             return;
         };
-        if current.states.get(&request).is_some_and(|existing| {
+        if authority.states.get(&request).is_some_and(|existing| {
             Self::containment_rank(existing.lifecycle()) > Self::containment_rank(state.lifecycle())
         }) {
             return;
         }
-        let mut candidate = (*current).clone();
+        let mut candidate = (**authority).clone();
         candidate.states.insert(request, state);
-        let Ok(mut authority) = self.authority.write() else {
-            return;
-        };
         *authority = Arc::new(candidate);
         drop(authority);
         drop(fence);
@@ -678,14 +675,11 @@ impl ErasureContainmentGateV1 {
         let Ok(fence) = self.fence_lock.lock() else {
             return;
         };
-        let Ok(current) = self.authority.read().map(|state| state.clone()) else {
-            return;
-        };
-        let mut candidate = (*current).clone();
-        candidate.blocked_timelines.insert(timeline);
         let Ok(mut authority) = self.authority.write() else {
             return;
         };
+        let mut candidate = (**authority).clone();
+        candidate.blocked_timelines.insert(timeline);
         *authority = Arc::new(candidate);
         drop(authority);
         drop(fence);
@@ -6349,6 +6343,89 @@ mod coverage_paths {
         assert_eq!(
             gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
             Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn corrupted_opaque_fork_inventory_fails_closed() -> Result<(), ErasureErrorV1> {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let state = inventory_state(
+            reference(61),
+            reference(62),
+            reference(63),
+            ErasureLifecycleV1::Authorized,
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            Vec::new(),
+            vec![parent],
+        );
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![(state, proof)],
+            vec![parent],
+            4,
+        )?;
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(64),
+            expected_inventory_generation: inventory.generation(),
+            child_scope: reference(65),
+            child: crate::TimelineMeta {
+                id: child,
+                mode: crate::TimelineMode::Historical,
+                name: Some("corrupt-inventory-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent, crate::Seq::ZERO)),
+            },
+        };
+
+        let mut mismatched_classification = inventory.clone();
+        mismatched_classification
+            .classifications
+            .get_mut(&parent)
+            .and_then(|classifications| classifications.first_mut())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .request = reference(66);
+        assert_eq!(
+            mismatched_classification
+                .clone()
+                .prepare_fork_batch(input.clone(), Vec::new()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            mismatched_classification.authorize(parent),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let mut incomplete_proof = inventory;
+        incomplete_proof.members[0].1.unaffected.clear();
+        assert_eq!(
+            incomplete_proof.prepare_fork_batch(input, Vec::new()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fork_batch_constructor_rejects_missing_parent() -> Result<(), ErasureErrorV1> {
+        let successor =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 1)?;
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(71),
+            expected_inventory_generation: successor.generation(),
+            child_scope: reference(72),
+            child: crate::TimelineMeta {
+                id: TimelineId::new(),
+                mode: crate::TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: None,
+            },
+        };
+        assert_eq!(
+            PreparedErasureForkBatchV1::new(input, Vec::new(), successor),
+            Err(ErasureErrorV1::PolicyConflict)
         );
         Ok(())
     }

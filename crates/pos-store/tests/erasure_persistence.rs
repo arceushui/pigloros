@@ -1436,6 +1436,13 @@ fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn
         )
     })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+        connection.execute(
+            "UPDATE erasure_records SET manifest_digest=X'00' WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "UPDATE erasure_records SET manifest_cbor=X'00' WHERE request_digest=?1",
             rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
