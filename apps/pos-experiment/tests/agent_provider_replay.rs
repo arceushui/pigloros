@@ -694,6 +694,49 @@ fn backtest_runner_requires_one_host_owned_erasure_gate() {
 }
 
 #[test]
+fn backtest_runner_accepts_the_same_prebound_gate_for_both_phases() {
+    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let factory_gate = Arc::clone(&host);
+    let result = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "shared-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        move || PluginRegistry::new().with_erasure_gate(Arc::clone(&factory_gate)),
+    )
+    .with_erasure_gate(host)
+    .run()
+    .test_ok();
+    assert_eq!(result.train_events, 0);
+    assert_eq!(result.eval_events, 0);
+}
+
+#[test]
+fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
+    let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let error = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "foreign-train-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        move || PluginRegistry::new().with_erasure_gate(Arc::clone(&foreign)),
+    )
+    .with_erasure_gate(host)
+    .run()
+    .err()
+    .test_ok();
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
+}
+
+#[test]
 fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
     let calls = Arc::new(AtomicU64::new(0));
     let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
