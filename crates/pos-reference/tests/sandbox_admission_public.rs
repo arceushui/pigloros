@@ -344,7 +344,7 @@ fn administrator_policy(
     trust: &SandboxTrustSnapshot,
     revocation: &SandboxRevocationSnapshot,
     authority: &SigningAuthority,
-    selection: PolicySelectionDigests,
+    selection: &PolicySelectionDigests,
 ) -> TestResult<SandboxAdministratorPolicy> {
     let unsigned = Value::Array(vec![
         Value::Text("APT1".to_owned()),
@@ -393,7 +393,11 @@ fn payload_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn execute_request(fixture: &Fixture, launch: &LaunchPolicy) -> TestResult<Vec<u8>> {
+fn execute_request(
+    fixture: &Fixture,
+    launch: &LaunchPolicy,
+    capability_ids: &[&str],
+) -> TestResult<Vec<u8>> {
     let input = b"input";
     self_digested_record(
         "SPX1",
@@ -422,7 +426,12 @@ fn execute_request(fixture: &Fixture, launch: &LaunchPolicy) -> TestResult<Vec<u
             bytes([17; 32]),
             bytes(wrapped_digest(&fixture.pcr1)?),
             bytes(wrapped_digest(&fixture.hcp1)?),
-            Value::Array(vec![]),
+            Value::Array(
+                capability_ids
+                    .iter()
+                    .map(|capability| Value::Text((*capability).to_owned()))
+                    .collect(),
+            ),
             Value::Array(vec![
                 integer(u64::try_from(input.len())?),
                 bytes(payload_digest(b"PiglorOS.SandboxInputBytes.v1\0", input)),
@@ -578,7 +587,7 @@ impl Fixture {
             &trust,
             &revocation,
             &authority,
-            PolicySelectionDigests {
+            &PolicySelectionDigests {
                 provider_manifest: wrapped_digest(&provider_record)?,
                 provider_binary: binary_digest,
                 conformance_report: wrapped_digest(&pcr1)?,
@@ -638,14 +647,7 @@ fn complete_provider_and_image_admission_binds_all_authority() -> TestResult {
         admitted.conformance_report().architecture,
         SandboxArchitecture::X86_64
     );
-    let image = admitted.admit_image(
-        &fixture.policy,
-        &fixture.trust,
-        &fixture.revocation,
-        &fixture.sim1,
-        &fixture.root_image,
-        &fixture.executable,
-    )?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
     assert_eq!(image.manifest().executable_path, "/adapter");
     Ok(())
 }
@@ -692,7 +694,7 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
         &fixture.trust,
         &fixture.revocation,
         &fixture.authority,
-        PolicySelectionDigests {
+        &PolicySelectionDigests {
             provider_manifest: wrapped_digest(&fixture.spm1)?,
             provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
             conformance_report: wrapped_digest(&failed_pcr1)?,
@@ -733,7 +735,7 @@ fn provider_admission_rejects_cross_record_architecture_mismatch() -> TestResult
         &fixture.trust,
         &fixture.revocation,
         &fixture.authority,
-        PolicySelectionDigests {
+        &PolicySelectionDigests {
             provider_manifest: wrapped_digest(&fixture.spm1)?,
             provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
             conformance_report: wrapped_digest(&pcr1)?,
@@ -759,25 +761,11 @@ fn image_admission_rejects_changed_revoked_and_foreign_bytes() -> TestResult {
     let fixture = Fixture::new()?;
     let admitted = fixture.admit()?;
     assert_eq!(
-        admitted.admit_image(
-            &fixture.policy,
-            &fixture.trust,
-            &fixture.revocation,
-            &fixture.sim1,
-            b"changed",
-            &fixture.executable,
-        ),
+        admitted.admit_image(&fixture.sim1, b"changed", &fixture.executable),
         Err(SandboxAdmissionError::ArtifactMismatch)
     );
     assert_eq!(
-        admitted.admit_image(
-            &fixture.policy,
-            &fixture.trust,
-            &fixture.revocation,
-            &fixture.sim1,
-            &fixture.root_image,
-            b"changed",
-        ),
+        admitted.admit_image(&fixture.sim1, &fixture.root_image, b"changed"),
         Err(SandboxAdmissionError::ArtifactMismatch)
     );
     let revoked = revocation(
@@ -786,15 +774,27 @@ fn image_admission_rejects_changed_revoked_and_foreign_bytes() -> TestResult {
         vec![],
         vec![bytes(wrapped_digest(&fixture.sim1)?)],
     )?;
+    let revoked_policy = administrator_policy(
+        &fixture.trust,
+        &revoked,
+        &fixture.authority,
+        &PolicySelectionDigests {
+            provider_manifest: wrapped_digest(&fixture.spm1)?,
+            provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
+            conformance_report: wrapped_digest(&fixture.pcr1)?,
+            syscall_set: wrapped_digest(&fixture.scs1)?,
+            launch_policy: wrapped_digest(&fixture.lps1)?,
+            image_manifest: wrapped_digest(&fixture.sim1)?,
+        },
+    )?;
+    let revoked_admission = AdmittedSandboxProvider::admit(
+        &revoked_policy,
+        &fixture.trust,
+        &revoked,
+        fixture.inputs(),
+    )?;
     assert_eq!(
-        admitted.admit_image(
-            &fixture.policy,
-            &fixture.trust,
-            &revoked,
-            &fixture.sim1,
-            &fixture.root_image,
-            &fixture.executable,
-        ),
+        revoked_admission.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable),
         Err(SandboxAdmissionError::Revoked)
     );
     Ok(())
@@ -804,16 +804,13 @@ fn image_admission_rejects_changed_revoked_and_foreign_bytes() -> TestResult {
 fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResult {
     let fixture = Fixture::new()?;
     let admitted = fixture.admit()?;
-    let image = admitted.admit_image(
-        &fixture.policy,
-        &fixture.trust,
-        &fixture.revocation,
-        &fixture.sim1,
-        &fixture.root_image,
-        &fixture.executable,
-    )?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
     let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
-    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(&fixture, &launch)?)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
     let grant = admitted.authenticate_grant(
         &admission_grant(&fixture, &request, &launch)?,
         &request,
@@ -829,5 +826,20 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
     )?;
     assert_eq!(result.spr1_digest, Some(receipt.receipt_digest));
     assert_eq!(result.attempt_id, request.attempt_id);
+
+    let unsupported = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["unsupported"],
+    )?)?;
+    assert_eq!(
+        admitted.authenticate_grant(
+            &admission_grant(&fixture, &unsupported, &launch)?,
+            &unsupported,
+            &image,
+            &launch,
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
     Ok(())
 }
