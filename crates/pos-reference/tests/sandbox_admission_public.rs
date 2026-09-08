@@ -544,9 +544,8 @@ fn audit_record(
 ) -> TestResult<Vec<u8>> {
     let authority = match event {
         0..=10 => vec![grant.grant_digest, grant.elm1_digest, [46; 32]],
-        11 => vec![grant.grant_digest, [41; 32], [44; 32]],
+        11 | 13 => vec![grant.grant_digest, [41; 32], [44; 32]],
         12 => vec![grant.grant_digest, [41; 32], [42; 32], [44; 32]],
-        13 => vec![grant.grant_digest, [41; 32], [44; 32]],
         _ => return Err("unsupported audit fixture event".into()),
     };
     sign_record(
