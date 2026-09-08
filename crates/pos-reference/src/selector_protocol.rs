@@ -310,6 +310,7 @@ fn is_magic(value: &Value, magic: &str) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::HashSet;
 
@@ -807,9 +808,8 @@ mod tests {
         mutate: impl FnOnce(&mut Vec<Value>),
     ) -> Result<Vec<Value>, AdapterError> {
         let mut changed = fields.to_vec();
-        let records = match &mut changed[10] {
-            Value::Array(records) => records,
-            _ => return Err(AdapterError::ProtocolFailure),
+        let Value::Array(records) = &mut changed[10] else {
+            return Err(AdapterError::ProtocolFailure);
         };
         let record = decode_canonical_with_limit(bytes(&records[index])?, CONTROL_LIMIT)
             .map_err(|_| AdapterError::ProtocolFailure)?;

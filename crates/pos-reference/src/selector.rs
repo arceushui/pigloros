@@ -337,6 +337,7 @@ fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoun
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
