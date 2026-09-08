@@ -189,18 +189,16 @@ impl ErasureExecutionHostV1 {
             }
         };
         let timeline = change(self.store.as_mut()).map_err(|error| map_store_error(&error))?;
-        let inventory = match self
+        let Ok(inventory) = self
             .store
             .complete_erasure_inventory_snapshot(maximum_requests)
             .and_then(|snapshot| {
                 ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
-            }) {
-            Ok(inventory) => inventory,
-            Err(_) => {
-                self.state = HostStateV1::Poisoned;
-                self.inventory = None;
-                return Err(ErasureHostErrorV1::RecoveryUnavailable);
-            }
+            })
+        else {
+            self.state = HostStateV1::Poisoned;
+            self.inventory = None;
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         self.publish_inventory(inventory, maximum_requests)
             .map(|generation| (timeline, generation))
@@ -236,7 +234,7 @@ impl ErasureExecutionHostV1 {
         }
     }
 
-    fn maximum_requests(&self) -> Result<usize, ErasureHostErrorV1> {
+    const fn maximum_requests(&self) -> Result<usize, ErasureHostErrorV1> {
         match self.state {
             HostStateV1::Ready {
                 maximum_requests, ..
