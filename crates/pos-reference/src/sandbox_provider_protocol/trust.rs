@@ -165,6 +165,23 @@ impl SandboxTrustSnapshot {
     pub fn certificates(&self) -> &[SandboxTrustCertificate] {
         &self.certificates
     }
+
+    pub(super) fn key_for_role(
+        &self,
+        id: &str,
+        role: SandboxTrustRole,
+    ) -> Result<VerifyingKey, super::SandboxTrustError> {
+        let key = self
+            .keys
+            .iter()
+            .find(|key| key.key_id == id)
+            .ok_or(super::SandboxTrustError::UnknownKey)?;
+        if key.role != role {
+            return Err(super::SandboxTrustError::WrongRole);
+        }
+        VerifyingKey::from_bytes(&key.public_key)
+            .map_err(|_| SandboxProviderProtocolError::SignatureInvalid.into())
+    }
 }
 
 fn reject_duplicate_identities(
