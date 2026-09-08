@@ -920,8 +920,8 @@ fn assert_sqlite_fork_retry_corruption(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_fork_retry_rejects_each_corrupted_durable_binding(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_fork_retry_rejects_corrupted_receipt_or_child() -> Result<(), Box<dyn std::error::Error>>
+{
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "UPDATE erasure_fork_admissions SET binding_digest=?1 WHERE operation_digest=?2",
@@ -929,6 +929,12 @@ fn sqlite_fork_retry_rejects_each_corrupted_durable_binding(
                 [0_u8; 32].as_slice(),
                 prepared.operation().digest().as_slice()
             ],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET child_id='corrupted' WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
         )
     })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
@@ -945,8 +951,97 @@ fn sqlite_fork_retry_rejects_each_corrupted_durable_binding(
     })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
+            "UPDATE timelines SET mode='live' WHERE id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE timelines SET parent_id='corrupted' WHERE id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE timelines SET fork_seq=0 WHERE id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE timelines SET head_seq=1 WHERE id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE timelines SET chain_head=zeroblob(32) WHERE id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE timeline_owners SET owner_id='corrupted' WHERE timeline_id=?1",
+            rusqlite::params![prepared.child().id.to_string()],
+        )
+    })
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
             "DELETE FROM erasure_records WHERE request_digest=?1",
             rusqlite::params![prepared.mutation().request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_records SET manifest_digest=zeroblob(32) WHERE request_digest=?1",
+            rusqlite::params![prepared.mutation().request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_records SET manifest_cbor=X'00' WHERE request_digest=?1",
+            rusqlite::params![prepared.mutation().request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_evidence WHERE reference_digest=?1",
+            rusqlite::params![prepared.mutation().new_objects()[0]
+                .reference()
+                .digest()
+                .as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_states WHERE state_digest=?1",
+            rusqlite::params![prepared.mutation().new_states()[0]
+                .reference()
+                .digest()
+                .as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_scope_nodes WHERE request_digest=?1",
+            rusqlite::params![prepared.mutation().request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_effects WHERE manifest_digest=?1",
+            rusqlite::params![prepared
+                .mutation()
+                .next_manifest()
+                .digest()
+                .digest()
+                .as_slice()],
         )
     })
 }
@@ -1008,6 +1103,37 @@ fn sqlite_fork_insert_failure_rolls_back_erasure_successor(
     connection.execute_batch(&format!(
         "CREATE TRIGGER reject_erasure_child BEFORE INSERT ON timelines
          WHEN NEW.id = '{child}' BEGIN SELECT RAISE(ABORT, 'fault'); END;"
+    ))?;
+    drop(connection);
+
+    let mut reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        reopened.commit_fork_admission(prepared),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    assert_eq!(reopened.scope_index_count(request)?, 0);
+    assert!(!reopened
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_owner_failure_rolls_back_child_and_erasure_successor(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, request, child, prepared) = prepared_fork(SqliteStore::open(path)?, None)?;
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch(&format!(
+        "CREATE TRIGGER reject_erasure_child_owner BEFORE INSERT ON timeline_owners
+         WHEN NEW.timeline_id = '{child}' BEGIN SELECT RAISE(ABORT, 'fault'); END;"
     ))?;
     drop(connection);
 
