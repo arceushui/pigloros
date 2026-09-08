@@ -28,6 +28,54 @@ fn corrupt_signed_digest(bytes: &[u8]) -> TestResult<Vec<u8>> {
     encode(&wrapper)
 }
 
+fn assert_revocation_collection_rejections(
+    fields: &[Value],
+    signer: &SigningKey,
+    trust: &SandboxTrustSnapshot,
+) -> TestResult {
+    for index in [4, 5, 6] {
+        let mut changed = fields.to_vec();
+        changed[index] = Value::Array(vec![Value::Null]);
+        assert!(SandboxRevocationSnapshot::authenticate(
+            &sign_record("RVS1", Value::Array(changed), signer)?,
+            trust
+        )
+        .is_err());
+    }
+    for (index, values) in [
+        (
+            4,
+            vec![Value::Text("z".to_owned()), Value::Text("a".to_owned())],
+        ),
+        (
+            5,
+            vec![Value::Bytes(vec![8; 32]), Value::Bytes(vec![3; 32])],
+        ),
+        (
+            6,
+            vec![Value::Bytes(vec![8; 32]), Value::Bytes(vec![4; 32])],
+        ),
+    ] {
+        let mut changed = fields.to_vec();
+        changed[index] = Value::Array(values);
+        assert_eq!(
+            SandboxRevocationSnapshot::authenticate(
+                &sign_record("RVS1", Value::Array(changed), signer)?,
+                trust
+            ),
+            Err(SandboxTrustError::Protocol(
+                ProtocolError::NonCanonicalOrder
+            ))
+        );
+    }
+    let valid = sign_record("RVS1", Value::Array(fields.to_vec()), signer)?;
+    assert_eq!(
+        SandboxRevocationSnapshot::authenticate(&corrupt_signed_digest(&valid)?, trust),
+        Err(SandboxTrustError::Protocol(ProtocolError::DigestMismatch))
+    );
+    Ok(())
+}
+
 fn key_record(id: &str, role: u64) -> Value {
     Value::Array(vec![
         Value::Text(id.to_owned()),
@@ -513,46 +561,7 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         )
         .is_err());
     }
-    for index in [4, 5, 6] {
-        let mut changed = fields.clone();
-        changed[index] = Value::Array(vec![Value::Null]);
-        assert!(SandboxRevocationSnapshot::authenticate(
-            &sign_record("RVS1", Value::Array(changed), &signer)?,
-            &trust
-        )
-        .is_err());
-    }
-    for (index, values) in [
-        (
-            4,
-            vec![Value::Text("z".to_owned()), Value::Text("a".to_owned())],
-        ),
-        (
-            5,
-            vec![Value::Bytes(vec![8; 32]), Value::Bytes(vec![3; 32])],
-        ),
-        (
-            6,
-            vec![Value::Bytes(vec![8; 32]), Value::Bytes(vec![4; 32])],
-        ),
-    ] {
-        let mut changed = fields.clone();
-        changed[index] = Value::Array(values);
-        assert_eq!(
-            SandboxRevocationSnapshot::authenticate(
-                &sign_record("RVS1", Value::Array(changed), &signer)?,
-                &trust
-            ),
-            Err(SandboxTrustError::Protocol(
-                ProtocolError::NonCanonicalOrder
-            ))
-        );
-    }
-    let valid_rvs = sign_record("RVS1", Value::Array(fields.clone()), &signer)?;
-    assert_eq!(
-        SandboxRevocationSnapshot::authenticate(&corrupt_signed_digest(&valid_rvs)?, &trust),
-        Err(SandboxTrustError::Protocol(ProtocolError::DigestMismatch))
-    );
+    assert_revocation_collection_rejections(&fields, &signer, &trust)?;
     let mut unknown_signer = fields;
     unknown_signer[7] = Value::Text("missing".to_owned());
     assert_eq!(
