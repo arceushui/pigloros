@@ -632,7 +632,7 @@ fn run_builtin_reference_experiment(
     use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
     use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
 
-    let mut exp = Experiment::new(ExperimentConfig {
+    let exp = Experiment::new(ExperimentConfig {
         name: "cli-run".to_owned(),
         stop: StopCondition::MaxTicks(ticks),
         store_config,
@@ -641,6 +641,8 @@ fn run_builtin_reference_experiment(
     let mut exp = exp.with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new(),
     ));
+    #[cfg(not(test))]
+    let mut exp = exp;
 
     // Register reference plugins
     let agent_entity = EntityId::new();
