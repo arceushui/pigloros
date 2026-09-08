@@ -517,6 +517,14 @@ where
     S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
     let parent = store.create_timeline("fork-parent")?.id();
+    store.append(
+        parent,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.parent"),
+            pos_core::CanonicalBytes::from_vec(vec![1]),
+        )],
+    )?;
     let shared = Rc::new(RefCell::new(store));
     let request = request()?;
     let required_target = target();
@@ -568,8 +576,8 @@ where
                 id: child,
                 mode: TimelineMode::Historical,
                 name: Some("admitted-child".to_owned()),
-                owner: None,
-                fork_point: Some((parent, Seq::ZERO)),
+                owner: Some(pos_core::EntityId::new()),
+                fork_point: Some((parent, Seq::from_u64(1))),
             },
         },
     )?;

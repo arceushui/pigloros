@@ -1336,8 +1336,11 @@ impl SqliteStore {
     }
 
     fn get_head_seq(&self, timeline_id: TimelineId) -> Result<Seq, CoreError> {
-        let n: i64 = self
-            .conn
+        Self::get_head_seq_on(&self.conn, timeline_id)
+    }
+
+    fn get_head_seq_on(conn: &Connection, timeline_id: TimelineId) -> Result<Seq, CoreError> {
+        let n: i64 = conn
             .query_row(
                 "SELECT head_seq FROM timelines WHERE id = ?1",
                 params![timeline_id.to_string()],
@@ -1364,6 +1367,43 @@ impl SqliteStore {
         to: Option<Seq>,
     ) -> Result<Vec<Event>, CoreError> {
         Self::read_own_events_limited_on(conn, timeline_id, from, to, None, None, u64::MAX)
+    }
+
+    fn read_unchecked_on(
+        conn: &Connection,
+        timeline: TimelineId,
+        range: SeqRange,
+    ) -> Result<Vec<Event>, CoreError> {
+        let chain = Self::fork_chain_on(conn, timeline)?;
+        let mut all = Vec::new();
+        for (index, &(member, _)) in chain.iter().enumerate() {
+            let logical_prefix = chain[index].1.as_u64();
+            if let Some((_, logical_fork)) = chain.get(index + 1) {
+                let local_limit = logical_fork
+                    .as_u64()
+                    .checked_sub(logical_prefix)
+                    .ok_or_else(|| {
+                        CoreError::Storage(format!(
+                            "Fork point precedes inherited history for timeline {member}"
+                        ))
+                    })?;
+                let local_head = Self::get_head_seq_on(conn, member)?.as_u64();
+                if local_limit > local_head {
+                    return Err(CoreError::Storage(format!(
+                        "Fork point exceeds parent logical Event head for timeline {member}"
+                    )));
+                }
+                all.extend(Self::read_own_events_on(
+                    conn,
+                    member,
+                    Seq::ZERO,
+                    Some(Seq::from_u64(local_limit)),
+                )?);
+            } else {
+                all.extend(Self::read_own_events_on(conn, member, Seq::ZERO, None)?);
+            }
+        }
+        Ok(crate::stitch::renumber_and_filter(all, range))
     }
 
     fn read_own_events_limited_on(
@@ -1787,8 +1827,17 @@ impl SqliteStore {
         index: usize,
         timeline: TimelineId,
     ) -> Result<u64, CoreError> {
+        Self::logical_segment_length_on(&self.conn, chain, index, timeline)
+    }
+
+    fn logical_segment_length_on(
+        conn: &Connection,
+        chain: &[(TimelineId, Seq)],
+        index: usize,
+        timeline: TimelineId,
+    ) -> Result<u64, CoreError> {
         let prefix = chain[index].1.as_u64();
-        let local_head = self.get_head_seq(timeline)?.as_u64();
+        let local_head = Self::get_head_seq_on(conn, timeline)?.as_u64();
         let length = chain.get(index + 1).map_or(Ok(local_head), |(_, fork)| {
             fork.as_u64().checked_sub(prefix).ok_or_else(|| {
                 CoreError::Storage(format!(
@@ -3458,28 +3507,8 @@ impl SqliteStore {
             .iter()
             .enumerate()
             .try_fold(0_u64, |logical_head, (index, (timeline, _))| {
-                let prefix = chain[index].1.as_u64();
-                let local_head = conn
-                    .query_row(
-                        "SELECT head_seq FROM timelines WHERE id = ?1",
-                        params![timeline.to_string()],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
-                let local_head = u64::try_from(local_head).unwrap_or(0);
-                let segment = chain.get(index + 1).map_or(Ok(local_head), |(_, fork)| {
-                    fork.as_u64().checked_sub(prefix).ok_or_else(|| {
-                        CoreError::Storage(format!(
-                            "Fork point precedes inherited history for timeline {timeline}"
-                        ))
-                    })
-                })?;
-                if segment > local_head {
-                    return Err(CoreError::Storage(format!(
-                        "Fork point exceeds parent logical Event head for timeline {timeline}"
-                    )));
-                }
-                Self::add_logical_segment(logical_head, segment)
+                Self::logical_segment_length_on(conn, &chain, index, *timeline)
+                    .and_then(|segment| Self::add_logical_segment(logical_head, segment))
             })
             .map(Seq::from_u64)
     }
@@ -3501,29 +3530,8 @@ impl SqliteStore {
         if at_seq == Seq::ZERO {
             return Ok(hash);
         }
-        let chain = Self::fork_chain_on(conn, timeline)?;
-        let mut all = Vec::new();
-        for (index, &(member, _)) in chain.iter().enumerate() {
-            let logical_prefix = chain[index].1.as_u64();
-            let local_limit = chain
-                .get(index + 1)
-                .map(|(_, fork)| {
-                    fork.as_u64().checked_sub(logical_prefix).ok_or_else(|| {
-                        CoreError::Storage(format!(
-                            "Fork point precedes inherited history for timeline {member}"
-                        ))
-                    })
-                })
-                .transpose()?;
-            all.extend(Self::read_own_events_on(
-                conn,
-                member,
-                Seq::ZERO,
-                local_limit.map(Seq::from_u64),
-            )?);
-        }
         for event in
-            crate::stitch::renumber_and_filter(all, SeqRange::bounded(Seq::from_u64(1), at_seq))
+            Self::read_unchecked_on(conn, timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))?
         {
             hash = hasher.hash_event(&hash, event.id.to_string().as_bytes(), &event.payload);
         }
@@ -4104,46 +4112,9 @@ impl EventStore for SqliteStore {
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
-            store.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| {
-                let chain = store.fork_chain(timeline)?;
-                let mut all: Vec<Event> = Vec::new();
-
-                for (i, &(tid, _)) in chain.iter().enumerate() {
-                    let logical_prefix = chain[i].1.as_u64();
-                    if i + 1 < chain.len() {
-                        let logical_fork = chain[i + 1].1;
-                        let fork_point_error = CoreError::Storage(format!(
-                            "Fork point precedes inherited history for timeline {tid}"
-                        ));
-                        let local_limit = logical_fork
-                            .as_u64()
-                            .checked_sub(logical_prefix)
-                            .ok_or(fork_point_error)?;
-                        store.get_head_seq(tid)
-                            .map(Seq::as_u64)
-                            .and_then(|local_head| {
-                                if local_limit > local_head {
-                                    return Err(CoreError::Storage(format!(
-                                        "Fork point exceeds parent logical Event head for timeline {tid}"
-                                    )));
-                                }
-                                store.read_own_events(
-                                    tid,
-                                    Seq::ZERO,
-                                    Some(Seq::from_u64(local_limit)),
-                                )
-                                .map(|events| all.extend(events))
-                            })?;
-                    } else {
-                        // Leaf: all own events; range applied after logical renumber.
-                        let events = store.read_own_events(tid, Seq::ZERO, None)?;
-                        all.extend(events);
-                    }
-                }
-
-                Ok(crate::stitch::renumber_and_filter(all, range))
-            })
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| Self::read_unchecked_on(&store.conn, timeline, range))
         })
     }
 
@@ -4715,24 +4686,18 @@ impl SqliteStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<pos_core::Hash, CoreError> {
-        let logical_head = self.logical_head(timeline)?;
-        if at_seq > logical_head {
-            return Err(CoreError::ForkBeyondHead {
-                fork_seq: at_seq.as_u64(),
-                head: logical_head.as_u64(),
-            });
-        }
-        let mut hash = self.hasher.genesis_hash();
-        if at_seq == Seq::ZERO {
-            return Ok(hash);
-        }
-        for event in self.read(timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))? {
-            let id_str = event.id.to_string();
-            hash = self
-                .hasher
-                .hash_event(&hash, id_str.as_bytes(), &event.payload);
-        }
-        Ok(hash)
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| {
+                    Self::compute_chain_hash_at_unchecked_on(
+                        &store.conn,
+                        store.hasher.as_ref(),
+                        timeline,
+                        at_seq,
+                    )
+                })
+        })
     }
 }
 
