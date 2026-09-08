@@ -5183,6 +5183,7 @@ mod coverage_paths {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
     fn frozen_scope_calls_the_verified_state_permission_check() -> Result<(), ErasureErrorV1> {
         let gate = ErasureContainmentGateV1::new();
         let timeline = TimelineId::new();
@@ -5197,6 +5198,7 @@ mod coverage_paths {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
     fn topology_proof_is_opaque_and_manifest_bound() -> Result<(), ErasureErrorV1> {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let affected = TimelineId::new();
@@ -5269,6 +5271,32 @@ mod coverage_paths {
         );
         assert_eq!(
             conflicting_gate.authorize(unknown, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn topology_proof_rejects_conflicting_unaffected_manifest() -> Result<(), ErasureErrorV1> {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let state = frozen_state_with_manifest(reference(6))?;
+        let unaffected = TimelineId::new();
+        let initial = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(TimelineId::new(), reference(7))],
+            vec![unaffected],
+        );
+        gate.install_verified_state_with_topology(&state, &initial)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let replacement = frozen_state_with_manifest(reference(8))?;
+        let conflicting = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            replacement.manifest_digest(),
+            vec![(TimelineId::new(), reference(7))],
+            vec![unaffected],
+        );
+        assert_eq!(
+            gate.install_verified_state_with_topology(&replacement, &conflicting),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         Ok(())

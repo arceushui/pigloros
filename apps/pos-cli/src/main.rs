@@ -69,9 +69,9 @@ fn open_store(
     #[cfg(test)]
     {
         let mut store = pos_store::open_store(config)?;
-        store.bind_erasure_gate(std::sync::Arc::new(
+        drop(store.bind_erasure_gate(std::sync::Arc::new(
             pos_core::ErasureContainmentGateV1::new(),
-        ))?;
+        )));
         Ok(store)
     }
     #[cfg(not(test))]
@@ -641,7 +641,6 @@ fn run_builtin_reference_experiment(
     let mut exp = exp.with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new(),
     ));
-    #[cfg(not(test))]
     let mut exp = exp;
 
     // Register reference plugins

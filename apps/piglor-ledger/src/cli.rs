@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use pos_core::{
-    ids::TimelineId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    ids::TimelineId, store::EventStore, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
+    KeyRoleV1, OwnerIdV1,
 };
 use pos_crypto::chain::Blake3Hasher;
 use pos_crypto::{
@@ -121,32 +122,27 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 CliError::BadSource("store: source requires --key <path>".to_owned())
             })?;
             let signing_key = load_signing_key(key_path)?;
-            let event_store = std::cell::RefCell::new(
-                pos_store::open_store(StoreConfig::Sqlite {
-                    path: db.to_string_lossy().into_owned(),
-                })
-                .map_err(|e| CliError::BadSource(e.to_string()))?,
-            );
+            let mut event_store = pos_store::open_store(StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .map_err(|e| CliError::BadSource(e.to_string()))?;
             #[cfg(test)]
-            let event_store = std::cell::RefCell::new(
-                crate::bind_test_store_gate(event_store.into_inner())
-                    .map_err(|e| CliError::BadSource(e.to_string()))?,
-            );
+            drop(event_store.bind_erasure_gate(std::sync::Arc::new(
+                pos_core::ErasureContainmentGateV1::new(),
+            )));
             let persisted_registry = event_store
-                .borrow()
                 .load_key_registry()
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             let (registry_state, identity) =
                 ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
             let timeline_id = event_store
-                .borrow_mut()
                 .initialize_timeline_with_key_registry("ledger", &registry_state)
                 .map_err(|error| CliError::BadSource(error.to_string()))?
                 .id();
             let registry = Arc::new(Mutex::new(registry_state));
             Ok(Box::new(
                 EventLedgerStore::new(
-                    event_store.into_inner(),
+                    event_store,
                     timeline_id,
                     crate::well_known_entity(),
                     signing_key,
@@ -379,11 +375,12 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
     let ledger = match &source {
         Source::Toml(dir) => TomlLedgerStore::new(dir).load(&today)?,
         Source::Store(db) => {
-            let store = pos_store::open_store_read_only(&db.to_string_lossy())
+            let mut store = pos_store::open_store_read_only(&db.to_string_lossy())
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             #[cfg(test)]
-            let store = crate::bind_test_store_gate(store)
-                .map_err(|e| CliError::BadSource(e.to_string()))?;
+            drop(store.bind_erasure_gate(std::sync::Arc::new(
+                pos_core::ErasureContainmentGateV1::new(),
+            )));
             let timeline_id = find_ledger_timeline(store.as_ref())?;
             pos_plugin_ledger::load_ledger_from_store(store.as_ref(), timeline_id, &today)?
         }

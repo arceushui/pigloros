@@ -50,6 +50,7 @@ pub use verify::run as verify_source;
 /// gate; test fixtures use an empty gate so they can exercise ledger behavior
 /// without fabricating erasure evidence.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn bind_test_store_gate(
     mut store: Box<dyn pos_core::store::EventStore>,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {

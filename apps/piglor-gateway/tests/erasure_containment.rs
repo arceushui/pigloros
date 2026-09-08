@@ -1,5 +1,6 @@
 use axum::{http::StatusCode, response::IntoResponse};
 use piglor_gateway::{Gateway, GatewayError, OwnTracksOwnerKey};
+use pos_core::store::EventStore;
 use pos_core::{
     CoreError, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
     ErasureProtectedOperationV1, TimelineId,
@@ -140,5 +141,22 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
     )?;
     owntracks_gateway.shutdown().await?;
     drop(owntracks_gateway);
+
+    let mut prebound_geo_store = pos_store::memory::MemoryStore::default();
+    drop(prebound_geo_store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+    assert!(Gateway::new_with_geo_location_admission_and_erasure_gate(
+        prebound_geo_store,
+        Arc::new(ErasureContainmentGateV1::new()),
+    )
+    .is_err());
+
+    let mut prebound_owntracks_store = pos_store::sqlite::SqliteStore::open_in_memory()?;
+    drop(prebound_owntracks_store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+    assert!(Gateway::new_with_owntracks_ingress_and_erasure_gate(
+        prebound_owntracks_store,
+        &owner_key,
+        Arc::new(ErasureContainmentGateV1::new()),
+    )
+    .is_err());
     Ok(())
 }

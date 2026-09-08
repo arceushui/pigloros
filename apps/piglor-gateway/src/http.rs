@@ -422,7 +422,6 @@ async fn post_ledger_prediction(
 
 const fn gateway_store_status(error: &CoreError) -> Option<StatusCode> {
     match error {
-        CoreError::ErasureAccessFrozen => Some(StatusCode::FORBIDDEN),
         CoreError::TimelineNotFound(_) => Some(StatusCode::NOT_FOUND),
         CoreError::ErasureContainmentUnavailable => Some(StatusCode::SERVICE_UNAVAILABLE),
         _ => None,

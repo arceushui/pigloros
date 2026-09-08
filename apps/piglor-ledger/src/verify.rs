@@ -10,7 +10,9 @@
 use std::path::Path;
 
 use pos_core::{
-    event::Event, store::SeqRange, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    event::Event,
+    store::{EventStore, SeqRange},
+    ErasureContainmentGateV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
 };
 use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
@@ -168,11 +170,10 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
 fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
     let supplied_public_keys = parse_supplied_public_keys(pubkey_hex)?;
 
-    let store = pos_store::open_store_read_only(&db.to_string_lossy())
+    let mut store = pos_store::open_store_read_only(&db.to_string_lossy())
         .map_err(|e| CliError::BadSource(e.to_string()))?;
     #[cfg(test)]
-    let store =
-        crate::bind_test_store_gate(store).map_err(|e| CliError::BadSource(e.to_string()))?;
+    drop(store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new())));
     let registry = store
         .load_key_registry()
         .map_err(|e| CliError::BadSource(e.to_string()))?;

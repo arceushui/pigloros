@@ -63,7 +63,7 @@ fn test_registry() -> PluginRegistry {
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    open_store_with_gate(config, None)
+    open_store_with_gate(config, Some(Arc::new(ErasureContainmentGateV1::new())))
 }
 
 fn open_store_with_gate(
@@ -71,14 +71,8 @@ fn open_store_with_gate(
     gate: Option<Arc<dyn ErasureGate>>,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
     let mut store = pos_store::open_store(config)?;
-    #[cfg(test)]
-    let supplied_gate = gate.is_some();
     if let Some(gate) = gate {
         store.bind_erasure_gate(gate)?;
-    }
-    #[cfg(test)]
-    if !supplied_gate {
-        bind_test_store_gate(store.as_mut())?;
     }
     Ok(store)
 }
