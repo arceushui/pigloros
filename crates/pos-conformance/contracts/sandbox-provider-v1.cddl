@@ -6,11 +6,17 @@ sha256 = bytes .size 32
 id16 = bytes .size 16
 key-id = text .size (1..128)
 identifier = text .size (1..128)
-safe-detail = text .size (1..256) / null
+safe-detail-text = (text .size (1..256)) .and
+  (text .regexp "[^\u0000]+")
+safe-detail = safe-detail-text / null
 epoch = uint
 
 provider-capability = [identifier, uint, uint]
 architecture = 0 / 1
+syscall-name = text .regexp "[a-z_][a-z0-9_]{0,127}"
+syscall-names = [1*512 syscall-name]
+scs1-u = ["SCS1",1,architecture,syscall-names,syscall-names]
+scs1 = [scs1-u,digest32]
 provider-capabilities = [1*256 provider-capability]
 architectures = [1*2 architecture]
 partition-descriptor = [0..2, bytes .size 16, bytes .size 16,

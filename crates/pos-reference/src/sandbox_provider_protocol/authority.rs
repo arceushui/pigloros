@@ -10,6 +10,7 @@ use super::codec::{
 use super::SandboxProviderProtocolError;
 
 const MAX_ARGUMENT_BYTES: usize = 256;
+const MAX_SYSCALL_NAMES: usize = 512;
 const MAX_INPUT_BYTES_U64: u64 = 128 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_PKCS7_BYTES: usize = 1024 * 1024;
@@ -37,6 +38,46 @@ impl SandboxArchitecture {
             1 => Ok(Self::Aarch64),
             _ => Err(SandboxProviderProtocolError::InvalidEncoding),
         }
+    }
+}
+
+/// Independently decoded architecture-qualified SCS1 syscall policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxSyscallSet {
+    pub architecture: SandboxArchitecture,
+    pub requested_names: Vec<String>,
+    pub expected_effective_names: Vec<String>,
+    pub syscall_set_digest: [u8; 32],
+}
+
+impl SandboxSyscallSet {
+    /// Decode and fully validate exact canonical SCS1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error for malformed, legacy, or inconsistent input.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxProviderProtocolError> {
+        let value = decode_document(bytes)?;
+        let (fields, syscall_set_digest) = self_digested::<5>(&value, "SCS1")?;
+        let syscall_set = Self {
+            architecture: SandboxArchitecture::decode(uint(&fields[2])?)?,
+            requested_names: decode_syscall_names(&fields[3])?,
+            expected_effective_names: decode_syscall_names(&fields[4])?,
+            syscall_set_digest,
+        };
+        syscall_set.validate(fields).map(|()| syscall_set)
+    }
+
+    fn validate(&self, unsigned: &[Value; 5]) -> Result<(), SandboxProviderProtocolError> {
+        validate_syscall_names(&self.requested_names)?;
+        validate_syscall_names(&self.expected_effective_names)?;
+        if self
+            .requested_names
+            .iter()
+            .any(|name| self.expected_effective_names.binary_search(name).is_err())
+        {
+            return Err(SandboxProviderProtocolError::InconsistentFields);
+        }
+        verify_digest("SCS1", unsigned, self.syscall_set_digest)
     }
 }
 
@@ -503,6 +544,36 @@ fn decode_architectures(
         .iter()
         .map(|value| SandboxArchitecture::decode(uint(value)?))
         .collect()
+}
+
+fn decode_syscall_names(value: &Value) -> Result<Vec<String>, SandboxProviderProtocolError> {
+    let Value::Array(values) = value else {
+        return Err(SandboxProviderProtocolError::InvalidEncoding);
+    };
+    values
+        .iter()
+        .map(|value| text(value).map(ToOwned::to_owned))
+        .collect()
+}
+
+fn validate_syscall_names(names: &[String]) -> Result<(), SandboxProviderProtocolError> {
+    if names.is_empty()
+        || names.len() > MAX_SYSCALL_NAMES
+        || names.iter().any(|name| !valid_syscall_name(name))
+    {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    if !names.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(SandboxProviderProtocolError::NonCanonicalOrder);
+    }
+    Ok(())
+}
+
+fn valid_syscall_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z' | b'_'))
+        && name.len() <= 128
+        && bytes.all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
 }
 
 fn decode_limits(value: &Value) -> Result<Vec<SandboxLimit>, SandboxProviderProtocolError> {

@@ -10,9 +10,9 @@ use pos_conformance::{
     SandboxLocalErrorCodeV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
     SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
     SandboxProviderOperationV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
-    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxTerminalOutcomeV1,
-    SignedImageManifestV1, MAX_SANDBOX_PAYLOAD_BYTES_V1, MAX_SANDBOX_PAYLOAD_CHUNKS_V1,
-    SANDBOX_PAYLOAD_CHUNK_BYTES_V1,
+    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxSyscallSetV1,
+    SandboxTerminalOutcomeV1, SignedImageManifestV1, MAX_SANDBOX_PAYLOAD_BYTES_V1,
+    MAX_SANDBOX_PAYLOAD_CHUNKS_V1, MAX_SANDBOX_SYSCALL_NAMES_V1, SANDBOX_PAYLOAD_CHUNK_BYTES_V1,
 };
 use sha2::{Digest, Sha256};
 
@@ -125,6 +125,31 @@ fn launch_policy() -> LaunchPolicyV1 {
         }],
         policy_digest: [0; 32],
     }
+}
+
+fn syscall_set() -> SandboxSyscallSetV1 {
+    let names = [
+        "execveat",
+        "getsockopt",
+        "poll",
+        "recvmsg",
+        "sendto",
+        "socket",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    SandboxSyscallSetV1 {
+        architecture: SandboxArchitectureV1::X86_64,
+        requested_names: names.clone(),
+        expected_effective_names: names,
+        syscall_set_digest: [0; 32],
+    }
+}
+
+fn numbered_syscall_names(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|index| format!("syscall_{index:03}"))
+        .collect()
 }
 
 fn image_manifest() -> SignedImageManifestV1 {
@@ -413,6 +438,32 @@ fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
     independent::LaunchPolicy::from_canonical_cbor(&policy_bytes)?;
     verify_and_materialize_vector("lps1", &policy_bytes)?;
 
+    let syscall_set = syscall_set().seal()?;
+    let syscall_set_bytes = syscall_set.to_canonical_cbor()?;
+    assert_eq!(
+        SandboxSyscallSetV1::from_canonical_cbor(&syscall_set_bytes)?,
+        syscall_set
+    );
+    let independently_decoded =
+        independent::SandboxSyscallSet::from_canonical_cbor(&syscall_set_bytes)?;
+    assert_eq!(
+        independently_decoded.architecture,
+        independent::SandboxArchitecture::X86_64
+    );
+    assert_eq!(
+        independently_decoded.requested_names,
+        syscall_set.requested_names
+    );
+    assert_eq!(
+        independently_decoded.expected_effective_names,
+        syscall_set.expected_effective_names
+    );
+    assert_eq!(
+        independently_decoded.syscall_set_digest,
+        syscall_set.syscall_set_digest
+    );
+    verify_and_materialize_vector("scs1", &syscall_set_bytes)?;
+
     let image = image_manifest().sign(&key)?;
     let image_bytes = image.to_canonical_cbor()?;
     assert_eq!(
@@ -424,6 +475,81 @@ fn authority_contracts_round_trip_and_verify_signatures() -> TestResult {
         .verify_signature(&key.verifying_key())?;
     verify_and_materialize_vector("sim1", &image_bytes)?;
     Ok(())
+}
+
+#[test]
+fn syscall_set_has_a_dedicated_512_name_ceiling() -> TestResult {
+    for count in [257, MAX_SANDBOX_SYSCALL_NAMES_V1] {
+        let names = numbered_syscall_names(count);
+        let record = SandboxSyscallSetV1 {
+            architecture: SandboxArchitectureV1::Aarch64,
+            requested_names: names.clone(),
+            expected_effective_names: names,
+            syscall_set_digest: [0; 32],
+        }
+        .seal()?;
+        let bytes = record.to_canonical_cbor()?;
+        assert_eq!(SandboxSyscallSetV1::from_canonical_cbor(&bytes)?, record);
+        assert_eq!(
+            independent::SandboxSyscallSet::from_canonical_cbor(&bytes)?.architecture,
+            independent::SandboxArchitecture::Aarch64
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn syscall_set_rejects_invalid_names_bounds_order_and_inclusion() {
+    let invalid_names = [
+        "",
+        "Read",
+        "read-write",
+        "read\0write",
+        "@system-service",
+        "é",
+    ];
+    for invalid_name in invalid_names {
+        let mut record = syscall_set();
+        record.requested_names = vec![invalid_name.to_owned()];
+        record.expected_effective_names = record.requested_names.clone();
+        assert_eq!(record.seal(), Err(SandboxContractErrorV1::FieldOutOfBounds));
+    }
+
+    let mut too_long = syscall_set();
+    too_long.requested_names = vec![format!("a{}", "b".repeat(128))];
+    too_long.expected_effective_names = too_long.requested_names.clone();
+    assert_eq!(
+        too_long.seal(),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+
+    for names in [Vec::new(), numbered_syscall_names(513)] {
+        let mut record = syscall_set();
+        record.requested_names = names.clone();
+        record.expected_effective_names = names;
+        assert_eq!(record.seal(), Err(SandboxContractErrorV1::FieldOutOfBounds));
+    }
+
+    for names in [
+        vec!["read".to_owned(), "read".to_owned()],
+        vec!["write".to_owned(), "read".to_owned()],
+    ] {
+        let mut record = syscall_set();
+        record.requested_names = names.clone();
+        record.expected_effective_names = names;
+        assert_eq!(
+            record.seal(),
+            Err(SandboxContractErrorV1::NonCanonicalOrder)
+        );
+    }
+
+    let mut missing = syscall_set();
+    missing.requested_names = vec!["read".to_owned()];
+    missing.expected_effective_names = vec!["write".to_owned()];
+    assert_eq!(
+        missing.seal(),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
 }
 
 #[test]
@@ -923,6 +1049,66 @@ fn signed_provider_error_round_trips_safe_detail() -> TestResult {
     assert_eq!(SandboxProviderErrorV1::from_canonical_cbor(&bytes)?, error);
     independent::SandboxProviderError::from_canonical_cbor(&bytes)?
         .verify_signature(&key.verifying_key())?;
+    Ok(())
+}
+
+#[test]
+fn safe_detail_uses_a_strict_utf8_byte_bound_in_both_decoders() -> TestResult {
+    let key = signing_key();
+    for detail in [None, Some("x".to_owned()), Some("é".repeat(128))] {
+        let local = SandboxLocalErrorV1 {
+            operation: None,
+            request_id: None,
+            code: SandboxLocalErrorCodeV1::ProviderUnavailable,
+            safe_detail: detail.clone(),
+        };
+        let local_bytes = local.to_canonical_cbor()?;
+        assert_eq!(
+            SandboxLocalErrorV1::from_canonical_cbor(&local_bytes)?,
+            local
+        );
+        assert_eq!(
+            independent::SandboxLocalError::from_canonical_cbor(&local_bytes)?.safe_detail,
+            detail
+        );
+
+        let mut signed = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
+        signed.safe_detail = detail.clone();
+        let signed = signed.sign(&key)?;
+        let signed_bytes = signed.to_canonical_cbor()?;
+        assert_eq!(
+            SandboxProviderErrorV1::from_canonical_cbor(&signed_bytes)?,
+            signed
+        );
+        assert_eq!(
+            independent::SandboxProviderError::from_canonical_cbor(&signed_bytes)?.safe_detail,
+            detail
+        );
+    }
+
+    for detail in [
+        String::new(),
+        format!("{}a", "é".repeat(128)),
+        "a\0b".to_owned(),
+    ] {
+        let local = SandboxLocalErrorV1 {
+            operation: None,
+            request_id: None,
+            code: SandboxLocalErrorCodeV1::ProviderUnavailable,
+            safe_detail: Some(detail.clone()),
+        };
+        assert_eq!(
+            local.validate(),
+            Err(SandboxContractErrorV1::FieldOutOfBounds)
+        );
+
+        let mut signed = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
+        signed.safe_detail = Some(detail);
+        assert_eq!(
+            signed.sign(&key),
+            Err(SandboxContractErrorV1::FieldOutOfBounds)
+        );
+    }
     Ok(())
 }
 

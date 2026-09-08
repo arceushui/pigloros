@@ -4,19 +4,24 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, Verifier};
 
 use super::{
-    SandboxContractErrorV1, MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1, MAX_SANDBOX_PROVIDER_ENTRIES_V1,
+    SandboxContractErrorV1, MAX_SANDBOX_PROVIDER_CBOR_COLLECTION_ENTRIES_V1,
+    MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1,
 };
 
 pub(super) fn decode(bytes: &[u8]) -> Result<Value, SandboxContractErrorV1> {
     if bytes.is_empty() || bytes.len() > MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1 {
         return Err(SandboxContractErrorV1::FieldOutOfBounds);
     }
-    crate::preflight_array_cbor(bytes, 32, MAX_SANDBOX_PROVIDER_ENTRIES_V1 as u64, true).map_err(
-        |error| match error {
-            crate::CborPreflightError::InvalidEncoding => SandboxContractErrorV1::InvalidEncoding,
-            crate::CborPreflightError::FieldOutOfBounds => SandboxContractErrorV1::FieldOutOfBounds,
-        },
-    )?;
+    crate::preflight_array_cbor(
+        bytes,
+        32,
+        MAX_SANDBOX_PROVIDER_CBOR_COLLECTION_ENTRIES_V1 as u64,
+        true,
+    )
+    .map_err(|error| match error {
+        crate::CborPreflightError::InvalidEncoding => SandboxContractErrorV1::InvalidEncoding,
+        crate::CborPreflightError::FieldOutOfBounds => SandboxContractErrorV1::FieldOutOfBounds,
+    })?;
     let mut cursor = Cursor::new(bytes);
     let value: Value =
         ciborium::from_reader(&mut cursor).map_err(|_| SandboxContractErrorV1::InvalidEncoding)?;

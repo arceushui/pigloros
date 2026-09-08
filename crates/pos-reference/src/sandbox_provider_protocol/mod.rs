@@ -11,7 +11,7 @@ mod operations;
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
-    SandboxProviderManifest, SignedImageManifest,
+    SandboxProviderManifest, SandboxSyscallSet, SignedImageManifest,
 };
 pub use execution::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,

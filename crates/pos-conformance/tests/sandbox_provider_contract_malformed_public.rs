@@ -4,7 +4,7 @@ use pos_conformance::{
     SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxExecuteRequestV1,
     SandboxLocalErrorV1, SandboxPayloadChunkV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
     SandboxProviderReceiptV1, SandboxProviderResultV1, SandboxReconcileRequestV1,
-    SandboxReconcileResponseV1, SignedImageManifestV1,
+    SandboxReconcileResponseV1, SandboxSyscallSetV1, SignedImageManifestV1,
 };
 use pos_reference::sandbox_provider_protocol as independent;
 
@@ -13,6 +13,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 #[derive(Clone, Copy)]
 enum Record {
     Spm1,
+    Scs1,
     Lps1,
     Sim1,
     Sdq1,
@@ -31,8 +32,9 @@ enum Record {
 }
 
 impl Record {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::Spm1,
+        Self::Scs1,
         Self::Lps1,
         Self::Sim1,
         Self::Sdq1,
@@ -53,6 +55,7 @@ impl Record {
     const fn name(self) -> &'static str {
         match self {
             Self::Spm1 => "spm1",
+            Self::Scs1 => "scs1",
             Self::Lps1 => "lps1",
             Self::Sim1 => "sim1",
             Self::Sdq1 => "sdq1",
@@ -78,6 +81,7 @@ impl Record {
     const fn bytes(self) -> &'static [u8] {
         match self {
             Self::Spm1 => include_bytes!("../vectors/sandbox-provider-v1/spm1.cbor"),
+            Self::Scs1 => include_bytes!("../vectors/sandbox-provider-v1/scs1.cbor"),
             Self::Lps1 => include_bytes!("../vectors/sandbox-provider-v1/lps1.cbor"),
             Self::Sim1 => include_bytes!("../vectors/sandbox-provider-v1/sim1.cbor"),
             Self::Sdq1 => include_bytes!("../vectors/sandbox-provider-v1/sdq1.cbor"),
@@ -99,6 +103,7 @@ impl Record {
     fn producer_accepts(self, bytes: &[u8]) -> bool {
         match self {
             Self::Spm1 => SandboxProviderManifestV1::from_canonical_cbor(bytes).is_ok(),
+            Self::Scs1 => SandboxSyscallSetV1::from_canonical_cbor(bytes).is_ok(),
             Self::Lps1 => LaunchPolicyV1::from_canonical_cbor(bytes).is_ok(),
             Self::Sim1 => SignedImageManifestV1::from_canonical_cbor(bytes).is_ok(),
             Self::Sdq1 => SandboxDescribeRequestV1::from_canonical_cbor(bytes).is_ok(),
@@ -120,6 +125,7 @@ impl Record {
     fn independent_accepts(self, bytes: &[u8]) -> bool {
         match self {
             Self::Spm1 => independent::SandboxProviderManifest::from_canonical_cbor(bytes).is_ok(),
+            Self::Scs1 => independent::SandboxSyscallSet::from_canonical_cbor(bytes).is_ok(),
             Self::Lps1 => independent::LaunchPolicy::from_canonical_cbor(bytes).is_ok(),
             Self::Sim1 => independent::SignedImageManifest::from_canonical_cbor(bytes).is_ok(),
             Self::Sdq1 => independent::SandboxDescribeRequest::from_canonical_cbor(bytes).is_ok(),
@@ -360,6 +366,35 @@ fn local_error_decoders_reject_nul_safe_detail() -> TestResult {
 }
 
 #[test]
+fn safe_detail_decoders_reject_malformed_utf8() -> TestResult {
+    for (record, path, magic) in [
+        (Record::Sle1, vec![5], None),
+        (Record::Spe1, vec![0, 7], Some("SPE1")),
+    ] {
+        let mut value = decode_value(record.bytes())?;
+        *value_at_mut(&mut value, &path).ok_or("safe-detail path must resolve")? =
+            Value::Text("x".to_owned());
+        if let Some(magic) = magic {
+            refresh_record_digest(&mut value, magic)?;
+        }
+        let mut bytes = encode_value(&value)?;
+        let marker = if magic.is_some() {
+            &[0x61, b'x', 0x6b][..]
+        } else {
+            &[0x61, b'x'][..]
+        };
+        let text_start = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .ok_or("one-byte safe detail must be encoded")?;
+        bytes[text_start + 1] = 0xff;
+        assert!(!record.producer_accepts(&bytes));
+        assert!(!record.independent_accepts(&bytes));
+    }
+    Ok(())
+}
+
+#[test]
 fn image_manifest_decoders_reject_nul_fixed_arguments() -> TestResult {
     let record = Record::Sim1;
     let mut value = decode_value(record.bytes())?;
@@ -464,6 +499,47 @@ fn independent_preflight_accepts_the_four_byte_length_form_before_shape_rejectio
 
 #[test]
 fn decoders_reject_semantically_invalid_self_digested_collections() -> TestResult {
+    for (path, replacement, name) in [
+        (
+            vec![0, 3, 0],
+            Value::Text("Execveat".to_owned()),
+            "invalid syscall name",
+        ),
+        (
+            vec![0, 3, 1],
+            Value::Text("execveat".to_owned()),
+            "duplicate syscall name",
+        ),
+        (
+            vec![0, 4],
+            Value::Array(vec![Value::Text("write".to_owned())]),
+            "requested syscall absent from expected set",
+        ),
+        (
+            vec![0, 3],
+            Value::Array(
+                (0..513)
+                    .map(|index| Value::Text(format!("syscall_{index:03}")))
+                    .collect(),
+            ),
+            "too many requested syscall names",
+        ),
+    ] {
+        let mut scs1 = decode_value(Record::Scs1.bytes())?;
+        *value_at_mut(&mut scs1, &path).ok_or("SCS1 field path must resolve")? = replacement;
+        refresh_record_digest(&mut scs1, "SCS1")?;
+        assert_rejected(Record::Scs1, &scs1, name)?;
+    }
+
+    let mut legacy_scs1 = decode_value(Record::Scs1.bytes())?;
+    let unsigned = value_at_mut(&mut legacy_scs1, &[0]).ok_or("SCS1 body must exist")?;
+    let Value::Array(unsigned) = unsigned else {
+        return Err("SCS1 body must be an array".into());
+    };
+    unsigned.remove(2);
+    refresh_record_digest(&mut legacy_scs1, "SCS1")?;
+    assert_rejected(Record::Scs1, &legacy_scs1, "legacy four-field SCS1")?;
+
     let mut lps1 = decode_value(Record::Lps1.bytes())?;
     let network =
         value_at_mut(&mut lps1, &[0, 6]).ok_or("LPS1 network capability list must exist")?;

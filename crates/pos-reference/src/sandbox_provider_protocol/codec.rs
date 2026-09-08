@@ -8,6 +8,7 @@ use super::SandboxProviderProtocolError;
 const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 pub(super) const MAX_LIST_ENTRIES: usize = 256;
+pub(super) const MAX_CBOR_COLLECTION_ENTRIES: usize = 512;
 pub(super) const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_EXECUTABLE_PATH_BYTES: usize = 512;
 
@@ -183,7 +184,7 @@ pub(super) fn preflight(bytes: &[u8]) -> Result<(), SandboxProviderProtocolError
             4 => {
                 let count = usize::try_from(count)
                     .map_err(|_| SandboxProviderProtocolError::FieldOutOfBounds)?;
-                if count > MAX_LIST_ENTRIES {
+                if count > MAX_CBOR_COLLECTION_ENTRIES {
                     return Err(SandboxProviderProtocolError::FieldOutOfBounds);
                 }
                 (0..count).try_for_each(|_| item(bytes, index, depth + 1))

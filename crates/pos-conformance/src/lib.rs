@@ -63,10 +63,11 @@ pub use sandbox_provider_contract::{
     SandboxLocalErrorCodeV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
     SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
     SandboxProviderOperationV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
-    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxTerminalOutcomeV1,
-    SignedImageManifestV1, MAX_SANDBOX_PAYLOAD_BYTES_V1, MAX_SANDBOX_PAYLOAD_CHUNKS_V1,
-    MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1, MAX_SANDBOX_PROVIDER_ENTRIES_V1,
-    SANDBOX_PAYLOAD_CHUNK_BYTES_V1, SANDBOX_RELEASE_TIMEOUT_SECONDS_V1,
+    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxSyscallSetV1,
+    SandboxTerminalOutcomeV1, SignedImageManifestV1, MAX_SANDBOX_PAYLOAD_BYTES_V1,
+    MAX_SANDBOX_PAYLOAD_CHUNKS_V1, MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1,
+    MAX_SANDBOX_PROVIDER_ENTRIES_V1, MAX_SANDBOX_SYSCALL_NAMES_V1, SANDBOX_PAYLOAD_CHUNK_BYTES_V1,
+    SANDBOX_RELEASE_TIMEOUT_SECONDS_V1,
 };
 
 fn encode_artifact_descriptor_value(value: &ArtifactDescriptorV1) -> Value {

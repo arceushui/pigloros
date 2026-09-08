@@ -4,7 +4,8 @@ use pos_conformance::{
     SandboxContractErrorV1, SandboxDescribeRequestV1, SandboxDescribeResponseV1,
     SandboxExecuteRequestV1, SandboxPayloadChunkV1, SandboxProviderErrorV1,
     SandboxProviderManifestV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
-    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SignedImageManifestV1,
+    SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxSyscallSetV1,
+    SignedImageManifestV1,
 };
 use pos_reference::sandbox_provider_protocol as independent;
 
@@ -175,6 +176,13 @@ fn every_signed_public_surface_propagates_validation_failures() -> TestResult {
 
 #[test]
 fn every_self_digested_public_surface_propagates_validation_failures() -> TestResult {
+    assert_self_digested_surface_rejects!(
+        SandboxSyscallSetV1::from_canonical_cbor(include_bytes!(
+            "../vectors/sandbox-provider-v1/scs1.cbor"
+        ))?,
+        |value: &mut SandboxSyscallSetV1| value.requested_names.clear(),
+        syscall_set_digest
+    );
     assert_self_digested_surface_rejects!(
         LaunchPolicyV1::from_canonical_cbor(include_bytes!(
             "../vectors/sandbox-provider-v1/lps1.cbor"

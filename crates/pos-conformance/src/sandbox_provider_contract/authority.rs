@@ -9,10 +9,11 @@ use super::codec::{
 };
 use super::{
     NetworkCapabilityV1, ProviderCapabilityV1, SandboxArchitectureV1, SandboxContractErrorV1,
-    SandboxLimitV1, MAX_SANDBOX_PROVIDER_ENTRIES_V1,
+    SandboxLimitV1, MAX_SANDBOX_PROVIDER_ENTRIES_V1, MAX_SANDBOX_SYSCALL_NAMES_V1,
 };
 
 const SPM1: &str = "SPM1";
+const SCS1: &str = "SCS1";
 const LPS1: &str = "LPS1";
 const SIM1: &str = "SIM1";
 const MAX_IDENTIFIER_BYTES: usize = 128;
@@ -211,6 +212,105 @@ impl SandboxProviderManifestV1 {
             value_bytes(&self.pcf1_digest),
             value_bytes(&self.required_hcp1_feature_set_digest),
             value_text(&self.provider_release_key_id),
+        ])
+    }
+}
+
+/// Exact architecture-qualified SCS1 syscall policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxSyscallSetV1 {
+    /// Architecture whose syscall-number space this policy governs.
+    pub architecture: SandboxArchitectureV1,
+    /// Strictly sorted syscall names explicitly requested by the adapter.
+    pub requested_names: Vec<String>,
+    /// Strictly sorted syscall names expected after policy installation.
+    pub expected_effective_names: Vec<String>,
+    /// Self-digest of the exact SCS1-U array.
+    pub syscall_set_digest: [u8; 32],
+}
+
+impl SandboxSyscallSetV1 {
+    /// Compute and install the exact SCS1 self-digest.
+    ///
+    /// # Errors
+    /// Returns a closed contract error when an unsigned field is invalid.
+    pub fn seal(mut self) -> Result<Self, SandboxContractErrorV1> {
+        self.validate_unsigned()?;
+        self.syscall_set_digest = digest(SCS1, &self.unsigned_value())?;
+        Ok(self)
+    }
+
+    /// Validate names, ordering, inclusion, architecture, and self-digest.
+    ///
+    /// # Errors
+    /// Returns a closed contract error for invalid syscall-set data.
+    pub fn validate(&self) -> Result<(), SandboxContractErrorV1> {
+        self.validate_unsigned()?;
+        (self.syscall_set_digest == digest(SCS1, &self.unsigned_value())?)
+            .then_some(())
+            .ok_or(SandboxContractErrorV1::DigestMismatch)
+    }
+
+    /// Encode exact deterministic-CBOR SCS1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed contract error when validation or encoding fails.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxContractErrorV1> {
+        self.validate()?;
+        encode(&Value::Array(vec![
+            self.unsigned_value(),
+            value_bytes(&self.syscall_set_digest),
+        ]))
+    }
+
+    /// Decode exact deterministic-CBOR SCS1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed contract error for malformed, legacy, or noncanonical input.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxContractErrorV1> {
+        let value = decode(bytes)?;
+        let fields = array::<2>(&value)?;
+        let unsigned = array::<5>(&fields[0])?;
+        validate_magic(unsigned, SCS1)?;
+        let syscall_set = Self {
+            architecture: SandboxArchitectureV1::from_code(uint(&unsigned[2])?)?,
+            requested_names: decode_syscall_names(&unsigned[3])?,
+            expected_effective_names: decode_syscall_names(&unsigned[4])?,
+            syscall_set_digest: fixed(&fields[1])?,
+        };
+        syscall_set.validate().map(|()| syscall_set)
+    }
+
+    fn validate_unsigned(&self) -> Result<(), SandboxContractErrorV1> {
+        validate_syscall_names(&self.requested_names)?;
+        validate_syscall_names(&self.expected_effective_names)?;
+        if self
+            .requested_names
+            .iter()
+            .any(|name| self.expected_effective_names.binary_search(name).is_err())
+        {
+            return Err(SandboxContractErrorV1::InconsistentFields);
+        }
+        Ok(())
+    }
+
+    fn unsigned_value(&self) -> Value {
+        Value::Array(vec![
+            value_text(SCS1),
+            value_uint(1),
+            value_uint(self.architecture.code()),
+            Value::Array(
+                self.requested_names
+                    .iter()
+                    .map(|name| value_text(name))
+                    .collect(),
+            ),
+            Value::Array(
+                self.expected_effective_names
+                    .iter()
+                    .map(|name| value_text(name))
+                    .collect(),
+            ),
         ])
     }
 }
@@ -628,6 +728,36 @@ fn decode_architectures(
         .iter()
         .map(|value| SandboxArchitectureV1::from_code(uint(value)?))
         .collect()
+}
+
+fn decode_syscall_names(value: &Value) -> Result<Vec<String>, SandboxContractErrorV1> {
+    let Value::Array(values) = value else {
+        return Err(SandboxContractErrorV1::InvalidEncoding);
+    };
+    values
+        .iter()
+        .map(|value| text(value).map(ToOwned::to_owned))
+        .collect()
+}
+
+fn validate_syscall_names(names: &[String]) -> Result<(), SandboxContractErrorV1> {
+    if names.is_empty()
+        || names.len() > MAX_SANDBOX_SYSCALL_NAMES_V1
+        || names.iter().any(|name| !valid_syscall_name(name))
+    {
+        return Err(SandboxContractErrorV1::FieldOutOfBounds);
+    }
+    if !names.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(SandboxContractErrorV1::NonCanonicalOrder);
+    }
+    Ok(())
+}
+
+fn valid_syscall_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z' | b'_'))
+        && name.len() <= 128
+        && bytes.all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
 }
 
 fn network_capability_value(value: &NetworkCapabilityV1) -> Value {
