@@ -510,6 +510,7 @@ mod tests {
         fail_nonempty_inventory: bool,
         misreport_exact_retry: bool,
         fail_recovery: bool,
+        fail_event_store: bool,
     }
 
     impl pos_core::EventStore for FaultStoreV1 {
@@ -518,7 +519,11 @@ mod tests {
         }
 
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
-            self.inner.create_timeline(name)
+            if self.fail_event_store {
+                Err(CoreError::Storage("fault create".to_owned()))
+            } else {
+                self.inner.create_timeline(name)
+            }
         }
 
         fn append(
@@ -526,11 +531,19 @@ mod tests {
             timeline: TimelineId,
             drafts: &[EventDraft],
         ) -> Result<Vec<Event>, CoreError> {
-            self.inner.append(timeline, drafts)
+            if self.fail_event_store {
+                Err(CoreError::Storage("fault append".to_owned()))
+            } else {
+                self.inner.append(timeline, drafts)
+            }
         }
 
         fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-            self.inner.read(timeline, range)
+            if self.fail_event_store {
+                Err(CoreError::Storage("fault read".to_owned()))
+            } else {
+                self.inner.read(timeline, range)
+            }
         }
 
         fn fork(
@@ -539,15 +552,27 @@ mod tests {
             at_seq: Seq,
             name: &str,
         ) -> Result<Timeline, CoreError> {
-            self.inner.fork(parent, at_seq, name)
+            if self.fail_event_store {
+                Err(CoreError::Storage("fault fork".to_owned()))
+            } else {
+                self.inner.fork(parent, at_seq, name)
+            }
         }
 
         fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-            self.inner.list_timelines()
+            if self.fail_event_store {
+                Err(CoreError::Storage("fault list".to_owned()))
+            } else {
+                self.inner.list_timelines()
+            }
         }
 
         fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-            self.inner.get_timeline(id)
+            if self.fail_event_store {
+                Err(CoreError::Storage("fault timeline".to_owned()))
+            } else {
+                self.inner.get_timeline(id)
+            }
         }
     }
 
@@ -596,12 +621,14 @@ mod tests {
         fail_nonempty_inventory: bool,
         misreport_exact_retry: bool,
         fail_recovery: bool,
+        fail_event_store: bool,
     ) -> FaultStoreV1 {
         FaultStoreV1 {
             inner: MemoryStore::new().without_erasure_gate(),
             fail_nonempty_inventory,
             misreport_exact_retry,
             fail_recovery,
+            fail_event_store,
         }
     }
 
@@ -734,7 +761,7 @@ mod tests {
     #[test]
     fn failed_successor_inventory_refresh_poisons_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(true, false, false)),
+            Box::new(fault_store(true, false, false, false)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -1042,7 +1069,7 @@ mod tests {
     #[test]
     fn impossible_applied_retry_poisons_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(false, true, false)),
+            Box::new(fault_store(false, true, false, false)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -1075,7 +1102,7 @@ mod tests {
     #[test]
     fn corrupt_fork_recovery_poisons_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(false, false, true)),
+            Box::new(fault_store(false, false, true, false)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -1089,5 +1116,61 @@ mod tests {
             host.command_sender(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
+    }
+
+    #[test]
+    fn every_hosted_event_store_failure_is_payload_free() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(false, false, false, true)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let timeline = TimelineId::new();
+        {
+            let mut command = host
+                .command_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            assert_eq!(
+                command.create_timeline("fault"),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+            assert_eq!(
+                command.fork_timeline(timeline, Seq::ZERO, "fault"),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+            assert_eq!(
+                command.append(
+                    timeline,
+                    &[EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("test.fault"),
+                        CanonicalBytes::from_vec(vec![1]),
+                    )],
+                ),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+        }
+
+        let bounds = EventReadBounds::new(8, 16, 1, 1);
+        let mut reader = host
+            .read_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            reader.read_bounded(timeline, SeqRange::all(), bounds),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
+            reader.timeline(timeline),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(reader.timelines(), Err(ErasureHostErrorV1::AdapterFailure));
+        assert_eq!(
+            reader.root_timeline_count_bounded(1),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
+            reader.logical_head(timeline),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
     }
 }
