@@ -1,5 +1,8 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[path = "support/sandbox_vector.rs"]
+mod sandbox_vector_support;
+
 use ciborium::value::Value;
 use pos_conformance::{
     AllowedDivergenceV1, ArtifactDescriptorV1, CapabilityPolicyV1, CaseOutcomeStatusV1,
@@ -14,23 +17,9 @@ use pos_conformance::{
     SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
     VerificationOutcomeV1, VerificationResultV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
+use sandbox_vector_support::verify_and_materialize_vector as verify_and_materialize_sandbox_vector;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-fn verify_and_materialize_sandbox_vector(name: &str, bytes: &[u8]) -> TestResult {
-    let filename = format!("{name}.cbor");
-    if let Some(root) = std::env::var_os("SANDBOX_PROVIDER_VECTOR_OUTPUT") {
-        std::fs::create_dir_all(&root)?;
-        std::fs::write(std::path::Path::new(&root).join(&filename), bytes)?;
-    }
-    let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("vectors/sandbox-provider-v1")
-        .join(filename);
-    if std::fs::read(&committed)? != bytes {
-        return Err(format!("committed vector {} has drifted", committed.display()).into());
-    }
-    Ok(())
-}
 
 pub mod fixtures {
     use super::*;
