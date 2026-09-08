@@ -368,7 +368,7 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pos_core::{CanonicalBytes, EntityId, Kind};
+    use pos_core::{CanonicalBytes, EntityId, EventStore, Kind};
     use pos_store::memory::MemoryStore;
 
     struct FailingInventoryV1;
