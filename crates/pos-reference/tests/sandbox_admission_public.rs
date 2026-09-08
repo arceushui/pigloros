@@ -1579,6 +1579,17 @@ fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult 
     )?;
     assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
 
+    let mut profile = HostCapabilityProfile::from_canonical_cbor(&fixture.hcp1)?;
+    profile.kernel_release.clear();
+    assert!(profile
+        .verify_signature(&fixture.authority.runtime.verifying_key())
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn conformance_report_rejects_closed_wire_and_verification_boundaries() -> TestResult {
+    let fixture = Fixture::new()?;
     for field in 2..=10 {
         let changed = resign_unsigned_field(
             &fixture.pcr1,
@@ -1623,11 +1634,6 @@ fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult 
         )?)
         .is_err()
     );
-    let mut profile = HostCapabilityProfile::from_canonical_cbor(&fixture.hcp1)?;
-    profile.kernel_release.clear();
-    assert!(profile
-        .verify_signature(&fixture.authority.runtime.verifying_key())
-        .is_err());
     let mut report = ProviderConformanceReport::from_canonical_cbor(&fixture.pcr1)?;
     report.pcf1_digest = [0; 32];
     assert!(report
@@ -1896,7 +1902,7 @@ fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
     assert!(admitted
         .authenticate_audit_chain(&audit, &receipt, &forged_result)
         .is_err());
-    let mut forged_audit = audit.clone();
+    let mut forged_audit = audit;
     forged_audit[0] = replace_signed_signature(&forged_audit[0], [9; 64])?;
     assert!(admitted
         .authenticate_audit_chain(&forged_audit, &receipt, &result)
