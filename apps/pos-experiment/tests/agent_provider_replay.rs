@@ -22,7 +22,7 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{ActionApprover, ActionRejected, Capability, Plugin, ProposedAction},
     store::EventStore,
-    ConsentAuthority, ConsentGrantedV1, CoreError, Timeline,
+    ConsentAuthority, ConsentGrantedV1, CoreError, ErasureContainmentGateV1, Timeline,
 };
 use pos_experiment::{
     BacktestConfig, BacktestRunner, Experiment, ExperimentConfig, ExperimentError,
@@ -55,6 +55,22 @@ const PROVIDER_VERSION: &str = "fixture-v1";
 const PLUGIN_HASH: [u8; 32] = [0x31; 32];
 const PROVIDER_HASH: [u8; 32] = [0x32; 32];
 const CONFIDENCE: u32 = 750_000;
+
+fn gated_experiment(config: ExperimentConfig) -> Experiment {
+    Experiment::new(config).with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
+fn gated_registry() -> PluginRegistry {
+    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
+fn gated_memory_store() -> MemoryStore {
+    let mut store = MemoryStore::new();
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok();
+    store
+}
 
 struct TickRecordingProvider {
     response: BoundedProviderBytes,
@@ -141,7 +157,7 @@ impl HostFixture {
             committed_tick: committed_tick.clone(),
         };
         let plugin = AgentPlugin::new();
-        let mut experiment = Experiment::new(ExperimentConfig {
+        let mut experiment = gated_experiment(ExperimentConfig {
             name: name.to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config,
@@ -212,7 +228,7 @@ impl HostFixture {
         let plugin = Arc::new(AgentPlugin::new());
         let child_plugin = Arc::clone(&plugin);
         let child_host = self.clone();
-        let mut experiment = Experiment::new(ExperimentConfig {
+        let mut experiment = gated_experiment(ExperimentConfig {
             name: name.to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config,
@@ -504,6 +520,10 @@ impl SharedMemoryAdapter {
 }
 
 impl EventStore for SharedMemoryAdapter {
+    fn bind_erasure_gate(&mut self, gate: Arc<dyn pos_core::ErasureGate>) -> Result<(), CoreError> {
+        self.store().bind_erasure_gate(gate)
+    }
+
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         self.store().create_timeline(name)
     }
@@ -628,7 +648,7 @@ fn assert_supplied_store_has_no_recovery_recipe(
 
 fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
     let plugin = AgentPlugin::new();
-    let mut experiment = Experiment::new(ExperimentConfig {
+    let mut experiment = gated_experiment(ExperimentConfig {
         name: name.to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config: StoreConfig::Memory,
@@ -652,7 +672,7 @@ fn backtest_runner_completes_both_empty_phases() {
             eval_ticks: 1,
             store_config: StoreConfig::Memory,
         },
-        PluginRegistry::new,
+        gated_registry,
     )
     .run()
     .test_ok();
@@ -690,7 +710,7 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
                 runner_host.provenance.clone(),
                 Box::new(provider),
             );
-            let mut registry = PluginRegistry::new();
+            let mut registry = gated_registry();
             registry
                 .register(
                     runner_plugin.as_ref(),
@@ -743,7 +763,7 @@ fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
                         ticks,
                     }),
                 );
-                let mut registry = PluginRegistry::new();
+                let mut registry = gated_registry();
                 registry
                     .register(
                         &AgentPlugin::new(),
@@ -808,7 +828,7 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
     };
 
     let protected_name = "public-branch-protected";
-    let mut protected_store = MemoryStore::new();
+    let mut protected_store = gated_memory_store();
     let protected_timeline = protected_store.create_timeline(protected_name).test_ok();
     protected_store
         .append(
@@ -821,7 +841,7 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
         )
         .test_ok();
     assert!(matches!(
-        Experiment::new(config(protected_name)).branch("protected-child", &mut protected_store),
+        gated_experiment(config(protected_name)).branch("protected-child", &mut protected_store),
         Err(ExperimentError::Runtime(
             RuntimeError::ConsentOperationUnavailable
         ))
@@ -829,9 +849,9 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
 
     let authority = ConsentAuthority::new();
     let protected_token = authority.record_grant_on_timeline(protected_timeline.id(), &grant(true));
-    let mut missing_timeline_store = MemoryStore::new();
+    let mut missing_timeline_store = gated_memory_store();
     assert!(matches!(
-        Experiment::new(config(protected_name)).branch_with_token(
+        gated_experiment(config(protected_name)).branch_with_token(
             "missing-child",
             &mut missing_timeline_store,
             &protected_token,
@@ -841,11 +861,11 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
     ));
 
     let no_gate_name = "public-branch-no-gate";
-    let mut no_gate_store = MemoryStore::new();
+    let mut no_gate_store = gated_memory_store();
     let no_gate_timeline = no_gate_store.create_timeline(no_gate_name).test_ok();
     let no_gate_token = authority.record_grant_on_timeline(no_gate_timeline.id(), &grant(true));
     assert!(matches!(
-        Experiment::new(config(no_gate_name))
+        gated_experiment(config(no_gate_name))
             .without_consent_gate()
             .branch_with_token("no-gate-child", &mut no_gate_store, &no_gate_token, 0),
         Err(ExperimentError::Runtime(
@@ -854,11 +874,11 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
     ));
 
     let denied_name = "public-branch-denied";
-    let mut denied_store = MemoryStore::new();
+    let mut denied_store = gated_memory_store();
     let denied_timeline = denied_store.create_timeline(denied_name).test_ok();
     let denied_token = authority.record_grant_on_timeline(denied_timeline.id(), &grant(false));
     assert!(matches!(
-        Experiment::new(config(denied_name)).branch_with_token(
+        gated_experiment(config(denied_name)).branch_with_token(
             "denied-child",
             &mut denied_store,
             &denied_token,
@@ -881,7 +901,7 @@ fn protected_result_export_and_faulted_projection_fail_closed() {
             .to_string_lossy()
             .into_owned(),
     };
-    let experiment = Experiment::new(ExperimentConfig {
+    let experiment = gated_experiment(ExperimentConfig {
         name: "protected-result-export".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config,
@@ -956,7 +976,7 @@ fn protected_result_export_succeeds_with_a_durable_authority() {
             .into_owned(),
     };
     let authority = ConsentAuthority::new();
-    let experiment = Experiment::new(ExperimentConfig {
+    let experiment = gated_experiment(ExperimentConfig {
         name: "protected-result-export-success".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config,
@@ -1033,7 +1053,7 @@ fn protected_session_fork_succeeds_from_a_durable_timeline() {
 #[test]
 fn public_branch_with_token_and_durable_session_boundaries_are_reachable() {
     let authority = ConsentAuthority::new();
-    let mut store = MemoryStore::new();
+    let mut store = gated_memory_store();
     let timeline = store.create_timeline("public-branch-success").test_ok();
     let token = authority.record_grant_on_timeline(
         timeline.id(),
@@ -1050,7 +1070,7 @@ fn public_branch_with_token_and_durable_session_boundaries_are_reachable() {
             grant_seq: 1,
         },
     );
-    let experiment = Experiment::new(ExperimentConfig {
+    let experiment = gated_experiment(ExperimentConfig {
         name: "public-branch-success".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config: StoreConfig::Memory,
@@ -1077,7 +1097,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
     };
     let authority = ConsentAuthority::new();
     let subject = EntityId::new();
-    let mut experiment = Experiment::new(ExperimentConfig {
+    let mut experiment = gated_experiment(ExperimentConfig {
         name: "durable-session-boundaries".to_owned(),
         stop: StopCondition::MaxTicks(3),
         store_config,
@@ -1156,7 +1176,7 @@ fn durable_backtest_builds_public_run_results() {
                     .into_owned(),
             },
         },
-        PluginRegistry::new,
+        gated_registry,
     )
     .run()
     .test_ok();
