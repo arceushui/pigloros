@@ -5196,7 +5196,9 @@ fn verify_contract_header(evidence: &MoatProofEvidenceV1) -> Result<(), Evidence
     verify_scenario_room_contract(&contract.scenario_room, &evidence.manifest)
 }
 
-fn verify_non_interference_contract(contract: &Wave8ProofContractV1) -> Result<(), EvidenceError> {
+const fn verify_non_interference_contract(
+    contract: &Wave8ProofContractV1,
+) -> Result<(), EvidenceError> {
     match contract.non_interference_status {
         NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable => {
             if !contract.non_interference.is_empty() {
@@ -5204,7 +5206,6 @@ fn verify_non_interference_contract(contract: &Wave8ProofContractV1) -> Result<(
             }
         }
         NonInterferenceExecutionStatusV1::Executed => {
-            verify_non_interference_matrix(&contract.non_interference)?;
             // This legacy envelope cannot bind the signed NIR1 report and NIA1 artifacts.
             // Executed evidence is admitted only through the dedicated signed verifier.
             return Err(EvidenceError::InvalidNonInterferenceMatrix);
@@ -5925,90 +5926,6 @@ fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> b
         && generation_valid
 }
 
-fn verify_non_interference_matrix(cases: &[NonInterferenceCaseV1]) -> Result<(), EvidenceError> {
-    if non_interference_matrix_matches(cases) {
-        Ok(())
-    } else {
-        Err(EvidenceError::InvalidNonInterferenceMatrix)
-    }
-}
-
-fn non_interference_matrix_matches(cases: &[NonInterferenceCaseV1]) -> bool {
-    let variants = [
-        NonInterferenceVariantV1::Success,
-        NonInterferenceVariantV1::Denial,
-        NonInterferenceVariantV1::WarmCache,
-        NonInterferenceVariantV1::ColdCache,
-    ];
-    let modes = [
-        ExecutionModeV1::Local,
-        ExecutionModeV1::AirGapped,
-        ExecutionModeV1::Replay,
-        ExecutionModeV1::Fork,
-    ];
-    let mut expected = Vec::with_capacity(NON_INTERFERENCE_CASE_COUNT_V1);
-    for fixture_id in NON_INTERFERENCE_FIXTURE_IDS_V1 {
-        for variant in variants {
-            for mode in modes {
-                expected.push((fixture_id, variant, mode));
-            }
-        }
-    }
-    cases.len() == expected.len()
-        && cases
-            .iter()
-            .zip(expected.iter())
-            .all(|(case, expected)| non_interference_case_matches(case, expected))
-        && cases.chunks_exact(16).all(|variants| {
-            variants.chunks_exact(4).all(|modes| {
-                modes
-                    .iter()
-                    .skip(1)
-                    .all(|case| non_interference_mode_matches_local(case, &modes[0]))
-            })
-        })
-}
-
-fn non_interference_case_matches(
-    case: &NonInterferenceCaseV1,
-    expected: &(&str, NonInterferenceVariantV1, ExecutionModeV1),
-) -> bool {
-    case.fixture_id == expected.0
-        && case.variant == expected.1
-        && case.mode == expected.2
-        && case.fixture_digest != [0; 32]
-        && case.control_input_digest != [0; 32]
-        && case.canary_input_digest != [0; 32]
-        && case.control_input_digest != case.canary_input_digest
-        && case.authoritative_digest != [0; 32]
-        && case.canary_authoritative_digest != [0; 32]
-        && case.public_digest != [0; 32]
-        && case.canary_public_digest != [0; 32]
-        && case.operational_digest != [0; 32]
-        && case.canary_operational_digest != [0; 32]
-        && case.authoritative_equal
-        && case.public_equal
-        && case.operational_equal
-        && case.authoritative_digest == case.canary_authoritative_digest
-        && case.public_digest == case.canary_public_digest
-        && case.operational_digest == case.canary_operational_digest
-        && case.first_divergence.is_none()
-        && case.first_cross_mode_divergence.is_none()
-        && case.provenance_digest != [0; 32]
-}
-
-fn non_interference_mode_matches_local(
-    case: &NonInterferenceCaseV1,
-    local: &NonInterferenceCaseV1,
-) -> bool {
-    case.fixture_digest == local.fixture_digest
-        && case.control_input_digest == local.control_input_digest
-        && case.canary_input_digest == local.canary_input_digest
-        && case.authoritative_digest == local.authoritative_digest
-        && case.public_digest == local.public_digest
-        && case.operational_digest == local.operational_digest
-}
-
 fn verify_participant_views(
     views: &[ParticipantViewV1],
     authoritative_events: &[AuthoritativeEventV1],
@@ -6335,88 +6252,6 @@ pub mod tests {
     use super::*;
 
     type EvidenceMutation = Box<dyn Fn(&mut MoatProofEvidenceV1)>;
-
-    fn executed_non_interference_matrix() -> Vec<NonInterferenceCaseV1> {
-        execute_wave8_non_interference_matrix([1; 32], |run| {
-            let Some(profile) = non_interference_capture_profiles_v1()
-                .into_iter()
-                .find(|profile| profile.fixture_id == run.subject.fixture_id)
-            else {
-                return Err(NonInterferenceExecutionErrorV1::CaptureUnavailable);
-            };
-            let operational = profile
-                .surface_normalizations
-                .iter()
-                .copied()
-                .map(test_raw_operational)
-                .collect();
-            normalize_non_interference_capture_v1(
-                run.subject.fixture_id,
-                NonInterferenceRawCaptureV1 {
-                    surface_names: profile.surface_names.clone(),
-                    authoritative: profile
-                        .surface_names
-                        .iter()
-                        .map(|_| run.subject.permitted_input.to_vec())
-                        .collect(),
-                    public: profile
-                        .surface_names
-                        .iter()
-                        .map(|_| b"public".to_vec())
-                        .collect(),
-                    operational,
-                    unexpected_network_accesses: 0,
-                    provenance_digest: [8; 32],
-                },
-            )
-        })
-        .unwrap_or_default()
-    }
-
-    fn test_raw_operational(
-        normalization: NonInterferenceNormalizationV1,
-    ) -> NonInterferenceRawOperationalV1 {
-        match normalization {
-            NonInterferenceNormalizationV1::CategoryCountDigest => {
-                NonInterferenceRawOperationalV1::CategoryCountDigest {
-                    category: 1,
-                    count: 1,
-                    digest: [7; 32],
-                    excluded_sensitive: Vec::new(),
-                }
-            }
-            NonInterferenceNormalizationV1::CountClass => {
-                NonInterferenceRawOperationalV1::CountClass {
-                    class: 1,
-                    count: 1,
-                    excluded_sensitive: Vec::new(),
-                }
-            }
-            NonInterferenceNormalizationV1::CategoryCount => {
-                NonInterferenceRawOperationalV1::CategoryCount {
-                    category: 1,
-                    count: 1,
-                    excluded_sensitive: Vec::new(),
-                }
-            }
-            NonInterferenceNormalizationV1::CategoryCountPaddedLength => {
-                NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
-                    category: 1,
-                    count: 1,
-                    padded_length: 64,
-                    excluded_sensitive: Vec::new(),
-                }
-            }
-            NonInterferenceNormalizationV1::OmitOperational => {
-                NonInterferenceRawOperationalV1::OmitOperational {
-                    excluded_sensitive: Vec::new(),
-                }
-            }
-            NonInterferenceNormalizationV1::ByteExact => {
-                NonInterferenceRawOperationalV1::ByteExact(b"operational".to_vec())
-            }
-        }
-    }
 
     pub(crate) fn input() -> MoatProofInputV1 {
         MoatProofInputV1 {
@@ -8033,91 +7868,6 @@ pub mod tests {
                     causation_seq: None,
                 };
                 let _ = contract_event_node(&event);
-            }
-
-            let matrix_mutations: Vec<EvidenceMutation> = vec![
-                Box::new(|value| value.contract.non_interference.clear()),
-                Box::new(|value| value.contract.non_interference[0].fixture_id.clear()),
-                Box::new(|value| {
-                    value.contract.non_interference[0].variant = NonInterferenceVariantV1::Denial;
-                }),
-                Box::new(|value| {
-                    value.contract.non_interference[0].mode = ExecutionModeV1::AirGapped
-                }),
-                Box::new(|value| value.contract.non_interference[0].fixture_digest = [0; 32]),
-                Box::new(|value| value.contract.non_interference[1].fixture_digest = [99; 32]),
-                Box::new(|value| value.contract.non_interference[0].control_input_digest = [0; 32]),
-                Box::new(|value| value.contract.non_interference[0].canary_input_digest = [0; 32]),
-                Box::new(|value| {
-                    value.contract.non_interference[0].canary_input_digest =
-                        value.contract.non_interference[0].control_input_digest;
-                }),
-                Box::new(|value| value.contract.non_interference[0].authoritative_digest = [0; 32]),
-                Box::new(|value| {
-                    value.contract.non_interference[0].canary_authoritative_digest = [0; 32];
-                }),
-                Box::new(|value| value.contract.non_interference[0].public_digest = [0; 32]),
-                Box::new(|value| {
-                    value.contract.non_interference[0].canary_public_digest = [0; 32];
-                }),
-                Box::new(|value| value.contract.non_interference[0].operational_digest = [0; 32]),
-                Box::new(|value| {
-                    value.contract.non_interference[0].canary_operational_digest = [0; 32];
-                }),
-                Box::new(|value| {
-                    value.contract.non_interference[0].canary_authoritative_digest = [99; 32];
-                }),
-                Box::new(|value| {
-                    value.contract.non_interference[0].canary_public_digest = [99; 32];
-                }),
-                Box::new(|value| {
-                    value.contract.non_interference[0].canary_operational_digest = [99; 32];
-                }),
-                Box::new(|value| value.contract.non_interference[0].authoritative_equal = false),
-                Box::new(|value| value.contract.non_interference[0].public_equal = false),
-                Box::new(|value| value.contract.non_interference[0].operational_equal = false),
-                Box::new(|value| {
-                    value.contract.non_interference[0].first_divergence =
-                        Some(NonInterferenceDivergenceCoordinateV1 {
-                            fixture_id: "NI-TOOL-001".to_owned(),
-                            variant: NonInterferenceVariantV1::Success,
-                            mode: ExecutionModeV1::Local,
-                            surface_ordinal: 0,
-                            byte_offset: 0,
-                        });
-                }),
-                Box::new(|value| {
-                    value.contract.non_interference[0].first_cross_mode_divergence =
-                        Some(NonInterferenceDivergenceCoordinateV1 {
-                            fixture_id: "NI-TOOL-001".to_owned(),
-                            variant: NonInterferenceVariantV1::Success,
-                            mode: ExecutionModeV1::AirGapped,
-                            surface_ordinal: 0,
-                            byte_offset: 0,
-                        });
-                }),
-                Box::new(|value| {
-                    value.contract.non_interference[1].authoritative_digest = [99; 32];
-                    value.contract.non_interference[1].canary_authoritative_digest = [99; 32];
-                }),
-                Box::new(|value| {
-                    value.contract.non_interference[1].control_input_digest = [98; 32];
-                }),
-                Box::new(|value| {
-                    value.contract.non_interference[1].canary_input_digest = [97; 32];
-                }),
-                Box::new(|value| value.contract.non_interference[0].provenance_digest = [0; 32]),
-            ];
-            let mut executed = value.clone();
-            executed.contract.non_interference_status = NonInterferenceExecutionStatusV1::Executed;
-            executed.contract.non_interference = executed_non_interference_matrix();
-            for mutate in matrix_mutations {
-                let mut invalid = executed.clone();
-                mutate(&mut invalid);
-                assert_eq!(
-                    verify_wave8_contract(&invalid),
-                    Err(EvidenceError::InvalidNonInterferenceMatrix)
-                );
             }
 
             let room_mutations: Vec<EvidenceMutation> = vec![
