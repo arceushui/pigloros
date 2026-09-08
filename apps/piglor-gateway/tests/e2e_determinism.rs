@@ -9,8 +9,8 @@ use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Hash, Plugin, PluginId,
-    PrincipalRefV1, Seq, TimelineId, WallTime,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1,
+    EventStore, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -634,6 +634,9 @@ async fn run_tick_boundaries(
         path: scenario.path.clone(),
     })
     .test_ok()?;
+    pending_store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok()?;
     let pending = pending_store
         .append(
             scenario.timeline,
@@ -861,6 +864,10 @@ fn assert_replay(
         path: scenario.path.clone(),
     })
     .test_ok()?;
+    let mut first_store = first_store;
+    first_store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok()?;
     let stored = first_store
         .read(scenario.timeline, SeqRange::all())
         .test_ok()?;
@@ -886,6 +893,10 @@ fn assert_replay(
         path: scenario.path.clone(),
     })
     .test_ok()?;
+    let mut second_store = second_store;
+    second_store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok()?;
     let mut second_replay = replay_registry();
     pos_time::replay(
         second_store.as_ref(),
@@ -1008,8 +1019,10 @@ async fn gateway_reloads_durable_consent_before_revocation(
 #[tokio::test]
 async fn gateway_rejects_geo_admission_after_consent_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let gateway =
-        Gateway::new_with_geo_location_admission(pos_store::memory::MemoryStore::default());
+    let gateway = Gateway::new_with_geo_location_admission_and_erasure_gate(
+        pos_store::memory::MemoryStore::default(),
+        Arc::new(ErasureContainmentGateV1::new()),
+    )?;
     let timeline = gateway
         .create_timeline("geo-revocation-fence")
         .await
