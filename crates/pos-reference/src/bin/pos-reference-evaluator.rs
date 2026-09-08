@@ -115,8 +115,7 @@ fn run() -> Result<(), CommandError> {
         EvaluatorBuildIdentityError::Invalid => CommandError::Identity,
     })?;
     let archive_bytes = read_bounded_file(&mut archive, MAX_ARCHIVE_BYTES)?;
-    let mut adapter =
-        SelectorAdapter::new(request.subject_adapter, request.subject_artifact_digest);
+    let mut adapter = SelectorAdapter::new(&request, &request_bytes);
     evaluate(
         &request_bytes,
         &archive_bytes,
