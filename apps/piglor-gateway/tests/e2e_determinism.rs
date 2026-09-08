@@ -641,10 +641,12 @@ async fn run_tick_boundaries(
     let mut pending_store = open_store(StoreConfig::Sqlite {
         path: scenario.path.clone(),
     })
-    .test_ok()?;
+    .test_ok()
+    .map_err(|error| std::io::Error::other(format!("open pending store: {error}")))?;
     pending_store
         .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
-        .test_ok()?;
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("bind pending gate: {error}")))?;
     let pending = pending_store
         .append(
             scenario.timeline,
@@ -659,12 +661,16 @@ async fn run_tick_boundaries(
             )
             .with_wall_time(pinned_wall_time)],
         )
-        .test_ok()?;
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("append pending signal: {error}")))?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].seq.as_u64(), 2);
     drop(pending_store);
     assert_eq!(
-        session.step_cadenced(0).test_ok()?,
+        session
+            .step_cadenced(0)
+            .test_ok()
+            .map_err(|error| std::io::Error::other(format!("first tick: {error}")))?,
         TickOutcome::Advanced {
             folded_events: 3,
             emitted_events: 2,
@@ -677,8 +683,9 @@ async fn run_tick_boundaries(
     let ready_rx = scenario.ready_rx.take().test_ok()?;
     tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(5)).test_ok())
         .await
-        .test_ok()?
-        .test_ok()?;
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("readiness join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("readiness receive: {error}")))?;
     let human = request_http(
         scenario.address,
         "POST",
@@ -698,19 +705,28 @@ async fn run_tick_boundaries(
             },
         })),
     )
-    .await?;
+    .await
+    .map_err(|error| std::io::Error::other(format!("human action request: {error}")))?;
     assert_eq!(human.status, 201);
     scenario.guard.release_policy();
-    let (mut session, boundary_at_100_ms) = session_task.await.test_ok()?;
+    let (mut session, boundary_at_100_ms) = session_task
+        .await
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("second tick join: {error}")))?;
     assert_eq!(
-        boundary_at_100_ms.test_ok()?,
+        boundary_at_100_ms
+            .test_ok()
+            .map_err(|error| std::io::Error::other(format!("second tick: {error}")))?,
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 1,
         }
     );
     assert_eq!(
-        session.step_cadenced(200_000_000).test_ok()?,
+        session
+            .step_cadenced(200_000_000)
+            .test_ok()
+            .map_err(|error| std::io::Error::other(format!("third tick: {error}")))?,
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 2,
