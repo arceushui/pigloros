@@ -46,11 +46,12 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
-    ErasureErrorV1, ErasureGate, ErasureIndexInsertV1, ErasurePersistencePortV1,
-    ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureGate, ErasureIndexInsertV1,
+    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
+    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -142,6 +143,9 @@ pub struct SqliteStore {
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
     erasure_gate: Option<Arc<dyn ErasureGate>>,
+    /// Whether the current gate was supplied by the host. The constructor's
+    /// local gate is replaceable exactly once by the composition root.
+    erasure_gate_bound: bool,
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     #[cfg(test)]
     destruction_transaction_hook:
@@ -407,6 +411,15 @@ fn normalize_schema_sql(sql: &str) -> String {
 }
 
 impl SqliteStore {
+    /// Remove the containment gate. Protected operations then fail closed until
+    /// a host binds its authoritative gate.
+    #[must_use]
+    pub fn without_erasure_gate(mut self) -> Self {
+        self.erasure_gate = None;
+        self.erasure_gate_bound = false;
+        self
+    }
+
     fn configure_busy_timeout(conn: &Connection) -> rusqlite::Result<()> {
         #[cfg(test)]
         if FAIL_BUSY_TIMEOUT.with(std::cell::Cell::get) {
@@ -651,7 +664,8 @@ impl SqliteStore {
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
-            erasure_gate: None,
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new())),
+            erasure_gate_bound: false,
             authority_persistence_binding: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
@@ -2144,7 +2158,7 @@ impl SqliteStore {
         mut effect: impl FnMut(&mut Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
         let Some(gate) = self.erasure_gate.clone() else {
-            return effect(self);
+            return Err(CoreError::ErasureContainmentUnavailable);
         };
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
@@ -2164,7 +2178,7 @@ impl SqliteStore {
         mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
         let Some(gate) = self.erasure_gate.clone() else {
-            return effect(self);
+            return Err(CoreError::ErasureContainmentUnavailable);
         };
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
@@ -2184,7 +2198,7 @@ impl SqliteStore {
         mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
     ) -> Result<Option<T>, CoreError> {
         let Some(gate) = self.erasure_gate.clone() else {
-            return effect(self).map(Some);
+            return Err(CoreError::ErasureContainmentUnavailable);
         };
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
@@ -3460,12 +3474,13 @@ impl SqliteStore {
 
 impl EventStore for SqliteStore {
     fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
-        if self.erasure_gate.is_some() {
+        if self.erasure_gate_bound {
             return Err(CoreError::Storage(
                 "erasure containment gate is already bound".to_owned(),
             ));
         }
         self.erasure_gate = Some(gate);
+        self.erasure_gate_bound = true;
         Ok(())
     }
 

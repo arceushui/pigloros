@@ -135,6 +135,39 @@ fn assert_listing_filters_frozen_scope<S: EventStore>(
     Ok(())
 }
 
+fn assert_unbound_fails_closed<S: EventStore>(
+    mut store: S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let timeline = store.create_timeline("unbound")?;
+    let expected = Some("erasure containment boundary is unavailable".to_owned());
+    assert_eq!(
+        store
+            .append(timeline.id(), &[draft()])
+            .err()
+            .map(|error| error.to_string()),
+        expected
+    );
+    assert_eq!(
+        store
+            .read(timeline.id(), SeqRange::all())
+            .err()
+            .map(|error| error.to_string()),
+        expected
+    );
+    assert_eq!(
+        store.list_timelines().err().map(|error| error.to_string()),
+        expected
+    );
+    assert_eq!(
+        store
+            .root_timeline_count_bounded(usize::MAX)
+            .err()
+            .map(|error| error.to_string()),
+        expected
+    );
+    Ok(())
+}
+
 #[test]
 fn memory_store_fails_closed_for_unavailable_erasure_boundary(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -157,4 +190,14 @@ fn memory_store_filters_frozen_scopes_from_listing_and_count(
 fn sqlite_store_filters_frozen_scopes_from_listing_and_count(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_listing_filters_frozen_scope(SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn memory_store_without_erasure_gate_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    assert_unbound_fails_closed(MemoryStore::new().without_erasure_gate())
+}
+
+#[test]
+fn sqlite_store_without_erasure_gate_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    assert_unbound_fails_closed(SqliteStore::open_in_memory()?.without_erasure_gate())
 }

@@ -46,11 +46,11 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureErrorV1, ErasureGate, ErasureIndexInsertV1, ErasurePersistedStateV1,
-    ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
-    ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1, PersistedAuthorityV1,
-    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureGate, ErasureIndexInsertV1,
+    ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
+    ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -158,6 +158,9 @@ pub struct MemoryStore {
     consent_authority_permit: Option<ConsentAppendPermit>,
     /// Host-owned erasure containment gate for protected Timeline operations.
     erasure_gate: Option<Arc<dyn ErasureGate>>,
+    /// Whether the current gate was supplied by the host. The constructor's
+    /// local gate is replaceable exactly once by the composition root.
+    erasure_gate_bound: bool,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
@@ -450,6 +453,15 @@ impl MemoryStore {
         Self::default()
     }
 
+    /// Remove the containment gate. Protected operations then fail closed until
+    /// a host binds its authoritative gate.
+    #[must_use]
+    pub fn without_erasure_gate(mut self) -> Self {
+        self.erasure_gate = None;
+        self.erasure_gate_bound = false;
+        self
+    }
+
     #[must_use]
     fn with_default_components(hasher: Box<dyn Hasher>) -> Self {
         Self {
@@ -468,7 +480,8 @@ impl MemoryStore {
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
             consent_authority_permit: None,
-            erasure_gate: None,
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new())),
+            erasure_gate_bound: false,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
             authority_persistence_binding: None,
@@ -1091,7 +1104,7 @@ impl MemoryStore {
         mut effect: impl FnMut(&mut Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
         let Some(gate) = self.erasure_gate.clone() else {
-            return effect(self);
+            return Err(CoreError::ErasureContainmentUnavailable);
         };
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
@@ -1111,7 +1124,7 @@ impl MemoryStore {
         mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
         let Some(gate) = self.erasure_gate.clone() else {
-            return effect(self);
+            return Err(CoreError::ErasureContainmentUnavailable);
         };
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
@@ -1131,7 +1144,7 @@ impl MemoryStore {
         mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
     ) -> Result<Option<T>, CoreError> {
         let Some(gate) = self.erasure_gate.clone() else {
-            return effect(self).map(Some);
+            return Err(CoreError::ErasureContainmentUnavailable);
         };
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
@@ -2381,12 +2394,13 @@ impl MemoryStore {
 
 impl EventStore for MemoryStore {
     fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
-        if self.erasure_gate.is_some() {
+        if self.erasure_gate_bound {
             return Err(CoreError::Storage(
                 "erasure containment gate is already bound".to_owned(),
             ));
         }
         self.erasure_gate = Some(gate);
+        self.erasure_gate_bound = true;
         Ok(())
     }
 
