@@ -696,6 +696,18 @@ pub enum SandboxProviderErrorCode {
 }
 
 impl SandboxProviderErrorCode {
+    const fn requires_authenticated_request(self) -> bool {
+        !matches!(
+            self,
+            Self::InvalidEncoding
+                | Self::UnsupportedVersion
+                | Self::FieldOutOfBounds
+                | Self::NonCanonicalOrder
+                | Self::DigestMismatch
+                | Self::SignatureInvalid
+        )
+    }
+
     const fn code(self) -> u64 {
         match self {
             Self::InvalidEncoding => 0,
@@ -813,6 +825,22 @@ impl SandboxProviderError {
                 && (self.operation.is_none() || self.request_id.is_none()))
         {
             return Err(SandboxProviderProtocolError::InconsistentFields);
+        }
+        if self.code.requires_authenticated_request() {
+            let Some(operation) = self.operation else {
+                return Err(SandboxProviderProtocolError::InconsistentFields);
+            };
+            let attempt_identity_matches_operation = if operation == 0 {
+                self.attempt_id.is_none()
+            } else {
+                self.attempt_id.is_some()
+            };
+            if self.request_id.is_none()
+                || self.request_digest.is_none()
+                || !attempt_identity_matches_operation
+            {
+                return Err(SandboxProviderProtocolError::InconsistentFields);
+            }
         }
         if self.code == SandboxProviderErrorCode::PayloadTransferTimeout
             && (self.operation != Some(1)

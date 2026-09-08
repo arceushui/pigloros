@@ -1311,6 +1311,65 @@ fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestR
     independent::SandboxProviderError::from_canonical_cbor(&bytes)?
         .verify_signature(&key.verifying_key())?;
 
+    for code in [
+        SandboxProviderErrorCodeV1::TrustRevoked,
+        SandboxProviderErrorCodeV1::AuthorityMismatch,
+        SandboxProviderErrorCodeV1::ProviderCapabilityMissing,
+        SandboxProviderErrorCodeV1::ImageIdentityMismatch,
+        SandboxProviderErrorCodeV1::SelfTestFailed,
+        SandboxProviderErrorCodeV1::SandboxUnavailable,
+        SandboxProviderErrorCodeV1::AdmissionBusy,
+        SandboxProviderErrorCodeV1::AuditUnavailable,
+        SandboxProviderErrorCodeV1::CleanupFailed,
+        SandboxProviderErrorCodeV1::UnknownAttempt,
+        SandboxProviderErrorCodeV1::RequestIdentityConflict,
+        SandboxProviderErrorCodeV1::AttemptInProgress,
+        SandboxProviderErrorCodeV1::PayloadTransferTimeout,
+    ] {
+        let signed = error_for_code(code).sign(&key)?;
+        let mut independently_decoded =
+            independent::SandboxProviderError::from_canonical_cbor(&signed.to_canonical_cbor()?)?;
+        independently_decoded.operation = None;
+        independently_decoded.request_id = None;
+        independently_decoded.request_digest = None;
+        independently_decoded.attempt_id = None;
+        assert_eq!(
+            independently_decoded.verify_signature(&key.verifying_key()),
+            Err(independent::SandboxProviderProtocolError::InconsistentFields)
+        );
+
+        let mut anonymous = error_for_code(code);
+        anonymous.operation = None;
+        anonymous.request_id = None;
+        anonymous.request_digest = None;
+        anonymous.attempt_id = None;
+        assert_eq!(
+            anonymous.sign(&key),
+            Err(SandboxContractErrorV1::InconsistentFields)
+        );
+    }
+
+    let mut describe_error = error_for_code(SandboxProviderErrorCodeV1::TrustRevoked);
+    describe_error.operation = Some(0);
+    describe_error.attempt_id = None;
+    let describe_error = describe_error.sign(&key)?;
+    let describe_bytes = describe_error.to_canonical_cbor()?;
+    let mut independently_decoded_describe =
+        independent::SandboxProviderError::from_canonical_cbor(&describe_bytes)?;
+    independently_decoded_describe.verify_signature(&key.verifying_key())?;
+    independently_decoded_describe.attempt_id = Some([3; 16]);
+    assert_eq!(
+        independently_decoded_describe.verify_signature(&key.verifying_key()),
+        Err(independent::SandboxProviderProtocolError::InconsistentFields)
+    );
+
+    let mut impossible_describe_attempt = describe_error;
+    impossible_describe_attempt.attempt_id = Some([3; 16]);
+    assert_eq!(
+        impossible_describe_attempt.sign(&key),
+        Err(SandboxContractErrorV1::InconsistentFields)
+    );
+
     let mut nul_detail = error_for_code(SandboxProviderErrorCodeV1::InvalidEncoding);
     nul_detail.safe_detail = Some("unsafe\0detail".to_owned());
     assert_eq!(

@@ -1356,6 +1356,18 @@ fn nonzero_optional(value: Option<[u8; 32]>) -> bool {
 }
 
 impl SandboxProviderErrorCodeV1 {
+    const fn requires_authenticated_request(self) -> bool {
+        !matches!(
+            self,
+            Self::InvalidEncoding
+                | Self::UnsupportedVersion
+                | Self::FieldOutOfBounds
+                | Self::NonCanonicalOrder
+                | Self::DigestMismatch
+                | Self::SignatureInvalid
+        )
+    }
+
     const fn code(self) -> u64 {
         match self {
             Self::InvalidEncoding => 0,
@@ -1496,6 +1508,22 @@ impl SandboxProviderErrorV1 {
                 && (self.operation.is_none() || self.request_id.is_none()))
         {
             return Err(SandboxContractErrorV1::InconsistentFields);
+        }
+        if self.code.requires_authenticated_request() {
+            let Some(operation) = self.operation else {
+                return Err(SandboxContractErrorV1::InconsistentFields);
+            };
+            let attempt_identity_matches_operation = if operation == 0 {
+                self.attempt_id.is_none()
+            } else {
+                self.attempt_id.is_some()
+            };
+            if self.request_id.is_none()
+                || self.request_digest.is_none()
+                || !attempt_identity_matches_operation
+            {
+                return Err(SandboxContractErrorV1::InconsistentFields);
+            }
         }
         if self.code == SandboxProviderErrorCodeV1::PayloadTransferTimeout
             && (self.operation != Some(1)
