@@ -736,6 +736,74 @@ mod tests {
     }
 
     #[test]
+    fn every_host_sender_rejects_a_stale_generation_before_adapter_access() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let root = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("stale-sender-root"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let batch = empty_fork_batch(
+            root.id(),
+            TimelineId::new(),
+            ErasureReferenceV1::from_digest([31; 32]),
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let stale = ErasureReferenceV1::from_digest([32; 32]);
+
+        let mut sender = host
+            .command_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        sender.generation = stale;
+        assert_eq!(
+            sender.create_timeline("stale"),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.fork_timeline(root.id(), Seq::ZERO, "stale"),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.commit_fork_admission(batch),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.recover_fork_admission(ErasureReferenceV1::from_digest([33; 32])),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.append(root.id(), &[]),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        drop(sender);
+
+        let mut reader = host
+            .read_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        reader.generation = stale;
+        assert_eq!(
+            reader.read_bounded(root.id(), SeqRange::all(), EventReadBounds::new(1, 1, 1, 1),),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            reader.timeline(root.id()),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(reader.timelines(), Err(ErasureHostErrorV1::StaleGeneration));
+        assert_eq!(
+            reader.root_timeline_count_bounded(1),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            reader.logical_head(root.id()),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+
+    #[test]
     fn active_requests_cannot_use_the_empty_topology_path() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
