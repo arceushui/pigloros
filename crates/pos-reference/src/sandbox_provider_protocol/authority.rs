@@ -25,14 +25,14 @@ pub enum SandboxArchitecture {
 }
 
 impl SandboxArchitecture {
-    const fn code(self) -> u64 {
+    pub(super) const fn code(self) -> u64 {
         match self {
             Self::X86_64 => 0,
             Self::Aarch64 => 1,
         }
     }
 
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+    pub(super) const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
             0 => Ok(Self::X86_64),
             1 => Ok(Self::Aarch64),
