@@ -157,63 +157,36 @@ mod tests {
     #[test]
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn binary_context_store_subcommands() -> Result<(), Box<dyn std::error::Error>> {
+    fn binary_store_fails_closed_without_host_gate() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         let store_db = tmp.path().join("store.db");
 
         bin_keygen(&key_path)?;
-        bin_predict_store(&store_db, &key_path)?;
-
-        let store_manifest = tmp.path().join("store_manifest.json");
-        run(&[
+        let error = run(&[
             "piglor-ledger".into(),
-            "export".into(),
+            "predict".into(),
             "--source".into(),
             format!("store:{}", store_db.display()),
-            "--out".into(),
-            store_manifest.to_str().test_ok()?.to_owned(),
+            "--key".into(),
+            key_path.to_str().test_ok()?.to_owned(),
+            "--title".into(),
+            "T".into(),
+            "--statement".into(),
+            "S".into(),
+            "--predicted-outcome".into(),
+            "O".into(),
+            "--confidence".into(),
+            "0.7".into(),
+            "--made-at".into(),
+            "2026-07-25T12:00:00Z".into(),
+            "--resolve-by".into(),
+            "2026-08-01".into(),
+            "--osf".into(),
+            "https://osf.io/x".into(),
         ])
-        .test_ok()?;
-
-        let pubkey_hex = derive_pubkey_hex(&key_path)?;
-        let trust_anchor = format!("piglor-ledger/2/1={pubkey_hex}");
-        run(&[
-            "piglor-ledger".into(),
-            "verify".into(),
-            "--source".into(),
-            format!("store:{}", store_db.display()),
-            "--pubkey".into(),
-            trust_anchor,
-        ])
-        .test_ok()?;
-
-        // Also exercise build and export-with-pubkey on the store tier.
-        let site = tmp.path().join("site-store");
-        run(&[
-            "piglor-ledger".into(),
-            "build".into(),
-            "--source".into(),
-            format!("store:{}", store_db.display()),
-            "--site".into(),
-            site.to_str().test_ok()?.to_owned(),
-            "--today".into(),
-            "2026-07-25".into(),
-        ])
-        .test_ok()?;
-        // Export with --pubkey exercises the pubkey field in ExportManifest::Store.
-        let manifest2 = tmp.path().join("manifest2.json");
-        run(&[
-            "piglor-ledger".into(),
-            "export".into(),
-            "--source".into(),
-            format!("store:{}", store_db.display()),
-            "--pubkey".into(),
-            pubkey_hex,
-            "--out".into(),
-            manifest2.to_str().test_ok()?.to_owned(),
-        ])
-        .test_ok()?;
+        .test_err()?;
+        assert!(error.to_string().contains("erasure containment boundary"));
 
         Ok(())
     }
@@ -358,37 +331,6 @@ mod tests {
         Ok(())
     }
 
-    fn bin_predict_store(
-        db: &std::path::Path,
-        key_path: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        run(&[
-            "piglor-ledger".into(),
-            "predict".into(),
-            "--source".into(),
-            format!("store:{}", db.display()),
-            "--key".into(),
-            key_path.to_str().test_ok()?.to_owned(),
-            "--title".into(),
-            "T".into(),
-            "--statement".into(),
-            "S".into(),
-            "--predicted-outcome".into(),
-            "O".into(),
-            "--confidence".into(),
-            "0.7".into(),
-            "--made-at".into(),
-            "2026-07-25T12:00:00Z".into(),
-            "--resolve-by".into(),
-            "2026-08-01".into(),
-            "--osf".into(),
-            "https://osf.io/x".into(),
-        ])
-        .test_ok()?;
-
-        Ok(())
-    }
-
     fn bin_resolve_toml(
         dir: &std::path::Path,
         id: &str,
@@ -409,11 +351,6 @@ mod tests {
         .test_ok()?;
 
         Ok(())
-    }
-
-    fn derive_pubkey_hex(key_path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
-        let sk_text = std::fs::read_to_string(key_path).test_ok()?;
-        Ok(piglor_ledger::test_helpers::derive_pubkey_hex(&sk_text))
     }
 
     #[test]
