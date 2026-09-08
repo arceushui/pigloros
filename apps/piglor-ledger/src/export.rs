@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use pos_core::store::{EventStore, SeqRange};
+use pos_core::store::SeqRange;
 use pos_plugin_ledger::{LedgerStore, LedgerView};
 use serde::{Deserialize, Serialize};
 
@@ -132,14 +132,17 @@ fn collect_toml_hashes(dir: &Path) -> Vec<FileHash> {
 
 /// Build a manifest for the store tier.
 fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportManifest, CliError> {
-    let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+    let store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: db.to_string_lossy().into_owned(),
     })
     .map_err(|e| CliError::BadSource(e.to_string()))?;
     #[cfg(test)]
-    drop(store.bind_erasure_gate(std::sync::Arc::new(
+    let mut store = store;
+    #[cfg(test)]
+    drop(pos_core::store::EventStore::bind_erasure_gate(
+        store.as_mut(),
         pos_core::ErasureContainmentGateV1::new(),
-    )));
+    ));
     let timeline = store
         .list_timelines()?
         .into_iter()
