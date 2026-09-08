@@ -44,6 +44,7 @@ fn test_err<T: Debug, E>(result: Result<T, E>) -> E {
 struct PluginRegistry(RuntimePluginRegistry);
 
 impl PluginRegistry {
+    #[allow(clippy::new_ret_no_self)]
     fn new() -> RuntimePluginRegistry {
         RuntimePluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
     }
