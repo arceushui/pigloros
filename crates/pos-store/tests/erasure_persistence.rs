@@ -643,7 +643,10 @@ where
 
 fn assert_overlapping_fork_batch<S>(mut store: S) -> Result<(), Box<dyn std::error::Error>>
 where
-    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
 {
     store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
     let parent = store.create_timeline("overlap-parent")?.id();
