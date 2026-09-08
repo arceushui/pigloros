@@ -532,10 +532,16 @@ mod tests {
             open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
         std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o500))?;
+        assert_eq!(
+            open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o700))?;
         let digest_path = authority.join(digest_name([1; 32]));
         std::fs::create_dir(&digest_path)?;
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o500))?;
         assert_eq!(
             open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
             Err(SelectorBoundaryError::ArtifactInvalid)

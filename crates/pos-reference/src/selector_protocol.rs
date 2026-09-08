@@ -867,7 +867,7 @@ mod tests {
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(
-            decode_reply(&control, &trailing, &encoded, [14; 32], 1),
+            decode_reply(&control, &trailing, &encoded, [14; 32], 0),
             Err(AdapterError::ProtocolFailure)
         );
         let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
