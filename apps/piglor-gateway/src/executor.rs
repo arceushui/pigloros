@@ -2225,6 +2225,13 @@ mod tests {
     }
 
     impl EventStore for BlockingRootCountStore {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<dyn pos_core::ErasureGate>,
+        ) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
         }
@@ -2291,6 +2298,13 @@ mod tests {
     }
 
     impl EventStore for BlockingCreateStore {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<dyn pos_core::ErasureGate>,
+        ) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             if self
                 .create_calls
@@ -2346,6 +2360,13 @@ mod tests {
     }
 
     impl EventStore for OrderedStore {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<dyn pos_core::ErasureGate>,
+        ) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.operations
                 .lock()

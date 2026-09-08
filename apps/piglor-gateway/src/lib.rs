@@ -3945,6 +3945,10 @@ mod tests {
     }
 
     impl EventStore for BlockFirstRootCount {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
         }
