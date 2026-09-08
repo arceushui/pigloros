@@ -174,11 +174,15 @@ pub enum EvaluatorError {
 
 impl From<ProtocolError> for EvaluatorError {
     fn from(error: ProtocolError) -> Self {
-        if error == ProtocolError::UnsupportedVersion {
-            Self::UnsupportedVersion
-        } else {
-            Self::Request
-        }
+        evaluator_error_from_protocol(error)
+    }
+}
+
+fn evaluator_error_from_protocol(error: ProtocolError) -> EvaluatorError {
+    if error == ProtocolError::UnsupportedVersion {
+        EvaluatorError::UnsupportedVersion
+    } else {
+        EvaluatorError::Request
     }
 }
 
@@ -327,12 +331,16 @@ fn evaluate_cases(
         if !fixture.modes.contains(&bundle.mode) {
             continue;
         }
-        adapter.set_case_ordinal(u16::try_from(ordinal).map_err(|_| EvaluatorError::Profile)?);
+        adapter.set_case_ordinal(case_ordinal(ordinal)?);
         outcomes.push(evaluate_case(profile, bundle, request, fixture, adapter)?);
     }
     (!outcomes.is_empty())
         .then_some(outcomes)
         .ok_or(EvaluatorError::Profile)
+}
+
+fn case_ordinal(ordinal: usize) -> Result<u16, EvaluatorError> {
+    u16::try_from(ordinal).map_err(|_| EvaluatorError::Profile)
 }
 
 fn evaluate_case(
@@ -343,11 +351,7 @@ fn evaluate_case(
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
     let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
-    let observation = adapter.execute(&attempt);
-    let provider_provenance = adapter.take_execution_provenance_digest();
-    if observation == Err(AdapterError::AuthenticatedEvidenceFailure) {
-        return Err(EvaluatorError::AdapterIdentity);
-    }
+    let (observation, provider_provenance) = execute_case(adapter, &attempt)?;
     enforce_observed_coordinate_limit(
         &observation,
         profile.evaluator_hard_caps.max_coordinate_bytes,
@@ -359,6 +363,21 @@ fn evaluate_case(
         observation,
         provenance_digest,
     ))
+}
+
+type AdapterExecution = (Result<SubjectObservation, AdapterError>, Option<[u8; 32]>);
+
+fn execute_case(
+    adapter: &mut impl SubjectAdapter,
+    attempt: &CaseAttempt,
+) -> Result<AdapterExecution, EvaluatorError> {
+    let observation = adapter.execute(attempt);
+    let provider_provenance = adapter.take_execution_provenance_digest();
+    if observation == Err(AdapterError::AuthenticatedEvidenceFailure) {
+        Err(EvaluatorError::AdapterIdentity)
+    } else {
+        Ok((observation, provider_provenance))
+    }
 }
 
 fn case_provenance(

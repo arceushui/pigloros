@@ -82,23 +82,50 @@ pub(crate) fn decode_reply(
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
         .map_err(|_| AdapterError::ProtocolFailure)?;
     if is_magic(&value, "SLE1") {
-        if !trailing.is_empty() {
-            return Err(AdapterError::ProtocolFailure);
-        }
-        let local = SandboxLocalError::from_canonical_cbor(control)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
-        let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
-            AdapterError::AuthenticatedEvidenceFailure
-        } else {
-            AdapterError::Unavailable
-        };
-        return Ok(DecodedSelectorReply {
-            observation: Err(error),
-            provenance: None,
-        });
+        return decode_local_error(control, trailing);
     }
-    let wrapper = array(&value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
+    decode_selector_reply(&value, trailing, request, evr1_digest, output_limit)
+}
+
+fn decode_local_error(
+    control: &[u8],
+    trailing: &[u8],
+) -> Result<DecodedSelectorReply, AdapterError> {
+    if !trailing.is_empty() {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    let local = SandboxLocalError::from_canonical_cbor(control)
+        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
+        AdapterError::AuthenticatedEvidenceFailure
+    } else {
+        AdapterError::Unavailable
+    };
+    Ok(DecodedSelectorReply {
+        observation: Err(error),
+        provenance: None,
+    })
+}
+
+fn decode_selector_reply(
+    value: &Value,
+    trailing: &[u8],
+    request: &EncodedSelectorRequest,
+    evr1_digest: [u8; 32],
+    output_limit: u64,
+) -> Result<DecodedSelectorReply, AdapterError> {
+    let wrapper = array(value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
     let fields = array(&wrapper[0], 12).map_err(|_| AdapterError::ProtocolFailure)?;
+    validate_reply_identity(fields, request)?;
+    validate_reply_digest(wrapper)?;
+    validate_execute_request(fields, request, evr1_digest)?;
+    decode_reply_outcome(fields, trailing, request, output_limit)
+}
+
+fn validate_reply_identity(
+    fields: &[Value],
+    request: &EncodedSelectorRequest,
+) -> Result<(), AdapterError> {
     if text(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != "SLY1"
         || uint(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)? != 1
         || fixed_bytes::<16>(&fields[2]).map_err(|_| AdapterError::ProtocolFailure)?
@@ -110,6 +137,10 @@ pub(crate) fn decode_reply(
     {
         return Err(AdapterError::ProtocolFailure);
     }
+    Ok(())
+}
+
+fn validate_reply_digest(wrapper: &[Value]) -> Result<(), AdapterError> {
     let unsigned =
         encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
     if fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?
@@ -117,6 +148,14 @@ pub(crate) fn decode_reply(
     {
         return Err(AdapterError::ProtocolFailure);
     }
+    Ok(())
+}
+
+fn validate_execute_request(
+    fields: &[Value],
+    request: &EncodedSelectorRequest,
+    evr1_digest: [u8; 32],
+) -> Result<(), AdapterError> {
     let spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&fields[5])?)
         .map_err(|_| AdapterError::ProtocolFailure)?;
     if spx.request.request_id != request.provider_request_id
@@ -126,6 +165,15 @@ pub(crate) fn decode_reply(
     {
         return Err(AdapterError::ProtocolFailure);
     }
+    Ok(())
+}
+
+fn decode_reply_outcome(
+    fields: &[Value],
+    trailing: &[u8],
+    request: &EncodedSelectorRequest,
+    output_limit: u64,
+) -> Result<DecodedSelectorReply, AdapterError> {
     match uint(&fields[6]).map_err(|_| AdapterError::ProtocolFailure)? {
         0 => decode_provider_result(fields, trailing, request, output_limit),
         1 => {

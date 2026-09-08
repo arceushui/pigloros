@@ -18,14 +18,14 @@ pub enum SandboxProviderOperation {
 }
 
 impl SandboxProviderOperation {
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
-        match code {
-            0 => Ok(Self::Describe),
-            1 => Ok(Self::Execute),
-            2 => Ok(Self::Cancel),
-            3 => Ok(Self::Reconcile),
-            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
-        }
+    const VALUES: [Self; 4] = [Self::Describe, Self::Execute, Self::Cancel, Self::Reconcile];
+
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::VALUES.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
     }
 }
 
@@ -44,19 +44,24 @@ pub enum SandboxLocalErrorCode {
 }
 
 impl SandboxLocalErrorCode {
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
-        match code {
-            0 => Ok(Self::ProviderUnavailable),
-            1 => Ok(Self::ProviderIdentityInvalid),
-            2 => Ok(Self::PolicyUnavailable),
-            3 => Ok(Self::ControlChannelUnavailable),
-            4 => Ok(Self::InvalidSelectorRequest),
-            5 => Ok(Self::RequestAuthorityMismatch),
-            6 => Ok(Self::PayloadLimitExceeded),
-            7 => Ok(Self::ProviderTerminalUnavailable),
-            8 => Ok(Self::ProviderEvidenceInvalid),
-            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
-        }
+    const VALUES: [Self; 9] = [
+        Self::ProviderUnavailable,
+        Self::ProviderIdentityInvalid,
+        Self::PolicyUnavailable,
+        Self::ControlChannelUnavailable,
+        Self::InvalidSelectorRequest,
+        Self::RequestAuthorityMismatch,
+        Self::PayloadLimitExceeded,
+        Self::ProviderTerminalUnavailable,
+        Self::ProviderEvidenceInvalid,
+    ];
+
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::VALUES.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
     }
 }
 
@@ -100,22 +105,28 @@ impl SandboxLocalError {
         let value = decode_document(bytes)?;
         let fields = array::<9>(&value)?;
         validate_magic(fields, "SLE1")?;
-        let error = Self {
-            phase: SandboxLocalErrorPhase::decode(uint(&fields[2])?)?,
-            operation: if fields[3] == Value::Null {
-                None
-            } else {
-                Some(SandboxProviderOperation::decode(uint(&fields[3])?)?)
-            },
-            request_id: optional_id16(&fields[4])?,
-            attempt_id: optional_id16(&fields[5])?,
-            agr1_digest: optional_digest(&fields[6])?,
-            code: SandboxLocalErrorCode::decode(uint(&fields[7])?)?,
-            safe_detail: optional_text(&fields[8], MAX_SAFE_DETAIL_BYTES)?,
-        };
+        let error = decode_local_error(fields)?;
         validate_local_error_shape(&error)?;
         Ok(error)
     }
+}
+
+fn decode_local_error(
+    fields: &[Value; 9],
+) -> Result<SandboxLocalError, SandboxProviderProtocolError> {
+    Ok(SandboxLocalError {
+        phase: SandboxLocalErrorPhase::decode(uint(&fields[2])?)?,
+        operation: if fields[3] == Value::Null {
+            None
+        } else {
+            Some(SandboxProviderOperation::decode(uint(&fields[3])?)?)
+        },
+        request_id: optional_id16(&fields[4])?,
+        attempt_id: optional_id16(&fields[5])?,
+        agr1_digest: optional_digest(&fields[6])?,
+        code: SandboxLocalErrorCode::decode(uint(&fields[7])?)?,
+        safe_detail: optional_text(&fields[8], MAX_SAFE_DETAIL_BYTES)?,
+    })
 }
 
 fn validate_local_error_shape(
