@@ -106,6 +106,12 @@ pub trait SubjectAdapter {
     /// Identify the immutable implementation artifact reached by the adapter.
     fn subject_artifact_digest(&self) -> [u8; 32];
 
+    /// Bind the next execution to its canonical selected-fixture ordinal.
+    ///
+    /// Only the root-selector adapter consumes this identity. Other adapters
+    /// have no ordinal-bearing transport field.
+    fn set_case_ordinal(&mut self, _ordinal: u16) {}
+
     /// Execute one independent, reset-budget fixture attempt.
     ///
     /// # Errors
@@ -317,10 +323,11 @@ fn evaluate_cases(
     adapter: &mut impl SubjectAdapter,
 ) -> Result<Vec<CaseOutcome>, EvaluatorError> {
     let mut outcomes = Vec::new();
-    for fixture in profile.selected_fixtures(request) {
+    for (ordinal, fixture) in profile.selected_fixtures(request).enumerate() {
         if !fixture.modes.contains(&bundle.mode) {
             continue;
         }
+        adapter.set_case_ordinal(u16::try_from(ordinal).map_err(|_| EvaluatorError::Profile)?);
         outcomes.push(evaluate_case(profile, bundle, request, fixture, adapter)?);
     }
     (!outcomes.is_empty())
