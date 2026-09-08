@@ -829,6 +829,49 @@ where
     Ok(())
 }
 
+fn assert_positively_unaffected_fork<S>(mut store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
+    let first = store.create_timeline("first")?.id();
+    let second = store.create_timeline("second")?.id();
+    let parent = first.max(second);
+    let shared = Rc::new(RefCell::new(store));
+    let request = request()?;
+    let coordinator = frozen_coordinator(Rc::clone(&shared), &request, target())?;
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let child = TimelineId::new();
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(106),
+        expected_inventory_generation: inventory.generation(),
+        child_scope: reference(107),
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("unaffected-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::ZERO)),
+        },
+    };
+    let batch = inventory.prepare_fork_batch(input, Vec::new())?;
+    assert!(batch.admissions().is_empty());
+    assert_eq!(
+        shared.borrow_mut().commit_fork_admission(batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    assert_eq!(shared.borrow().scope_index_count(request.reference())?, 0);
+    assert!(shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    Ok(())
+}
+
 #[test]
 fn memory_manifest_cas_survives_restart_and_retains_indexes(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -878,6 +921,12 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
 fn memory_fork_admission_commits_every_overlapping_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_overlapping_fork_batch(MemoryStore::new())
+}
+
+#[test]
+fn memory_fork_admission_preserves_a_positively_unaffected_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_positively_unaffected_fork(MemoryStore::new())
 }
 
 #[test]
@@ -1122,6 +1171,13 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
 fn sqlite_fork_admission_commits_every_overlapping_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_overlapping_fork_batch(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_admission_preserves_a_positively_unaffected_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_positively_unaffected_fork(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]

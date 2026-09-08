@@ -45,6 +45,8 @@ pub struct ErasureExecutionHostV1 {
     gate: Arc<ErasureContainmentGateV1>,
     inventory: Option<ErasureVerifiedInventoryV1>,
     state: HostStateV1,
+    #[cfg(test)]
+    fail_inventory_publication: bool,
 }
 
 impl ErasureExecutionHostV1 {
@@ -64,6 +66,8 @@ impl ErasureExecutionHostV1 {
             gate,
             inventory: None,
             state: HostStateV1::Closed,
+            #[cfg(test)]
+            fail_inventory_publication: false,
         })
     }
 
@@ -153,11 +157,20 @@ impl ErasureExecutionHostV1 {
         let request_count = inventory.request_count();
         let retained_inventory = inventory.clone();
         let mut query = OneShotInventoryV1(Some(inventory));
-        let generation = match self
+        #[cfg(test)]
+        let publication = if self.fail_inventory_publication {
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        } else {
+            self.gate
+                .install_from_verified_inventory_query(&mut query, maximum_requests)
+                .map_err(ErasureHostErrorV1::from)
+        };
+        #[cfg(not(test))]
+        let publication = self
             .gate
             .install_from_verified_inventory_query(&mut query, maximum_requests)
-            .map_err(ErasureHostErrorV1::from)
-        {
+            .map_err(ErasureHostErrorV1::from);
+        let generation = match publication {
             Ok(generation) => generation,
             Err(error) => {
                 self.state = HostStateV1::Poisoned;
@@ -692,6 +705,25 @@ mod tests {
         );
         assert!(matches!(
             host.read_sender(),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
+    }
+
+    #[test]
+    fn failed_gate_publication_poisons_the_host() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.fail_inventory_publication = true;
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline("unpublished")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert!(matches!(
+            host.command_sender(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
     }
