@@ -281,13 +281,17 @@ pub struct ProjectionRegistry {
     slots: Vec<(String, Slot)>,
     /// Host-owned erasure gate for protected projection materialization.
     erasure_gate: Option<Arc<dyn ErasureGate>>,
+    /// Whether the current gate was supplied by the host composition root.
+    /// The constructor's fail-closed gate can be replaced exactly once.
+    erasure_gate_bound: bool,
 }
 
 impl Default for ProjectionRegistry {
     fn default() -> Self {
         Self {
             slots: Vec::new(),
-            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new())),
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
+            erasure_gate_bound: false,
         }
     }
 }
@@ -335,7 +339,11 @@ impl ProjectionRegistry {
 
     /// Bind the host-owned erasure gate in place.
     pub fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) {
+        if self.erasure_gate_bound {
+            return;
+        }
         self.erasure_gate = Some(gate);
+        self.erasure_gate_bound = true;
     }
 
     /// Remove the erasure gate so protected observations fail closed.
@@ -1969,7 +1977,11 @@ mod wave3_tests {
         let gate = Arc::new(ErasureContainmentGateV1::new());
         let timeline = TimelineId::new();
         gate.block_timeline(timeline);
-        let registry = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        let mut registry = ProjectionRegistry::new();
+        registry.bind_erasure_gate(gate.clone());
+        // A host binding is immutable for the lifetime of the registry. A
+        // later permissive replacement must not bypass the original fence.
+        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         assert_eq!(
             registry.authorize_erasure_observation(gate.as_ref(), timeline),
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)

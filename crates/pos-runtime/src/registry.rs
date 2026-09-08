@@ -752,6 +752,9 @@ pub struct PluginRegistry {
     poisoned_driver: Option<String>,
     consent_gate: Option<Arc<dyn ConsentGate>>,
     erasure_gate: Option<Arc<dyn ErasureGate>>,
+    /// Whether the current gate was supplied by the host composition root.
+    /// The constructor's fail-closed gate can be replaced exactly once.
+    erasure_gate_bound: bool,
 }
 
 impl PluginRegistry {
@@ -1006,7 +1009,8 @@ impl PluginRegistry {
     }
 
     fn new_with_mode(run_mode: RunMode, composition_mode: PluginExecutionModeV1) -> Self {
-        let erasure_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let erasure_gate: Arc<dyn ErasureGate> =
+            Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let mut schemas = SchemaRegistry::new();
         // Auto-register the Recorder's internal event type so that
         // Recorder::to_draft() output passes SchemaRegistry::validate().
@@ -1024,7 +1028,10 @@ impl PluginRegistry {
             plugins: IndexMap::new(),
             approver_map: IndexMap::new(),
             schemas,
-            projections: ProjectionRegistry::new().with_erasure_gate(Arc::clone(&erasure_gate)),
+            // Keep both defaults fail-closed. The composition root must bind a
+            // single shared gate through `bind_erasure_gate` before protected
+            // runtime and projection work can proceed.
+            projections: ProjectionRegistry::new(),
             pending_step: None,
             run_mode,
             composition_mode,
@@ -1035,6 +1042,7 @@ impl PluginRegistry {
             // protected drafts instead of exposing an unguarded public path.
             consent_gate: Some(Arc::new(ConsentAuthority::new())),
             erasure_gate: Some(erasure_gate),
+            erasure_gate_bound: false,
         }
     }
 
@@ -1088,8 +1096,12 @@ impl PluginRegistry {
     /// Bind the host-owned erasure gate in place for a shared Gateway/runtime
     /// composition.
     pub fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) {
+        if self.erasure_gate_bound {
+            return;
+        }
         self.projections.bind_erasure_gate(Arc::clone(&gate));
         self.erasure_gate = Some(gate);
+        self.erasure_gate_bound = true;
     }
 
     /// Remove the erasure gate so protected runtime operations fail closed.
@@ -5254,9 +5266,10 @@ mod erasure_gate_coverage {
     fn append_fence_rejects_missing_and_unavailable_erasure_gates() {
         let timeline = pos_core::ids::TimelineId::new();
         let mut missing = PluginRegistry::new();
-        assert!(missing
-            .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
-            .is_ok());
+        assert!(matches!(
+            missing.step_all_anchored(timeline, pos_core::clock::Seq::ZERO),
+            Err(RuntimeError::ErasureContainment(_))
+        ));
         let mut missing = missing.without_erasure_gate();
         let mut missing_store = pos_store::memory::MemoryStore::new();
         assert!(matches!(
@@ -5269,21 +5282,18 @@ mod erasure_gate_coverage {
             Err(RuntimeError::ErasureOperationUnavailable)
         ));
 
-        let mut rejecting = PluginRegistry::new();
+        let permissive = Arc::new(ErasureContainmentGateV1::new());
+        let mut rejecting = PluginRegistry::new().with_erasure_gate(permissive.clone());
+        // A second binding is ignored, so a host cannot replace the original
+        // gate after composition and reopen the protected path.
+        rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         assert!(rejecting
             .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
             .is_ok());
-        rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let mut rejecting_store = pos_store::memory::MemoryStore::new();
-        assert!(matches!(
-            rejecting.append_and_commit_step_at(
-                &mut rejecting_store,
-                pos_core::clock::Seq::ZERO,
-                0,
-                &[],
-            ),
-            Err(RuntimeError::ErasureContainment(_))
-        ));
+        assert!(rejecting
+            .append_and_commit_step_at(&mut rejecting_store, pos_core::clock::Seq::ZERO, 0, &[],)
+            .is_ok());
     }
 }
 
