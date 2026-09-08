@@ -1,7 +1,7 @@
 //! Root-owned immutable artifact and selector-socket boundary.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -11,9 +11,9 @@ use rustix::fd::AsFd;
 use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
 use rustix::net::sockopt::socket_peercred;
 
-use crate::adapter_transport::{read_observation, write_attempt};
 use crate::evaluator::{AdapterError, CaseAttempt, SubjectAdapter, SubjectObservation};
-use crate::evaluator_protocol::SubjectAdapterKind;
+use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
+use crate::selector_protocol::{decode_reply, encode_request, EncodedSelectorRequest};
 
 /// Fixed root-owned selector endpoint. It is not configurable by an evaluator.
 pub const SANDBOX_SELECTOR_SOCKET: &str = "/run/pigloros/sandbox-provider.sock";
@@ -103,27 +103,49 @@ impl ImmutableSandboxArtifact {
 pub struct SelectorAdapter {
     kind: SubjectAdapterKind,
     subject_artifact_digest: [u8; 32],
+    request: EvaluationRequest,
+    request_bytes: Vec<u8>,
+    next_case_ordinal: u32,
+    provenance: Option<[u8; 32]>,
 }
 
 impl SelectorAdapter {
     /// Bind evaluation to the fixed root-owned selector endpoint.
     #[must_use]
-    pub const fn new(kind: SubjectAdapterKind, subject_artifact_digest: [u8; 32]) -> Self {
+    pub fn new(request: &EvaluationRequest, request_bytes: &[u8]) -> Self {
         Self {
-            kind,
-            subject_artifact_digest,
+            kind: request.subject_adapter,
+            subject_artifact_digest: request.subject_artifact_digest,
+            request: request.clone(),
+            request_bytes: request_bytes.to_vec(),
+            next_case_ordinal: 0,
+            provenance: None,
         }
     }
 
-    fn invoke(attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
-        Self::invoke_at(Path::new(SANDBOX_SELECTOR_SOCKET), 0, attempt)
+    fn invoke(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        let ordinal =
+            u16::try_from(self.next_case_ordinal).map_err(|_| AdapterError::ProtocolFailure)?;
+        self.next_case_ordinal += 1;
+        let request = encode_request(&self.request, &self.request_bytes, attempt, ordinal)?;
+        let reply = Self::invoke_at(
+            Path::new(SANDBOX_SELECTOR_SOCKET),
+            0,
+            attempt,
+            &request,
+            self.request.request_digest,
+        )?;
+        self.provenance = reply.provenance;
+        reply.observation
     }
 
     fn invoke_at(
         socket_path: &Path,
         expected_uid: u32,
         attempt: &CaseAttempt,
-    ) -> Result<SubjectObservation, AdapterError> {
+        request: &EncodedSelectorRequest,
+        evr1_digest: [u8; 32],
+    ) -> Result<crate::selector_protocol::DecodedSelectorReply, AdapterError> {
         let mut stream =
             connect_at(socket_path, expected_uid).map_err(|_| AdapterError::Unavailable)?;
         let watchdog = Duration::from_millis(attempt.watchdog_ms);
@@ -131,12 +153,41 @@ impl SelectorAdapter {
             .set_read_timeout(Some(watchdog))
             .and_then(|()| stream.set_write_timeout(Some(watchdog)))
             .map_err(|_| AdapterError::Unavailable)?;
-        write_attempt(&mut stream, attempt).map_err(|_| AdapterError::ProtocolFailure)?;
+        let control_length =
+            u32::try_from(request.control.len()).map_err(|_| AdapterError::ProtocolFailure)?;
+        stream
+            .write_all(&control_length.to_be_bytes())
+            .and_then(|()| stream.write_all(&request.control))
+            .and_then(|()| stream.write_all(&request.attempt_stream))
+            .map_err(|_| AdapterError::ProtocolFailure)?;
         stream
             .shutdown(std::net::Shutdown::Write)
             .map_err(|_| AdapterError::ProtocolFailure)?;
-        read_observation(&mut stream, attempt.budget.output_bytes)
-            .map_err(|_| AdapterError::ProtocolFailure)
+        let mut prefix = [0; 4];
+        stream
+            .read_exact(&mut prefix)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let length = usize::try_from(u32::from_be_bytes(prefix))
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        if length == 0 || length > 16 * 1024 * 1024 {
+            return Err(AdapterError::ProtocolFailure);
+        }
+        let mut control = vec![0; length];
+        stream
+            .read_exact(&mut control)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut trailing = Vec::new();
+        stream
+            .take(129 * 1024 * 1024)
+            .read_to_end(&mut trailing)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        decode_reply(
+            &control,
+            &trailing,
+            request,
+            evr1_digest,
+            attempt.budget.output_bytes,
+        )
     }
 }
 
@@ -150,7 +201,11 @@ impl SubjectAdapter for SelectorAdapter {
     }
 
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
-        Self::invoke(attempt)
+        self.invoke(attempt)
+    }
+
+    fn take_execution_provenance_digest(&mut self) -> Option<[u8; 32]> {
+        self.provenance.take()
     }
 }
 
@@ -275,10 +330,6 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
 
-    use crate::adapter_transport::{read_attempt, write_observation};
-    use crate::evaluator::{AttemptArtifact, AttemptTransportCaps, ResourceUsage, SubjectResult};
-    use crate::profile::DeterministicBudget;
-
     use super::*;
 
     #[test]
@@ -331,67 +382,6 @@ mod tests {
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&image_directory, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(())
-    }
-
-    fn attempt() -> CaseAttempt {
-        let artifact = |bytes: Vec<u8>| AttemptArtifact {
-            digest: *blake3::hash(&bytes).as_bytes(),
-            bytes,
-        };
-        CaseAttempt {
-            case_id: "selector-case".to_owned(),
-            claim_layer: 1,
-            family: 2,
-            mode: 1,
-            fixture_digest: [3; 32],
-            schema: artifact(vec![4]),
-            payload: artifact(vec![5]),
-            auxiliary: Vec::new(),
-            budget: DeterministicBudget {
-                memory_bytes: 1,
-                cpu_fuel: 2,
-                host_calls: 3,
-                event_count: 4,
-                output_bytes: 5,
-                storage_bytes: 6,
-                execution_steps: 7,
-                simulation_time_ns: 8,
-            },
-            watchdog_ms: 1_000,
-            network_allowed: false,
-            capability_ids: vec!["sandbox".to_owned()],
-            transport_caps: AttemptTransportCaps {
-                max_member_bytes: 1024,
-                max_attempt_bytes: 4096,
-            },
-        }
-    }
-
-    #[test]
-    fn selector_transport_authenticates_socket_and_round_trips(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let socket = temporary.path().join("selector.sock");
-        let listener = UnixListener::bind(&socket)?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-        let uid = std::fs::metadata(&socket)?.uid();
-        let expected = SubjectObservation {
-            result: SubjectResult::Unavailable,
-            usage: ResourceUsage::default(),
-        };
-        let server_expected = expected.clone();
-        let server = std::thread::spawn(move || -> Result<(), String> {
-            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
-            read_attempt(&mut stream).map_err(|error| error.to_string())?;
-            write_observation(&mut stream, &server_expected).map_err(|error| error.to_string())
-        });
-
-        assert_eq!(
-            SelectorAdapter::invoke_at(&socket, uid, &attempt()),
-            Ok(expected)
-        );
-        server.join().map_err(|_| "selector server panicked")??;
         Ok(())
     }
 

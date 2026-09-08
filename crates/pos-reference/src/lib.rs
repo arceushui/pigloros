@@ -25,6 +25,7 @@ pub mod profile;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
+mod selector_protocol;
 pub mod signed_bundle;
 
 /// Divergence classes emitted by the independent JSON evaluator.
