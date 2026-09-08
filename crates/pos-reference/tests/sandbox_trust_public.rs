@@ -421,3 +421,167 @@ fn rejects_unknown_roles_malformed_fields_and_tampering() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult {
+    let root = SigningKey::from_bytes(&[1; 32]);
+    let Value::Array(fields) =
+        snapshot(vec![key_record("policy", 1)], vec![certificate(3)], "root")
+    else {
+        return Err("expected test TRS1 array".into());
+    };
+    for index in 2..fields.len() {
+        let mut changed = fields.clone();
+        changed[index] = Value::Null;
+        assert!(SandboxTrustSnapshot::authenticate(
+            &sign(Value::Array(changed), &root)?,
+            "root",
+            &root.verifying_key()
+        )
+        .is_err());
+    }
+    let Value::Array(key_fields) = key_record("policy", 1) else {
+        return Err("expected test key array".into());
+    };
+    for index in 0..key_fields.len() {
+        let mut changed = key_fields.clone();
+        changed[index] = Value::Null;
+        assert!(SandboxTrustSnapshot::authenticate(
+            &sign(snapshot(vec![Value::Array(changed)], vec![], "root"), &root)?,
+            "root",
+            &root.verifying_key()
+        )
+        .is_err());
+    }
+    let Value::Array(certificate_fields) = certificate(3) else {
+        return Err("expected test certificate array".into());
+    };
+    for index in 0..certificate_fields.len() {
+        let mut changed = certificate_fields.clone();
+        changed[index] = Value::Null;
+        assert!(SandboxTrustSnapshot::authenticate(
+            &sign(snapshot(vec![], vec![Value::Array(changed)], "root"), &root)?,
+            "root",
+            &root.verifying_key()
+        )
+        .is_err());
+    }
+    let first = Value::Array(vec![Value::Bytes(vec![7; 32]), integer(1), integer(2)]);
+    let second = Value::Array(vec![Value::Bytes(vec![8; 32]), integer(1), integer(2)]);
+    assert_eq!(
+        SandboxTrustSnapshot::authenticate(
+            &sign(snapshot(vec![], vec![second, first], "root"), &root)?,
+            "root",
+            &root.verifying_key()
+        ),
+        Err(ProtocolError::NonCanonicalOrder)
+    );
+    assert!(
+        SandboxTrustSnapshot::authenticate(b"not-cbor", "root", &root.verifying_key()).is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn revocation_rejects_each_malformed_field_collection_and_key_material() -> TestResult {
+    let trust = trusted_registry(1)?;
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let Value::Array(fields) = revocation(&trust, 5, vec![]) else {
+        return Err("expected test RVS1 array".into());
+    };
+    for index in 2..fields.len() {
+        let mut changed = fields.clone();
+        changed[index] = Value::Null;
+        assert!(SandboxRevocationSnapshot::authenticate(
+            &sign_record("RVS1", Value::Array(changed), &signer)?,
+            &trust
+        )
+        .is_err());
+    }
+    for index in [4, 5, 6] {
+        let mut changed = fields.clone();
+        changed[index] = Value::Array(vec![Value::Null]);
+        assert!(SandboxRevocationSnapshot::authenticate(
+            &sign_record("RVS1", Value::Array(changed), &signer)?,
+            &trust
+        )
+        .is_err());
+    }
+    let mut unknown_signer = fields.clone();
+    unknown_signer[7] = Value::Text("missing".to_owned());
+    assert_eq!(
+        SandboxRevocationSnapshot::authenticate(
+            &sign_record("RVS1", Value::Array(unknown_signer), &signer)?,
+            &trust
+        ),
+        Err(SandboxTrustError::UnknownKey)
+    );
+    let root = SigningKey::from_bytes(&[1; 32]);
+    let invalid_key = Value::Array(vec![
+        Value::Text("policy".to_owned()),
+        integer(1),
+        Value::Bytes(vec![u8::MAX; 32]),
+        integer(2),
+    ]);
+    let invalid_trust = SandboxTrustSnapshot::authenticate(
+        &sign(snapshot(vec![invalid_key], vec![], "root"), &root)?,
+        "root",
+        &root.verifying_key(),
+    )?;
+    let invalid_rvs = revocation(&invalid_trust, 5, vec![]);
+    assert_eq!(
+        SandboxRevocationSnapshot::authenticate(
+            &sign_record("RVS1", invalid_rvs, &signer)?,
+            &invalid_trust
+        ),
+        Err(SandboxTrustError::Protocol(ProtocolError::SignatureInvalid))
+    );
+    let foreign_trust = trusted_registry(2)?;
+    let foreign = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&foreign_trust, 6, vec![]), &signer)?,
+        &foreign_trust,
+    )?;
+    let current = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&trust, 5, vec![]), &signer)?,
+        &trust,
+    )?;
+    assert_eq!(
+        current.validate_successor(&foreign),
+        Err(SandboxTrustError::AuthorityMismatch)
+    );
+    assert!(SandboxRevocationSnapshot::authenticate(b"not-cbor", &trust).is_err());
+    Ok(())
+}
+
+#[test]
+fn administrator_policy_rejects_each_malformed_field_and_collection() -> TestResult {
+    let trust = trusted_registry(1)?;
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let revocation = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&trust, 5, vec![]), &signer)?,
+        &trust,
+    )?;
+    let fields = policy_fields(&trust, &revocation);
+    for index in 2..fields.len() {
+        let mut changed = fields.clone();
+        changed[index] = Value::Null;
+        assert!(SandboxAdministratorPolicy::authenticate(
+            &sign_record("APT1", Value::Array(changed), &signer)?,
+            &trust,
+            &revocation
+        )
+        .is_err());
+    }
+    for index in [5, 6] {
+        let mut changed = fields.clone();
+        changed[index] = Value::Array(vec![Value::Null]);
+        assert!(SandboxAdministratorPolicy::authenticate(
+            &sign_record("APT1", Value::Array(changed), &signer)?,
+            &trust,
+            &revocation
+        )
+        .is_err());
+    }
+    assert!(SandboxAdministratorPolicy::authenticate(b"not-cbor", &trust, &revocation).is_err());
+    Ok(())
+}
