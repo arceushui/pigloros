@@ -4941,7 +4941,7 @@ impl ErasureForkRecoveryV1 {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let receipt_digest =
-            Self::compute_receipt_digest(operation, binding_digest, successor_generation, child.id);
+            Self::compute_receipt_digest(operation, binding_digest, successor_generation, &child);
         Ok(Self {
             operation,
             binding_digest,
@@ -4974,14 +4974,34 @@ impl ErasureForkRecoveryV1 {
         operation: ErasureReferenceV1,
         binding_digest: ErasureReferenceV1,
         successor_generation: ErasureReferenceV1,
-        child: TimelineId,
+        child: &crate::TimelineMeta,
     ) -> ErasureReferenceV1 {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"pigloros/erasure-fork-recovery/v1");
         hasher.update(&operation.digest());
         hasher.update(&binding_digest.digest());
         hasher.update(&successor_generation.digest());
-        hasher.update(&child.inner().to_bytes());
+        hasher.update(&child.id.inner().to_bytes());
+        hasher.update(b"historical");
+        match &child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => hasher.update(&[0]),
+        }
+        match child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => hasher.update(&[0]),
+        }
+        if let Some((parent, at_seq)) = child.fork_point {
+            hasher.update(&parent.inner().to_bytes());
+            hasher.update(&at_seq.as_u64().to_be_bytes());
+        }
         ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
     }
 

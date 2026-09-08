@@ -213,6 +213,36 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 primary_key: false,
             },
             ErasureSchemaColumn {
+                name: "child_name",
+                kind: "TEXT",
+                not_null: false,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "child_mode",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "parent_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "fork_seq",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "owner_id",
+                kind: "TEXT",
+                not_null: false,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
                 name: "successor_generation",
                 kind: "BLOB",
                 not_null: true,
@@ -230,6 +260,7 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(binding_digest) = 32)",
             "CHECK (length(successor_generation) = 32)",
             "CHECK (length(receipt_digest) = 32)",
+            "CHECK (fork_seq >= 0)",
         ],
     },
     ErasureSchemaTable {
@@ -4845,13 +4876,18 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             self.conn
                 .execute(
                     "INSERT INTO erasure_fork_admissions
-                     (operation_digest, binding_digest, child_id, successor_generation,
-                      receipt_digest)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                     (operation_digest, binding_digest, child_id, child_name, child_mode,
+                      parent_id, fork_seq, owner_id, successor_generation, receipt_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         admission.operation().digest().as_slice(),
                         admission.binding_digest().digest().as_slice(),
                         child.id.to_string(),
+                        child.name.as_deref(),
+                        mode_str(child.mode),
+                        parent.to_string(),
+                        seq_as_i64(at_seq),
+                        child.owner.map(|owner| owner.to_string()),
                         admission
                             .successor_inventory()
                             .generation()
@@ -4885,41 +4921,101 @@ fn sqlite_timeline_exists(conn: &Connection, timeline: TimelineId) -> Result<boo
     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
 }
 
+struct SqliteForkAdmissionReceiptV1 {
+    binding: ErasureReferenceV1,
+    child_id: String,
+    child_name: Option<String>,
+    child_mode: String,
+    parent_id: String,
+    fork_seq: i64,
+    owner_id: Option<String>,
+    successor: ErasureReferenceV1,
+    receipt: ErasureReferenceV1,
+}
+
+struct SqliteForkAdmissionReceiptRow {
+    binding: Vec<u8>,
+    child_id: String,
+    child_name: Option<String>,
+    child_mode: String,
+    parent_id: String,
+    fork_seq: i64,
+    owner_id: Option<String>,
+    successor: Vec<u8>,
+    receipt: Vec<u8>,
+}
+
+impl SqliteForkAdmissionReceiptV1 {
+    fn recover(
+        &self,
+        operation: ErasureReferenceV1,
+    ) -> Result<ErasureForkRecoveryV1, ErasureErrorV1> {
+        let child = TimelineMeta {
+            id: parse_timeline_id(&self.child_id).map_err(|_| ErasureErrorV1::ProvenanceMissing)?,
+            mode: parse_mode(&self.child_mode),
+            name: self.child_name.clone(),
+            owner: self
+                .owner_id
+                .as_deref()
+                .map(parse_entity_id)
+                .transpose()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?,
+            fork_point: Some((
+                parse_timeline_id(&self.parent_id)
+                    .map_err(|_| ErasureErrorV1::ProvenanceMissing)?,
+                Seq::from_u64(
+                    u64::try_from(self.fork_seq).map_err(|_| ErasureErrorV1::ProvenanceMissing)?,
+                ),
+            )),
+        };
+        ErasureForkRecoveryV1::from_persisted(
+            operation,
+            self.binding,
+            self.successor,
+            child,
+            self.receipt,
+        )
+    }
+}
+
 fn sqlite_fork_admission_receipt(
     conn: &Connection,
     operation: ErasureReferenceV1,
-) -> Result<
-    Option<(
-        ErasureReferenceV1,
-        String,
-        ErasureReferenceV1,
-        ErasureReferenceV1,
-    )>,
-    ErasureErrorV1,
-> {
+) -> Result<Option<SqliteForkAdmissionReceiptV1>, ErasureErrorV1> {
     conn.query_row(
-        "SELECT binding_digest, child_id, successor_generation, receipt_digest
+        "SELECT binding_digest, child_id, child_name, child_mode, parent_id, fork_seq,
+                owner_id, successor_generation, receipt_digest
          FROM erasure_fork_admissions
          WHERE operation_digest=?1",
         params![operation.digest().as_slice()],
         |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-            ))
+            Ok(SqliteForkAdmissionReceiptRow {
+                binding: row.get(0)?,
+                child_id: row.get(1)?,
+                child_name: row.get(2)?,
+                child_mode: row.get(3)?,
+                parent_id: row.get(4)?,
+                fork_seq: row.get(5)?,
+                owner_id: row.get(6)?,
+                successor: row.get(7)?,
+                receipt: row.get(8)?,
+            })
         },
     )
     .optional()
     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-    .map(|(binding, child, successor, receipt)| {
-        Ok((
-            reference_from_sql(binding)?,
-            child,
-            reference_from_sql(successor)?,
-            reference_from_sql(receipt)?,
-        ))
+    .map(|row| {
+        Ok(SqliteForkAdmissionReceiptV1 {
+            binding: reference_from_sql(row.binding)?,
+            child_id: row.child_id,
+            child_name: row.child_name,
+            child_mode: row.child_mode,
+            parent_id: row.parent_id,
+            fork_seq: row.fork_seq,
+            owner_id: row.owner_id,
+            successor: reference_from_sql(row.successor)?,
+            receipt: reference_from_sql(row.receipt)?,
+        })
     })
     .transpose()
 }
@@ -4928,70 +5024,27 @@ fn sqlite_recover_fork_admission(
     conn: &Connection,
     operation: ErasureReferenceV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-    let Some((binding, child_id, successor, receipt)) =
-        sqlite_fork_admission_receipt(conn, operation)?
-    else {
+    let Some(receipt) = sqlite_fork_admission_receipt(conn, operation)? else {
         return Ok(None);
     };
-    let row = conn
-        .query_row(
-            "SELECT name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id=?1",
-            params![&child_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let (name, mode, parent, fork_seq, head) = row;
-    let mut child = timeline_fields_to_timeline(&child_id, name, &mode, parent, fork_seq, head)
-        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-    child.meta.owner = conn
-        .query_row(
-            "SELECT owner_id FROM timeline_owners WHERE timeline_id=?1",
-            params![&child_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-        .map(|owner| parse_entity_id(&owner).map_err(|_| ErasureErrorV1::ProvenanceMissing))
-        .transpose()?;
-    ErasureForkRecoveryV1::from_persisted(operation, binding, successor, child.meta, receipt)
-        .map(Some)
+    let recovered = receipt.recover(operation)?;
+    if !sqlite_timeline_exists(conn, recovered.child().id)? {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(Some(recovered))
 }
 
 fn sqlite_fork_admission_is_exact(
     conn: &Connection,
     admission: &PreparedErasureForkBatchV1,
     chain_head: Hash,
-    receipt: (
-        ErasureReferenceV1,
-        String,
-        ErasureReferenceV1,
-        ErasureReferenceV1,
-    ),
+    receipt: SqliteForkAdmissionReceiptV1,
 ) -> Result<bool, ErasureErrorV1> {
-    let (binding, child_id, successor, receipt_digest) = receipt;
     let child = admission.child();
-    if binding != admission.binding_digest()
-        || child_id != child.id.to_string()
-        || successor != admission.successor_inventory().generation()
-        || ErasureForkRecoveryV1::from_persisted(
-            admission.operation(),
-            binding,
-            successor,
-            child.clone(),
-            receipt_digest,
-        )
-        .is_err()
-    {
+    let Ok(recovered) = receipt.recover(admission.operation()) else {
+        return Ok(false);
+    };
+    if recovered != admission.recovery_result()? {
         return Ok(false);
     }
     let row = conn

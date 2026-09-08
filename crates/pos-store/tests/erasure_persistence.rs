@@ -953,6 +953,11 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         store.borrow_mut().commit_fork_admission(prepared)?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
     );
+    store.borrow_mut().delete_timeline(child)?;
+    assert_eq!(
+        store.borrow_mut().recover_fork_admission(operation),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
 
@@ -1199,6 +1204,7 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
         reopened.recover_fork_admission(operation)?,
         Some(expected_result)
     );
+    assert_eq!(reopened.recover_fork_admission(reference(251))?, None);
     assert_eq!(
         reopened.commit_fork_admission(prepared)?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
@@ -1208,6 +1214,38 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
         .topology()
         .contains(&child));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_a_missing_original_child() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let operation = prepared.operation();
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "DELETE FROM timelines WHERE id=?1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+    assert_eq!(
+        SqliteStore::open(path)?.recover_fork_admission(operation),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
 
@@ -1277,6 +1315,39 @@ fn sqlite_fork_retry_rejects_corrupted_receipt_or_child() -> Result<(), Box<dyn 
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "UPDATE erasure_fork_admissions SET child_id='corrupted' WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET child_name='corrupted'
+             WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET child_mode='live' WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET parent_id='corrupted'
+             WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET fork_seq=1 WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET owner_id='corrupted'
+             WHERE operation_digest=?1",
             rusqlite::params![prepared.operation().digest().as_slice()],
         )
     })?;

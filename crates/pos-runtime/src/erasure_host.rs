@@ -157,19 +157,16 @@ impl ErasureExecutionHostV1 {
         let request_count = inventory.request_count();
         let retained_inventory = inventory.clone();
         let mut query = OneShotInventoryV1(Some(inventory));
-        #[cfg(test)]
-        let publication = if self.fail_inventory_publication {
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        } else {
-            self.gate
-                .install_from_verified_inventory_query(&mut query, maximum_requests)
-                .map_err(ErasureHostErrorV1::from)
-        };
-        #[cfg(not(test))]
         let publication = self
             .gate
             .install_from_verified_inventory_query(&mut query, maximum_requests)
             .map_err(ErasureHostErrorV1::from);
+        #[cfg(test)]
+        let publication = if self.fail_inventory_publication {
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        } else {
+            publication
+        };
         let generation = match publication {
             Ok(generation) => generation,
             Err(error) => {

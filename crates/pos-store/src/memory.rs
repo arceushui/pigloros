@@ -1477,10 +1477,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
             return Ok(None);
         };
-        let exact_child = self
-            .timelines
-            .get(&result.child().id)
-            .is_some_and(|state| state.timeline.meta == *result.child());
+        let exact_child = self.timelines.contains_key(&result.child().id);
         exact_child
             .then_some(Some(result))
             .ok_or(ErasureErrorV1::ProvenanceMissing)
