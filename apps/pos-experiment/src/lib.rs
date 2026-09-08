@@ -19,12 +19,13 @@ use pos_core::{
     ConsentAuthority, ConsentCapabilityToken, ConsentGate, ErasureGate, ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
-use pos_store::{open_store, StoreConfig};
+use pos_store::{open_store as open_store_raw, StoreConfig};
 use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn bind_test_erasure_gate(registry: &mut PluginRegistry) {
     if !registry.erasure_gate_is_bound() {
         registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
@@ -32,10 +33,40 @@ fn bind_test_erasure_gate(registry: &mut PluginRegistry) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn bind_test_store_gate(
     store: &mut dyn pos_core::store::EventStore,
 ) -> Result<(), pos_core::CoreError> {
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_memory_store() -> pos_store::memory::MemoryStore {
+    let mut store = pos_store::memory::MemoryStore::new();
+    bind_test_store_gate(&mut store).expect("test MemoryStore must accept the erasure gate");
+    store
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_registry() -> PluginRegistry {
+    let mut registry = PluginRegistry::new();
+    bind_test_erasure_gate(&mut registry);
+    registry
+}
+
+fn open_store(
+    config: StoreConfig,
+) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    let store = pos_store::open_store(config)?;
+    #[cfg(test)]
+    let store = {
+        let mut store = store;
+        bind_test_store_gate(store.as_mut())?;
+        store
+    };
+    Ok(store)
 }
 
 // Experiment hosts may close their own session, but they are not a Gateway
@@ -953,7 +984,7 @@ impl Experiment {
     /// opened or cannot create the Timeline.
     pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let store = open_store(store_config.clone())?;
+        let store = open_store_raw(store_config.clone())?;
         self.start_with_store_and_recipe(store, Some(store_config))
     }
 
@@ -1033,7 +1064,7 @@ impl Experiment {
         timeline_id: pos_core::ids::TimelineId,
     ) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let store = open_store(store_config.clone())?;
+        let store = open_store_raw(store_config.clone())?;
         self.resume_with_store_and_recipe(timeline_id, store, Some(store_config))
     }
 
@@ -2212,7 +2243,7 @@ impl BacktestRunner {
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] or [`ExperimentError::Store`] on failure.
     pub fn run(self) -> Result<BacktestResult, ExperimentError> {
-        let mut store = open_store(self.config.store_config.clone())?;
+        let mut store = open_store_raw(self.config.store_config.clone())?;
         self.run_on_store(store.as_mut())
     }
 
@@ -2456,7 +2487,7 @@ mod tests {
         let store_config = StoreConfig::Sqlite {
             path: database.path().to_str().test_ok().to_owned(),
         };
-        let mut store = pos_store::open_store(store_config.clone()).test_ok();
+        let mut store = open_store(store_config.clone()).test_ok();
         let timeline_id = store.create_timeline("run-result-policy").test_ok().id();
         let subject_id = EntityId::new();
         let authority = ConsentAuthority::new();
@@ -2716,7 +2747,7 @@ mod tests {
     }
 
     fn composition_registry(plugins: &[CompositionPluginSpec]) -> PluginRegistry {
-        let mut registry = PluginRegistry::new();
+        let mut registry = test_registry();
         for spec in plugins {
             registry
                 .register(&CompositionPlugin(*spec), None, None)
@@ -2881,7 +2912,7 @@ mod tests {
 
     #[test]
     fn fold_captured_range_advances_the_boundary() {
-        let mut store = pos_store::memory::MemoryStore::new();
+        let mut store = test_memory_store();
         let timeline = store.create_timeline("fold-boundary").test_ok();
         let mut boundary = TickBoundaryCoordinator {
             folded_through: pos_core::clock::Seq::ZERO,
@@ -2902,12 +2933,12 @@ mod tests {
 
     #[test]
     fn advance_tick_distinguishes_empty_and_folded_ranges() {
-        let mut empty_store = pos_store::memory::MemoryStore::new();
+        let mut empty_store = test_memory_store();
         let empty_timeline = empty_store.create_timeline("empty-range").test_ok();
         let empty = advance_tick(
             &mut empty_store,
             empty_timeline.id(),
-            &mut PluginRegistry::new(),
+            &mut test_registry(),
             &mut TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
@@ -2915,7 +2946,7 @@ mod tests {
         .test_ok();
         assert!(matches!(empty.0, TickAdvance::Quiescent));
 
-        let mut folded_store = pos_store::memory::MemoryStore::new();
+        let mut folded_store = test_memory_store();
         let folded_timeline = folded_store.create_timeline("folded-range").test_ok();
         folded_store
             .append(
@@ -2930,7 +2961,7 @@ mod tests {
         let folded = advance_tick(
             &mut folded_store,
             folded_timeline.id(),
-            &mut PluginRegistry::new(),
+            &mut test_registry(),
             &mut TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
@@ -3122,6 +3153,10 @@ mod tests {
     }
 
     impl EventStore for CaptureAwareStore {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.base.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.base.create_timeline(name)
         }
@@ -3218,7 +3253,7 @@ mod tests {
 
         let store_state = Arc::new(Mutex::new(HostTransactionState::default()));
         let mut store = CaptureAwareStore {
-            base: Box::new(pos_store::memory::MemoryStore::new()),
+            base: Box::new(test_memory_store()),
             state: Arc::clone(&store_state),
             fail_append: false,
             fail_post_step_capture: false,
@@ -3327,6 +3362,10 @@ mod tests {
     }
 
     impl EventStore for FailLogicalHeadStore {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
@@ -3531,6 +3570,7 @@ mod tests {
             self.injected = true;
             let mut gateway_store =
                 pos_store::sqlite::SqliteStore::open(&self.path).map_err(RuntimeError::Store)?;
+            bind_test_store_gate(&mut gateway_store).map_err(RuntimeError::Store)?;
             let mut human = EventDraft::new(
                 self.entity,
                 Kind::new("world.action"),
@@ -4279,6 +4319,7 @@ mod tests {
         let head_path = head_database.path().to_str().test_ok().to_owned();
         let malformed_head_timeline = {
             let mut store = pos_store::sqlite::SqliteStore::open(&head_path).test_ok();
+            bind_test_store_gate(&mut store).test_ok();
             let root = store.create_timeline("resume-head-root").test_ok();
             store
                 .append(
@@ -4354,6 +4395,10 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     impl EventStore for CaptureFaultStore {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.base.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.base.create_timeline(name)
         }
@@ -4458,7 +4503,7 @@ mod tests {
             CaptureFault::EmptyRead,
         ] {
             let mut store = CaptureFaultStore {
-                base: pos_store::memory::MemoryStore::new(),
+                base: test_memory_store(),
                 fault,
                 head_calls: std::cell::Cell::new(0),
             };
@@ -4484,7 +4529,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_pipeline_and_branch_propagate_each_boundary_failure() {
         let mut first_capture_store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
+            base: test_memory_store(),
             fault: CaptureFault::LogicalHead,
             head_calls: std::cell::Cell::new(0),
         };
@@ -4494,7 +4539,7 @@ mod tests {
         assert!(advance_tick(
             &mut first_capture_store,
             first_timeline.id(),
-            &mut PluginRegistry::new(),
+            &mut test_registry(),
             &mut TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
@@ -4502,7 +4547,7 @@ mod tests {
         .is_err());
 
         let mut second_capture_store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
+            base: test_memory_store(),
             fault: CaptureFault::SecondLogicalHead,
             head_calls: std::cell::Cell::new(0),
         };
@@ -4512,16 +4557,16 @@ mod tests {
         assert!(advance_tick(
             &mut second_capture_store,
             second_timeline.id(),
-            &mut PluginRegistry::new(),
+            &mut test_registry(),
             &mut TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
         )
         .is_err());
 
-        let mut driver_store = pos_store::memory::MemoryStore::new();
+        let mut driver_store = test_memory_store();
         let driver_timeline = driver_store.create_timeline("driver-failure").test_ok();
-        let mut registry = PluginRegistry::new();
+        let mut registry = test_registry();
         registry
             .register(
                 &make_plugin("capture-fail", &[]),
@@ -4538,7 +4583,7 @@ mod tests {
         .is_err());
 
         let mut branch_store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
+            base: test_memory_store(),
             fault: CaptureFault::LogicalHead,
             head_calls: std::cell::Cell::new(0),
         };
@@ -4585,7 +4630,7 @@ mod tests {
                 (&["host.transaction"], Some("host.transaction"))
             }
         };
-        let mut registry = PluginRegistry::new();
+        let mut registry = test_registry();
         registry
             .register(
                 &make_plugin("host-transaction", owned_event_types),
@@ -4658,7 +4703,7 @@ mod tests {
 
         let (timeline, result) = match path {
             TransactionHostPath::AdvanceTick => {
-                let mut base: Box<dyn EventStore> = Box::new(pos_store::memory::MemoryStore::new());
+                let mut base: Box<dyn EventStore> = Box::new(test_memory_store());
                 let timeline = base.create_timeline("transaction-advance").test_ok().id();
                 seed_external_event(base.as_mut(), timeline);
                 let mut store = capture_aware_store(base, case, &state);
@@ -4686,10 +4731,7 @@ mod tests {
                 {
                     let mut store = session.store.lock().test_ok();
                     seed_external_event(store.as_mut(), timeline);
-                    let base = std::mem::replace(
-                        &mut *store,
-                        Box::new(pos_store::memory::MemoryStore::new()),
-                    );
+                    let base = std::mem::replace(&mut *store, Box::new(test_memory_store()));
                     *store = Box::new(capture_aware_store(base, case, &state));
                 }
                 (timeline, session.step_tick().map(|_| ()))
@@ -4811,7 +4853,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn captured_ranges_fail_before_fold_when_length_order_or_cursor_is_invalid() {
-        let mut store = pos_store::memory::MemoryStore::new();
+        let mut store = test_memory_store();
         let timeline = store.create_timeline("range-validation").test_ok();
         let mut event = store
             .append(
@@ -5420,7 +5462,7 @@ mod tests {
 
         // Consume the experiment and get a store back via run, then re-use the
         // branch logic through a manual store path.
-        let mut store2 = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store2 = open_store(StoreConfig::Memory).test_ok();
         store2.create_timeline("branch-seed").test_ok();
         let forked = exp2_mut.branch("branch-seed", store2.as_mut()).test_ok();
         assert!(!forked.id().to_string().is_empty());
@@ -5434,7 +5476,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let err = exp.branch("nonexistent", store.as_mut());
         assert!(err.is_err());
     }
@@ -5447,7 +5489,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let timeline = store.create_timeline("protected-branch").test_ok();
         store
             .append(
@@ -5540,7 +5582,7 @@ mod tests {
                 Ok(StepOutput::empty())
             }
         }
-        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("idle2-test").test_ok();
         let mut d = IdleDriver2;
         assert_eq!(d.name(), "idle2");
@@ -5572,7 +5614,7 @@ mod tests {
                 Ok(StepOutput::new(vec![draft]))
             }
         }
-        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("bad2-test").test_ok();
         let entity = EntityId::new();
         let mut d = BadDriver2 { entity };
@@ -5760,7 +5802,7 @@ mod tests {
                 pos_core::clock::Seq::from_u64(3)
             ))
         );
-        let store = pos_store::sqlite::SqliteStore::open(&path).test_ok();
+        let store = open_store(StoreConfig::Sqlite { path }).test_ok();
         assert_eq!(store.logical_head(branch.id()).test_ok().as_u64(), 3);
     }
 
@@ -6895,7 +6937,7 @@ mod coverage_entrypoints {
             "coverage-experiment-branch",
             StopCondition::MaxTicks(1),
         ));
-        let mut store = pos_store::memory::MemoryStore::new();
+        let mut store = test_memory_store();
         let timeline = ok(store.create_timeline("coverage-experiment-branch"));
         ok(store.append(
             timeline.id(),
@@ -7816,7 +7858,7 @@ mod backtest_tests {
         assert_eq!(BadEvalDriver { entity }.name(), "bad-eval-driver");
 
         // Also cover GoodBtDriver::step by calling it directly.
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).test_ok();
+        let mut store = open_store(pos_store::StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("good-step-test").test_ok();
         let out = GoodBtDriver
             .step(tl.id(), pos_runtime::ObservationView::empty())
@@ -7920,7 +7962,7 @@ mod fault_injection_tests {
         Capability, ConsentGrantedV1, CoreError, Plugin,
     };
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::StoreConfig;
     use rusqlite::Connection;
     use std::cell::Cell;
 
@@ -9157,6 +9199,10 @@ mod fault_injection_tests {
         }
 
         impl EventStore for FaultyForkerStore {
+            fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+                self.base.bind_erasure_gate(gate)
+            }
+
             fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
                 self.base.create_timeline(name)
             }
