@@ -9,13 +9,14 @@
 //! projections on each tick until a [`StopCondition`] is met.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+#[cfg(test)]
+use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::WallTime,
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ErasureContainmentGateV1, ErasureGate,
-    ReproManifest, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ErasureGate, ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store as open_store_raw, StoreConfig};
