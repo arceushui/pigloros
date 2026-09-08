@@ -717,7 +717,7 @@ fn valid_sandbox_requirement(value: &SandboxRequirement) -> bool {
     value.lps1_digest != [0; 32]
         && value.sim1_digest != [0; 32]
         && value.apt1_digest != [0; 32]
-        && validate_identifier(&value.required_provider_capability.capability_id).is_ok()
+        && validate_provider_identifier(&value.required_provider_capability.capability_id).is_ok()
 }
 
 fn report_value(value: &ConformanceReport, include_digest: bool) -> Value {
@@ -1007,7 +1007,15 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
     validate_identifier(value).map(|()| value.to_owned())
 }
 
-fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
+const fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
+    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+        Err(ProtocolError::FieldOutOfBounds)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_provider_identifier(value: &str) -> Result<(), ProtocolError> {
     let Some(first) = value.as_bytes().first() else {
         return Err(ProtocolError::FieldOutOfBounds);
     };

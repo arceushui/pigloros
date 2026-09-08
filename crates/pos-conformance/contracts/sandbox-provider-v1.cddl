@@ -5,14 +5,15 @@ digest32 = bytes .size 32
 sha256 = bytes .size 32
 id16 = bytes .size 16
 key-id = text .size (1..128)
-identifier = (text .size (1..128)) .and
+identity-text = text .size (1..128)
+provider-identifier = (text .size (1..128)) .and
   (text .regexp "[a-z0-9][a-z0-9._/-]{0,127}")
 safe-detail-text = (text .size (1..256)) .and
   (text .regexp "[^\u0000]+")
 safe-detail = safe-detail-text / null
 epoch = uint
 
-provider-capability = [identifier, uint, uint]
+provider-capability = [provider-identifier, uint, uint]
 architecture = 0 / 1
 syscall-name = text .regexp "[a-z_][a-z0-9_]{0,127}"
 syscall-names = [1*512 syscall-name]
@@ -22,35 +23,35 @@ provider-capabilities = [1*256 provider-capability]
 architectures = [1*2 architecture]
 partition-descriptor = [0..2, bytes .size 16, bytes .size 16,
   uint, 1..17179869184, digest32]
-network-capability = [identifier, 0, 0 / 1,
+network-capability = [provider-identifier, 0, 0 / 1,
   (bytes .size 4) / (bytes .size 16), 1..65535, 1..134217728, 1..134217728]
 limit-record = [0..16, uint]
 arguments = [*256 text .size (1..256)]
 limits = [1*17 limit-record]
 network-capabilities = [*256 network-capability]
-identifiers = [*256 identifier]
+identifiers = [*256 provider-identifier]
 network-plans = [*256 network-plan]
 digests = [*256 digest32]
 operational-events = [*256 0..13]
 
-spm1-u = ["SPM1",1,identifier,digest32,digest32,digest32,digest32,key-id,
+spm1-u = ["SPM1",1,provider-identifier,digest32,digest32,digest32,digest32,key-id,
   provider-capabilities,architectures,digest32,digest32,digest32,digest32,
   epoch,digest32,digest32,key-id]
 spm1 = [spm1-u,digest32,bytes .size 64]
 
-sim1-u = ["SIM1",1,identifier,architecture,uint,digest32,
+sim1-u = ["SIM1",1,provider-identifier,architecture,uint,digest32,
   [partition-descriptor,partition-descriptor,partition-descriptor],
   sha256,4096,4096,1,bytes .size 0,
   [uint,sha256,bytes .size (1..1048576)],sha256,uint,
   text .size (1..512),digest32,arguments,epoch,key-id]
 sim1 = [sim1-u,digest32,bytes .size 64]
 
-lps1-u = ["LPS1",1,identifier,0..3,digest32,
+lps1-u = ["LPS1",1,provider-identifier,0..3,digest32,
   limits,network-capabilities]
 lps1 = [lps1-u,digest32]
 
 sandbox-requirement = [digest32,digest32,provider-capability,digest32,epoch]
-implementation-identity = [identifier,digest32,digest32,digest32,digest32,identifier / null]
+implementation-identity = [identity-text,digest32,digest32,digest32,digest32,identity-text / null]
 output-capability = [digest32,uint,uint]
 evr1 = ["EVR1",1,id16,digest32,digest32,0..2,digest32,
   implementation-identity,digest32,digest32,output-capability,digest32,digest32,
@@ -71,7 +72,7 @@ sry1-u = ["SRY1",1,id16,id16,true,digest32,key-id]
 sry1 = [sry1-u,digest32,bytes .size 64]
 sle1 = ["SLE1",1,(0..3) / null,id16 / null,0..3,safe-detail]
 
-network-plan = ["NXP1",1,id16,uint,identifier,uint,digest32,uint,digest32,digest32,digest32]
+network-plan = ["NXP1",1,id16,uint,provider-identifier,uint,digest32,uint,digest32,digest32,digest32]
 payload-descriptor = [0..134217728,digest32]
 payload-direction = 0 / 1
 sbc1-u = ["SBC1",1,digest32,id16,id16,payload-direction,uint,uint,
