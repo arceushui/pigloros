@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
@@ -33,6 +34,28 @@ use erasure_support::{
     persistence_target as target, reference, retry_admission as fixture_retry_admission,
     FreezeEvidenceFixtureInput, RetryAdmissionFixture,
 };
+
+struct PermitErasureGate;
+
+impl pos_core::ErasureGate for PermitErasureGate {
+    fn authorize(
+        &self,
+        _timeline: TimelineId,
+        _operation: pos_core::ErasureProtectedOperationV1,
+    ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+        Ok(())
+    }
+
+    fn with_fence(
+        &self,
+        _timeline: TimelineId,
+        _operation: pos_core::ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(),
+    ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+        effect();
+        Ok(())
+    }
+}
 
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
@@ -516,6 +539,7 @@ fn prepared_fork<S>(
 where
     S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
+    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
     let parent = store.create_timeline("fork-parent")?.id();
     store.append(
         parent,
