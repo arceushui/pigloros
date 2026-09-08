@@ -5282,8 +5282,8 @@ mod erasure_gate_coverage {
             Err(RuntimeError::ErasureOperationUnavailable)
         ));
 
-        let permissive = Arc::new(ErasureContainmentGateV1::new());
-        let mut rejecting = PluginRegistry::new().with_erasure_gate(permissive.clone());
+        let mut rejecting =
+            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         // A second binding is ignored, so a host cannot replace the original
         // gate after composition and reopen the protected path.
         rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
