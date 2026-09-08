@@ -851,9 +851,13 @@ fn fork_eval_timeline(
 impl Experiment {
     #[must_use]
     pub fn new(config: ExperimentConfig) -> Self {
-        let mut registry = PluginRegistry::new();
+        let registry = PluginRegistry::new();
         #[cfg(test)]
-        bind_test_erasure_gate(&mut registry);
+        let registry = {
+            let mut registry = registry;
+            bind_test_erasure_gate(&mut registry);
+            registry
+        };
         Self {
             config,
             registry,
@@ -975,9 +979,13 @@ impl Experiment {
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
-        let mut registry = self.registry;
+        let registry = self.registry;
         #[cfg(test)]
-        bind_test_erasure_gate(&mut registry);
+        let registry = {
+            let mut registry = registry;
+            bind_test_erasure_gate(&mut registry);
+            registry
+        };
         if let Some(gate) = registry.clone_erasure_gate() {
             store.bind_erasure_gate(gate)?;
         }
