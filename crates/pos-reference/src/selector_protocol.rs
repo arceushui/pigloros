@@ -1079,6 +1079,44 @@ mod tests {
     }
 
     #[test]
+    fn sly1_rejects_malformed_envelope_and_identity_types() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array_values(&decoded).map_err(|_| AdapterError::ProtocolFailure)?;
+        let fields = array_values(&wrapper[0]).map_err(|_| AdapterError::ProtocolFailure)?;
+
+        for index in 0..=7 {
+            let mut changed = fields.to_vec();
+            changed[index] = Value::Null;
+            let (changed, _) = protocol_record("SLY1", changed, false)?;
+            assert_eq!(
+                decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        for malformed in [
+            Value::Null,
+            Value::Array(vec![Value::Null]),
+            Value::Array(vec![wrapper[0].clone(), Value::Null]),
+        ] {
+            let bytes = encode_with_limit(&malformed, CONTROL_LIMIT)
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            assert_eq!(
+                decode_reply(&bytes, &trailing, &encoded, [14; 32], 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        let malformed_local = local_error_with_fields(vec![Value::Text("SLE1".to_owned())])?;
+        assert_eq!(
+            decode_reply(&malformed_local, &[], &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn sly1_rejects_wrong_execute_authority_and_output_descriptor() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
         let (control, trailing, receipt_digest) = admitted_reply(&encoded, [14; 32], 0)?;
@@ -1147,6 +1185,13 @@ mod tests {
                 observation: Err(AdapterError::ProtocolFailure),
                 provenance: None,
             })
+        );
+        let mut malformed_error = fields.clone();
+        malformed_error[7] = Value::Null;
+        let (control, _) = protocol_record("SLY1", malformed_error, false)?;
+        assert_eq!(
+            decode_reply(&control, &[], &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
         );
         let mut with_evidence = fields;
         with_evidence[8] = Value::Bytes(vec![1]);
@@ -1362,6 +1407,40 @@ mod tests {
         for (sequence, event, authority, previous) in invalid {
             let (record, _) = audit_record(&encoded, sequence, event, authority, previous)?;
             assert!(SandboxAuditRecord::from_canonical_cbor(&record).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn admitted_reply_rejects_malformed_evidence_types() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let evidence = admitted_evidence(&control)?;
+
+        for index in 7..=11 {
+            let mut changed = evidence.fields.clone();
+            changed[index] = Value::Null;
+            assert_eq!(
+                decode_provider_result(&changed, &trailing, &encoded, 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        let mut malformed_audit = evidence.fields.clone();
+        malformed_audit[10] = Value::Array(vec![Value::Null]);
+        assert_eq!(
+            decode_provider_result(&malformed_audit, &trailing, &encoded, 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        for descriptor in [
+            Value::Array(vec![Value::Null, Value::Bytes(vec![1; 32])]),
+            Value::Array(vec![integer(0), Value::Null]),
+        ] {
+            let mut changed = evidence.fields.clone();
+            changed[11] = descriptor;
+            assert_eq!(
+                decode_provider_result(&changed, &trailing, &encoded, 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
         }
         Ok(())
     }
