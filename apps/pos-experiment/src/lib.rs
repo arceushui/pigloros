@@ -24,6 +24,20 @@ use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+#[cfg(test)]
+fn bind_test_erasure_gate(registry: &mut PluginRegistry) {
+    if !registry.erasure_gate_is_bound() {
+        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    }
+}
+
+#[cfg(test)]
+fn bind_test_store_gate(
+    store: &mut dyn pos_core::store::EventStore,
+) -> Result<(), pos_core::CoreError> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
 // Experiment hosts may close their own session, but they are not a Gateway
 // consent issuer.  Keep this durable lifecycle marker outside the canonical
 // `consent.*` namespace so only Gateway APIs can create consent events.
@@ -837,9 +851,12 @@ fn fork_eval_timeline(
 impl Experiment {
     #[must_use]
     pub fn new(config: ExperimentConfig) -> Self {
+        let mut registry = PluginRegistry::new();
+        #[cfg(test)]
+        bind_test_erasure_gate(&mut registry);
         Self {
             config,
-            registry: PluginRegistry::new(),
+            registry,
             fork_registry_factory: None,
         }
     }
@@ -958,14 +975,17 @@ impl Experiment {
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
-        if let Some(gate) = self.registry.clone_erasure_gate() {
+        let mut registry = self.registry;
+        #[cfg(test)]
+        bind_test_erasure_gate(&mut registry);
+        if let Some(gate) = registry.clone_erasure_gate() {
             store.bind_erasure_gate(gate)?;
         }
-        let parent_composition = self.registry.composition();
+        let parent_composition = registry.composition();
         let timeline = store.create_timeline(&self.config.name)?;
         Ok(ExperimentSession {
             config: self.config,
-            registry: self.registry,
+            registry,
             parent_composition,
             store: Arc::new(Mutex::new(store)),
             recovery_store_config,
@@ -1035,6 +1055,8 @@ impl Experiment {
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
+        #[cfg(test)]
+        bind_test_erasure_gate(&mut self.registry);
         if let Some(gate) = self.registry.clone_erasure_gate() {
             store.bind_erasure_gate(gate)?;
         }
@@ -2191,6 +2213,8 @@ impl BacktestRunner {
         self,
         store: &mut dyn pos_core::store::EventStore,
     ) -> Result<BacktestResult, ExperimentError> {
+        #[cfg(test)]
+        bind_test_store_gate(store)?;
         let store_config = self.config.store_config.clone();
 
         // --- Train phase ---
@@ -2199,6 +2223,8 @@ impl BacktestRunner {
         let train_tl_id = train_tl.id();
 
         let mut train_registry = (self.registry_factory)();
+        #[cfg(test)]
+        bind_test_erasure_gate(&mut train_registry);
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
             store,
@@ -2217,6 +2243,8 @@ impl BacktestRunner {
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
+        #[cfg(test)]
+        bind_test_erasure_gate(&mut eval_registry);
         let inherited =
             restore_inherited_eval_events(store, eval_tl_id, train_head_seq, &mut eval_registry)?;
         hydrate_projections(&mut eval_registry, &inherited);
