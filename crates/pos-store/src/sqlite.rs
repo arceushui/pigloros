@@ -4849,7 +4849,7 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             if let Some(receipt) = sqlite_fork_admission_receipt(&self.conn, admission.operation())?
             {
                 return sqlite_fork_admission_is_exact(
-                    &self.conn, &admission, chain_head, receipt,
+                    &self.conn, &admission, chain_head, &receipt,
                 )?
                 .then_some(ErasureCasOutcomeV1::ExactRetry)
                 .ok_or(ErasureErrorV1::PolicyConflict);
@@ -5038,7 +5038,7 @@ fn sqlite_fork_admission_is_exact(
     conn: &Connection,
     admission: &PreparedErasureForkBatchV1,
     chain_head: Hash,
-    receipt: SqliteForkAdmissionReceiptV1,
+    receipt: &SqliteForkAdmissionReceiptV1,
 ) -> Result<bool, ErasureErrorV1> {
     let child = admission.child();
     let Ok(recovered) = receipt.recover(admission.operation()) else {
