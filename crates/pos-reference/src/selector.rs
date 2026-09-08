@@ -321,7 +321,11 @@ fn digest_name(digest: [u8; 32]) -> String {
 }
 
 fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoundaryError> {
-    connect_at_with(path, expected_uid, UnixStream::connect)
+    connect_at_with(path, expected_uid, connect_unix)
+}
+
+fn connect_unix(path: &Path) -> std::io::Result<UnixStream> {
+    UnixStream::connect(path)
 }
 
 fn connect_at_with(
