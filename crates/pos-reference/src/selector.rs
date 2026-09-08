@@ -157,9 +157,6 @@ impl SelectorAdapter {
         request: &EncodedSelectorRequest,
         evr1_digest: [u8; 32],
     ) -> Result<crate::selector_protocol::DecodedSelectorReply, AdapterError> {
-        if attempt.watchdog_ms == 0 {
-            return Err(AdapterError::ProtocolFailure);
-        }
         let mut stream =
             connect_at(socket_path, expected_uid).map_err(|_| AdapterError::Unavailable)?;
         let watchdog = Duration::from_millis(attempt.watchdog_ms);
@@ -717,23 +714,14 @@ mod tests {
     }
 
     #[test]
-    fn selector_transport_rejects_a_zero_watchdog_before_exchange(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn selector_request_rejects_a_zero_watchdog_before_exchange() {
         let request = selector_request();
         let mut attempt = selector_attempt();
         attempt.watchdog_ms = 0;
-        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
-        assert_eq!(
-            SelectorAdapter::invoke_at(
-                Path::new("unused-for-invalid-attempt"),
-                0,
-                &attempt,
-                &encoded,
-                [14; 32]
-            ),
+        assert!(matches!(
+            encode_request(&request, b"evr1", &attempt, 0),
             Err(AdapterError::ProtocolFailure)
-        );
-        Ok(())
+        ));
     }
 
     #[test]
