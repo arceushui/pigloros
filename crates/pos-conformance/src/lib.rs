@@ -50,10 +50,13 @@ pub use non_interference::{
     NonInterferenceRawOperationalV1,
 };
 pub use non_interference_report::{
-    non_interference_normalization_digest_v1, NonInterferenceModeResultRefV1,
-    NonInterferenceReportErrorV1, NonInterferenceReportOutcomeV1, NonInterferenceReportV1,
-    MAX_NON_INTERFERENCE_REPORT_BYTES_V1, NON_INTERFERENCE_REPORT_MAGIC_V1,
-    NON_INTERFERENCE_REPORT_OUTCOME_COUNT_V1,
+    non_interference_normalization_digest_v1, NonInterferenceExecutionArtifactBodyV1,
+    NonInterferenceExecutionArtifactV1, NonInterferenceModeResultRefV1,
+    NonInterferenceReportErrorV1,
+    NonInterferenceReportOutcomeV1, NonInterferenceReportV1,
+    MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1, MAX_NON_INTERFERENCE_REPORT_BYTES_V1,
+    NON_INTERFERENCE_EXECUTION_ARTIFACT_MAGIC_V1,
+    NON_INTERFERENCE_REPORT_MAGIC_V1, NON_INTERFERENCE_REPORT_OUTCOME_COUNT_V1,
 };
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,

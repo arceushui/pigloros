@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub const NON_INTERFERENCE_REPORT_MAGIC_V1: &str = "NIR1";
 pub const MAX_NON_INTERFERENCE_REPORT_BYTES_V1: usize = 64 * 1024;
 pub const NON_INTERFERENCE_REPORT_OUTCOME_COUNT_V1: usize = 48;
+pub const NON_INTERFERENCE_EXECUTION_ARTIFACT_MAGIC_V1: &str = "NIA1";
+pub const MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1: usize = 4 * 1024;
 
 /// Return the canonical executable-normalization digest for one ADR-059 row.
 #[must_use]
@@ -25,8 +27,6 @@ pub fn non_interference_normalization_digest_v1(fixture_id: &str) -> Option<[u8;
 pub struct NonInterferenceModeResultRefV1 {
     #[serde(rename = "m")]
     pub mode: ExecutionModeV1,
-    #[serde(rename = "g")]
-    pub genuine_execution: bool,
     #[serde(rename = "r")]
     pub result_digest: [u8; 32],
     #[serde(rename = "a")]
@@ -35,6 +35,183 @@ pub struct NonInterferenceModeResultRefV1 {
     pub execution_provenance_digest: [u8; 32],
     #[serde(rename = "e")]
     pub equal: bool,
+}
+
+/// Immutable content-addressed result supplied by a concrete #193 executor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NonInterferenceExecutionArtifactBodyV1 {
+    pub fixture_id: String,
+    pub variant: NonInterferenceVariantV1,
+    pub mode: ExecutionModeV1,
+    pub profile_digest: [u8; 32],
+    pub normalization_digest: [u8; 32],
+    pub result_digest: [u8; 32],
+    pub execution_provenance_digest: [u8; 32],
+}
+
+/// Immutable content-addressed result supplied by a concrete #193 executor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NonInterferenceExecutionArtifactV1 {
+    #[serde(rename = "m")]
+    pub magic: String,
+    #[serde(rename = "v")]
+    pub version: u16,
+    #[serde(rename = "i")]
+    pub fixture_id: String,
+    #[serde(rename = "x")]
+    pub variant: NonInterferenceVariantV1,
+    #[serde(rename = "o")]
+    pub mode: ExecutionModeV1,
+    #[serde(rename = "p")]
+    pub profile_digest: [u8; 32],
+    #[serde(rename = "n")]
+    pub normalization_digest: [u8; 32],
+    #[serde(rename = "r")]
+    pub result_digest: [u8; 32],
+    #[serde(rename = "e")]
+    pub execution_provenance_digest: [u8; 32],
+    #[serde(rename = "k")]
+    pub executor_public_key: [u8; 32],
+    #[serde(rename = "s")]
+    pub signature: Signature,
+}
+
+impl NonInterferenceExecutionArtifactV1 {
+    /// Construct and sign one immutable executor result.
+    ///
+    /// # Errors
+    /// Returns a closed error when the coordinate or bound digests are invalid.
+    pub fn sign(
+        body: NonInterferenceExecutionArtifactBodyV1,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Result<Self, NonInterferenceReportErrorV1> {
+        let mut artifact = Self {
+            magic: NON_INTERFERENCE_EXECUTION_ARTIFACT_MAGIC_V1.to_owned(),
+            version: 1,
+            fixture_id: body.fixture_id,
+            variant: body.variant,
+            mode: body.mode,
+            profile_digest: body.profile_digest,
+            normalization_digest: body.normalization_digest,
+            result_digest: body.result_digest,
+            execution_provenance_digest: body.execution_provenance_digest,
+            executor_public_key: signing_key.verifying_key().to_bytes(),
+            signature: Signature::from_bytes([0; 64]),
+        };
+        artifact.validate_unsigned_shape()?;
+        artifact.signature = Signature::from_bytes(
+            signing_key
+                .sign(&execution_artifact_signature_message(
+                    &artifact.unsigned_bytes()?,
+                ))
+                .to_bytes(),
+        );
+        Ok(artifact)
+    }
+
+    /// Encode the validated signed artifact as canonical CBOR.
+    ///
+    /// # Errors
+    /// Returns a closed error when its shape, signature, or encoding is invalid.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, NonInterferenceReportErrorV1> {
+        self.validate_shape()?;
+        encode(self)
+    }
+
+    /// Decode and validate one bounded canonical signed artifact.
+    ///
+    /// # Errors
+    /// Returns a closed error for oversized, malformed, noncanonical, or unsigned input.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, NonInterferenceReportErrorV1> {
+        if bytes.len() > MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1 {
+            return Err(NonInterferenceReportErrorV1::TooLarge);
+        }
+        let canonical = CanonicalBytes::from_vec(bytes.to_vec());
+        let artifact: Self = pos_crypto::canonical::decode(&canonical)
+            .map_err(|_| NonInterferenceReportErrorV1::NonCanonical)?;
+        if encode(&artifact)?.as_slice() != bytes {
+            return Err(NonInterferenceReportErrorV1::NonCanonical);
+        }
+        artifact.validate_shape().map(|()| artifact)
+    }
+
+    /// Return the content address of the complete signed artifact.
+    ///
+    /// # Errors
+    /// Returns a closed error when the artifact cannot be validated or encoded.
+    pub fn content_digest(&self) -> Result<[u8; 32], NonInterferenceReportErrorV1> {
+        self.to_canonical_cbor()
+            .map(|bytes| domain_digest(b"PiglorOS.NonInterference.ExecutionArtifact.v1", &bytes))
+    }
+
+    fn validate_shape(&self) -> Result<(), NonInterferenceReportErrorV1> {
+        self.validate_unsigned_shape()?;
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&self.executor_public_key)
+            .map_err(|_| NonInterferenceReportErrorV1::SignatureInvalid)?;
+        key.verify(
+            &execution_artifact_signature_message(&self.unsigned_bytes()?),
+            &ed25519_dalek::Signature::from_bytes(self.signature.as_bytes()),
+        )
+        .map_err(|_| NonInterferenceReportErrorV1::SignatureInvalid)
+    }
+
+    fn validate_unsigned_shape(&self) -> Result<(), NonInterferenceReportErrorV1> {
+        let profile = non_interference_capture_profiles_v1()
+            .into_iter()
+            .find(|profile| profile.fixture_id == self.fixture_id)
+            .ok_or(NonInterferenceReportErrorV1::InvalidShape)?;
+        if self.magic != NON_INTERFERENCE_EXECUTION_ARTIFACT_MAGIC_V1
+            || self.version != 1
+            || self.profile_digest != profile.profile_digest
+            || self.normalization_digest != normalization_digest(profile.profile_digest)
+            || self.result_digest == [0; 32]
+            || self.execution_provenance_digest == [0; 32]
+            || self.executor_public_key == [0; 32]
+        {
+            return Err(NonInterferenceReportErrorV1::InvalidShape);
+        }
+        Ok(())
+    }
+
+    fn unsigned_bytes(&self) -> Result<Vec<u8>, NonInterferenceReportErrorV1> {
+        encode(&UnsignedNonInterferenceExecutionArtifactV1 {
+            magic: self.magic.clone(),
+            version: self.version,
+            fixture_id: self.fixture_id.clone(),
+            variant: self.variant,
+            mode: self.mode,
+            profile_digest: self.profile_digest,
+            normalization_digest: self.normalization_digest,
+            result_digest: self.result_digest,
+            execution_provenance_digest: self.execution_provenance_digest,
+            executor_public_key: self.executor_public_key,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct UnsignedNonInterferenceExecutionArtifactV1 {
+    #[serde(rename = "m")]
+    magic: String,
+    #[serde(rename = "v")]
+    version: u16,
+    #[serde(rename = "i")]
+    fixture_id: String,
+    #[serde(rename = "x")]
+    variant: NonInterferenceVariantV1,
+    #[serde(rename = "o")]
+    mode: ExecutionModeV1,
+    #[serde(rename = "p")]
+    profile_digest: [u8; 32],
+    #[serde(rename = "n")]
+    normalization_digest: [u8; 32],
+    #[serde(rename = "r")]
+    result_digest: [u8; 32],
+    #[serde(rename = "e")]
+    execution_provenance_digest: [u8; 32],
+    #[serde(rename = "k")]
+    executor_public_key: [u8; 32],
 }
 
 /// One row/variant outcome, containing all four ordered mode executions.
@@ -198,7 +375,20 @@ impl NonInterferenceReportV1 {
     ///
     /// # Errors
     /// Returns a closed error for any invalid report invariant.
-    pub fn validate(&self) -> Result<(), NonInterferenceReportErrorV1> {
+    pub fn validate(
+        &self,
+        trusted_signer_public_key: &[u8; 32],
+        trusted_executor_public_keys: &[[u8; 32]],
+        execution_artifacts: &[Vec<u8>],
+    ) -> Result<(), NonInterferenceReportErrorV1> {
+        if &self.signer_public_key != trusted_signer_public_key {
+            return Err(NonInterferenceReportErrorV1::SignatureInvalid);
+        }
+        self.validate_integrity()?;
+        self.validate_execution_artifacts(trusted_executor_public_keys, execution_artifacts)
+    }
+
+    fn validate_integrity(&self) -> Result<(), NonInterferenceReportErrorV1> {
         if self.magic != NON_INTERFERENCE_REPORT_MAGIC_V1 || self.version != 1 {
             return Err(NonInterferenceReportErrorV1::InvalidShape);
         }
@@ -237,7 +427,7 @@ impl NonInterferenceReportV1 {
     /// # Errors
     /// Returns a closed error if validation or encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, NonInterferenceReportErrorV1> {
-        self.validate()?;
+        self.validate_integrity()?;
         encode(self)
     }
 
@@ -246,7 +436,12 @@ impl NonInterferenceReportV1 {
     /// # Errors
     /// Returns a closed error for malformed, noncanonical, oversized, or
     /// unverifiable bytes.
-    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, NonInterferenceReportErrorV1> {
+    pub fn from_canonical_cbor(
+        bytes: &[u8],
+        trusted_signer_public_key: &[u8; 32],
+        trusted_executor_public_keys: &[[u8; 32]],
+        execution_artifacts: &[Vec<u8>],
+    ) -> Result<Self, NonInterferenceReportErrorV1> {
         if bytes.len() > MAX_NON_INTERFERENCE_REPORT_BYTES_V1 {
             return Err(NonInterferenceReportErrorV1::TooLarge);
         }
@@ -256,7 +451,13 @@ impl NonInterferenceReportV1 {
         if encode(&report)?.as_slice() != bytes {
             return Err(NonInterferenceReportErrorV1::NonCanonical);
         }
-        report.validate().map(|()| report)
+        report
+            .validate(
+                trusted_signer_public_key,
+                trusted_executor_public_keys,
+                execution_artifacts,
+            )
+            .map(|()| report)
     }
 
     #[must_use]
@@ -315,6 +516,43 @@ impl NonInterferenceReportV1 {
             ),
         ]
     }
+
+    fn validate_execution_artifacts(
+        &self,
+        trusted_executor_public_keys: &[[u8; 32]],
+        execution_artifacts: &[Vec<u8>],
+    ) -> Result<(), NonInterferenceReportErrorV1> {
+        if execution_artifacts.len() != 192 || trusted_executor_public_keys.is_empty() {
+            return Err(NonInterferenceReportErrorV1::InvalidShape);
+        }
+        let mut resolved = std::collections::BTreeMap::new();
+        for bytes in execution_artifacts {
+            let artifact = NonInterferenceExecutionArtifactV1::from_canonical_cbor(bytes)?;
+            let digest = domain_digest(b"PiglorOS.NonInterference.ExecutionArtifact.v1", bytes);
+            if resolved.insert(digest, artifact).is_some() {
+                return Err(NonInterferenceReportErrorV1::InvalidShape);
+            }
+        }
+        for outcome in &self.outcomes {
+            for reference in &outcome.modes {
+                let artifact = resolved
+                    .get(&reference.artifact_digest)
+                    .ok_or(NonInterferenceReportErrorV1::InvalidShape)?;
+                if artifact.fixture_id != outcome.fixture_id
+                    || artifact.variant != outcome.variant
+                    || artifact.mode != reference.mode
+                    || artifact.profile_digest != outcome.profile_digest
+                    || artifact.normalization_digest != outcome.normalization_digest
+                    || artifact.result_digest != reference.result_digest
+                    || artifact.execution_provenance_digest != reference.execution_provenance_digest
+                    || !trusted_executor_public_keys.contains(&artifact.executor_public_key)
+                {
+                    return Err(NonInterferenceReportErrorV1::InvalidShape);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_outcomes(
@@ -360,7 +598,6 @@ fn validate_outcomes(
         }
         for (mode, expected_mode) in outcome.modes.iter().zip(modes) {
             if mode.mode != expected_mode
-                || !mode.genuine_execution
                 || mode.result_digest == [0; 32]
                 || mode.artifact_digest == [0; 32]
                 || mode.execution_provenance_digest == [0; 32]
@@ -368,13 +605,22 @@ fn validate_outcomes(
                 return Err(NonInterferenceReportErrorV1::InvalidShape);
             }
         }
+        if outcome
+            .modes
+            .iter()
+            .skip(1)
+            .any(|mode| mode.result_digest != outcome.modes[0].result_digest)
+        {
+            return Err(NonInterferenceReportErrorV1::InvalidShape);
+        }
         let first_failed = outcome.modes.iter().find(|mode| !mode.equal);
         match (first_failed, &outcome.first_divergence) {
             (None, None) => {}
             (Some(mode), Some(coordinate))
                 if coordinate.fixture_id == outcome.fixture_id
                     && coordinate.variant == outcome.variant
-                    && coordinate.mode == mode.mode => {}
+                    && coordinate.mode == mode.mode
+                    && usize::from(coordinate.surface_ordinal) < profile.surface_names.len() => {}
             _ => return Err(NonInterferenceReportErrorV1::InvalidShape),
         }
     }
@@ -399,6 +645,12 @@ fn report_digest(unsigned: &[u8]) -> [u8; 32] {
 
 fn signature_message(unsigned: &[u8]) -> Vec<u8> {
     let mut message = b"PiglorOS.NonInterference.Report.Signature.v1\0".to_vec();
+    message.extend_from_slice(unsigned);
+    message
+}
+
+fn execution_artifact_signature_message(unsigned: &[u8]) -> Vec<u8> {
+    let mut message = b"PiglorOS.NonInterference.ExecutionArtifact.Signature.v1\0".to_vec();
     message.extend_from_slice(unsigned);
     message
 }

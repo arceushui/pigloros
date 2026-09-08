@@ -3,8 +3,8 @@ use pos_conformance::{
     non_interference_capture_profiles_v1, non_interference_normalization_policy_v1,
     non_interference_surface_names_v1, normalize_non_interference_capture_v1, ExecutionModeV1,
     NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1, NonInterferenceFixturePairV1,
-    NonInterferenceMatrixMemberV1, NonInterferenceRawCaptureV1, NonInterferenceRawOperationalV1,
-    NonInterferenceVariantV1, NON_INTERFERENCE_CASE_COUNT_V1,
+    NonInterferenceMatrixMemberV1, NonInterferenceNormalizationV1, NonInterferenceRawCaptureV1,
+    NonInterferenceRawOperationalV1, NonInterferenceVariantV1, NON_INTERFERENCE_CASE_COUNT_V1,
 };
 use std::cell::Cell;
 use std::fmt::Debug;
@@ -36,39 +36,51 @@ fn capture_for(fixture_id: &str, bytes: &[u8]) -> NonInterferenceCaptureV1 {
 }
 
 fn raw_capture_for(fixture_id: &str, bytes: &[u8]) -> NonInterferenceRawCaptureV1 {
+    let profile = non_interference_capture_profiles_v1()
+        .into_iter()
+        .find(|profile| profile.fixture_id == fixture_id)
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing capture profile")));
     let names = non_interference_surface_names_v1(fixture_id).unwrap_or_default();
     NonInterferenceRawCaptureV1 {
         surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
         authoritative: names.iter().map(|_| bytes.to_vec()).collect(),
         public: names.iter().map(|_| b"public-outcome".to_vec()).collect(),
-        operational: names
+        operational: profile
+            .surface_normalizations
             .iter()
-            .map(|_| raw_operational_for(fixture_id))
+            .copied()
+            .map(raw_operational_for)
             .collect(),
         unexpected_network_accesses: 0,
         provenance_digest: [9; 32],
     }
 }
 
-fn raw_operational_for(fixture_id: &str) -> NonInterferenceRawOperationalV1 {
-    match fixture_id {
-        "NI-TOOL-001" => NonInterferenceRawOperationalV1::CategoryCountDigest {
-            category: 7,
-            count: 1,
-            digest: [8; 32],
-            excluded_sensitive: b"provider text".to_vec(),
-        },
-        "NI-CACHE-002" => NonInterferenceRawOperationalV1::CountClass {
+fn raw_operational_for(
+    normalization: NonInterferenceNormalizationV1,
+) -> NonInterferenceRawOperationalV1 {
+    match normalization {
+        NonInterferenceNormalizationV1::CategoryCountDigest => {
+            NonInterferenceRawOperationalV1::CategoryCountDigest {
+                category: 7,
+                count: 1,
+                digest: [8; 32],
+                excluded_sensitive: b"provider text".to_vec(),
+            }
+        }
+        NonInterferenceNormalizationV1::CountClass => NonInterferenceRawOperationalV1::CountClass {
             class: 2,
             count: 1,
             excluded_sensitive: b"cache key and latency".to_vec(),
         },
-        "NI-STATE-003" | "NI-NET-010" => NonInterferenceRawOperationalV1::CategoryCount {
-            category: 3,
-            count: 1,
-            excluded_sensitive: b"diagnostic details".to_vec(),
-        },
-        "NI-OBS-004" | "NI-CRASH-012" => {
+        NonInterferenceNormalizationV1::CategoryCount => {
+            NonInterferenceRawOperationalV1::CategoryCount {
+                category: 3,
+                count: 1,
+                excluded_sensitive: b"diagnostic details".to_vec(),
+            }
+        }
+        NonInterferenceNormalizationV1::CategoryCountPaddedLength => {
             NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
                 category: 4,
                 count: 1,
@@ -76,10 +88,14 @@ fn raw_operational_for(fixture_id: &str) -> NonInterferenceRawOperationalV1 {
                 excluded_sensitive: b"stack path and raw identifiers".to_vec(),
             }
         }
-        "NI-TIME-005" => NonInterferenceRawOperationalV1::OmitOperational {
-            excluded_sensitive: b"wall time and duration".to_vec(),
-        },
-        _ => NonInterferenceRawOperationalV1::ByteExact(b"byte-exact".to_vec()),
+        NonInterferenceNormalizationV1::OmitOperational => {
+            NonInterferenceRawOperationalV1::OmitOperational {
+                excluded_sensitive: b"wall time and duration".to_vec(),
+            }
+        }
+        NonInterferenceNormalizationV1::ByteExact => {
+            NonInterferenceRawOperationalV1::ByteExact(b"byte-exact".to_vec())
+        }
     }
 }
 
@@ -354,7 +370,7 @@ fn capture_inventory_is_complete_ordered_and_fixture_bound() {
     assert!(non_interference_normalization_policy_v1("unknown").is_none());
     assert_eq!(
         non_interference_normalization_policy_v1("NI-TOOL-001"),
-        Some("count/category/digest; provider text absent")
+        Some("count/category/digest; sensitive text absent")
     );
     let mut captures = Vec::new();
 
@@ -387,6 +403,10 @@ fn capture_inventory_is_complete_ordered_and_fixture_bound() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the independent golden inventory intentionally lists every ADR-059 surface"
+)]
 fn canonical_capture_profiles_match_the_adr_059_public_contract() {
     let expected = [
         (
@@ -550,9 +570,26 @@ fn canonical_capture_profiles_match_the_adr_059_public_contract() {
             ]
         );
         assert_eq!(profile.normalization_version, 1);
+        assert_eq!(profile.surface_normalizations.len(), surfaces.len());
         assert_eq!(profile.max_surface_bytes, 1024 * 1024);
         assert_ne!(profile.profile_digest, [0; 32]);
     }
+    let time = &profiles[4].surface_normalizations;
+    assert_eq!(
+        time,
+        &[
+            NonInterferenceNormalizationV1::ByteExact,
+            NonInterferenceNormalizationV1::OmitOperational,
+            NonInterferenceNormalizationV1::ByteExact,
+            NonInterferenceNormalizationV1::CategoryCount,
+            NonInterferenceNormalizationV1::CategoryCount,
+            NonInterferenceNormalizationV1::ByteExact,
+        ]
+    );
+    assert_eq!(
+        profiles[5].surface_normalizations,
+        [NonInterferenceNormalizationV1::CategoryCount; 5]
+    );
 }
 
 #[test]
@@ -625,11 +662,22 @@ fn typed_normalizers_reject_wrong_shape_and_invalid_allowed_values() {
         Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
     );
 
-    let mut empty_exact = raw_capture_for("NI-PUBLIC-006", b"captured");
+    let mut empty_exact = raw_capture_for("NI-EVAL-007", b"captured");
     empty_exact.operational[0] = NonInterferenceRawOperationalV1::ByteExact(Vec::new());
     assert_eq!(
-        normalize_non_interference_capture_v1("NI-PUBLIC-006", empty_exact),
+        normalize_non_interference_capture_v1("NI-EVAL-007", empty_exact),
         Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+    );
+
+    let mut oversized_sensitive = raw_capture_for("NI-CACHE-002", b"captured");
+    oversized_sensitive.operational[0] = NonInterferenceRawOperationalV1::CountClass {
+        class: 1,
+        count: 1,
+        excluded_sensitive: vec![0; 1024 * 1024 + 1],
+    };
+    assert_eq!(
+        normalize_non_interference_capture_v1("NI-CACHE-002", oversized_sensitive),
+        Err(NonInterferenceExecutionErrorV1::CaptureOutOfBounds)
     );
 }
 
