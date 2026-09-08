@@ -505,12 +505,17 @@ mod tests {
     };
     use pos_store::memory::MemoryStore;
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FaultModeV1 {
+        NonemptyInventory,
+        MisreportExactRetry,
+        Recovery,
+        EventStore,
+    }
+
     struct FaultStoreV1 {
         inner: MemoryStore,
-        fail_nonempty_inventory: bool,
-        misreport_exact_retry: bool,
-        fail_recovery: bool,
-        fail_event_store: bool,
+        fault: FaultModeV1,
     }
 
     impl pos_core::EventStore for FaultStoreV1 {
@@ -519,7 +524,7 @@ mod tests {
         }
 
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
-            if self.fail_event_store {
+            if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault create".to_owned()))
             } else {
                 self.inner.create_timeline(name)
@@ -531,7 +536,7 @@ mod tests {
             timeline: TimelineId,
             drafts: &[EventDraft],
         ) -> Result<Vec<Event>, CoreError> {
-            if self.fail_event_store {
+            if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault append".to_owned()))
             } else {
                 self.inner.append(timeline, drafts)
@@ -539,7 +544,7 @@ mod tests {
         }
 
         fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-            if self.fail_event_store {
+            if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault read".to_owned()))
             } else {
                 self.inner.read(timeline, range)
@@ -552,7 +557,7 @@ mod tests {
             at_seq: Seq,
             name: &str,
         ) -> Result<Timeline, CoreError> {
-            if self.fail_event_store {
+            if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault fork".to_owned()))
             } else {
                 self.inner.fork(parent, at_seq, name)
@@ -560,7 +565,7 @@ mod tests {
         }
 
         fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-            if self.fail_event_store {
+            if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault list".to_owned()))
             } else {
                 self.inner.list_timelines()
@@ -568,7 +573,7 @@ mod tests {
         }
 
         fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-            if self.fail_event_store {
+            if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault timeline".to_owned()))
             } else {
                 self.inner.get_timeline(id)
@@ -584,7 +589,7 @@ mod tests {
             let snapshot = self
                 .inner
                 .complete_erasure_inventory_snapshot(maximum_requests)?;
-            if self.fail_nonempty_inventory && !snapshot.topology().is_empty() {
+            if self.fault == FaultModeV1::NonemptyInventory && !snapshot.topology().is_empty() {
                 Err(ErasureErrorV1::ProvenanceMissing)
             } else {
                 Ok(snapshot)
@@ -598,7 +603,9 @@ mod tests {
             admission: PreparedErasureForkBatchV1,
         ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
             let outcome = self.inner.commit_fork_admission(admission)?;
-            if self.misreport_exact_retry && outcome == ErasureCasOutcomeV1::ExactRetry {
+            if self.fault == FaultModeV1::MisreportExactRetry
+                && outcome == ErasureCasOutcomeV1::ExactRetry
+            {
                 Ok(ErasureCasOutcomeV1::Applied)
             } else {
                 Ok(outcome)
@@ -609,7 +616,7 @@ mod tests {
             &mut self,
             operation: ErasureReferenceV1,
         ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-            if self.fail_recovery {
+            if self.fault == FaultModeV1::Recovery {
                 Err(ErasureErrorV1::ProvenanceMissing)
             } else {
                 self.inner.recover_fork_admission(operation)
@@ -617,18 +624,10 @@ mod tests {
         }
     }
 
-    fn fault_store(
-        fail_nonempty_inventory: bool,
-        misreport_exact_retry: bool,
-        fail_recovery: bool,
-        fail_event_store: bool,
-    ) -> FaultStoreV1 {
+    fn fault_store(fault: FaultModeV1) -> FaultStoreV1 {
         FaultStoreV1 {
             inner: MemoryStore::new().without_erasure_gate(),
-            fail_nonempty_inventory,
-            misreport_exact_retry,
-            fail_recovery,
-            fail_event_store,
+            fault,
         }
     }
 
@@ -761,7 +760,7 @@ mod tests {
     #[test]
     fn failed_successor_inventory_refresh_poisons_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(true, false, false, false)),
+            Box::new(fault_store(FaultModeV1::NonemptyInventory)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -1069,7 +1068,7 @@ mod tests {
     #[test]
     fn impossible_applied_retry_poisons_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(false, true, false, false)),
+            Box::new(fault_store(FaultModeV1::MisreportExactRetry)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -1102,7 +1101,7 @@ mod tests {
     #[test]
     fn corrupt_fork_recovery_poisons_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(false, false, true, false)),
+            Box::new(fault_store(FaultModeV1::Recovery)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -1121,7 +1120,7 @@ mod tests {
     #[test]
     fn every_hosted_event_store_failure_is_payload_free() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(false, false, false, true)),
+            Box::new(fault_store(FaultModeV1::EventStore)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
