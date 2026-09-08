@@ -4,6 +4,7 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, PluginId, TimelineId},
+    ErasureContainmentGateV1,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -17,6 +18,7 @@ use pos_runtime::{
     recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry,
     RuntimeError, StepOutput, TimelineHistorySegment,
 };
+use std::sync::Arc;
 use ulid::Ulid;
 
 const PLUGIN_VERSION: &str = "1.0.0";
@@ -24,6 +26,10 @@ const PROVIDER_ID: &str = "fixture-1";
 const PROVIDER_VERSION: &str = "v1";
 const PLUGIN_HASH: [u8; 32] = [0x31; 32];
 const PROVIDER_HASH: [u8; 32] = [0x32; 32];
+
+fn gated_registry() -> PluginRegistry {
+    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
 
 trait TestValueExt<T> {
     fn test_ok(self) -> T;
@@ -1001,7 +1007,7 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
         host.provenance.clone(),
         Box::new(provider),
     );
-    let mut registry = PluginRegistry::new();
+    let mut registry = gated_registry();
     registry.register_driver(Box::new(driver));
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
@@ -1177,7 +1183,7 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
         host.provenance.clone(),
         Box::new(provider),
     );
-    let mut registry = PluginRegistry::new();
+    let mut registry = gated_registry();
     registry.register_driver(Box::new(PrecedingDriver {
         entity: host.other_agent,
     }));
