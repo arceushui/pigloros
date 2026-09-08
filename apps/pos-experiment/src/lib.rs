@@ -157,6 +157,17 @@ fn require_backtest_erasure_gate(
     gate.ok_or(pos_core::CoreError::ErasureContainmentUnavailable)
 }
 
+fn start_backtest_train(
+    store: &mut dyn pos_core::store::EventStore,
+    registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
+    name: &str,
+) -> Result<(Arc<dyn ErasureGate>, Timeline), pos_core::CoreError> {
+    let gate = bind_backtest_erasure_gate(store, registry, gate)?;
+    let timeline = store.create_timeline(name)?;
+    Ok((gate, timeline))
+}
+
 // Experiment hosts may close their own session, but they are not a Gateway
 // consent issuer.  Keep this durable lifecycle marker outside the canonical
 // `consent.*` namespace so only Gateway APIs can create consent events.
@@ -914,6 +925,17 @@ fn restore_inherited_eval_events(
                 .map_err(ExperimentError::from)
                 .map(|()| events)
         })
+}
+
+fn prepare_backtest_eval_registry(
+    store: &dyn pos_core::store::EventStore,
+    timeline: pos_core::ids::TimelineId,
+    train_head: pos_core::clock::Seq,
+    registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<Vec<pos_core::Event>, ExperimentError> {
+    inherit_backtest_erasure_gate(registry, gate)?;
+    restore_inherited_eval_events(store, timeline, train_head, registry)
 }
 
 /// Run the tick loop on the given store and timeline.
@@ -2354,13 +2376,7 @@ impl BacktestRunner {
         let train_name = format!("{}-train", self.config.experiment_name);
         let mut train_registry = (self.registry_factory)();
         let (erasure_gate, train_tl) =
-            bind_backtest_erasure_gate(store, &mut train_registry, erasure_gate).and_then(
-                |gate| {
-                    store
-                        .create_timeline(&train_name)
-                        .map(|timeline| (gate, timeline))
-                },
-            )?;
+            start_backtest_train(store, &mut train_registry, erasure_gate, &train_name)?;
         let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
@@ -2380,9 +2396,13 @@ impl BacktestRunner {
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
-        inherit_backtest_erasure_gate(&mut eval_registry, erasure_gate)?;
-        let inherited =
-            restore_inherited_eval_events(store, eval_tl_id, train_head_seq, &mut eval_registry)?;
+        let inherited = prepare_backtest_eval_registry(
+            store,
+            eval_tl_id,
+            train_head_seq,
+            &mut eval_registry,
+            erasure_gate,
+        )?;
         hydrate_projections(&mut eval_registry, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
