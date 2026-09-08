@@ -4482,6 +4482,15 @@ pub mod strict_codec {
         }
 
         #[test]
+        fn encodes_the_reserved_executed_contract_status() {
+            let mut contract = super::super::tests::evidence().contract;
+            contract.non_interference_status = NonInterferenceExecutionStatusV1::Executed;
+            let encoded = encode_contract(&contract);
+            let fields = array(&encoded, "wave8_contract", 8).unwrap_or(&[]);
+            assert_eq!(fields.get(6), Some(&uint(1)));
+        }
+
+        #[test]
         fn exercises_verification_record_boundaries() -> Result<(), String> {
             let evidence = super::super::tests::evidence();
             let result = evidence

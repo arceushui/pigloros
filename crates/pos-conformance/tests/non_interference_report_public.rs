@@ -948,6 +948,10 @@ fn both_verifiers_reject_each_invalid_artifact_shape() {
         invalid.push(value);
     }
     for value in invalid {
+        assert_eq!(
+            value.to_canonical_cbor(),
+            Err(NonInterferenceReportErrorV1::InvalidShape)
+        );
         let replacement = canonical_bytes(&value);
         assert_eq!(
             NonInterferenceExecutionArtifactV1::from_canonical_cbor(&replacement),

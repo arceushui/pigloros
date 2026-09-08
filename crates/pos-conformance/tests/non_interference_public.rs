@@ -970,6 +970,59 @@ fn divergent_outcomes_round_trip_at_the_strict_public_wire_seam() {
 }
 
 #[test]
+fn strict_outcome_decoder_rejects_each_scalar_field_type() {
+    let outcome = test_ok(execute_non_interference_pair(&fixture(), |_| {
+        Ok(capture(b"same"))
+    }));
+    let encoded = test_ok(outcome.to_canonical_cbor());
+    let value: ciborium::Value = test_ok(ciborium::from_reader(encoded.as_slice()));
+
+    for (field, replacement) in [
+        (0, ciborium::Value::Integer(0_u64.into())),
+        (1, ciborium::Value::Integer(99_u64.into())),
+        (2, ciborium::Value::Integer(99_u64.into())),
+    ] {
+        let mut malformed = value.clone();
+        let fields = malformed
+            .as_array_mut()
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("outcome must be an array")));
+        fields[field] = replacement;
+        let mut bytes = Vec::new();
+        test_ok(ciborium::into_writer(&malformed, &mut bytes));
+        assert!(pos_conformance::NonInterferenceCaseV1::from_canonical_cbor(&bytes).is_err());
+    }
+
+    for field in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17] {
+        let mut malformed = value.clone();
+        let fields = malformed
+            .as_array_mut()
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("outcome must be an array")));
+        fields[field] = ciborium::Value::Text("wrong-type".to_owned());
+        let mut bytes = Vec::new();
+        test_ok(ciborium::into_writer(&malformed, &mut bytes));
+        assert!(pos_conformance::NonInterferenceCaseV1::from_canonical_cbor(&bytes).is_err());
+    }
+
+    for field in [14, 15] {
+        let mut malformed = value.clone();
+        let fields = malformed
+            .as_array_mut()
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("outcome must be an array")));
+        fields[field] = ciborium::Value::Bool(false);
+        let mut bytes = Vec::new();
+        test_ok(ciborium::into_writer(&malformed, &mut bytes));
+        assert!(pos_conformance::NonInterferenceCaseV1::from_canonical_cbor(&bytes).is_err());
+    }
+
+    let mut not_an_array = Vec::new();
+    test_ok(ciborium::into_writer(
+        &ciborium::Value::Map(Vec::new()),
+        &mut not_an_array,
+    ));
+    assert!(pos_conformance::NonInterferenceCaseV1::from_canonical_cbor(&not_an_array).is_err());
+}
+
+#[test]
 fn complete_matrix_propagates_a_missing_host_execution() {
     assert_eq!(
         execute_wave8_non_interference_matrix([3; 32], |_| {
