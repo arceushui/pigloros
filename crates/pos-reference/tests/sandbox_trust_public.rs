@@ -20,6 +20,15 @@ fn encode(value: &Value) -> TestResult<Vec<u8>> {
     Ok(bytes)
 }
 
+fn test_nonce() -> [u8; 16] {
+    loop {
+        let nonce = rand::random();
+        if nonce != [0; 16] {
+            return nonce;
+        }
+    }
+}
+
 fn corrupt_signed_digest(bytes: &[u8]) -> TestResult<Vec<u8>> {
     let mut wrapper: Value = ciborium::from_reader(bytes)?;
     let Value::Array(fields) = &mut wrapper else {
@@ -27,6 +36,27 @@ fn corrupt_signed_digest(bytes: &[u8]) -> TestResult<Vec<u8>> {
     };
     fields[1] = Value::Bytes(vec![0; 32]);
     encode(&wrapper)
+}
+
+fn resign_unsigned_field(
+    bytes: &[u8],
+    magic: &str,
+    field: usize,
+    replacement: Value,
+    signer: &SigningKey,
+) -> TestResult<Vec<u8>> {
+    let Value::Array(wrapper) = ciborium::from_reader(bytes)? else {
+        return Err("expected signed test record".into());
+    };
+    let Value::Array(mut unsigned) = wrapper
+        .into_iter()
+        .next()
+        .ok_or("signed test record is empty")?
+    else {
+        return Err("expected unsigned field array".into());
+    };
+    *unsigned.get_mut(field).ok_or("unsigned field missing")? = replacement;
+    sign_record(magic, Value::Array(unsigned), signer)
 }
 
 fn assert_revocation_collection_rejections(
@@ -174,12 +204,23 @@ fn revocation_update(
     signer: &SigningKey,
     nonce: [u8; 16],
 ) -> TestResult<Vec<u8>> {
+    revocation_update_with_id(current, next_bytes, next, signer, nonce, [21; 16])
+}
+
+fn revocation_update_with_id(
+    current: &SandboxRevocationSnapshot,
+    next_bytes: &[u8],
+    next: &SandboxRevocationSnapshot,
+    signer: &SigningKey,
+    nonce: [u8; 16],
+    request_id: [u8; 16],
+) -> TestResult<Vec<u8>> {
     sign_record(
         "RCU1",
         Value::Array(vec![
             Value::Text("RCU1".to_owned()),
             integer(1),
-            Value::Bytes(vec![21; 16]),
+            Value::Bytes(request_id.to_vec()),
             Value::Bytes(current.snapshot_digest().to_vec()),
             Value::Bytes(next_bytes.to_vec()),
             Value::Bytes(next.snapshot_digest().to_vec()),
@@ -195,16 +236,34 @@ fn revocation_acknowledgement(
     signer: &SigningKey,
     cancelled: Vec<Value>,
 ) -> TestResult<Vec<u8>> {
+    revocation_acknowledgement_fields(
+        next.snapshot_digest(),
+        signer,
+        cancelled,
+        [21; 16],
+        0,
+        "runtime",
+    )
+}
+
+fn revocation_acknowledgement_fields(
+    revocation_digest: [u8; 32],
+    signer: &SigningKey,
+    cancelled: Vec<Value>,
+    request_id: [u8; 16],
+    status: u64,
+    runtime_key_id: &str,
+) -> TestResult<Vec<u8>> {
     sign_record(
         "RCA1",
         Value::Array(vec![
             Value::Text("RCA1".to_owned()),
             integer(1),
-            Value::Bytes(vec![21; 16]),
-            Value::Bytes(next.snapshot_digest().to_vec()),
+            Value::Bytes(request_id.to_vec()),
+            Value::Bytes(revocation_digest.to_vec()),
             Value::Array(cancelled),
-            integer(0),
-            Value::Text("runtime".to_owned()),
+            integer(status),
+            Value::Text(runtime_key_id.to_owned()),
         ]),
         signer,
     )
@@ -736,7 +795,8 @@ fn selector_revocation_state_requires_exact_timely_cancellation_acknowledgement(
     )?;
     let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
     let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
-    let update = revocation_update(&current, &next_bytes, &next, &signer, [22; 16])?;
+    let update_id = test_nonce();
+    let update = revocation_update(&current, &next_bytes, &next, &signer, update_id)?;
     let cancelled = vec![[23; 16], [24; 16]];
     let mut state = SelectorRevocationState::new(current.clone());
     state.begin_update(&update, &trust, cancelled.clone(), 1_000)?;
@@ -760,7 +820,7 @@ fn selector_revocation_state_requires_exact_timely_cancellation_acknowledgement(
     state.begin_update(&update, &trust, cancelled, 2_000)?;
     state.acknowledge(&acknowledgement, "runtime", &signer.verifying_key(), 2_000)?;
 
-    let conflicting = revocation_update(&current, &next_bytes, &next, &signer, [25; 16])?;
+    let conflicting = revocation_update(&current, &next_bytes, &next, &signer, test_nonce())?;
     assert_eq!(
         state.begin_update(&conflicting, &trust, vec![], 2_000),
         Err(SandboxRevocationUpdateError::RequestIdentityConflict)
@@ -771,6 +831,285 @@ fn selector_revocation_state_requires_exact_timely_cancellation_acknowledgement(
     assert_eq!(
         late.acknowledge(&acknowledgement, "runtime", &signer.verifying_key(), 1_101,),
         Err(SandboxRevocationUpdateError::AcknowledgementDeadline)
+    );
+    Ok(())
+}
+
+struct RevocationTransitionFixture {
+    trust: SandboxTrustSnapshot,
+    signer: SigningKey,
+    current: SandboxRevocationSnapshot,
+    next_bytes: Vec<u8>,
+    next: SandboxRevocationSnapshot,
+}
+
+fn revocation_transition_fixture() -> TestResult<RevocationTransitionFixture> {
+    let trust = update_registry()?;
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let current_bytes = sign_record("RVS1", revocation(&trust, 5, vec![]), &signer)?;
+    let current = SandboxRevocationSnapshot::authenticate(&current_bytes, &trust)?;
+    let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
+    let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
+    Ok(RevocationTransitionFixture {
+        trust,
+        signer,
+        current,
+        next_bytes,
+        next,
+    })
+}
+
+#[test]
+fn selector_revocation_state_rejects_pending_update_conflicts() -> TestResult {
+    let fixture = revocation_transition_fixture()?;
+    let first_nonce = test_nonce();
+    let second_nonce = loop {
+        let candidate = test_nonce();
+        if candidate != first_nonce {
+            break candidate;
+        }
+    };
+    let update = revocation_update(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        first_nonce,
+    )?;
+    let conflicting = revocation_update(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        second_nonce,
+    )?;
+    let other_request = revocation_update_with_id(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        test_nonce(),
+        [22; 16],
+    )?;
+    let cancelled = vec![[23; 16], [24; 16]];
+    let mut state = SelectorRevocationState::new(fixture.current.clone());
+    state.begin_update(&update, &fixture.trust, cancelled.clone(), 1_000)?;
+    assert_eq!(
+        state.begin_update(&conflicting, &fixture.trust, cancelled.clone(), 1_001),
+        Err(SandboxRevocationUpdateError::RequestIdentityConflict)
+    );
+    assert_eq!(
+        state.begin_update(&other_request, &fixture.trust, cancelled, 1_001),
+        Err(SandboxRevocationUpdateError::UpdateInFlight)
+    );
+
+    let mut no_pending = SelectorRevocationState::new(fixture.current);
+    for invalid in [
+        vec![[0; 16]],
+        vec![[23; 16], [23; 16]],
+        vec![[24; 16], [23; 16]],
+        vec![[1; 16]; 257],
+    ] {
+        assert!(matches!(
+            no_pending.begin_update(&update, &fixture.trust, invalid, 1_000),
+            Err(SandboxRevocationUpdateError::Protocol(_))
+        ));
+    }
+    assert_eq!(
+        no_pending.begin_update(&update, &fixture.trust, Vec::new(), u64::MAX),
+        Err(SandboxRevocationUpdateError::AcknowledgementDeadline)
+    );
+    Ok(())
+}
+
+#[test]
+fn selector_revocation_state_rejects_update_authority_and_signer_substitution() -> TestResult {
+    let fixture = revocation_transition_fixture()?;
+    let update = revocation_update(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        test_nonce(),
+    )?;
+    for (field, replacement, expected) in [
+        (
+            3,
+            Value::Bytes(vec![99; 32]),
+            SandboxRevocationUpdateError::Trust(SandboxTrustError::AuthorityMismatch),
+        ),
+        (
+            5,
+            Value::Bytes(vec![99; 32]),
+            SandboxRevocationUpdateError::Trust(SandboxTrustError::AuthorityMismatch),
+        ),
+        (
+            7,
+            Value::Text("runtime".to_owned()),
+            SandboxRevocationUpdateError::Trust(SandboxTrustError::WrongRole),
+        ),
+    ] {
+        let changed = resign_unsigned_field(&update, "RCU1", field, replacement, &fixture.signer)?;
+        let mut state = SelectorRevocationState::new(fixture.current.clone());
+        assert_eq!(
+            state.begin_update(&changed, &fixture.trust, Vec::new(), 1_000),
+            Err(expected)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
+    let fixture = revocation_transition_fixture()?;
+    let update = revocation_update(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        test_nonce(),
+    )?;
+    let cancelled = vec![[23; 16], [24; 16]];
+    let cancelled_values = cancelled
+        .iter()
+        .map(|attempt| Value::Bytes(attempt.to_vec()))
+        .collect::<Vec<_>>();
+    let mut state = SelectorRevocationState::new(fixture.current.clone());
+    state.begin_update(&update, &fixture.trust, cancelled, 1_000)?;
+    let wrong_request_ack = revocation_acknowledgement_fields(
+        fixture.next.snapshot_digest(),
+        &fixture.signer,
+        cancelled_values.clone(),
+        [22; 16],
+        0,
+        "runtime",
+    )?;
+    assert_eq!(
+        state.acknowledge(
+            &wrong_request_ack,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_050
+        ),
+        Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+    );
+    let wrong_snapshot_ack = revocation_acknowledgement_fields(
+        fixture.current.snapshot_digest(),
+        &fixture.signer,
+        cancelled_values.clone(),
+        [21; 16],
+        0,
+        "runtime",
+    )?;
+    assert_eq!(
+        state.acknowledge(
+            &wrong_snapshot_ack,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_050
+        ),
+        Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+    );
+    let wrong_status_ack = revocation_acknowledgement_fields(
+        fixture.next.snapshot_digest(),
+        &fixture.signer,
+        cancelled_values.clone(),
+        [21; 16],
+        1,
+        "runtime",
+    )?;
+    assert!(matches!(
+        state.acknowledge(
+            &wrong_status_ack,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_050
+        ),
+        Err(SandboxRevocationUpdateError::Protocol(_))
+    ));
+    let forged_acknowledgement = revocation_acknowledgement(
+        &fixture.next,
+        &SigningKey::from_bytes(&[8; 32]),
+        cancelled_values.clone(),
+    )?;
+    assert!(matches!(
+        state.acknowledge(
+            &forged_acknowledgement,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_050
+        ),
+        Err(SandboxRevocationUpdateError::Protocol(
+            ProtocolError::SignatureInvalid
+        ))
+    ));
+    let acknowledgement =
+        revocation_acknowledgement(&fixture.next, &fixture.signer, cancelled_values)?;
+    assert_eq!(
+        state.acknowledge(
+            &acknowledgement,
+            "other",
+            &fixture.signer.verifying_key(),
+            1_050
+        ),
+        Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn selector_revocation_state_rejects_completed_acknowledgement_conflicts() -> TestResult {
+    let fixture = revocation_transition_fixture()?;
+    let update = revocation_update(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        test_nonce(),
+    )?;
+    let cancelled = vec![[23; 16], [24; 16]];
+    let cancelled_values = cancelled
+        .iter()
+        .map(|attempt| Value::Bytes(attempt.to_vec()))
+        .collect::<Vec<_>>();
+    let acknowledgement =
+        revocation_acknowledgement(&fixture.next, &fixture.signer, cancelled_values)?;
+    let mut state = SelectorRevocationState::new(fixture.current.clone());
+    state.begin_update(&update, &fixture.trust, cancelled, 1_000)?;
+    state.acknowledge(
+        &acknowledgement,
+        "runtime",
+        &fixture.signer.verifying_key(),
+        1_050,
+    )?;
+
+    let conflicting_ack = revocation_acknowledgement_fields(
+        fixture.next.snapshot_digest(),
+        &fixture.signer,
+        vec![Value::Bytes(vec![23; 16])],
+        [21; 16],
+        0,
+        "runtime",
+    )?;
+    assert_eq!(
+        state.acknowledge(
+            &conflicting_ack,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_051
+        ),
+        Err(SandboxRevocationUpdateError::RequestIdentityConflict)
+    );
+
+    let mut no_pending = SelectorRevocationState::new(fixture.current);
+    assert_eq!(
+        no_pending.acknowledge(
+            &acknowledgement,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_050
+        ),
+        Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
     );
     Ok(())
 }
