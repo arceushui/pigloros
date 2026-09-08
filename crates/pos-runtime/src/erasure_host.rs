@@ -365,7 +365,7 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pos_core::{CanonicalBytes, EntityId, EventStore, Kind};
+    use pos_core::{CanonicalBytes, EntityId, Kind};
     use pos_store::memory::MemoryStore;
 
     struct FailingInventoryV1;
@@ -435,46 +435,34 @@ mod tests {
 
     #[test]
     fn read_sender_exposes_generation_bound_events_and_metadata() {
-        let mut store = MemoryStore::new().without_erasure_gate();
-        store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
-            .unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!("gate binding failed: {error:?}")))
-            });
-        let timeline = store.create_timeline("host").unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("timeline creation failed: {error:?}")))
-        });
-        store
-            .append(
-                timeline.id(),
-                &[EventDraft::new(
-                    EntityId::new(),
-                    Kind::new("host.fixture"),
-                    CanonicalBytes::from_vec(Vec::new()),
-                )],
-            )
-            .unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!("fixture append failed: {error:?}")))
-            });
-
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(store.without_erasure_gate()),
+            Box::new(MemoryStore::new().without_erasure_gate()),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.command_sender()
+        let timeline = host
+            .command_sender()
             .and_then(|mut sender| {
+                let timeline = sender.create_timeline("host")?;
                 sender.append(
                     timeline.id(),
-                    &[EventDraft::new(
-                        EntityId::new(),
-                        Kind::new("host.second-fixture"),
-                        CanonicalBytes::from_vec(Vec::new()),
-                    )],
-                )
+                    &[
+                        EventDraft::new(
+                            EntityId::new(),
+                            Kind::new("host.fixture"),
+                            CanonicalBytes::from_vec(Vec::new()),
+                        ),
+                        EventDraft::new(
+                            EntityId::new(),
+                            Kind::new("host.second-fixture"),
+                            CanonicalBytes::from_vec(Vec::new()),
+                        ),
+                    ],
+                )?;
+                Ok(timeline)
             })
             .unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!("host append failed: {error:?}")))
+                std::panic::resume_unwind(Box::new(format!("host fixture failed: {error:?}")))
             });
         let mut reader = host
             .read_sender()
