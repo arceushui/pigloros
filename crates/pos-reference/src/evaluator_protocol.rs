@@ -1007,7 +1007,7 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
     validate_identifier(value).map(|()| value.to_owned())
 }
 
-const fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
+fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
     let Some(first) = value.as_bytes().first() else {
         return Err(ProtocolError::FieldOutOfBounds);
     };
