@@ -11,8 +11,9 @@ use pos_conformance::{
 use pos_reference::sandbox_provider_protocol as independent;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+type BytesResult = Result<Vec<u8>, Box<dyn std::error::Error>>;
 
-fn replace_unsigned_field(bytes: &[u8], index: usize, replacement: Value) -> TestResult<Vec<u8>> {
+fn replace_unsigned_field(bytes: &[u8], index: usize, replacement: Value) -> BytesResult {
     let mut document: Value = ciborium::from_reader(bytes)?;
     let Value::Array(envelope) = &mut document else {
         return Err("signed document must be an array".into());
