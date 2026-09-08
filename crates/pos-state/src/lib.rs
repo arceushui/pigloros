@@ -1799,7 +1799,6 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(on))]
     fn public_observation_path_enters_the_erasure_fence() {
         let timeline = TimelineId::new();
-        let registry = ProjectionRegistry::new();
         let fixture = active_decision(timeline);
         let authority_registry = test_ok(AuthorityRegistrySnapshotV1::try_new(
             test_hash(7),
@@ -1813,22 +1812,32 @@ mod tests {
             reducer: "missing-reducer".to_owned(),
             prior_snapshot_digest: None,
         };
-        assert!(registry
-            .materialize_authorized_observation(
-                &fixture.request,
-                &fixture.decision,
-                &fixture.authority,
-                &authority_registry,
-                Seq::ZERO,
-                &context,
-            )
-            .is_err());
+        let mut registry = ProjectionRegistry::new();
+        assert_eq!(
+            registry
+                .materialize_authorized_observation(
+                    &fixture.request,
+                    &fixture.decision,
+                    &fixture.authority,
+                    &authority_registry,
+                    Seq::ZERO,
+                    &context,
+                )
+                .map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
 
         let blocked_gate = Arc::new(ErasureContainmentGateV1::new());
         blocked_gate.block_timeline(timeline);
-        let blocked = ProjectionRegistry::new().with_erasure_gate(blocked_gate);
+        registry.bind_erasure_gate(blocked_gate.clone());
+        // A second binding cannot replace the host gate with a permissive one.
+        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         assert_eq!(
-            blocked.materialize_authorized_observation(
+            registry.authorize_erasure_observation(blocked_gate.as_ref(), timeline),
+            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            registry.materialize_authorized_observation(
                 &fixture.request,
                 &fixture.decision,
                 &fixture.authority,
@@ -1969,22 +1978,5 @@ mod wave3_tests {
         let empty_snap = std::collections::HashMap::new();
         let diff = reg.diff_against_snapshot(&empty_snap, &[entity]);
         assert!(diff.is_some());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn projection_erasure_observation_gate_is_fail_closed() {
-        let gate = Arc::new(ErasureContainmentGateV1::new());
-        let timeline = TimelineId::new();
-        gate.block_timeline(timeline);
-        let mut registry = ProjectionRegistry::new();
-        registry.bind_erasure_gate(gate.clone());
-        // A host binding is immutable for the lifetime of the registry. A
-        // later permissive replacement must not bypass the original fence.
-        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
-        assert_eq!(
-            registry.authorize_erasure_observation(gate.as_ref(), timeline),
-            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
-        );
     }
 }
