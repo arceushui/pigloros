@@ -190,6 +190,12 @@ fn validate_contract(
             "plugin boundary is not an object",
         ))?;
     validate_plugin_boundary_shape(boundary)?;
+    validate_non_interference_contract(contract)
+}
+
+fn validate_non_interference_contract(
+    contract: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), ReferenceError> {
     let matrix = contract
         .get("non_interference")
         .ok_or(ReferenceError::InvalidForkEvidence(
@@ -590,39 +596,45 @@ fn validate_contract_shape(
             ));
         }
     }
-    if contract
-        .keys()
-        .any(|field| !required.contains(&field.as_str()))
-        || !contract
-            .get("scenario_room")
-            .is_some_and(serde_json::Value::is_object)
-        || !contract
-            .get("plugin_boundary")
-            .is_some_and(serde_json::Value::is_object)
-        || !contract
-            .get("counterfactual")
-            .is_some_and(serde_json::Value::is_object)
-        || !contract
-            .get("knowledge_snapshots")
-            .is_some_and(serde_json::Value::is_array)
-        || !contract
-            .get("authorization_decisions")
-            .is_some_and(serde_json::Value::is_array)
-        || !contract
-            .get("atomicity")
-            .is_some_and(serde_json::Value::is_array)
-        || !contract
-            .get("non_interference_status")
-            .is_some_and(serde_json::Value::is_string)
-        || !contract
-            .get("non_interference")
-            .is_some_and(serde_json::Value::is_array)
-    {
+    if !contract_fields_have_expected_shapes(contract, &required) {
         return Err(ReferenceError::InvalidForkEvidence(
             "contract shape is invalid",
         ));
     }
     Ok(())
+}
+
+fn contract_fields_have_expected_shapes(
+    contract: &serde_json::Map<String, serde_json::Value>,
+    required: &[&str],
+) -> bool {
+    !contract
+        .keys()
+        .any(|field| !required.contains(&field.as_str()))
+        && contract
+            .get("scenario_room")
+            .is_some_and(serde_json::Value::is_object)
+        && contract
+            .get("plugin_boundary")
+            .is_some_and(serde_json::Value::is_object)
+        && contract
+            .get("counterfactual")
+            .is_some_and(serde_json::Value::is_object)
+        && contract
+            .get("knowledge_snapshots")
+            .is_some_and(serde_json::Value::is_array)
+        && contract
+            .get("authorization_decisions")
+            .is_some_and(serde_json::Value::is_array)
+        && contract
+            .get("atomicity")
+            .is_some_and(serde_json::Value::is_array)
+        && contract
+            .get("non_interference_status")
+            .is_some_and(serde_json::Value::is_string)
+        && contract
+            .get("non_interference")
+            .is_some_and(serde_json::Value::is_array)
 }
 
 fn validate_plugin_boundary_shape(

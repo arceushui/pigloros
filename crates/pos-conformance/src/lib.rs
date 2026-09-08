@@ -4348,6 +4348,12 @@ pub mod strict_codec {
 
     fn decode_contract(value: &Value) -> Result<Wave8ProofContractV1, StrictCborError> {
         let fields = array(value, "wave8_contract", 8)?;
+        decode_contract_fields(fields)
+    }
+
+    fn decode_contract_fields(
+        fields: &[Value],
+    ) -> Result<Wave8ProofContractV1, StrictCborError> {
         Ok(Wave8ProofContractV1 {
             scenario_room: decode_room(&fields[0])?,
             plugin_boundary: decode_plugin_boundary(&fields[1])?,
@@ -4364,20 +4370,24 @@ pub mod strict_codec {
                 .iter()
                 .map(decode_atomicity)
                 .collect::<Result<Vec<_>, _>>()?,
-            non_interference_status: match uint_value(&fields[6], "non_interference_status")? {
-                0 => NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable,
-                1 => NonInterferenceExecutionStatusV1::Executed,
-                _ => {
-                    return Err(StrictCborError::InvalidField {
-                        field: "non_interference_status".to_owned(),
-                    });
-                }
-            },
+            non_interference_status: decode_non_interference_status(&fields[6])?,
             non_interference: array_values(&fields[7], "non_interference")?
                 .iter()
                 .map(decode_non_interference_case)
                 .collect::<Result<Vec<_>, _>>()?,
         })
+    }
+
+    fn decode_non_interference_status(
+        value: &Value,
+    ) -> Result<NonInterferenceExecutionStatusV1, StrictCborError> {
+        match uint_value(value, "non_interference_status")? {
+            0 => Ok(NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable),
+            1 => Ok(NonInterferenceExecutionStatusV1::Executed),
+            _ => Err(StrictCborError::InvalidField {
+                field: "non_interference_status".to_owned(),
+            }),
+        }
     }
 
     #[cfg(test)]
@@ -5176,6 +5186,11 @@ fn verify_contract_header(evidence: &MoatProofEvidenceV1) -> Result<(), Evidence
         .plugin_boundary
         .validate()
         .map_err(|_| EvidenceError::InvalidContract)?;
+    verify_non_interference_contract(contract)?;
+    verify_scenario_room_contract(&contract.scenario_room, &evidence.manifest)
+}
+
+fn verify_non_interference_contract(contract: &Wave8ProofContractV1) -> Result<(), EvidenceError> {
     match contract.non_interference_status {
         NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable => {
             if !contract.non_interference.is_empty() {
@@ -5186,10 +5201,19 @@ fn verify_contract_header(evidence: &MoatProofEvidenceV1) -> Result<(), Evidence
             verify_non_interference_matrix(&contract.non_interference)?;
         }
     }
-    let room = &contract.scenario_room;
-    if room.input_digest != evidence.manifest.input_digest
-        || evidence.manifest.scenario_room_digest != room.room_digest
-        || room.network_enabled != evidence.manifest.network_enabled
+    Ok(())
+}
+
+fn verify_scenario_room_contract(
+    room: &ScenarioRoomFixtureV1,
+    manifest: &ReproManifestV1,
+) -> Result<(), EvidenceError> {
+    if (room.input_digest, room.room_digest, room.network_enabled)
+        != (
+            manifest.input_digest,
+            manifest.scenario_room_digest,
+            manifest.network_enabled,
+        )
         || room.room_id.trim().is_empty()
         || room.room_digest == [0; 32]
         || room.horizon_ticks == 0
