@@ -517,7 +517,6 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, TimelineId},
-        ErasureContainmentGateV1,
     };
     use pos_plugin_ledger::LedgerStore;
     use pos_store::{open_store, StoreConfig};

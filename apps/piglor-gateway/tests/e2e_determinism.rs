@@ -9,8 +9,8 @@ use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1,
-    EventStore, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Hash,
+    Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -460,8 +460,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let address = listener.local_addr().test_ok()?;
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
-    let erasure_gate: Arc<dyn pos_core::ErasureGate> =
-        Arc::new(ErasureContainmentGateV1::new());
+    let erasure_gate: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
     let mut gateway_store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?;
     gateway_store
         .bind_erasure_gate(Arc::clone(&erasure_gate))

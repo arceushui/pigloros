@@ -1136,6 +1136,10 @@ impl Gateway {
     /// Binding happens before the bounded `StoreExecutor` starts, so every
     /// Gateway append/read/export command observes the same gate as direct
     /// `EventStore` consumers.
+    ///
+    /// # Errors
+    /// Returns a store error when the supplied gate cannot be bound before the
+    /// Gateway executor starts.
     pub fn new_with_erasure_gate(
         mut store: Box<dyn EventStore>,
         gate: Arc<dyn ErasureGate>,
@@ -2810,8 +2814,7 @@ mod tests {
         ids::EventId,
         store::{export_timeline_own, import_timeline_with_id},
         timeline::TimelineMeta,
-        ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureProtectedOperationV1,
-        EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+        ErasureContainmentGateV1, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{

@@ -5267,7 +5267,7 @@ mod tests {
             version: "1.0.0",
             event_type: "composition.event",
         };
-        let foreign_gate = Arc::new(ErasureContainmentGateV1::new());
+        let foreign_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
         let mut experiment = Experiment::new(ExperimentConfig {
             name: "prebound-factory-gate".to_owned(),
             stop: StopCondition::MaxTicks(1),
