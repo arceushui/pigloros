@@ -38,6 +38,27 @@ fn corrupt_signed_digest(bytes: &[u8]) -> TestResult<Vec<u8>> {
     encode(&wrapper)
 }
 
+fn resign_unsigned_field(
+    bytes: &[u8],
+    magic: &str,
+    field: usize,
+    replacement: Value,
+    signer: &SigningKey,
+) -> TestResult<Vec<u8>> {
+    let Value::Array(wrapper) = ciborium::from_reader(bytes)? else {
+        return Err("expected signed test record".into());
+    };
+    let Value::Array(mut unsigned) = wrapper
+        .into_iter()
+        .next()
+        .ok_or("signed test record is empty")?
+    else {
+        return Err("expected unsigned field array".into());
+    };
+    *unsigned.get_mut(field).ok_or("unsigned field missing")? = replacement;
+    sign_record(magic, Value::Array(unsigned), signer)
+}
+
 fn assert_revocation_collection_rejections(
     fields: &[Value],
     signer: &SigningKey,
@@ -902,6 +923,43 @@ fn selector_revocation_state_rejects_pending_update_conflicts() -> TestResult {
 }
 
 #[test]
+fn selector_revocation_state_rejects_update_authority_and_signer_substitution() -> TestResult {
+    let fixture = revocation_transition_fixture()?;
+    let update = revocation_update(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        test_nonce(),
+    )?;
+    for (field, replacement, expected) in [
+        (
+            3,
+            Value::Bytes(vec![99; 32]),
+            SandboxRevocationUpdateError::Trust(SandboxTrustError::AuthorityMismatch),
+        ),
+        (
+            5,
+            Value::Bytes(vec![99; 32]),
+            SandboxRevocationUpdateError::Trust(SandboxTrustError::AuthorityMismatch),
+        ),
+        (
+            7,
+            Value::Text("runtime".to_owned()),
+            SandboxRevocationUpdateError::Trust(SandboxTrustError::WrongRole),
+        ),
+    ] {
+        let changed = resign_unsigned_field(&update, "RCU1", field, replacement, &fixture.signer)?;
+        let mut state = SelectorRevocationState::new(fixture.current.clone());
+        assert_eq!(
+            state.begin_update(&changed, &fixture.trust, Vec::new(), 1_000),
+            Err(expected)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
     let fixture = revocation_transition_fixture()?;
     let update = revocation_update(
@@ -968,6 +1026,22 @@ fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
             1_050
         ),
         Err(SandboxRevocationUpdateError::Protocol(_))
+    ));
+    let forged_acknowledgement = revocation_acknowledgement(
+        &fixture.next,
+        &SigningKey::from_bytes(&[8; 32]),
+        cancelled_values.clone(),
+    )?;
+    assert!(matches!(
+        state.acknowledge(
+            &forged_acknowledgement,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_050
+        ),
+        Err(SandboxRevocationUpdateError::Protocol(
+            ProtocolError::SignatureInvalid
+        ))
     ));
     let acknowledgement =
         revocation_acknowledgement(&fixture.next, &fixture.signer, cancelled_values)?;
