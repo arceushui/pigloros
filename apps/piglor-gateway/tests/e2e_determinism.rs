@@ -1,9 +1,16 @@
-use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, GatewayError, LedgerWriteMode};
+use piglor_gateway::{
+    router, AppState, Gateway, GatewayAuthorization, GatewayError, LedgerWriteMode,
+    LocalAuthenticationAdapter,
+};
 use piglor_ledger::LedgerView;
 use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
 use pos_core::{
-    CanonicalBytes, Capability, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
-    Kind, Plugin, PluginId, TimelineId, WallTime,
+    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Hash, Plugin, PluginId,
+    PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -216,22 +223,38 @@ async fn request_http(
     path: &str,
     body: Option<Value>,
 ) -> Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>> {
-    let method = method.to_owned();
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || request_http_blocking(address, &method, &path, body))
-        .await
-        .test_ok()?
+    request_http_with_actor(address, method, path, body, None).await
 }
 
-fn request_http_blocking(
+async fn request_http_with_actor(
     address: SocketAddr,
     method: &str,
     path: &str,
     body: Option<Value>,
+    actor: Option<EntityId>,
+) -> Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    let method = method.to_owned();
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        request_http_blocking_with_actor(address, &method, &path, body, actor)
+    })
+    .await
+    .test_ok()?
+}
+
+fn request_http_blocking_with_actor(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    actor: Option<EntityId>,
 ) -> Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>> {
     let payload = body
         .map_or_else(|| Ok(Vec::new()), |value| serde_json::to_vec(&value))
         .test_ok()?;
+    let actor_header = actor.map_or_else(String::new, |actor| {
+        format!("x-piglor-actor-entity: {actor}\r\n")
+    });
     let mut stream = TcpStream::connect(address).test_ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -241,7 +264,7 @@ fn request_http_blocking(
         .test_ok()?;
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{actor_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     )
     .test_ok()?;
@@ -335,6 +358,79 @@ fn state_u64(
     state.get(key).and_then(Value::as_u64).test_ok()
 }
 
+fn gateway_authorization_for(
+    actor: EntityId,
+) -> Result<GatewayAuthorization, Box<dyn std::error::Error + Send + Sync>> {
+    let principal = PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok()?;
+    let authenticated =
+        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+            principal: principal.clone(),
+            adapter_id: "fixture".to_owned(),
+            assurance: AssuranceLevelV1::try_new(1).test_ok()?,
+            issued_at: WallTime::from_micros(1),
+            expires_at: WallTime::from_micros(u64::MAX),
+            binding_digest: Hash::from_bytes([2; 32]),
+        })
+        .test_ok()?;
+    let authority_timeline = TimelineId::new();
+    let registry_digest = Hash::from_bytes([3; 32]);
+    let policy_revision = Hash::from_bytes([4; 32]);
+    let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        resources: vec!["timeline.events".to_owned(), "world.action".to_owned()],
+        actions: vec!["read".to_owned(), "world.action.submit".to_owned()],
+        purposes: vec!["action".to_owned(), "read".to_owned()],
+        audiences: vec!["gateway".to_owned()],
+        actor_entity_ids: vec![actor],
+        subject_ids: Vec::new(),
+        participant_ids: Vec::new(),
+        plugin_id: None,
+        principal_roles: vec![AuthorityRoleV1::Actor],
+        max_uses: 1,
+        budget: 1,
+        environment_constraints: Vec::new(),
+    })
+    .test_ok()?;
+    let grant = CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+        grant_id: Hash::from_bytes([5; 32]),
+        grantor: principal.clone(),
+        grantee: AuthorityGranteeV1::Principal(principal),
+        trust_domain: "gateway.test".to_owned(),
+        scope,
+        valid_from_position: Seq::from_u64(1),
+        valid_until_position: Seq::from_u64(50),
+        parent_grant_id: None,
+        delegation_depth: 0,
+        max_delegation_depth: 0,
+        permitted_delegate_classes: Vec::new(),
+        consent_references: Vec::new(),
+        policy_revision,
+        issuance_timeline: authority_timeline,
+        issuance_seq: Seq::from_u64(1),
+        revocation_epoch: 0,
+        revocation_fence: None,
+        authority_registry_digest: registry_digest,
+    })
+    .test_ok()?;
+    let registry = AuthorityRegistrySnapshotV1::try_new(
+        registry_digest,
+        vec![authenticated.registry_binding_digest()],
+        vec![grant.binding_digest().test_ok()?],
+        Vec::new(),
+    )
+    .test_ok()?;
+    let host = AuthorityPersistenceHostV1::new(&registry);
+    let mut state = AuthorityPersistenceStateV1::new();
+    state
+        .issue_grant(host.authorize_grant(&grant).test_ok()?, grant.clone())
+        .test_ok()?;
+    let authority = state.resolve(grant.grant_id()).test_ok()?;
+    Ok(GatewayAuthorization::new(
+        Arc::new(LocalAuthenticationAdapter::new(authenticated)),
+        authority,
+        registry,
+    ))
+}
+
 struct MultiRateScenario {
     _database: tempfile::NamedTempFile,
     path: String,
@@ -364,10 +460,10 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
     let state = AppState {
-        gateway: Gateway::new_with_world_bodies_and_principal(
+        gateway: Gateway::new_with_world_bodies_and_authorization(
             open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
             [human_body],
-            ActionPrincipal::new(human_entity, [Kind::new("world.action.submit")]),
+            gateway_authorization_for(human_entity)?,
         ),
         ledger_view: LedgerView::default(),
         ledger_write: LedgerWriteMode::Disabled,
@@ -615,6 +711,7 @@ async fn run_tick_boundaries(
 async fn poll_events(
     address: SocketAddr,
     timeline: TimelineId,
+    actor: EntityId,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let mut polled = Vec::new();
     let mut from_seq = 0_u64;
@@ -622,11 +719,12 @@ async fn poll_events(
     loop {
         pages += 1;
         assert!(pages <= 5, "polling must terminate within five pages");
-        let page = request_http(
+        let page = request_http_with_actor(
             address,
             "GET",
             &format!("/v1/timelines/{timeline}/events?from_seq={from_seq}&limit=2"),
             None,
+            Some(actor),
         )
         .await?;
         assert_eq!(page.status, 200);
@@ -817,7 +915,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         .test_ok()?
         .with_protected_token(token.clone());
     let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await?;
-    let polled = poll_events(scenario.address, scenario.timeline).await?;
+    let polled = poll_events(scenario.address, scenario.timeline, scenario.human_entity).await?;
     assert_event_order(
         scenario.human_entity,
         scenario.fast_entity,
