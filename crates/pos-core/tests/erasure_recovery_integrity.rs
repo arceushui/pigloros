@@ -1432,7 +1432,7 @@ fn fork_preparation_rejects_unbound_child_metadata() -> Result<(), ErasureErrorV
                     fork_point: Some((TimelineId::new(), Seq::from_u64(1))),
                     ..base.child.clone()
                 },
-                ..base.clone()
+                ..base
             },
         ),
         Err(ErasureErrorV1::PolicyConflict)
