@@ -557,11 +557,12 @@ mod tests {
 
     #[test]
     fn sqlite_topology_changes_republish_the_empty_inventory_generation() {
-        let store = pos_store::sqlite::SqliteStore::open_in_memory()
-            .map(pos_store::sqlite::SqliteStore::without_erasure_gate)
-            .unwrap_or_else(|error| {
+        let store = pos_store::sqlite::SqliteStore::open_in_memory().map_or_else(
+            |error| {
                 std::panic::resume_unwind(Box::new(format!("SQLite fixture failed: {error:?}")))
-            });
+            },
+            pos_store::sqlite::SqliteStore::without_erasure_gate,
+        );
         assert_empty_topology_changes(Box::new(store));
     }
 }
