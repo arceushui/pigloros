@@ -505,13 +505,9 @@ mod tests {
         assert_eq!(reader.logical_head(timeline.id()), Ok(Seq::from_u64(2)));
     }
 
-    #[test]
-    fn root_creation_republishes_the_empty_inventory_generation() {
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+    fn assert_empty_topology_changes(store: Box<dyn ErasureHostStoreV1>) {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(store, 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let (first, second, child) = host
             .command_sender()
             .and_then(|mut sender| {
@@ -535,12 +531,15 @@ mod tests {
         let mut reader = host
             .read_sender()
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_eq!(
-            reader
-                .timelines()
-                .map(|items| items.into_iter().map(|item| item.id()).collect()),
-            Ok(vec![first.id(), second.id(), child.id()])
-        );
+        let timelines = reader.timelines().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("host listing failed: {error:?}")))
+        });
+        assert_eq!(timelines.len(), 3);
+        assert!(timelines.iter().any(|timeline| timeline.id() == first.id()));
+        assert!(timelines
+            .iter()
+            .any(|timeline| timeline.id() == second.id()));
+        assert!(timelines.iter().any(|timeline| timeline.id() == child.id()));
         assert_eq!(reader.root_timeline_count_bounded(2), Ok(2));
         assert_eq!(
             reader
@@ -552,5 +551,20 @@ mod tests {
                 .map(|events| events.len()),
             Ok(1)
         );
+    }
+
+    #[test]
+    fn memory_topology_changes_republish_the_empty_inventory_generation() {
+        assert_empty_topology_changes(Box::new(MemoryStore::new().without_erasure_gate()));
+    }
+
+    #[test]
+    fn sqlite_topology_changes_republish_the_empty_inventory_generation() {
+        let store = pos_store::sqlite::SqliteStore::open_in_memory()
+            .map(pos_store::sqlite::SqliteStore::without_erasure_gate)
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("SQLite fixture failed: {error:?}")))
+            });
+        assert_empty_topology_changes(Box::new(store));
     }
 }
