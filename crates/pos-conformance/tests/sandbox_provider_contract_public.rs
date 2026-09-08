@@ -9,7 +9,7 @@ use pos_conformance::{
     ReceiptAuthorityV1, RequestAuthorityV1, SandboxArchitectureV1, SandboxCancelRequestV1,
     SandboxCancelResponseV1, SandboxCancelResultV1, SandboxContractErrorV1,
     SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxExecuteRequestV1, SandboxLimitV1,
-    SandboxLocalErrorCodeV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
+    SandboxLocalErrorCodeV1, SandboxLocalErrorPhaseV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
     SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
     SandboxProviderOperationV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
     SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxSyscallSetV1,
@@ -1059,9 +1059,12 @@ fn safe_detail_uses_a_strict_utf8_byte_bound_in_both_decoders() -> TestResult {
     let key = signing_key();
     for detail in [None, Some("x".to_owned()), Some("é".repeat(128))] {
         let local = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
             operation: None,
             request_id: None,
-            code: SandboxLocalErrorCodeV1::ProviderUnavailable,
+            attempt_id: None,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::PolicyUnavailable,
             safe_detail: detail.clone(),
         };
         let local_bytes = local.to_canonical_cbor()?;
@@ -1094,9 +1097,12 @@ fn safe_detail_uses_a_strict_utf8_byte_bound_in_both_decoders() -> TestResult {
         "a\0b".to_owned(),
     ] {
         let local = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
             operation: None,
             request_id: None,
-            code: SandboxLocalErrorCodeV1::ProviderUnavailable,
+            attempt_id: None,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::PolicyUnavailable,
             safe_detail: Some(detail.clone()),
         };
         assert_eq!(
@@ -1975,8 +1981,11 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
     verify_and_materialize_vector("sry1", &response_bytes)?;
 
     let local_error = SandboxLocalErrorV1 {
+        phase: SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission,
         operation: Some(SandboxProviderOperationV1::Execute),
         request_id: Some([1; 16]),
+        attempt_id: Some([2; 16]),
+        agr1_digest: None,
         code: SandboxLocalErrorCodeV1::ControlChannelUnavailable,
         safe_detail: Some("selector socket unavailable".to_owned()),
     };
@@ -1991,23 +2000,71 @@ fn reconcile_and_local_error_operations_round_trip() -> TestResult {
 }
 
 #[test]
-fn local_errors_round_trip_every_operation_and_failure_code() -> TestResult {
-    let operations = [
-        SandboxProviderOperationV1::Describe,
-        SandboxProviderOperationV1::Execute,
-        SandboxProviderOperationV1::Cancel,
-        SandboxProviderOperationV1::Reconcile,
+fn local_errors_round_trip_every_legal_phase_and_failure_code() -> TestResult {
+    let cases = [
+        (
+            SandboxLocalErrorPhaseV1::BeforeSpx1,
+            SandboxLocalErrorCodeV1::PolicyUnavailable,
+            false,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::BeforeSpx1,
+            SandboxLocalErrorCodeV1::InvalidSelectorRequest,
+            false,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::BeforeSpx1,
+            SandboxLocalErrorCodeV1::RequestAuthorityMismatch,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::BeforeSpx1,
+            SandboxLocalErrorCodeV1::PayloadLimitExceeded,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCodeV1::ProviderUnavailable,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCodeV1::ProviderIdentityInvalid,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCodeV1::ControlChannelUnavailable,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCodeV1::ProviderEvidenceInvalid,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterAdmission,
+            SandboxLocalErrorCodeV1::ControlChannelUnavailable,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterAdmission,
+            SandboxLocalErrorCodeV1::ProviderTerminalUnavailable,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterAdmission,
+            SandboxLocalErrorCodeV1::ProviderEvidenceInvalid,
+            true,
+        ),
     ];
-    let codes = [
-        SandboxLocalErrorCodeV1::ProviderUnavailable,
-        SandboxLocalErrorCodeV1::ProviderIdentityInvalid,
-        SandboxLocalErrorCodeV1::PolicyUnavailable,
-        SandboxLocalErrorCodeV1::ControlChannelUnavailable,
-    ];
-    for (operation, code) in operations.into_iter().zip(codes) {
+    for (phase, code, complete_request) in cases {
         let error = SandboxLocalErrorV1 {
-            operation: Some(operation),
-            request_id: Some([1; 16]),
+            phase,
+            operation: complete_request.then_some(SandboxProviderOperationV1::Execute),
+            request_id: complete_request.then_some([1; 16]),
+            attempt_id: complete_request.then_some([2; 16]),
+            agr1_digest: (phase == SandboxLocalErrorPhaseV1::AfterAdmission).then_some([3; 32]),
             code,
             safe_detail: None,
         };
@@ -2207,9 +2264,12 @@ fn public_encoders_propagate_nested_validation_failures() -> TestResult {
     assert_eq!(execute.seal(), Err(SandboxContractErrorV1::DigestMismatch));
 
     let local_error = SandboxLocalErrorV1 {
+        phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
         operation: None,
         request_id: Some([0; 16]),
-        code: SandboxLocalErrorCodeV1::ProviderUnavailable,
+        attempt_id: None,
+        agr1_digest: None,
+        code: SandboxLocalErrorCodeV1::InvalidSelectorRequest,
         safe_detail: None,
     };
     assert_eq!(
