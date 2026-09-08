@@ -855,9 +855,13 @@ fn provider_admission_rejects_each_revoked_provider_identity() -> TestResult {
             vec![bytes(revoked_identity)],
             vec![],
         )?;
-        let policy = fixture.policy_for_provider(&revocation, &fixture.spm1, &fixture.pcr1)?;
         assert_eq!(
-            AdmittedSandboxProvider::admit(&policy, &fixture.trust, &revocation, fixture.inputs(),),
+            AdmittedSandboxProvider::admit(
+                &fixture.policy,
+                &fixture.trust,
+                &revocation,
+                fixture.inputs(),
+            ),
             Err(SandboxAdmissionError::Revoked)
         );
     }
