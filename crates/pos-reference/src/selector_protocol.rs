@@ -415,6 +415,21 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn slx1_rejects_invalid_attempts_and_oversized_control() {
+        let mut invalid = attempt();
+        invalid.case_id.clear();
+        assert_eq!(
+            encode_request(&request(), b"evr1", &invalid, 0).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        let oversized = vec![0; CONTROL_LIMIT + 1];
+        assert_eq!(
+            encode_request(&request(), &oversized, &attempt(), 0).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+    }
+
     fn local_error(phase: u64) -> Result<Vec<u8>, AdapterError> {
         local_error_with_fields(vec![
             Value::Text("SLE1".to_owned()),
@@ -929,6 +944,7 @@ mod tests {
     #[test]
     fn sle1_rejects_zero_and_inconsistent_phase_bindings() -> Result<(), AdapterError> {
         let invalid_cases = [
+            (0, None, None, None, None, 0),
             (0, Some(1), Some([0; 16]), Some([2; 16]), None, 5),
             (0, Some(1), Some([1; 16]), Some([0; 16]), None, 5),
             (0, Some(1), Some([1; 16]), Some([2; 16]), Some([0; 32]), 5),
@@ -1099,6 +1115,7 @@ mod tests {
         for malformed in [
             Value::Null,
             Value::Array(vec![Value::Null]),
+            Value::Array(vec![Value::Null, Value::Bytes(vec![1; 32])]),
             Value::Array(vec![wrapper[0].clone(), Value::Null]),
         ] {
             let bytes = encode_with_limit(&malformed, CONTROL_LIMIT)
@@ -1113,6 +1130,15 @@ mod tests {
             decode_reply(&malformed_local, &[], &encoded, [14; 32], 1024),
             Err(AdapterError::ProtocolFailure)
         );
+        for index in [5_usize, 7] {
+            let mut changed = fields.to_vec();
+            changed[index] = Value::Bytes(b"not-cbor".to_vec());
+            let (changed, _) = protocol_record("SLY1", changed, false)?;
+            assert_eq!(
+                decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
         Ok(())
     }
 
@@ -1187,7 +1213,7 @@ mod tests {
             })
         );
         let mut malformed_error = fields.clone();
-        malformed_error[7] = Value::Null;
+        malformed_error[7] = Value::Bytes(b"not-cbor".to_vec());
         let (control, _) = protocol_record("SLY1", malformed_error, false)?;
         assert_eq!(
             decode_reply(&control, &[], &encoded, [14; 32], 1024),
@@ -1425,10 +1451,24 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+        for index in [7_usize, 8, 9] {
+            let mut changed = evidence.fields.clone();
+            changed[index] = Value::Bytes(b"not-cbor".to_vec());
+            assert_eq!(
+                decode_provider_result(&changed, &trailing, &encoded, 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
         let mut malformed_audit = evidence.fields.clone();
         malformed_audit[10] = Value::Array(vec![Value::Null]);
         assert_eq!(
             decode_provider_result(&malformed_audit, &trailing, &encoded, 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        let mut malformed_audit_record = evidence.fields.clone();
+        malformed_audit_record[10] = Value::Array(vec![Value::Bytes(b"not-cbor".to_vec())]);
+        assert_eq!(
+            decode_provider_result(&malformed_audit_record, &trailing, &encoded, 1024),
             Err(AdapterError::ProtocolFailure)
         );
         for descriptor in [
@@ -1486,6 +1526,12 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+        let mut malformed_records = fields.to_vec();
+        malformed_records[10] = Value::Null;
+        assert_eq!(
+            require_absent_evidence(&malformed_records, &[]),
+            Err(AdapterError::ProtocolFailure)
+        );
         assert_eq!(
             require_absent_evidence(fields, &[1]),
             Err(AdapterError::ProtocolFailure)
