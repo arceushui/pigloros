@@ -958,9 +958,7 @@ fn checked_event_coordinates(
 impl Gateway {
     #[cfg(test)]
     fn bind_test_erasure_gate(store: &mut dyn EventStore) {
-        assert!(store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
-            .is_ok());
+        drop(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
     }
 
     async fn enqueue_consent_cleanup(&self, scope: AppendDedupScope) {
@@ -2400,7 +2398,8 @@ impl Gateway {
     }
 
     #[cfg(test)]
-    fn with_limits(store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
+    fn with_limits(mut store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
+        Self::bind_test_erasure_gate(store.as_mut());
         let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(

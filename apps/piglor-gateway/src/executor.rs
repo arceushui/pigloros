@@ -607,7 +607,8 @@ pub(crate) struct StoreExecutor {
 
 impl StoreExecutor {
     #[cfg(test)]
-    pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
+    pub(crate) fn new(mut store: Box<dyn EventStore>) -> Self {
+        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         Self::spawn(ExecutorStore::Generic(store), None)
     }
 
@@ -615,6 +616,8 @@ impl StoreExecutor {
         mut store: Box<dyn EventStore>,
         permit: ConsentAppendPermit,
     ) -> Self {
+        #[cfg(test)]
+        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::Generic(store), None)
     }
@@ -626,6 +629,8 @@ impl StoreExecutor {
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
+        #[cfg(test)]
+        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::GeoLocation(Box::new(store)), None)
     }
@@ -638,6 +643,8 @@ impl StoreExecutor {
     where
         S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
     {
+        #[cfg(test)]
+        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::OwnTracks(Box::new(store)), Some(owner_key))
     }
