@@ -427,6 +427,7 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
 fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
     let corpus = support::corpus()?;
     let request = request_with(&corpus.request, |request| {
+        request.request_id[14..].fill(0);
         request.sandbox_requirement = Some(SandboxRequirement {
             lps1_digest: [31; 32],
             sim1_digest: [32; 32],
