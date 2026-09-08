@@ -21,9 +21,10 @@ pub mod adapter_transport;
 pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
-pub mod process_adapter;
 pub mod profile;
 pub mod sandbox_provider_protocol;
+#[cfg(unix)]
+pub mod selector;
 pub mod signed_bundle;
 
 /// Divergence classes emitted by the independent JSON evaluator.
