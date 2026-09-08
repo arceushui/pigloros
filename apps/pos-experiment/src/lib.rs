@@ -59,6 +59,7 @@ fn test_registry() -> PluginRegistry {
     registry
 }
 
+#[cfg(test)]
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
