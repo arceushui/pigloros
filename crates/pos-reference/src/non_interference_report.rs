@@ -1,4 +1,4 @@
-use ciborium::value::Value;
+use ciborium::value::{CanonicalValue, Value};
 use ed25519_dalek::Verifier;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -673,9 +673,9 @@ fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, IndependentNonInterferenceReportErrorV1> {
-    let json = serde_json::to_value(value)
+    let value = Value::serialized(value)
         .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
-    let canonical = sort_map_keys(json_to_cbor(json)?)?;
+    let canonical = sort_map_keys(value);
     let mut bytes = Vec::new();
     ciborium::into_writer(&canonical, &mut bytes)
         .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
@@ -692,66 +692,22 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, IndependentNonInterfer
     Ok(value)
 }
 
-fn json_to_cbor(json: serde_json::Value) -> Result<Value, IndependentNonInterferenceReportErrorV1> {
-    use serde_json::Value as JsonValue;
-    match json {
-        JsonValue::Null => Ok(Value::Null),
-        JsonValue::Bool(value) => Ok(Value::Bool(value)),
-        JsonValue::Number(value) => value.as_i64().map_or_else(
-            || {
-                value.as_u64().map_or_else(
-                    || Err(IndependentNonInterferenceReportErrorV1::NonCanonical),
-                    |value| Ok(Value::Integer(value.into())),
-                )
-            },
-            |value| Ok(Value::Integer(value.into())),
-        ),
-        JsonValue::String(value) => Ok(Value::Text(value)),
-        JsonValue::Array(values) => values
-            .into_iter()
-            .map(json_to_cbor)
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        JsonValue::Object(values) => values
-            .into_iter()
-            .map(|(key, value)| json_to_cbor(value).map(|value| (Value::Text(key), value)))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Map),
-    }
-}
-
-fn sort_map_keys(value: Value) -> Result<Value, IndependentNonInterferenceReportErrorV1> {
+fn sort_map_keys(value: Value) -> Value {
     match value {
         Value::Map(pairs) => {
             let mut sortable = pairs
                 .into_iter()
-                .map(|(key, value)| {
-                    canonical_key_bytes(&key)
-                        .and_then(|bytes| sort_map_keys(value).map(|value| (bytes, key, value)))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            sortable.sort_by(|(left, _, _), (right, _, _)| {
-                left.len().cmp(&right.len()).then_with(|| left.cmp(right))
-            });
-            Ok(Value::Map(
+                .map(|(key, value)| (CanonicalValue::from(key), sort_map_keys(value)))
+                .collect::<Vec<_>>();
+            sortable.sort_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Map(
                 sortable
                     .into_iter()
-                    .map(|(_, key, value)| (key, value))
+                    .map(|(key, value)| (Value::from(key), value))
                     .collect(),
-            ))
+            )
         }
-        Value::Array(values) => values
-            .into_iter()
-            .map(sort_map_keys)
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        other => Ok(other),
+        Value::Array(values) => Value::Array(values.into_iter().map(sort_map_keys).collect()),
+        other => other,
     }
-}
-
-fn canonical_key_bytes(key: &Value) -> Result<Vec<u8>, IndependentNonInterferenceReportErrorV1> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(key, &mut bytes)
-        .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
-    Ok(bytes)
 }

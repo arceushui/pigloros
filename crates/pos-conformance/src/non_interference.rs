@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 const MAX_PERMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_UNAUTHORIZED_VALUE_BYTES: usize = 1024 * 1024;
-const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SURFACE_BYTES: usize = 1024 * 1024;
 const NORMALIZATION_VERSION_V1: u16 = 1;
 
@@ -351,7 +350,7 @@ impl NonInterferenceFixturePairV1 {
             canary_unauthorized_value,
             fixture_digest: [0; 32],
         };
-        value.validate_fields()?;
+        let _ = value.validate_fields()?;
         value.fixture_digest = value.expected_digest();
         Ok(value)
     }
@@ -362,16 +361,25 @@ impl NonInterferenceFixturePairV1 {
     /// Returns a closed fixture error without exposing either unauthorized
     /// value.
     pub fn validate(&self) -> Result<(), NonInterferenceExecutionErrorV1> {
-        self.validate_fields()?;
+        self.validated_profile().map(drop)
+    }
+
+    fn validated_profile(
+        &self,
+    ) -> Result<NonInterferenceCaptureProfileV1, NonInterferenceExecutionErrorV1> {
+        let profile = self.validate_fields()?;
         if self.fixture_digest == [0; 32] || self.fixture_digest != self.expected_digest() {
             return Err(NonInterferenceExecutionErrorV1::FixtureInvalid);
         }
-        Ok(())
+        Ok(profile)
     }
 
-    fn validate_fields(&self) -> Result<(), NonInterferenceExecutionErrorV1> {
-        if !NON_INTERFERENCE_FIXTURE_IDS_V1.contains(&self.fixture_id.as_str())
-            || self.permitted_input.is_empty()
+    fn validate_fields(
+        &self,
+    ) -> Result<NonInterferenceCaptureProfileV1, NonInterferenceExecutionErrorV1> {
+        let profile = capture_profile(&self.fixture_id)
+            .ok_or(NonInterferenceExecutionErrorV1::FixtureInvalid)?;
+        if self.permitted_input.is_empty()
             || self.permitted_input.len() > MAX_PERMITTED_INPUT_BYTES
             || self.control_unauthorized_value.len() > MAX_UNAUTHORIZED_VALUE_BYTES
             || self.canary_unauthorized_value.len() > MAX_UNAUTHORIZED_VALUE_BYTES
@@ -381,14 +389,13 @@ impl NonInterferenceFixturePairV1 {
         {
             return Err(NonInterferenceExecutionErrorV1::FixtureInvalid);
         }
-        Ok(())
+        Ok(profile)
     }
 
     fn expected_digest(&self) -> [u8; 32] {
         let mut bytes = Vec::new();
         append_bytes(&mut bytes, self.fixture_id.as_bytes());
         bytes.push(variant_code(self.variant));
-        bytes.push(mode_code(self.mode));
         append_bytes(&mut bytes, &self.permitted_input);
         append_bytes(&mut bytes, &self.control_unauthorized_value);
         append_bytes(&mut bytes, &self.canary_unauthorized_value);
@@ -507,7 +514,7 @@ pub fn normalize_non_interference_capture_v1(
         normalization_digest: [0; 32],
     };
     capture.normalization_digest = normalized_capture_digest(&profile, &capture);
-    capture.validate(fixture_id).map(|()| capture)
+    capture.validate(&profile).map(|()| capture)
 }
 
 impl NonInterferenceRawOperationalV1 {
@@ -655,48 +662,23 @@ const fn normalization_code(value: NonInterferenceNormalizationV1) -> u8 {
 }
 
 impl NonInterferenceCaptureV1 {
-    fn validate(&self, fixture_id: &str) -> Result<(), NonInterferenceExecutionErrorV1> {
+    fn validate(
+        &self,
+        profile: &NonInterferenceCaptureProfileV1,
+    ) -> Result<(), NonInterferenceExecutionErrorV1> {
         if self.unexpected_network_accesses != 0 {
             return Err(NonInterferenceExecutionErrorV1::UnexpectedNetworkAccess);
         }
-        let expected_names = non_interference_surface_names_v1(fixture_id)
-            .ok_or(NonInterferenceExecutionErrorV1::CaptureUnavailable)?;
-        let profile = capture_profile(fixture_id)
-            .ok_or(NonInterferenceExecutionErrorV1::CaptureUnavailable)?;
-        if !self
-            .surface_names
-            .iter()
-            .map(String::as_str)
-            .eq(expected_names.iter().copied())
-            || self.authoritative.len() != expected_names.len()
-            || self.public.len() != expected_names.len()
-            || self.operational.len() != expected_names.len()
-            || self.normalization_digest != normalized_capture_digest(&profile, self)
+        let surface_count = profile.surface_names.len();
+        if self.surface_names != profile.surface_names
+            || (
+                self.authoritative.len(),
+                self.public.len(),
+                self.operational.len(),
+            ) != (surface_count, surface_count, surface_count)
+            || self.normalization_digest != normalized_capture_digest(profile, self)
         {
             return Err(NonInterferenceExecutionErrorV1::CaptureUnavailable);
-        }
-        let bytes = self
-            .surface_names
-            .iter()
-            .map(String::len)
-            .chain(
-                self.authoritative
-                    .iter()
-                    .chain(&self.public)
-                    .chain(&self.operational)
-                    .map(Vec::len),
-            )
-            .fold(0_usize, usize::saturating_add);
-        if self
-            .authoritative
-            .iter()
-            .chain(&self.public)
-            .chain(&self.operational)
-            .any(Vec::is_empty)
-            || bytes > MAX_CAPTURE_BYTES
-            || self.provenance_digest == [0; 32]
-        {
-            return Err(NonInterferenceExecutionErrorV1::CaptureOutOfBounds);
         }
         Ok(())
     }
@@ -740,25 +722,20 @@ where
     ) -> Result<NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1>,
 {
     let invocation = fixture.invocation();
-    fixture
-        .validate()
-        .and_then(|()| {
-            execute(&NonInterferenceHostRunV1 {
-                member: NonInterferenceMatrixMemberV1::Control,
-                subject: invocation,
-                unauthorized_value: &fixture.control_unauthorized_value,
-            })
-        })
-        .and_then(|control| control.validate(&fixture.fixture_id).map(|()| control))
-        .and_then(|control| {
-            execute(&NonInterferenceHostRunV1 {
-                member: NonInterferenceMatrixMemberV1::Canary,
-                subject: invocation,
-                unauthorized_value: &fixture.canary_unauthorized_value,
-            })
-            .and_then(|canary| canary.validate(&fixture.fixture_id).map(|()| canary))
-            .map(|canary| case_with_captures(fixture, control, canary))
-        })
+    let profile = fixture.validated_profile()?;
+    let control = execute(&NonInterferenceHostRunV1 {
+        member: NonInterferenceMatrixMemberV1::Control,
+        subject: invocation,
+        unauthorized_value: &fixture.control_unauthorized_value,
+    })?;
+    control.validate(&profile)?;
+    let canary = execute(&NonInterferenceHostRunV1 {
+        member: NonInterferenceMatrixMemberV1::Canary,
+        subject: invocation,
+        unauthorized_value: &fixture.canary_unauthorized_value,
+    })?;
+    canary.validate(&profile)?;
+    Ok(case_with_captures(fixture, control, canary))
 }
 
 fn case_with_captures(
@@ -790,6 +767,7 @@ fn case_with_captures(
         fixture_id: fixture.fixture_id.clone(),
         variant: fixture.variant,
         mode: fixture.mode,
+        fixture_digest: fixture.fixture_digest,
         control_input_digest: input_digest(
             b"PiglorOS.NonInterference.ControlInput.v1",
             &fixture.permitted_input,

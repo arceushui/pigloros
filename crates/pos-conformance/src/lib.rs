@@ -1193,6 +1193,8 @@ pub struct NonInterferenceCaseV1 {
     pub fixture_id: String,
     pub variant: NonInterferenceVariantV1,
     pub mode: ExecutionModeV1,
+    /// Mode-independent identity of the signed control/canary fixture pair.
+    pub fixture_digest: [u8; 32],
     pub control_input_digest: [u8; 32],
     pub canary_input_digest: [u8; 32],
     pub authoritative_digest: [u8; 32],
@@ -4012,6 +4014,7 @@ pub mod strict_codec {
             encode_non_interference_coordinate(case.first_divergence.as_ref()),
             encode_non_interference_coordinate(case.first_cross_mode_divergence.as_ref()),
             digest(&case.provenance_digest),
+            digest(&case.fixture_digest),
         ])
     }
 
@@ -4052,6 +4055,7 @@ pub mod strict_codec {
     }
 
     struct DecodedNonInterferenceDigests {
+        fixture: [u8; 32],
         control_input: [u8; 32],
         canary_input: [u8; 32],
         authoritative: [u8; 32],
@@ -4067,6 +4071,7 @@ pub mod strict_codec {
         fields: &[Value],
     ) -> Result<DecodedNonInterferenceDigests, StrictCborError> {
         Ok(DecodedNonInterferenceDigests {
+            fixture: bytes(&fields[17], "non_interference_fixture_digest")?,
             control_input: bytes(&fields[3], "non_interference_control")?,
             canary_input: bytes(&fields[4], "non_interference_canary")?,
             authoritative: bytes(&fields[5], "non_interference_authoritative")?,
@@ -4082,12 +4087,13 @@ pub mod strict_codec {
     fn decode_non_interference_case(
         value: &Value,
     ) -> Result<NonInterferenceCaseV1, StrictCborError> {
-        let fields = array(value, "non_interference_case", 17)?;
+        let fields = array(value, "non_interference_case", 18)?;
         let digests = decode_non_interference_digests(fields)?;
         Ok(NonInterferenceCaseV1 {
             fixture_id: string(&fields[0], "non_interference_fixture")?,
             variant: decode_non_interference_variant(&fields[1])?,
             mode: decode_mode(&fields[2])?,
+            fixture_digest: digests.fixture,
             control_input_digest: digests.control_input,
             canary_input_digest: digests.canary_input,
             authoritative_digest: digests.authoritative,
@@ -5937,6 +5943,7 @@ fn non_interference_case_matches(
     case.fixture_id == expected.0
         && case.variant == expected.1
         && case.mode == expected.2
+        && case.fixture_digest != [0; 32]
         && case.control_input_digest != [0; 32]
         && case.canary_input_digest != [0; 32]
         && case.control_input_digest != case.canary_input_digest
@@ -5961,7 +5968,8 @@ fn non_interference_mode_matches_local(
     case: &NonInterferenceCaseV1,
     local: &NonInterferenceCaseV1,
 ) -> bool {
-    case.control_input_digest == local.control_input_digest
+    case.fixture_digest == local.fixture_digest
+        && case.control_input_digest == local.control_input_digest
         && case.canary_input_digest == local.canary_input_digest
         && case.authoritative_digest == local.authoritative_digest
         && case.public_digest == local.public_digest
@@ -8002,6 +8010,8 @@ pub mod tests {
                 Box::new(|value| {
                     value.contract.non_interference[0].mode = ExecutionModeV1::AirGapped
                 }),
+                Box::new(|value| value.contract.non_interference[0].fixture_digest = [0; 32]),
+                Box::new(|value| value.contract.non_interference[1].fixture_digest = [99; 32]),
                 Box::new(|value| value.contract.non_interference[0].control_input_digest = [0; 32]),
                 Box::new(|value| value.contract.non_interference[0].canary_input_digest = [0; 32]),
                 Box::new(|value| {

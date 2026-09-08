@@ -447,10 +447,6 @@ impl NonInterferenceReportV1 {
             &ed25519_dalek::Signature::from_bytes(self.signature.as_bytes()),
         )
         .map_err(|_| NonInterferenceReportErrorV1::SignatureInvalid)?;
-        let encoded = encode(self)?;
-        if encoded.len() > MAX_NON_INTERFERENCE_REPORT_BYTES_V1 {
-            return Err(NonInterferenceReportErrorV1::TooLarge);
-        }
         Ok(())
     }
 

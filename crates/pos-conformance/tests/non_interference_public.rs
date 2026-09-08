@@ -136,6 +136,9 @@ fn complete_matrix_executes_every_control_and_canary_through_the_public_input() 
 
     assert_eq!(cases.len(), NON_INTERFERENCE_CASE_COUNT_V1);
     assert_eq!(usize::from(calls.get()), NON_INTERFERENCE_CASE_COUNT_V1 * 2);
+    assert!(cases.chunks_exact(4).all(|modes| modes
+        .iter()
+        .all(|case| case.fixture_digest == modes[0].fixture_digest)));
     assert!(cases.iter().all(|case| {
         case.authoritative_equal
             && case.public_equal
@@ -368,10 +371,35 @@ fn every_capture_bound_fails_closed() {
 fn capture_inventory_is_complete_ordered_and_fixture_bound() {
     assert!(non_interference_surface_names_v1("unknown").is_none());
     assert!(non_interference_normalization_policy_v1("unknown").is_none());
-    assert_eq!(
-        non_interference_normalization_policy_v1("NI-TOOL-001"),
-        Some("count/category/digest; sensitive text absent")
-    );
+    for (fixture_id, expected) in [
+        (
+            "NI-TOOL-001",
+            "count/category/digest; sensitive text absent",
+        ),
+        (
+            "NI-CACHE-002",
+            "bounded count/class; sensitive values and timing absent",
+        ),
+        (
+            "NI-STATE-003",
+            "category/count only; diagnostic details absent",
+        ),
+        (
+            "NI-OBS-004",
+            "safe category/count/padded length; diagnostics absent",
+        ),
+        ("NI-TIME-005", "surface-specific typed normalization"),
+        ("NI-EVAL-007", "declared operational surface is byte-exact"),
+        (
+            "NI-CRASH-012",
+            "safe category/count/padded length; diagnostics absent",
+        ),
+    ] {
+        assert_eq!(
+            non_interference_normalization_policy_v1(fixture_id),
+            Some(expected)
+        );
+    }
     let mut captures = Vec::new();
 
     let mut wrong_name = raw_capture_for("NI-TOOL-001", b"captured");
@@ -625,6 +653,57 @@ fn typed_normalizers_remove_only_declared_sensitive_operational_fields() {
             .iter()
             .all(|surface| !surface.windows(secret.len()).any(|window| window == secret)));
     }
+}
+
+#[test]
+fn typed_normalizers_emit_the_exact_canonical_bytes() {
+    let expected_digest = [8; 32];
+    let cases = [
+        (
+            "NI-TOOL-001",
+            0,
+            [vec![0, 7, 0, 0, 0, 1], expected_digest.to_vec()].concat(),
+        ),
+        ("NI-CACHE-002", 0, vec![0, 2, 0, 0, 0, 1]),
+        ("NI-STATE-003", 0, vec![0, 3, 0, 0, 0, 1]),
+        ("NI-OBS-004", 0, vec![0, 4, 0, 0, 0, 1, 0, 0, 0, 64]),
+        ("NI-TIME-005", 1, vec![0]),
+        ("NI-TIME-005", 0, b"byte-exact".to_vec()),
+    ];
+    for (fixture_id, surface_ordinal, expected) in cases {
+        let normalized = test_ok(normalize_non_interference_capture_v1(
+            fixture_id,
+            raw_capture_for(fixture_id, b"authoritative"),
+        ));
+        assert_eq!(normalized.operational[surface_ordinal], expected);
+    }
+}
+
+#[test]
+fn published_per_surface_bound_is_composable_for_the_largest_profile() {
+    let profile = non_interference_capture_profiles_v1()
+        .into_iter()
+        .find(|profile| profile.fixture_id == "NI-FORK-008")
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing largest profile")));
+    let maximum = usize::try_from(profile.max_surface_bytes).unwrap_or(usize::MAX);
+    let mut raw = raw_capture_for(&profile.fixture_id, b"authoritative");
+    raw.authoritative = profile
+        .surface_names
+        .iter()
+        .map(|_| vec![1; maximum])
+        .collect();
+    raw.public = profile
+        .surface_names
+        .iter()
+        .map(|_| vec![2; maximum])
+        .collect();
+    raw.operational = profile
+        .surface_names
+        .iter()
+        .map(|_| NonInterferenceRawOperationalV1::ByteExact(vec![3; maximum]))
+        .collect();
+
+    assert!(normalize_non_interference_capture_v1(&profile.fixture_id, raw).is_ok());
 }
 
 #[test]

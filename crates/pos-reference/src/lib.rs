@@ -861,6 +861,14 @@ mod tests {
         Ok(serde_json::from_str(value)?)
     }
 
+    fn assert_fork_error_contains(result: Result<(), ReferenceError>, expected: &str) {
+        let error = match result {
+            Ok(()) => std::panic::resume_unwind(Box::new("fork evidence must be rejected")),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
     fn object_mut(
         value: &mut serde_json::Value,
     ) -> Result<&mut serde_json::Map<String, serde_json::Value>, ReferenceError> {
@@ -1731,6 +1739,17 @@ mod tests {
                 "contract shape is invalid"
             ))
         ));
+        for status in [
+            serde_json::json!("unknown"),
+            serde_json::json!("not_executed_capture_unavailable"),
+        ] {
+            let mut value = parse_json(&counterfactual)?;
+            value["contract"]["non_interference_status"] = status;
+            assert_fork_error_contains(
+                verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
+                "non-interference execution status is invalid",
+            );
+        }
         Ok(())
     }
 
@@ -1882,56 +1901,48 @@ mod tests {
         let mut invalid_digest_byte = parse_json(&counterfactual)?;
         invalid_digest_byte["contract"]["non_interference"][0]["provenance_digest"] =
             serde_json::json!(vec![256_u64; 32]);
-        assert!(matches!(
+        assert_fork_error_contains(
             verify_fork_json(
                 &baseline,
                 &invalid_digest_byte.to_string(),
-                "world.action.v1"
+                "world.action.v1",
             ),
-            Err(ReferenceError::InvalidForkEvidence(
-                "non-interference case is invalid"
-            ))
-        ));
+            "non-interference case is invalid",
+        );
 
         let mut zero_digest = parse_json(&counterfactual)?;
         zero_digest["contract"]["non_interference"][0]["provenance_digest"] =
             serde_json::json!(vec![0_u8; 32]);
-        assert!(matches!(
+        assert_fork_error_contains(
             verify_fork_json(&baseline, &zero_digest.to_string(), "world.action.v1"),
-            Err(ReferenceError::InvalidForkEvidence(
-                "non-interference case is invalid"
-            ))
-        ));
+            "non-interference case is invalid",
+        );
 
         let mut cross_mode_divergence = parse_json(&counterfactual)?;
         for field in ["authoritative_digest", "canary_authoritative_digest"] {
             cross_mode_divergence["contract"]["non_interference"][1][field] =
                 serde_json::json!(vec![99_u8; 32]);
         }
-        assert!(matches!(
+        assert_fork_error_contains(
             verify_fork_json(
                 &baseline,
                 &cross_mode_divergence.to_string(),
-                "world.action.v1"
+                "world.action.v1",
             ),
-            Err(ReferenceError::InvalidForkEvidence(
-                "non-interference modes diverged"
-            ))
-        ));
+            "non-interference modes diverged",
+        );
         for field in ["control_input_digest", "canary_input_digest"] {
             let mut cross_mode_input_divergence = parse_json(&counterfactual)?;
             cross_mode_input_divergence["contract"]["non_interference"][1][field] =
                 serde_json::json!(vec![99_u8; 32]);
-            assert!(matches!(
+            assert_fork_error_contains(
                 verify_fork_json(
                     &baseline,
                     &cross_mode_input_divergence.to_string(),
-                    "world.action.v1"
+                    "world.action.v1",
                 ),
-                Err(ReferenceError::InvalidForkEvidence(
-                    "non-interference modes diverged"
-                ))
-            ));
+                "non-interference modes diverged",
+            );
         }
         Ok(())
     }
