@@ -213,6 +213,55 @@ impl std::fmt::Display for ErasureContainmentErrorV1 {
 
 impl std::error::Error for ErasureContainmentErrorV1 {}
 
+/// Closed, payload-free failures returned by the erasure execution host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureHostErrorV1 {
+    /// Complete durable recovery has not been installed or was invalidated.
+    RecoveryUnavailable,
+    /// The requested Timeline/Fork intersects a frozen-or-later scope.
+    AccessFrozen,
+    /// The caller's inventory generation or durable predecessor is stale.
+    StaleGeneration,
+    /// An independently injected verifier denied the operation.
+    AuthorizationDenied,
+    /// A stable operation identity conflicts with different bound content.
+    Conflict,
+    /// The owned persistence adapter failed without exposing payload details.
+    AdapterFailure,
+}
+
+impl ErasureHostErrorV1 {
+    /// Return the stable public error code.
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::RecoveryUnavailable => 0,
+            Self::AccessFrozen => 1,
+            Self::StaleGeneration => 2,
+            Self::AuthorizationDenied => 3,
+            Self::Conflict => 4,
+            Self::AdapterFailure => 5,
+        }
+    }
+}
+
+impl From<ErasureContainmentErrorV1> for ErasureHostErrorV1 {
+    fn from(error: ErasureContainmentErrorV1) -> Self {
+        match error {
+            ErasureContainmentErrorV1::AccessFrozen => Self::AccessFrozen,
+            ErasureContainmentErrorV1::RecoveryUnavailable => Self::RecoveryUnavailable,
+        }
+    }
+}
+
+impl std::fmt::Display for ErasureHostErrorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "erasure host error {}", self.code())
+    }
+}
+
+impl std::error::Error for ErasureHostErrorV1 {}
+
 /// Host-owned erasure containment seam used by stores and runtime consumers.
 ///
 /// Implementations resolve a Timeline/Fork to the immutable scope reference
@@ -3942,6 +3991,25 @@ pub struct ErasureVerifiedInventoryV1 {
 }
 
 impl ErasureVerifiedInventoryV1 {
+    /// Verify the positive empty-request case from one complete adapter snapshot.
+    ///
+    /// This is not a fallback for failed recovery: the adapter snapshot must
+    /// exist and its durable request-head set must be exactly empty. Non-empty
+    /// snapshots must pass through [`ErasureVerifiedInventoryQueryV1`] so core
+    /// revalidates every request graph and topology classification.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] for a non-empty durable set.
+    pub fn from_verified_empty_snapshot(
+        snapshot: ErasurePersistenceInventorySnapshotV1,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureErrorV1> {
+        if !snapshot.request_heads.is_empty() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Self::from_verified_recovery(Vec::new(), snapshot.topology, maximum_requests)
+    }
+
     pub(crate) fn from_verified_recovery(
         mut recovered: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
         mut topology: Vec<TimelineId>,
@@ -5747,14 +5815,14 @@ mod coverage_paths {
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
-        let stale = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+        let stale_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             reference(54),
             vec![(timeline, reference(53))],
             Vec::new(),
         );
         assert_eq!(
             ErasureVerifiedInventoryV1::from_verified_recovery(
-                vec![(state, stale)],
+                vec![(state, stale_proof)],
                 vec![timeline],
                 4,
             ),

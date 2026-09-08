@@ -26,6 +26,7 @@
 
 pub mod composition;
 pub mod driver;
+pub mod erasure_host;
 pub mod error;
 pub mod recorder;
 pub mod registry;
@@ -42,6 +43,7 @@ pub use driver::{
     Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey, RecoveryEvent,
     RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
 };
+pub use erasure_host::{ErasureCommandSenderV1, ErasureExecutionHostV1, ErasureReadSenderV1};
 pub use error::RuntimeError;
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
