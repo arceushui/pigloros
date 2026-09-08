@@ -92,6 +92,26 @@ fn self_digested_record(magic: &str, unsigned: Value) -> TestResult<Vec<u8>> {
     encode(&Value::Array(vec![unsigned, bytes(digest)]))
 }
 
+fn redigest_unsigned_field(
+    encoded: &[u8],
+    magic: &str,
+    field: usize,
+    replacement: Value,
+) -> TestResult<Vec<u8>> {
+    let Value::Array(wrapper) = ciborium::from_reader(encoded)? else {
+        return Err("self-digested wrapper must be an array".into());
+    };
+    let Value::Array(mut unsigned) = wrapper
+        .into_iter()
+        .next()
+        .ok_or("self-digested wrapper prefix missing")?
+    else {
+        return Err("self-digested wrapper prefix must be an array".into());
+    };
+    *unsigned.get_mut(field).ok_or("unsigned field missing")? = replacement;
+    self_digested_record(magic, Value::Array(unsigned))
+}
+
 fn wrapped_digest(encoded: &[u8]) -> TestResult<[u8; 32]> {
     let Value::Array(wrapper) = ciborium::from_reader(encoded)? else {
         return Err("signed wrapper must be an array".into());
@@ -727,6 +747,27 @@ impl Fixture {
             },
         )
     }
+
+    fn policy_for_image(
+        &self,
+        image_manifest: &[u8],
+        launch: &[u8],
+    ) -> TestResult<SandboxAdministratorPolicy> {
+        administrator_policy(
+            &self.trust,
+            &self.revocation,
+            &self.authority,
+            &PolicySelectionDigests {
+                provider_manifest: wrapped_digest(&self.spm1)?,
+                provider_binary: *blake3::hash(&self.provider_binary).as_bytes(),
+                broker_hard_caps: *blake3::hash(&self.broker_hard_caps).as_bytes(),
+                conformance_report: wrapped_digest(&self.pcr1)?,
+                syscall_set: wrapped_digest(&self.scs1)?,
+                launch_policy: wrapped_digest(launch)?,
+                image_manifest: wrapped_digest(image_manifest)?,
+            },
+        )
+    }
 }
 
 #[test]
@@ -1029,7 +1070,12 @@ fn provider_admission_rejects_each_cross_record_binding_substitution() -> TestRe
     );
 
     for (record, magic, field, signer) in [
+        (&fixture.pcr1, "PCR1", 2, &fixture.authority.reviewer),
+        (&fixture.pcr1, "PCR1", 3, &fixture.authority.reviewer),
         (&fixture.pcr1, "PCR1", 4, &fixture.authority.reviewer),
+        (&fixture.pcr1, "PCR1", 5, &fixture.authority.reviewer),
+        (&fixture.pcr1, "PCR1", 6, &fixture.authority.reviewer),
+        (&fixture.pcr1, "PCR1", 8, &fixture.authority.reviewer),
         (&fixture.spm1, "SPM1", 16, &fixture.authority.release),
     ] {
         let changed = resign_unsigned_field(record, magic, field, bytes([99; 32]), signer)?;
@@ -1064,36 +1110,206 @@ fn image_admission_rejects_changed_revoked_and_foreign_bytes() -> TestResult {
         admitted.admit_image(&fixture.sim1, &fixture.root_image, b"changed"),
         Err(SandboxAdmissionError::ArtifactMismatch)
     );
-    let revoked = revocation(
-        &fixture.trust,
-        &fixture.authority,
-        vec![],
-        vec![bytes(wrapped_digest(&fixture.sim1)?)],
+    for revoked_identity in [
+        wrapped_digest(&fixture.sim1)?,
+        *blake3::hash(&fixture.root_image).as_bytes(),
+        *blake3::hash(&fixture.executable).as_bytes(),
+    ] {
+        let revoked = revocation(
+            &fixture.trust,
+            &fixture.authority,
+            vec![],
+            vec![bytes(revoked_identity)],
+        )?;
+        let revoked_policy = fixture.policy_for_image(&fixture.sim1, &fixture.lps1)?;
+        let revoked_admission = AdmittedSandboxProvider::admit(
+            &revoked_policy,
+            &fixture.trust,
+            &revoked,
+            fixture.inputs(),
+        )?;
+        assert_eq!(
+            revoked_admission.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable,),
+            Err(SandboxAdmissionError::Revoked)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn image_admission_rejects_each_selection_and_authority_substitution() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let unselected = image_manifest(&fixture.authority, b"other-image", &fixture.executable, 0)?;
+    assert_eq!(
+        admitted.admit_image(&unselected, b"other-image", &fixture.executable),
+        Err(SandboxAdmissionError::PolicyMismatch)
+    );
+
+    for (field, replacement, expected) in [
+        (
+            4,
+            integer(u64::try_from(fixture.root_image.len())? + 1),
+            SandboxAdmissionError::ArtifactMismatch,
+        ),
+        (
+            18,
+            integer(fixture.trust.trust_epoch() + 1),
+            SandboxAdmissionError::ConformanceMismatch,
+        ),
+        (
+            13,
+            bytes([99; 32]),
+            SandboxAdmissionError::CertificateMismatch,
+        ),
+        (14, integer(78), SandboxAdmissionError::CertificateMismatch),
+    ] {
+        let changed = resign_unsigned_field(
+            &fixture.sim1,
+            "SIM1",
+            field,
+            replacement,
+            &fixture.authority.image,
+        )?;
+        let policy = fixture.policy_for_image(&changed, &fixture.lps1)?;
+        let selected = AdmittedSandboxProvider::admit(
+            &policy,
+            &fixture.trust,
+            &fixture.revocation,
+            fixture.inputs(),
+        )?;
+        assert_eq!(
+            selected.admit_image(&changed, &fixture.root_image, &fixture.executable),
+            Err(expected)
+        );
+    }
+
+    let unknown_key = resign_unsigned_field(
+        &fixture.sim1,
+        "SIM1",
+        19,
+        Value::Text("other-image".to_owned()),
+        &fixture.authority.image,
     )?;
-    let revoked_policy = administrator_policy(
+    let policy = fixture.policy_for_image(&unknown_key, &fixture.lps1)?;
+    let selected = AdmittedSandboxProvider::admit(
+        &policy,
         &fixture.trust,
-        &revoked,
+        &fixture.revocation,
+        fixture.inputs(),
+    )?;
+    assert!(matches!(
+        selected.admit_image(&unknown_key, &fixture.root_image, &fixture.executable),
+        Err(SandboxAdmissionError::Trust(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn image_admission_rejects_provider_architecture_substitution() -> TestResult {
+    let fixture = Fixture::new()?;
+    let syscall_set = syscall_set(1)?;
+    let host_profile = host_profile(&fixture.authority, "cgroup-v2", 1, 1)?;
+    let report = conformance_report(
+        &fixture.authority,
+        *blake3::hash(&fixture.provider_binary).as_bytes(),
+        feature_set_digest(&fixture.required_features)?,
+        wrapped_digest(&host_profile)?,
+        1,
+    )?;
+    let manifest = resign_unsigned_field(
+        &fixture.spm1,
+        "SPM1",
+        9,
+        Value::Array(vec![integer(1)]),
+        &fixture.authority.release,
+    )?;
+    let policy = administrator_policy(
+        &fixture.trust,
+        &fixture.revocation,
         &fixture.authority,
         &PolicySelectionDigests {
-            provider_manifest: wrapped_digest(&fixture.spm1)?,
+            provider_manifest: wrapped_digest(&manifest)?,
             provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
             broker_hard_caps: *blake3::hash(&fixture.broker_hard_caps).as_bytes(),
-            conformance_report: wrapped_digest(&fixture.pcr1)?,
-            syscall_set: wrapped_digest(&fixture.scs1)?,
+            conformance_report: wrapped_digest(&report)?,
+            syscall_set: wrapped_digest(&syscall_set)?,
             launch_policy: wrapped_digest(&fixture.lps1)?,
             image_manifest: wrapped_digest(&fixture.sim1)?,
         },
     )?;
-    let revoked_admission = AdmittedSandboxProvider::admit(
-        &revoked_policy,
+    let inputs = SandboxProviderAdmissionInputs {
+        provider_manifest: &manifest,
+        conformance_report: &report,
+        host_profile: &host_profile,
+        syscall_set: &syscall_set,
+        ..fixture.inputs()
+    };
+    let selected =
+        AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs)?;
+    assert_eq!(
+        selected.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable),
+        Err(SandboxAdmissionError::ArchitectureMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn launch_and_execute_admission_reject_each_selected_authority_mismatch() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let unselected_launch = launch_policy([99; 32])?;
+    assert_eq!(
+        admitted.admit_launch_policy(&unselected_launch, &image),
+        Err(SandboxAdmissionError::PolicyMismatch)
+    );
+
+    let policy = fixture.policy_for_image(&fixture.sim1, &unselected_launch)?;
+    let selected = AdmittedSandboxProvider::admit(
+        &policy,
         &fixture.trust,
-        &revoked,
+        &fixture.revocation,
         fixture.inputs(),
     )?;
+    let image = selected.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
     assert_eq!(
-        revoked_admission.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable),
-        Err(SandboxAdmissionError::Revoked)
+        selected.admit_launch_policy(&unselected_launch, &image),
+        Err(SandboxAdmissionError::ConformanceMismatch)
     );
+
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request_bytes = execute_request(&fixture, &launch, &["execute"])?;
+    let changed_request = redigest_unsigned_field(&request_bytes, "SPX1", 12, bytes([99; 32]))?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&changed_request)?;
+    assert_eq!(
+        admitted.authenticate_grant(
+            &admission_grant(&fixture, &request, &launch)?,
+            &request,
+            &image,
+            &launch,
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn host_profile_rejects_non_boolean_feature_proof_status() -> TestResult {
+    let fixture = Fixture::new()?;
+    let invalid_proof = Value::Array(vec![Value::Array(vec![
+        Value::Text("cgroup-v2".to_owned()),
+        integer(2),
+        bytes([18; 32]),
+    ])]);
+    let changed = resign_unsigned_field(
+        &fixture.hcp1,
+        "HCP1",
+        4,
+        invalid_proof,
+        &fixture.authority.runtime,
+    )?;
+    assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
     Ok(())
 }
 
