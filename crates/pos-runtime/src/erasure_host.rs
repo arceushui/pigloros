@@ -165,9 +165,10 @@ impl ErasureExecutionHostV1 {
         Ok(generation)
     }
 
-    fn refresh_verified_empty_inventory(
+    fn apply_empty_topology_change(
         &mut self,
-    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        change: impl FnOnce(&mut dyn ErasureHostStoreV1) -> Result<Timeline, CoreError>,
+    ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let maximum_requests = match self.state {
             HostStateV1::Ready {
                 maximum_requests,
@@ -178,6 +179,7 @@ impl ErasureExecutionHostV1 {
                 return Err(ErasureHostErrorV1::RecoveryUnavailable)
             }
         };
+        let timeline = change(self.store.as_mut()).map_err(|error| map_store_error(&error))?;
         let snapshot = self
             .store
             .complete_erasure_inventory_snapshot(maximum_requests)
@@ -186,6 +188,7 @@ impl ErasureExecutionHostV1 {
             ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
                 .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
         self.publish_inventory(inventory, maximum_requests)
+            .map(|generation| (timeline, generation))
     }
     /// Recover a new store only when its complete durable request set is empty.
     ///
@@ -228,21 +231,33 @@ impl ErasureCommandSenderV1<'_> {
     /// publication fails, the host is poisoned and no further sender is issued.
     pub fn create_timeline(&mut self, name: &str) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        if !matches!(
-            self.host.state,
-            HostStateV1::Ready {
-                request_count: 0,
-                ..
-            }
-        ) {
-            return Err(ErasureHostErrorV1::RecoveryUnavailable);
-        }
-        let timeline = self
+        let (timeline, generation) = self
             .host
-            .store
-            .create_timeline(name)
-            .map_err(|error| map_store_error(&error))?;
-        self.generation = self.host.refresh_verified_empty_inventory()?;
+            .apply_empty_topology_change(|store| store.create_timeline(name))?;
+        self.generation = generation;
+        Ok(timeline)
+    }
+
+    /// Fork a Timeline and publish its successor inventory generation.
+    ///
+    /// This seam is limited to the positively verified empty active-request
+    /// case. Active erasure requests require atomic ERSE1 admission and are
+    /// rejected before the child can be persisted.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error and fails closed if successor
+    /// inventory publication cannot complete.
+    pub fn fork_timeline(
+        &mut self,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (timeline, generation) = self
+            .host
+            .apply_empty_topology_change(|store| store.fork(parent, at_seq, name))?;
+        self.generation = generation;
         Ok(timeline)
     }
 
@@ -497,12 +512,21 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let (first, second) = host
+        let (first, second, child) = host
             .command_sender()
             .and_then(|mut sender| {
                 let first = sender.create_timeline("first")?;
+                sender.append(
+                    first.id(),
+                    &[EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("host.parent-fixture"),
+                        CanonicalBytes::from_vec(Vec::new()),
+                    )],
+                )?;
                 let second = sender.create_timeline("second")?;
-                Ok((first, second))
+                let child = sender.fork_timeline(first.id(), Seq::from_u64(1), "child")?;
+                Ok((first, second, child))
             })
             .unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!("host creation failed: {error:?}")))
@@ -515,8 +539,18 @@ mod tests {
             reader
                 .timelines()
                 .map(|items| items.into_iter().map(|item| item.id()).collect()),
-            Ok(vec![first.id(), second.id()])
+            Ok(vec![first.id(), second.id(), child.id()])
         );
         assert_eq!(reader.root_timeline_count_bounded(2), Ok(2));
+        assert_eq!(
+            reader
+                .read_bounded(
+                    child.id(),
+                    SeqRange::all(),
+                    EventReadBounds::new(32, 32, 4, 2),
+                )
+                .map(|events| events.len()),
+            Ok(1)
+        );
     }
 }
