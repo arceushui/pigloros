@@ -1356,6 +1356,10 @@ fn nonzero_optional(value: Option<[u8; 32]>) -> bool {
 }
 
 impl SandboxProviderErrorCodeV1 {
+    const fn requires_identified_operation(self) -> bool {
+        !matches!(self, Self::InvalidEncoding)
+    }
+
     const fn requires_authenticated_request(self) -> bool {
         !matches!(
             self,
@@ -1507,6 +1511,9 @@ impl SandboxProviderErrorV1 {
             || (self.attempt_id.is_some()
                 && (self.operation.is_none() || self.request_id.is_none()))
         {
+            return Err(SandboxContractErrorV1::InconsistentFields);
+        }
+        if self.code.requires_identified_operation() && self.operation.is_none() {
             return Err(SandboxContractErrorV1::InconsistentFields);
         }
         if self.code.requires_authenticated_request() {

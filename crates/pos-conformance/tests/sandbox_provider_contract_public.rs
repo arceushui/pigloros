@@ -1391,6 +1391,42 @@ fn post_authentication_provider_errors_bind_available_identities() -> TestResult
 }
 
 #[test]
+fn pre_authentication_provider_errors_still_identify_the_operation() -> TestResult {
+    let key = signing_key();
+    for code in [
+        SandboxProviderErrorCodeV1::UnsupportedVersion,
+        SandboxProviderErrorCodeV1::FieldOutOfBounds,
+        SandboxProviderErrorCodeV1::NonCanonicalOrder,
+        SandboxProviderErrorCodeV1::DigestMismatch,
+        SandboxProviderErrorCodeV1::SignatureInvalid,
+    ] {
+        let mut identified = error_for_code(code);
+        identified.request_id = None;
+        identified.request_digest = None;
+        identified.attempt_id = None;
+        let identified = identified.sign(&key)?;
+        let identified_bytes = identified.to_canonical_cbor()?;
+        let mut independently_decoded =
+            independent::SandboxProviderError::from_canonical_cbor(&identified_bytes)?;
+        independently_decoded.verify_signature(&key.verifying_key())?;
+
+        independently_decoded.operation = None;
+        assert_eq!(
+            independently_decoded.verify_signature(&key.verifying_key()),
+            Err(independent::SandboxProviderProtocolError::InconsistentFields)
+        );
+
+        let mut anonymous = identified;
+        anonymous.operation = None;
+        assert_eq!(
+            anonymous.sign(&key),
+            Err(SandboxContractErrorV1::InconsistentFields)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn payload_transfer_timeout_requires_authenticated_execute_identities() -> TestResult {
     let key = signing_key();
     let timeout = error_for_code(SandboxProviderErrorCodeV1::PayloadTransferTimeout);
