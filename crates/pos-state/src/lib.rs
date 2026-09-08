@@ -1822,7 +1822,7 @@ mod tests {
 
         let blocked_gate = Arc::new(ErasureContainmentGateV1::new());
         blocked_gate.block_timeline(timeline);
-        registry.bind_erasure_gate(blocked_gate.clone());
+        registry.bind_erasure_gate(blocked_gate);
         // A second binding cannot replace the host gate with a permissive one.
         registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         assert_eq!(
