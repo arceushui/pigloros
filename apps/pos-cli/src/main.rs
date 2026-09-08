@@ -638,7 +638,7 @@ fn run_builtin_reference_experiment(
         store_config,
     });
     #[cfg(test)]
-    let mut exp = exp.with_erasure_gate(std::sync::Arc::new(
+    let exp = exp.with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new(),
     ));
     let mut exp = exp;

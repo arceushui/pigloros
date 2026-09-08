@@ -141,7 +141,7 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
     #[cfg(test)]
     drop(pos_core::store::EventStore::bind_erasure_gate(
         store.as_mut(),
-        pos_core::ErasureContainmentGateV1::new(),
+        std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new()),
     ));
     let timeline = store
         .list_timelines()?
