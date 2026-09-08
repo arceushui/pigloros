@@ -125,6 +125,9 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 path: db.to_string_lossy().into_owned(),
             })
             .map_err(|e| CliError::BadSource(e.to_string()))?;
+            #[cfg(test)]
+            crate::bind_test_store_gate(event_store.as_mut())
+                .map_err(|e| CliError::BadSource(e.to_string()))?;
             let persisted_registry = event_store
                 .load_key_registry()
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
@@ -370,7 +373,10 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
     let ledger = match &source {
         Source::Toml(dir) => TomlLedgerStore::new(dir).load(&today)?,
         Source::Store(db) => {
-            let store = pos_store::open_store_read_only(&db.to_string_lossy())
+            let mut store = pos_store::open_store_read_only(&db.to_string_lossy())
+                .map_err(|e| CliError::BadSource(e.to_string()))?;
+            #[cfg(test)]
+            crate::bind_test_store_gate(store.as_mut())
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             let timeline_id = find_ledger_timeline(store.as_ref())?;
             pos_plugin_ledger::load_ledger_from_store(store.as_ref(), timeline_id, &today)?
@@ -1967,7 +1973,8 @@ mod tests {
         ])
         .test_ok()?;
 
-        let store = pos_store::open_store_read_only(&db.to_string_lossy()).test_ok()?;
+        let mut store = pos_store::open_store_read_only(&db.to_string_lossy()).test_ok()?;
+        crate::bind_test_store_gate(store.as_mut()).test_ok()?;
         let timeline = find_ledger_timeline(store.as_ref())?;
         let event = store
             .read(timeline, pos_core::store::SeqRange::all())

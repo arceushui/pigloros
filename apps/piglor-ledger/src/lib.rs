@@ -44,6 +44,20 @@ pub use json::render_json;
 pub use pos_plugin_ledger::LedgerView;
 pub use verify::run as verify_source;
 
+/// Bind the permissive host gate used by this crate's in-process store tests.
+///
+/// Production composition roots must install their authoritative recovered
+/// gate; test fixtures use an empty gate so they can exercise ledger behavior
+/// without fabricating erasure evidence.
+#[cfg(test)]
+pub(crate) fn bind_test_store_gate(
+    store: &mut dyn pos_core::store::EventStore,
+) -> Result<(), pos_core::CoreError> {
+    store.bind_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new(),
+    ))
+}
+
 /// Return the committed author identity used for ledger Events.
 #[must_use]
 pub(crate) fn well_known_entity() -> pos_core::ids::EntityId {
