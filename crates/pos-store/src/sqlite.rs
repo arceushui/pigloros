@@ -46,13 +46,14 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureGate, ErasureIndexInsertV1,
-    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureGate,
+    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
     ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
     KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    PreparedErasureForkAdmissionV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -189,6 +190,34 @@ const ERASURE_INDEX_COLUMNS: &[ErasureSchemaColumn] = &[
 ];
 
 const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
+    ErasureSchemaTable {
+        name: "erasure_fork_admissions",
+        columns_query: "PRAGMA table_info(erasure_fork_admissions)",
+        columns: &[
+            ErasureSchemaColumn {
+                name: "operation_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            ErasureSchemaColumn {
+                name: "binding_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(operation_digest) = 32)",
+            "CHECK (length(binding_digest) = 32)",
+        ],
+    },
     ErasureSchemaTable {
         name: "erasure_records",
         columns_query: "PRAGMA table_info(erasure_records)",
@@ -3420,15 +3449,116 @@ impl SqliteStore {
     }
 
     fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
-        let chain = self.fork_chain(id)?;
+        Self::logical_head_unchecked_on(&self.conn, id)
+    }
+
+    fn logical_head_unchecked_on(conn: &Connection, id: TimelineId) -> Result<Seq, CoreError> {
+        let chain = Self::fork_chain_on(conn, id)?;
         chain
             .iter()
             .enumerate()
             .try_fold(0_u64, |logical_head, (index, (timeline, _))| {
-                self.logical_segment_length(&chain, index, *timeline)
-                    .and_then(|segment| Self::add_logical_segment(logical_head, segment))
+                let prefix = chain[index].1.as_u64();
+                let local_head = conn
+                    .query_row(
+                        "SELECT head_seq FROM timelines WHERE id = ?1",
+                        params![timeline.to_string()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                let local_head = u64::try_from(local_head).unwrap_or(0);
+                let segment = chain.get(index + 1).map_or(Ok(local_head), |(_, fork)| {
+                    fork.as_u64().checked_sub(prefix).ok_or_else(|| {
+                        CoreError::Storage(format!(
+                            "Fork point precedes inherited history for timeline {timeline}"
+                        ))
+                    })
+                })?;
+                if segment > local_head {
+                    return Err(CoreError::Storage(format!(
+                        "Fork point exceeds parent logical Event head for timeline {timeline}"
+                    )));
+                }
+                Self::add_logical_segment(logical_head, segment)
             })
             .map(Seq::from_u64)
+    }
+
+    fn compute_chain_hash_at_unchecked_on(
+        conn: &Connection,
+        hasher: &dyn Hasher,
+        timeline: TimelineId,
+        at_seq: Seq,
+    ) -> Result<Hash, CoreError> {
+        let logical_head = Self::logical_head_unchecked_on(conn, timeline)?;
+        if at_seq > logical_head {
+            return Err(CoreError::ForkBeyondHead {
+                fork_seq: at_seq.as_u64(),
+                head: logical_head.as_u64(),
+            });
+        }
+        let mut hash = hasher.genesis_hash();
+        if at_seq == Seq::ZERO {
+            return Ok(hash);
+        }
+        let chain = Self::fork_chain_on(conn, timeline)?;
+        let mut all = Vec::new();
+        for (index, &(member, _)) in chain.iter().enumerate() {
+            let logical_prefix = chain[index].1.as_u64();
+            let local_limit = chain
+                .get(index + 1)
+                .map(|(_, fork)| {
+                    fork.as_u64().checked_sub(logical_prefix).ok_or_else(|| {
+                        CoreError::Storage(format!(
+                            "Fork point precedes inherited history for timeline {member}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            all.extend(Self::read_own_events_on(
+                conn,
+                member,
+                Seq::ZERO,
+                local_limit.map(Seq::from_u64),
+            )?);
+        }
+        for event in
+            crate::stitch::renumber_and_filter(all, SeqRange::bounded(Seq::from_u64(1), at_seq))
+        {
+            hash = hasher.hash_event(&hash, event.id.to_string().as_bytes(), &event.payload);
+        }
+        Ok(hash)
+    }
+
+    fn insert_timeline_with_meta_on(
+        conn: &Connection,
+        meta: &TimelineMeta,
+        chain_head: Hash,
+    ) -> Result<(), ErasureErrorV1> {
+        let (parent_id, fork_seq) = meta.fork_point.map_or((None, None), |(parent, at_seq)| {
+            (Some(parent.to_string()), Some(seq_as_i64(at_seq)))
+        });
+        conn.execute(
+            "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+            params![
+                meta.id.to_string(),
+                meta.name.as_deref(),
+                mode_str(meta.mode),
+                parent_id.as_deref(),
+                fork_seq,
+                chain_head.as_bytes().as_slice(),
+            ],
+        )
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        if let Some(owner) = meta.owner {
+            conn.execute(
+                "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
+                params![meta.id.to_string(), owner.to_string()],
+            )
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        }
+        Ok(())
     }
 
     fn save_key_registry_in_transaction(
@@ -4623,60 +4753,226 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         if maximum_requests == 0 || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let request_limit = i64::try_from(maximum_requests.saturating_add(1))
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        let topology_limit = i64::try_from(ERASURE_MAX_INVENTORY_TIMELINES.saturating_add(1))
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        let request_heads = {
-            let mut statement = transaction
-                .prepare(
-                    "SELECT request_digest, manifest_digest FROM erasure_records
-                     ORDER BY request_digest LIMIT ?1",
-                )
-                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-            let rows = statement
-                .query_map(params![request_limit], |row| {
-                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-            rows.map(|row| {
-                row.map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
-                    .and_then(|(request, manifest)| {
-                        Ok((reference_from_sql(request)?, reference_from_sql(manifest)?))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        if request_heads.len() > maximum_requests {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        let topology = {
-            let mut statement = transaction
-                .prepare("SELECT id FROM timelines ORDER BY id LIMIT ?1")
-                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-            let rows = statement
-                .query_map(params![topology_limit], |row| row.get::<_, String>(0))
-                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-            rows.map(|row| {
-                row.map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
-                    .and_then(|id| {
-                        parse_timeline_id(&id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        if topology.len() > ERASURE_MAX_INVENTORY_TIMELINES {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
+        let snapshot = sqlite_erasure_inventory_snapshot(&transaction, maximum_requests)?;
         transaction
             .commit()
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        ErasurePersistenceInventorySnapshotV1::new(request_heads, topology, maximum_requests)
+        Ok(snapshot)
     }
+}
+
+fn sqlite_erasure_inventory_snapshot(
+    conn: &Connection,
+    maximum_requests: usize,
+) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+    if maximum_requests == 0 || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    let request_limit = i64::try_from(maximum_requests.saturating_add(1))
+        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+    let topology_limit = i64::try_from(ERASURE_MAX_INVENTORY_TIMELINES.saturating_add(1))
+        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+    let request_heads = {
+        let mut statement = conn
+            .prepare(
+                "SELECT request_digest, manifest_digest FROM erasure_records
+                 ORDER BY request_digest LIMIT ?1",
+            )
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let rows = statement
+            .query_map(params![request_limit], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        rows.map(|row| {
+            row.map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+                .and_then(|(request, manifest)| {
+                    Ok((reference_from_sql(request)?, reference_from_sql(manifest)?))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    if request_heads.len() > maximum_requests {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    let topology = {
+        let mut statement = conn
+            .prepare("SELECT id FROM timelines ORDER BY id LIMIT ?1")
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let rows = statement
+            .query_map(params![topology_limit], |row| row.get::<_, String>(0))
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        rows.map(|row| {
+            row.map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+                .and_then(|id| {
+                    parse_timeline_id(&id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    if topology.len() > ERASURE_MAX_INVENTORY_TIMELINES {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    ErasurePersistenceInventorySnapshotV1::new(request_heads, topology, maximum_requests)
+}
+
+impl ErasureForkPersistencePortV1 for SqliteStore {
+    fn commit_fork_admission(
+        &mut self,
+        admission: PreparedErasureForkAdmissionV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let result = (|| {
+            let child = admission.child();
+            let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
+            let chain_head = Self::compute_chain_hash_at_unchecked_on(
+                &self.conn,
+                self.hasher.as_ref(),
+                parent,
+                at_seq,
+            )
+            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
+
+            if sqlite_fork_admission_receipt(&self.conn, admission.operation())?.is_some() {
+                return sqlite_fork_admission_is_exact(&self.conn, &admission, chain_head)?
+                    .then_some(ErasureCasOutcomeV1::ExactRetry)
+                    .ok_or(ErasureErrorV1::PolicyConflict);
+            }
+
+            let generation =
+                sqlite_erasure_inventory_snapshot(&self.conn, ERASURE_MAX_INVENTORY_REQUESTS)?
+                    .generation();
+            if generation != admission.expected_inventory_generation()
+                || sqlite_timeline_exists(&self.conn, child.id)?
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+
+            if apply_sqlite_erasure_cas(&self.conn, admission.mutation())?
+                != ErasureCasOutcomeV1::Applied
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            Self::insert_timeline_with_meta_on(&self.conn, child, chain_head)?;
+            self.conn
+                .execute(
+                    "INSERT INTO erasure_fork_admissions
+                     (operation_digest, binding_digest, child_id) VALUES (?1, ?2, ?3)",
+                    params![
+                        admission.operation().digest().as_slice(),
+                        admission.binding_digest().digest().as_slice(),
+                        child.id.to_string(),
+                    ],
+                )
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            Ok(ErasureCasOutcomeV1::Applied)
+        })();
+        finish_erasure_transaction(&self.conn, result)
+    }
+}
+
+fn sqlite_timeline_exists(conn: &Connection, timeline: TimelineId) -> Result<bool, ErasureErrorV1> {
+    conn.query_row(
+        "SELECT 1 FROM timelines WHERE id=?1",
+        params![timeline.to_string()],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+}
+
+fn sqlite_fork_admission_receipt(
+    conn: &Connection,
+    operation: ErasureReferenceV1,
+) -> Result<Option<(ErasureReferenceV1, String)>, ErasureErrorV1> {
+    conn.query_row(
+        "SELECT binding_digest, child_id FROM erasure_fork_admissions
+         WHERE operation_digest=?1",
+        params![operation.digest().as_slice()],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+    )
+    .optional()
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+    .map(|(binding, child)| Ok((reference_from_sql(binding)?, child)))
+    .transpose()
+}
+
+fn sqlite_fork_admission_is_exact(
+    conn: &Connection,
+    admission: &PreparedErasureForkAdmissionV1,
+    chain_head: Hash,
+) -> Result<bool, ErasureErrorV1> {
+    let Some((binding, child_id)) = sqlite_fork_admission_receipt(conn, admission.operation())?
+    else {
+        return Ok(false);
+    };
+    let child = admission.child();
+    if binding != admission.binding_digest() || child_id != child.id.to_string() {
+        return Ok(false);
+    }
+    let row = conn
+        .query_row(
+            "SELECT name, mode, parent_id, fork_seq, head_seq, chain_head
+             FROM timelines WHERE id=?1",
+            params![child.id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let Some((name, mode, parent, fork_seq, head, stored_chain_head)) = row else {
+        return Ok(false);
+    };
+    let expected_parent = child.fork_point.map(|(parent, _)| parent.to_string());
+    let expected_fork = child.fork_point.map(|(_, at_seq)| seq_as_i64(at_seq));
+    let owner = conn
+        .query_row(
+            "SELECT owner_id FROM timeline_owners WHERE timeline_id=?1",
+            params![child.id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let expected_owner = child.owner.map(|value| value.to_string());
+    if name != child.name
+        || mode != mode_str(child.mode)
+        || parent != expected_parent
+        || fork_seq != expected_fork
+        || head != 0
+        || stored_chain_head.as_slice() != chain_head.as_bytes()
+        || owner != expected_owner
+    {
+        return Ok(false);
+    }
+    let manifest = conn
+        .query_row(
+            "SELECT manifest_digest, manifest_cbor FROM erasure_records
+             WHERE request_digest=?1",
+            params![admission.mutation().request().digest().as_slice()],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let exact_manifest = manifest.is_some_and(|(digest, bytes)| {
+        digest.as_slice() == admission.mutation().next_manifest().digest().digest()
+            && bytes.as_slice() == admission.mutation().next_manifest().canonical_cbor()
+    });
+    Ok(exact_manifest && sqlite_mutation_is_exact(conn, admission.mutation())?)
 }
 
 impl ErasurePersistencePortV1 for SqliteStore {

@@ -1393,7 +1393,7 @@ fn coordinator_prepares_bound_erse1_and_child_without_committing() -> Result<(),
                     owner: Some(EntityId::new()),
                     ..input.child.clone()
                 },
-                ..input.clone()
+                ..input
             },
         )?;
     assert_ne!(owned.binding_digest(), named_binding);
@@ -1485,7 +1485,6 @@ fn coordinator_verifies_complete_nonempty_inventory() -> Result<(), ErasureError
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .digest();
     let timeline = TimelineId::new();
-    let scope = scope(request, &[target(10)], lineage_rule)?;
     let observation = ErasureInventoryObservationV1::new(
         vec![(request, manifest)],
         vec![timeline],
@@ -1493,7 +1492,7 @@ fn coordinator_verifies_complete_nonempty_inventory() -> Result<(), ErasureError
             request,
             ErasureVerifiedTopologyObservationV1::new(
                 manifest,
-                vec![(timeline, scope.reference())],
+                vec![(timeline, reference(7))],
                 Vec::new(),
             ),
         )],

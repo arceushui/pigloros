@@ -3936,10 +3936,13 @@ pub trait ErasureForkPersistencePortV1 {
 /// snapshot port without exposing either raw capability to Gateway, Replay, or
 /// Plugin callers. `MemoryStore` and `SQLite` are the two production adapters at
 /// this seam.
-pub trait ErasureHostStoreV1: crate::store::EventStore + ErasureInventoryPersistencePortV1 {}
+pub trait ErasureHostStoreV1:
+    crate::store::EventStore + ErasureInventoryPersistencePortV1 + ErasureForkPersistencePortV1
+{
+}
 
 impl<T> ErasureHostStoreV1 for T where
-    T: crate::store::EventStore + ErasureInventoryPersistencePortV1
+    T: crate::store::EventStore + ErasureInventoryPersistencePortV1 + ErasureForkPersistencePortV1
 {
 }
 

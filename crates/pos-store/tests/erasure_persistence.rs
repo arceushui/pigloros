@@ -93,8 +93,8 @@ struct Host<S> {
 
 type RetainedEffect = (ErasureReferenceV1, pos_core::ErasureCasEffectV1);
 type CompletedErasure<S> = (Rc<RefCell<S>>, ErasureRequestV1, Vec<RetainedEffect>);
-type PreparedMemoryFork = (
-    Rc<RefCell<MemoryStore>>,
+type PreparedFork<S> = (
+    Rc<RefCell<S>>,
     ErasureReferenceV1,
     TimelineId,
     pos_core::PreparedErasureForkAdmissionV1,
@@ -509,10 +509,13 @@ fn assert_empty_backend<S: ErasurePersistencePortV1>(
     Ok(())
 }
 
-fn prepared_memory_fork(
+fn prepared_fork<S>(
+    mut store: S,
     expected_generation: Option<ErasureReferenceV1>,
-) -> Result<PreparedMemoryFork, Box<dyn std::error::Error>> {
-    let mut store = MemoryStore::new();
+) -> Result<PreparedFork<S>, Box<dyn std::error::Error>>
+where
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
     let parent = store.create_timeline("fork-parent")?.id();
     let shared = Rc::new(RefCell::new(store));
     let request = request()?;
@@ -600,7 +603,7 @@ fn memory_manifest_cas_accepts_exact_retry_for_every_effect(
 #[test]
 fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (store, request, child, prepared) = prepared_memory_fork(None)?;
+    let (store, request, child, prepared) = prepared_fork(MemoryStore::new(), None)?;
     assert_eq!(
         store.borrow_mut().commit_fork_admission(prepared.clone())?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -621,7 +624,8 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
 #[test]
 fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (store, request, child, prepared) = prepared_memory_fork(Some(reference(104)))?;
+    let (store, request, child, prepared) =
+        prepared_fork(MemoryStore::new(), Some(reference(104)))?;
     let topology_before = store
         .borrow_mut()
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
@@ -822,6 +826,86 @@ fn sqlite_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn
 fn sqlite_manifest_cas_accepts_exact_retry_for_every_effect(
 ) -> Result<(), Box<dyn std::error::Error>> {
     complete_with_retry_validation(SqliteStore::open_in_memory()?, true)?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, request, child, prepared) = prepared_fork(SqliteStore::open(path)?, None)?;
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared.clone())?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+
+    let mut reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        reopened.commit_fork_admission(prepared)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
+    assert_eq!(reopened.scope_index_count(request)?, 1);
+    assert!(reopened
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (store, request, child, prepared) =
+        prepared_fork(SqliteStore::open_in_memory()?, Some(reference(104)))?;
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(store.borrow().scope_index_count(request)?, 0);
+    assert!(!store
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_insert_failure_rolls_back_erasure_successor(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, request, child, prepared) = prepared_fork(SqliteStore::open(path)?, None)?;
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch(&format!(
+        "CREATE TRIGGER reject_erasure_child BEFORE INSERT ON timelines
+         WHEN NEW.id = '{}' BEGIN SELECT RAISE(ABORT, 'fault'); END;",
+        child
+    ))?;
+    drop(connection);
+
+    let mut reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        reopened.commit_fork_admission(prepared),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    assert_eq!(reopened.scope_index_count(request)?, 0);
+    assert!(!reopened
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
     Ok(())
 }
 
