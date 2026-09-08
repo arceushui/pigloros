@@ -89,7 +89,7 @@ pub use erasure::{
     ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureCoordinator,
     ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
-    ErasureForkAdmissionInputV1, ErasureForkPersistencePortV1,
+    ErasureForkAdmissionInputV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
     ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,

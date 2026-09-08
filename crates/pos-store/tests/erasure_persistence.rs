@@ -900,6 +900,37 @@ fn memory_manifest_cas_accepts_exact_retry_for_every_effect(
 fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn std::error::Error>>
 {
     let (store, request, child, prepared) = prepared_fork(MemoryStore::new())?;
+    let operation = prepared.operation();
+    let expected_result = prepared.recovery_result()?;
+    assert_eq!(expected_result.operation(), operation);
+    assert_eq!(expected_result.binding_digest(), prepared.binding_digest());
+    assert_eq!(
+        expected_result.successor_generation(),
+        prepared.successor_inventory().generation()
+    );
+    assert_eq!(expected_result.child(), prepared.child());
+    assert_eq!(
+        pos_core::ErasureForkRecoveryV1::from_persisted(
+            operation,
+            prepared.binding_digest(),
+            prepared.successor_inventory().generation(),
+            prepared.child().clone(),
+            reference(249),
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let mut invalid_child = prepared.child().clone();
+    invalid_child.mode = pos_core::TimelineMode::Live;
+    assert_eq!(
+        pos_core::ErasureForkRecoveryV1::from_persisted(
+            operation,
+            prepared.binding_digest(),
+            prepared.successor_inventory().generation(),
+            invalid_child,
+            expected_result.receipt_digest(),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     assert_eq!(
         store.borrow_mut().commit_fork_admission(prepared.clone())?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -910,6 +941,14 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
         .topology()
         .contains(&child));
+    assert_eq!(
+        store.borrow_mut().recover_fork_admission(operation)?,
+        Some(expected_result)
+    );
+    assert_eq!(
+        store.borrow_mut().recover_fork_admission(reference(250))?,
+        None
+    );
     assert_eq!(
         store.borrow_mut().commit_fork_admission(prepared)?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
@@ -1147,6 +1186,8 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let (store, request, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let operation = prepared.operation();
+    let expected_result = prepared.recovery_result()?;
     assert_eq!(
         store.borrow_mut().commit_fork_admission(prepared.clone())?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -1154,6 +1195,10 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
     drop(store);
 
     let mut reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        reopened.recover_fork_admission(operation)?,
+        Some(expected_result)
+    );
     assert_eq!(
         reopened.commit_fork_admission(prepared)?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
@@ -1232,6 +1277,20 @@ fn sqlite_fork_retry_rejects_corrupted_receipt_or_child() -> Result<(), Box<dyn 
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "UPDATE erasure_fork_admissions SET child_id='corrupted' WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET successor_generation=zeroblob(32)
+             WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET receipt_digest=zeroblob(32)
+             WHERE operation_digest=?1",
             rusqlite::params![prepared.operation().digest().as_slice()],
         )
     })?;

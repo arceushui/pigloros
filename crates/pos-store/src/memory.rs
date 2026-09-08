@@ -46,8 +46,8 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureGate,
-    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
+    ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
     PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
@@ -182,7 +182,7 @@ pub struct MemoryStore {
     erasure_effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
     erasure_recovery_errors: BTreeMap<ErasureReferenceV1, BTreeSet<ErasureReferenceV1>>,
     /// Stable Fork operation identity to complete prepared-admission binding.
-    erasure_fork_admissions: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+    erasure_fork_admissions: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -1417,7 +1417,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
             .compute_chain_hash_at_unchecked(parent, at_seq)
             .map_err(|_| ErasureErrorV1::PolicyConflict)?;
 
-        if let Some(stored_binding) = self.erasure_fork_admissions.get(&operation) {
+        if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
             let exact_child = self.timelines.get(&child.id).is_some_and(|state| {
                 state.timeline.meta == child
                     && state.timeline.head == Seq::ZERO
@@ -1425,7 +1425,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
                     && state.chain_head == chain_head
             });
             let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
-            return (*stored_binding == binding && exact_child && exact_manifest)
+            return (stored_result.binding_digest() == binding && exact_child && exact_manifest)
                 .then_some(ErasureCasOutcomeV1::ExactRetry)
                 .ok_or(ErasureErrorV1::PolicyConflict);
         }
@@ -1465,8 +1465,25 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         }
         self.timelines
             .insert(timeline.id(), TimelineState::new(timeline, chain_head));
-        self.erasure_fork_admissions.insert(operation, binding);
+        let result = admission.recovery_result()?;
+        self.erasure_fork_admissions.insert(operation, result);
         Ok(ErasureCasOutcomeV1::Applied)
+    }
+
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+        let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
+            return Ok(None);
+        };
+        let exact_child = self
+            .timelines
+            .get(&result.child().id)
+            .is_some_and(|state| state.timeline.meta == *result.child());
+        exact_child
+            .then_some(Some(result))
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
 }
 

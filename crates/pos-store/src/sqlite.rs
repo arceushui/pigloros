@@ -46,14 +46,14 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureGate,
-    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
-    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
-    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
+    ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
+    ErasureReferenceV1, ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
+    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -212,10 +212,24 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 not_null: true,
                 primary_key: false,
             },
+            ErasureSchemaColumn {
+                name: "successor_generation",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "receipt_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
         ],
         constraints: &[
             "CHECK (length(operation_digest) = 32)",
             "CHECK (length(binding_digest) = 32)",
+            "CHECK (length(successor_generation) = 32)",
+            "CHECK (length(receipt_digest) = 32)",
         ],
     },
     ErasureSchemaTable {
@@ -4827,20 +4841,36 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                 }
             }
             Self::insert_timeline_with_meta_on(&self.conn, child, chain_head)?;
+            let recovery = admission.recovery_result()?;
             self.conn
                 .execute(
                     "INSERT INTO erasure_fork_admissions
-                     (operation_digest, binding_digest, child_id) VALUES (?1, ?2, ?3)",
+                     (operation_digest, binding_digest, child_id, successor_generation,
+                      receipt_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         admission.operation().digest().as_slice(),
                         admission.binding_digest().digest().as_slice(),
                         child.id.to_string(),
+                        admission
+                            .successor_inventory()
+                            .generation()
+                            .digest()
+                            .as_slice(),
+                        recovery.receipt_digest().digest().as_slice(),
                     ],
                 )
                 .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
             Ok(ErasureCasOutcomeV1::Applied)
         })();
         finish_erasure_transaction(&self.conn, result)
+    }
+
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+        sqlite_recover_fork_admission(&self.conn, operation)
     }
 }
 
@@ -4858,28 +4888,110 @@ fn sqlite_timeline_exists(conn: &Connection, timeline: TimelineId) -> Result<boo
 fn sqlite_fork_admission_receipt(
     conn: &Connection,
     operation: ErasureReferenceV1,
-) -> Result<Option<(ErasureReferenceV1, String)>, ErasureErrorV1> {
+) -> Result<
+    Option<(
+        ErasureReferenceV1,
+        String,
+        ErasureReferenceV1,
+        ErasureReferenceV1,
+    )>,
+    ErasureErrorV1,
+> {
     conn.query_row(
-        "SELECT binding_digest, child_id FROM erasure_fork_admissions
+        "SELECT binding_digest, child_id, successor_generation, receipt_digest
+         FROM erasure_fork_admissions
          WHERE operation_digest=?1",
         params![operation.digest().as_slice()],
-        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        },
     )
     .optional()
     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-    .map(|(binding, child)| Ok((reference_from_sql(binding)?, child)))
+    .map(|(binding, child, successor, receipt)| {
+        Ok((
+            reference_from_sql(binding)?,
+            child,
+            reference_from_sql(successor)?,
+            reference_from_sql(receipt)?,
+        ))
+    })
     .transpose()
+}
+
+fn sqlite_recover_fork_admission(
+    conn: &Connection,
+    operation: ErasureReferenceV1,
+) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+    let Some((binding, child_id, successor, receipt)) =
+        sqlite_fork_admission_receipt(conn, operation)?
+    else {
+        return Ok(None);
+    };
+    let row = conn
+        .query_row(
+            "SELECT name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id=?1",
+            params![&child_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let (name, mode, parent, fork_seq, head) = row;
+    let mut child = timeline_fields_to_timeline(&child_id, name, &mode, parent, fork_seq, head)
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    child.meta.owner = conn
+        .query_row(
+            "SELECT owner_id FROM timeline_owners WHERE timeline_id=?1",
+            params![&child_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+        .map(|owner| parse_entity_id(&owner).map_err(|_| ErasureErrorV1::ProvenanceMissing))
+        .transpose()?;
+    ErasureForkRecoveryV1::from_persisted(operation, binding, successor, child.meta, receipt)
+        .map(Some)
 }
 
 fn sqlite_fork_admission_is_exact(
     conn: &Connection,
     admission: &PreparedErasureForkBatchV1,
     chain_head: Hash,
-    receipt: (ErasureReferenceV1, String),
+    receipt: (
+        ErasureReferenceV1,
+        String,
+        ErasureReferenceV1,
+        ErasureReferenceV1,
+    ),
 ) -> Result<bool, ErasureErrorV1> {
-    let (binding, child_id) = receipt;
+    let (binding, child_id, successor, receipt_digest) = receipt;
     let child = admission.child();
-    if binding != admission.binding_digest() || child_id != child.id.to_string() {
+    if binding != admission.binding_digest()
+        || child_id != child.id.to_string()
+        || successor != admission.successor_inventory().generation()
+        || ErasureForkRecoveryV1::from_persisted(
+            admission.operation(),
+            binding,
+            successor,
+            child.clone(),
+            receipt_digest,
+        )
+        .is_err()
+    {
         return Ok(false);
     }
     let row = conn

@@ -3928,6 +3928,20 @@ pub trait ErasureForkPersistencePortV1 {
         &mut self,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
+
+    /// Recover the durable result for one stable Fork operation identity.
+    ///
+    /// The adapter must validate that the receipt still names the exact
+    /// persisted child before returning it. Missing or corrupt result evidence
+    /// fails closed rather than allocating a replacement child.
+    ///
+    /// # Errors
+    /// Returns a closed persistence or provenance error for malformed,
+    /// conflicting, or unreadable durable evidence.
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1>;
 }
 
 /// `EventStore` adapter capability owned exclusively by the erasure execution host.
@@ -4902,6 +4916,106 @@ pub struct ErasureForkAdmissionInputV1 {
     pub child: crate::TimelineMeta,
 }
 
+/// Durable, payload-free result of one committed future-Fork operation.
+///
+/// This value lets a restarted host answer a retry after the original reply
+/// was lost. It identifies the original child and the complete successor
+/// inventory generation without exposing ERSE1 manifests or adapter state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureForkRecoveryV1 {
+    operation: ErasureReferenceV1,
+    binding_digest: ErasureReferenceV1,
+    successor_generation: ErasureReferenceV1,
+    child: crate::TimelineMeta,
+    receipt_digest: ErasureReferenceV1,
+}
+
+impl ErasureForkRecoveryV1 {
+    fn new(
+        operation: ErasureReferenceV1,
+        binding_digest: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
+        child: crate::TimelineMeta,
+    ) -> Result<Self, ErasureErrorV1> {
+        if child.mode != crate::TimelineMode::Historical || child.fork_point.is_none() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let receipt_digest =
+            Self::compute_receipt_digest(operation, binding_digest, successor_generation, child.id);
+        Ok(Self {
+            operation,
+            binding_digest,
+            successor_generation,
+            child,
+            receipt_digest,
+        })
+    }
+
+    /// Reconstruct one adapter-validated durable Fork result.
+    ///
+    /// # Errors
+    /// Returns a closed policy error when the persisted child is not a
+    /// Historical Fork.
+    pub fn from_persisted(
+        operation: ErasureReferenceV1,
+        binding_digest: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
+        child: crate::TimelineMeta,
+        receipt_digest: ErasureReferenceV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let recovered = Self::new(operation, binding_digest, successor_generation, child)?;
+        if recovered.receipt_digest != receipt_digest {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(recovered)
+    }
+
+    fn compute_receipt_digest(
+        operation: ErasureReferenceV1,
+        binding_digest: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
+        child: TimelineId,
+    ) -> ErasureReferenceV1 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-recovery/v1");
+        hasher.update(&operation.digest());
+        hasher.update(&binding_digest.digest());
+        hasher.update(&successor_generation.digest());
+        hasher.update(&child.inner().to_bytes());
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+    }
+
+    /// Return the stable logical operation identity.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureReferenceV1 {
+        self.operation
+    }
+
+    /// Return the digest binding the original prepared transaction.
+    #[must_use]
+    pub const fn binding_digest(&self) -> ErasureReferenceV1 {
+        self.binding_digest
+    }
+
+    /// Return the complete successor inventory generation committed with it.
+    #[must_use]
+    pub const fn successor_generation(&self) -> ErasureReferenceV1 {
+        self.successor_generation
+    }
+
+    /// Return the original preallocated child metadata.
+    #[must_use]
+    pub const fn child(&self) -> &crate::TimelineMeta {
+        &self.child
+    }
+
+    /// Return the content address of the minimized durable receipt.
+    #[must_use]
+    pub const fn receipt_digest(&self) -> ErasureReferenceV1 {
+        self.receipt_digest
+    }
+}
+
 /// Opaque core-prepared ERSE1 and child-Timeline transaction.
 ///
 /// Adapters may inspect the bound values but cannot construct this capability.
@@ -5144,6 +5258,20 @@ impl PreparedErasureForkBatchV1 {
     #[must_use]
     pub const fn binding_digest(&self) -> ErasureReferenceV1 {
         self.binding_digest
+    }
+
+    /// Derive the durable payload-free result stored with this transaction.
+    ///
+    /// # Errors
+    /// Returns a closed policy error only if the opaque prepared value is
+    /// internally inconsistent.
+    pub fn recovery_result(&self) -> Result<ErasureForkRecoveryV1, ErasureErrorV1> {
+        ErasureForkRecoveryV1::new(
+            self.operation(),
+            self.binding_digest(),
+            self.successor_inventory().generation(),
+            self.child().clone(),
+        )
     }
 }
 
