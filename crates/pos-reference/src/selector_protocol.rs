@@ -22,21 +22,21 @@ const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
 const SLY1_DOMAIN: &[u8] = b"PiglorOS.SLY1.v1\0";
 
-pub struct EncodedSelectorRequest {
-    pub control: Vec<u8>,
-    pub attempt_stream: Vec<u8>,
-    pub provider_request_id: [u8; 16],
-    pub attempt_id: [u8; 16],
-    pub digest: [u8; 32],
+pub(super) struct EncodedSelectorRequest {
+    pub(super) control: Vec<u8>,
+    pub(super) attempt_stream: Vec<u8>,
+    pub(super) provider_request_id: [u8; 16],
+    pub(super) attempt_id: [u8; 16],
+    pub(super) digest: [u8; 32],
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct DecodedSelectorReply {
-    pub observation: Result<SubjectObservation, AdapterError>,
-    pub provenance: Option<[u8; 32]>,
+pub(super) struct DecodedSelectorReply {
+    pub(super) observation: Result<SubjectObservation, AdapterError>,
+    pub(super) provenance: Option<[u8; 32]>,
 }
 
-pub fn encode_request(
+pub(super) fn encode_request(
     request: &EvaluationRequest,
     request_bytes: &[u8],
     attempt: &CaseAttempt,
@@ -72,7 +72,7 @@ pub fn encode_request(
     })
 }
 
-pub fn decode_reply(
+pub(super) fn decode_reply(
     control: &[u8],
     trailing: &[u8],
     request: &EncodedSelectorRequest,
