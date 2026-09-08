@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use pos_core::{
     store::{EventReadBounds, SeqRange},
-    CoreError, ErasureContainmentGateV1, ErasureGate, ErasureHostErrorV1, ErasureHostStoreV1,
-    ErasureReferenceV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event,
-    EventDraft, Seq, Timeline, TimelineId,
+    CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1, ErasureGate,
+    ErasureHostErrorV1, ErasureHostStoreV1, ErasureReferenceV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, Event, EventDraft, PreparedErasureForkBatchV1, Seq, Timeline,
+    TimelineId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +43,7 @@ impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
 pub struct ErasureExecutionHostV1 {
     store: Box<dyn ErasureHostStoreV1>,
     gate: Arc<ErasureContainmentGateV1>,
+    inventory: Option<ErasureVerifiedInventoryV1>,
     state: HostStateV1,
 }
 
@@ -60,6 +62,7 @@ impl ErasureExecutionHostV1 {
         Ok(Self {
             store,
             gate,
+            inventory: None,
             state: HostStateV1::Closed,
         })
     }
@@ -78,6 +81,7 @@ impl ErasureExecutionHostV1 {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         }
         self.state = HostStateV1::Closed;
+        self.inventory = None;
         let Ok(inventory) = query.verified_inventory(maximum_requests) else {
             self.state = HostStateV1::Poisoned;
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
@@ -114,7 +118,11 @@ impl ErasureExecutionHostV1 {
             HostStateV1::Ready { generation, .. }
                 if self.gate.inventory_generation() == Ok(generation) =>
             {
-                Ok(generation)
+                self.inventory
+                    .as_ref()
+                    .filter(|inventory| inventory.generation() == generation)
+                    .map(|_| generation)
+                    .ok_or(ErasureHostErrorV1::RecoveryUnavailable)
             }
             HostStateV1::Closed | HostStateV1::Ready { .. } | HostStateV1::Poisoned => {
                 Err(ErasureHostErrorV1::RecoveryUnavailable)
@@ -131,6 +139,7 @@ impl ErasureExecutionHostV1 {
             Ok(_) => Err(ErasureHostErrorV1::StaleGeneration),
             Err(error) => {
                 self.state = HostStateV1::Poisoned;
+                self.inventory = None;
                 Err(error)
             }
         }
@@ -142,6 +151,7 @@ impl ErasureExecutionHostV1 {
         maximum_requests: usize,
     ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
         let request_count = inventory.request_count();
+        let retained_inventory = inventory.clone();
         let mut query = OneShotInventoryV1(Some(inventory));
         let generation = match self
             .gate
@@ -151,9 +161,11 @@ impl ErasureExecutionHostV1 {
             Ok(generation) => generation,
             Err(error) => {
                 self.state = HostStateV1::Poisoned;
+                self.inventory = None;
                 return Err(error);
             }
         };
+        self.inventory = Some(retained_inventory);
         self.state = HostStateV1::Ready {
             generation,
             maximum_requests,
@@ -177,15 +189,62 @@ impl ErasureExecutionHostV1 {
             }
         };
         let timeline = change(self.store.as_mut()).map_err(|error| map_store_error(&error))?;
-        let snapshot = self
+        let inventory = match self
             .store
             .complete_erasure_inventory_snapshot(maximum_requests)
-            .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
-        let inventory =
-            ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
-                .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
+            .and_then(|snapshot| {
+                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+            }) {
+            Ok(inventory) => inventory,
+            Err(_) => {
+                self.state = HostStateV1::Poisoned;
+                self.inventory = None;
+                return Err(ErasureHostErrorV1::RecoveryUnavailable);
+            }
+        };
         self.publish_inventory(inventory, maximum_requests)
             .map(|generation| (timeline, generation))
+    }
+
+    fn apply_fork_batch(
+        &mut self,
+        admission: PreparedErasureForkBatchV1,
+    ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
+        let current_generation = self.ready_generation()?;
+        let maximum_requests = self.maximum_requests()?;
+        let expected_generation = admission.expected_inventory_generation();
+        let successor = admission.successor_inventory().clone();
+        let successor_generation = successor.generation();
+        if current_generation != expected_generation && current_generation != successor_generation {
+            return Err(ErasureHostErrorV1::StaleGeneration);
+        }
+        let child = Timeline::new(admission.child().clone());
+        let outcome = self
+            .store
+            .commit_fork_admission(admission)
+            .map_err(map_erasure_error)?;
+        match (current_generation == expected_generation, outcome) {
+            (true, ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry) => self
+                .publish_inventory(successor, maximum_requests)
+                .map(|generation| (child, generation)),
+            (false, ErasureCasOutcomeV1::ExactRetry) => Ok((child, current_generation)),
+            (false, ErasureCasOutcomeV1::Applied) => {
+                self.state = HostStateV1::Poisoned;
+                self.inventory = None;
+                Err(ErasureHostErrorV1::RecoveryUnavailable)
+            }
+        }
+    }
+
+    fn maximum_requests(&self) -> Result<usize, ErasureHostErrorV1> {
+        match self.state {
+            HostStateV1::Ready {
+                maximum_requests, ..
+            } => Ok(maximum_requests),
+            HostStateV1::Closed | HostStateV1::Poisoned => {
+                Err(ErasureHostErrorV1::RecoveryUnavailable)
+            }
+        }
     }
     /// Recover a new store only when its complete durable request set is empty.
     ///
@@ -254,6 +313,26 @@ impl ErasureCommandSenderV1<'_> {
         let (timeline, generation) = self
             .host
             .apply_empty_topology_change(|store| store.fork(parent, at_seq, name))?;
+        self.generation = generation;
+        Ok(timeline)
+    }
+
+    /// Commit a complete-set future-Fork batch and publish its successor fence.
+    ///
+    /// The adapter persists every required ERSE1 mutation and the child under
+    /// one atomic boundary. The already verified successor inventory becomes
+    /// visible before this method returns the child. Replaying the same batch
+    /// after a lost reply returns the same child without another write.
+    ///
+    /// # Errors
+    /// Returns a payload-free stale, conflict, recovery, or adapter error. A
+    /// post-commit publication failure permanently poisons this host instance.
+    pub fn commit_fork_admission(
+        &mut self,
+        admission: PreparedErasureForkBatchV1,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (timeline, generation) = self.host.apply_fork_batch(admission)?;
         self.generation = generation;
         Ok(timeline)
     }
@@ -362,11 +441,36 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     }
 }
 
+const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
+    match error {
+        ErasureErrorV1::Unauthorized => ErasureHostErrorV1::AuthorizationDenied,
+        ErasureErrorV1::ScopeInvalid | ErasureErrorV1::PolicyConflict => {
+            ErasureHostErrorV1::Conflict
+        }
+        ErasureErrorV1::InvalidEncoding
+        | ErasureErrorV1::UnsupportedVersion
+        | ErasureErrorV1::AccessFreezeFailed
+        | ErasureErrorV1::TrustSnapshotInvalid
+        | ErasureErrorV1::ProvenanceMissing => ErasureHostErrorV1::RecoveryUnavailable,
+        ErasureErrorV1::KeyRegistryUnavailable
+        | ErasureErrorV1::KeyDestructionFailed
+        | ErasureErrorV1::ArtifactDeletionFailed
+        | ErasureErrorV1::ReplicaTimeout
+        | ErasureErrorV1::ReplicaNegativeAcknowledgement
+        | ErasureErrorV1::BackupInventoryIncomplete
+        | ErasureErrorV1::BackupDeletionPending
+        | ErasureErrorV1::ReceiptCommitFailed => ErasureHostErrorV1::AdapterFailure,
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use pos_core::{CanonicalBytes, EntityId, Kind};
+    use pos_core::{
+        CanonicalBytes, EntityId, ErasureForkAdmissionInputV1,
+        ErasurePersistenceInventorySnapshotV1, Kind, TimelineMeta, TimelineMode,
+    };
     use pos_store::memory::MemoryStore;
 
     struct FailingInventoryV1;
@@ -553,5 +657,89 @@ mod tests {
             pos_store::sqlite::SqliteStore::without_erasure_gate,
         );
         assert_empty_topology_changes(Box::new(store));
+    }
+
+    fn empty_fork_batch(
+        parent: TimelineId,
+        child: TimelineId,
+        operation: ErasureReferenceV1,
+    ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
+        let inventory = ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![parent], 4)?,
+            4,
+        )?;
+        inventory.clone().prepare_fork_batch(
+            ErasureForkAdmissionInputV1 {
+                operation,
+                expected_inventory_generation: inventory.generation(),
+                child_scope: operation,
+                child: TimelineMeta {
+                    id: child,
+                    mode: TimelineMode::Historical,
+                    name: None,
+                    owner: None,
+                    fork_point: Some((parent, Seq::ZERO)),
+                },
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn host_publishes_atomic_unaffected_fork_and_returns_exact_retry() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let child = TimelineId::new();
+        let batch = empty_fork_batch(parent.id(), child, ErasureReferenceV1::from_digest([7; 32]))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut sender = host
+            .command_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            sender
+                .commit_fork_admission(batch.clone())
+                .map(|timeline| timeline.id()),
+            Ok(child)
+        );
+        assert_eq!(
+            sender
+                .commit_fork_admission(batch)
+                .map(|timeline| timeline.id()),
+            Ok(child)
+        );
+    }
+
+    #[test]
+    fn host_rejects_a_fork_batch_after_an_intervening_topology_change() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let batch = empty_fork_batch(
+            parent.id(),
+            TimelineId::new(),
+            ErasureReferenceV1::from_digest([8; 32]),
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut sender = host
+            .command_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(sender.create_timeline("intervening").is_ok());
+        assert_eq!(
+            sender.commit_fork_admission(batch),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
     }
 }

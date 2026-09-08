@@ -3926,7 +3926,7 @@ pub trait ErasureForkPersistencePortV1 {
     /// error without leaving either side visible.
     fn commit_fork_admission(
         &mut self,
-        admission: PreparedErasureForkAdmissionV1,
+        admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
 }
 
@@ -4070,6 +4070,7 @@ struct ErasureInventoryClassificationV1 {
 pub struct ErasureVerifiedInventoryV1 {
     generation: ErasureReferenceV1,
     request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    members: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
     classifications: BTreeMap<TimelineId, Vec<ErasureInventoryClassificationV1>>,
 }
 
@@ -4148,6 +4149,7 @@ impl ErasureVerifiedInventoryV1 {
         Ok(Self {
             generation,
             request_heads,
+            members: recovered,
             classifications,
         })
     }
@@ -4186,6 +4188,99 @@ impl ErasureVerifiedInventoryV1 {
     #[must_use]
     pub const fn request_count(&self) -> usize {
         self.request_heads.len()
+    }
+
+    /// Prepare the complete successor inventory for one future-Fork command.
+    ///
+    /// Every active request whose verified parent membership carries a
+    /// future-Fork lineage rule must contribute exactly one independently
+    /// prepared ERSE1 mutation. Requests that positively exclude the parent,
+    /// or whose immutable scope has no future-Fork rule, classify the child as
+    /// unaffected. The resulting opaque batch is the only value an adapter may
+    /// commit for a non-empty inventory.
+    ///
+    /// # Errors
+    /// Returns a closed conflict for a stale generation, an existing child,
+    /// an omitted/duplicate/extraneous request mutation, or inconsistent child
+    /// metadata and ERSE1 evidence.
+    pub fn prepare_fork_batch(
+        self,
+        input: ErasureForkAdmissionInputV1,
+        mut admissions: Vec<PreparedErasureForkAdmissionV1>,
+    ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
+        let Some((parent, _)) = input.child.fork_point else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        if input.child.mode != crate::TimelineMode::Historical
+            || input.expected_inventory_generation != self.generation
+            || self.classifications.contains_key(&input.child.id)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let parent_classifications = self
+            .classifications
+            .get(&parent)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        admissions.sort_unstable_by_key(|admission| admission.mutation.request());
+        if admissions
+            .windows(2)
+            .any(|pair| pair[0].mutation.request() == pair[1].mutation.request())
+            || admissions.iter().any(|admission| admission.input != input)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+
+        let mut successor_members = Vec::new();
+        successor_members
+            .try_reserve(self.members.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        let mut admission_index = 0;
+        for ((mut state, mut proof), classification) in
+            self.members.into_iter().zip(parent_classifications.iter())
+        {
+            let request = state.request().reference();
+            if classification.request != request {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let requires_extension = classification.membership.included_scope().is_some()
+                && state
+                    .scope()
+                    .and_then(ErasureScopeCommitmentV1::lineage_rule)
+                    .is_some();
+            let admission = admissions
+                .get(admission_index)
+                .filter(|admission| admission.mutation.request() == request);
+            match (requires_extension, admission) {
+                (true, Some(admission))
+                    if admission.mutation.expected_manifest_digest()
+                        == Some(state.manifest_digest()) =>
+                {
+                    state.manifest_digest = admission.mutation.next_manifest().digest();
+                    state.scope_extensions.push(admission.extension.clone());
+                    proof.manifest_digest = state.manifest_digest();
+                    proof
+                        .bindings
+                        .push((input.child.id, admission.child_scope()));
+                    admission_index += 1;
+                }
+                (false, None) => proof.unaffected.push(input.child.id),
+                (true, None) | (false, Some(_)) | (true, Some(_)) => {
+                    return Err(ErasureErrorV1::PolicyConflict)
+                }
+            }
+            successor_members.push((state, proof));
+        }
+        if admission_index != admissions.len() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let mut topology = self.classifications.into_keys().collect::<Vec<_>>();
+        topology.push(input.child.id);
+        let successor = Self::from_verified_recovery(
+            successor_members,
+            topology,
+            self.request_heads.len().max(1),
+        )?;
+        PreparedErasureForkBatchV1::new(input, admissions, successor)
     }
 
     fn authorize(&self, timeline: TimelineId) -> Result<(), ErasureContainmentErrorV1> {
@@ -4937,6 +5032,115 @@ impl PreparedErasureForkAdmissionV1 {
     }
 
     /// Return the digest binding every idempotency-relevant admission field.
+    #[must_use]
+    pub const fn binding_digest(&self) -> ErasureReferenceV1 {
+        self.binding_digest
+    }
+}
+
+/// Opaque complete-set future-Fork transaction prepared for one host command.
+///
+/// The batch contains every ERSE1 mutation required by the installed inventory
+/// plus the fully verified successor inventory. An adapter consumes the batch
+/// atomically; the host publishes its successor before exposing the child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedErasureForkBatchV1 {
+    input: ErasureForkAdmissionInputV1,
+    admissions: Vec<PreparedErasureForkAdmissionV1>,
+    successor_inventory: ErasureVerifiedInventoryV1,
+    binding_digest: ErasureReferenceV1,
+}
+
+impl PreparedErasureForkBatchV1 {
+    fn new(
+        input: ErasureForkAdmissionInputV1,
+        admissions: Vec<PreparedErasureForkAdmissionV1>,
+        successor_inventory: ErasureVerifiedInventoryV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let Some((parent, at_seq)) = input.child.fork_point else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-batch/v1");
+        for reference in [
+            input.operation,
+            input.expected_inventory_generation,
+            input.child_scope,
+            successor_inventory.generation(),
+        ] {
+            hasher.update(&reference.digest());
+        }
+        hasher.update(&input.child.id.inner().to_bytes());
+        hasher.update(b"historical");
+        match &input.child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        match input.child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&parent.inner().to_bytes());
+        hasher.update(&at_seq.as_u64().to_be_bytes());
+        hasher.update(
+            &u64::try_from(admissions.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for admission in &admissions {
+            hasher.update(&admission.binding_digest().digest());
+        }
+        let binding_digest = ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes());
+        Ok(Self {
+            input,
+            admissions,
+            successor_inventory,
+            binding_digest,
+        })
+    }
+
+    /// Return the stable operation identity.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureReferenceV1 {
+        self.input.operation
+    }
+
+    /// Return the installed inventory generation this operation extends.
+    #[must_use]
+    pub const fn expected_inventory_generation(&self) -> ErasureReferenceV1 {
+        self.input.expected_inventory_generation
+    }
+
+    /// Return the preallocated child metadata.
+    #[must_use]
+    pub const fn child(&self) -> &crate::TimelineMeta {
+        &self.input.child
+    }
+
+    /// Return the ordered complete set of prepared ERSE1 mutations.
+    #[must_use]
+    pub fn admissions(&self) -> &[PreparedErasureForkAdmissionV1] {
+        &self.admissions
+    }
+
+    /// Return the successor inventory to publish after adapter commit.
+    #[must_use]
+    pub const fn successor_inventory(&self) -> &ErasureVerifiedInventoryV1 {
+        &self.successor_inventory
+    }
+
+    /// Return the digest binding the complete operation and successor state.
     #[must_use]
     pub const fn binding_digest(&self) -> ErasureReferenceV1 {
         self.binding_digest

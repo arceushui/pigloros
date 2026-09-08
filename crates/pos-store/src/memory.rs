@@ -50,7 +50,7 @@ use pos_core::{
     ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
     ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
@@ -1407,7 +1407,7 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
 impl ErasureForkPersistencePortV1 for MemoryStore {
     fn commit_fork_admission(
         &mut self,
-        admission: PreparedErasureForkAdmissionV1,
+        admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         let binding = admission.binding_digest();
         let operation = admission.operation();
@@ -1424,19 +1424,10 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
                     && state.events.is_empty()
                     && state.chain_head == chain_head
             });
-            let exact_manifest = self
-                .erasure_records
-                .get(&admission.mutation().request())
-                .is_some_and(|(digest, bytes)| {
-                    *digest == admission.mutation().next_manifest().digest()
-                        && bytes.as_slice() == admission.mutation().next_manifest().canonical_cbor()
-                });
-            return (*stored_binding == binding
-                && exact_child
-                && exact_manifest
-                && memory_mutation_is_exact(self, admission.mutation()))
-            .then_some(ErasureCasOutcomeV1::ExactRetry)
-            .ok_or(ErasureErrorV1::PolicyConflict);
+            let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
+            return (*stored_binding == binding && exact_child && exact_manifest)
+                .then_some(ErasureCasOutcomeV1::ExactRetry)
+                .ok_or(ErasureErrorV1::PolicyConflict);
         }
 
         let generation = self
@@ -1449,30 +1440,48 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         }
 
         let timeline = Timeline::new(child);
-        let current_digest = self
-            .erasure_records
-            .get(&admission.mutation().request())
-            .map(|(digest, _)| *digest);
-        if current_digest != admission.mutation().expected_manifest_digest() {
-            return Err(ErasureErrorV1::PolicyConflict);
+        let mut delta = MemoryErasureCasDelta::default();
+        for prepared in admission.admissions() {
+            let mutation = prepared.mutation();
+            let current_digest = self
+                .erasure_records
+                .get(&mutation.request())
+                .map(|(digest, _)| *digest);
+            if current_digest != mutation.expected_manifest_digest() {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            stage_memory_erasure_mutation(self, mutation, &mut delta)?;
         }
-        let delta = stage_memory_erasure_delta(self, admission.mutation())?;
         apply_memory_erasure_delta(self, delta);
-        self.erasure_records.insert(
-            admission.mutation().request(),
-            (
-                admission.mutation().next_manifest().digest(),
-                admission
-                    .mutation()
-                    .next_manifest()
-                    .canonical_cbor()
-                    .to_vec(),
-            ),
-        );
+        for prepared in admission.admissions() {
+            let mutation = prepared.mutation();
+            self.erasure_records.insert(
+                mutation.request(),
+                (
+                    mutation.next_manifest().digest(),
+                    mutation.next_manifest().canonical_cbor().to_vec(),
+                ),
+            );
+        }
         self.timelines
             .insert(timeline.id(), TimelineState::new(timeline, chain_head));
         self.erasure_fork_admissions.insert(operation, binding);
         Ok(ErasureCasOutcomeV1::Applied)
+    }
+}
+
+impl MemoryStore {
+    fn erasure_fork_batch_is_exact(&self, admission: &PreparedErasureForkBatchV1) -> bool {
+        admission.admissions().iter().all(|prepared| {
+            let mutation = prepared.mutation();
+            self.erasure_records
+                .get(&mutation.request())
+                .is_some_and(|(digest, bytes)| {
+                    *digest == mutation.next_manifest().digest()
+                        && bytes.as_slice() == mutation.next_manifest().canonical_cbor()
+                })
+                && memory_mutation_is_exact(self, mutation)
+        })
     }
 }
 
@@ -1656,11 +1665,18 @@ fn stage_memory_erasure_delta(
     mutation: &PreparedErasureCasV1,
 ) -> Result<MemoryErasureCasDelta, ErasureErrorV1> {
     let mut delta = MemoryErasureCasDelta::default();
-    stage_memory_objects(store, mutation.new_objects(), &mut delta)
-        .and_then(|()| stage_memory_states(store, mutation.new_states(), &mut delta))
-        .and_then(|()| stage_memory_indexes(store, mutation, &mut delta))
-        .and_then(|()| stage_memory_effect(store, mutation, &mut delta))
-        .map(|()| delta)
+    stage_memory_erasure_mutation(store, mutation, &mut delta).map(|()| delta)
+}
+
+fn stage_memory_erasure_mutation(
+    store: &MemoryStore,
+    mutation: &PreparedErasureCasV1,
+    delta: &mut MemoryErasureCasDelta,
+) -> Result<(), ErasureErrorV1> {
+    stage_memory_objects(store, mutation.new_objects(), delta)
+        .and_then(|()| stage_memory_states(store, mutation.new_states(), delta))
+        .and_then(|()| stage_memory_indexes(store, mutation, delta))
+        .and_then(|()| stage_memory_effect(store, mutation, delta))
 }
 
 fn stage_memory_objects(

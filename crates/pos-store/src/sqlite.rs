@@ -51,7 +51,7 @@ use pos_core::{
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
     ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
     KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkAdmissionV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
     ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
     GEOGRAPHIC_EVENT_TYPE,
 };
@@ -4785,7 +4785,7 @@ fn sqlite_erasure_inventory_snapshot(
 impl ErasureForkPersistencePortV1 for SqliteStore {
     fn commit_fork_admission(
         &mut self,
-        admission: PreparedErasureForkAdmissionV1,
+        admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         self.conn
             .execute_batch(begin_immediate_sql())
@@ -4819,10 +4819,12 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
 
-            if apply_sqlite_erasure_cas(&self.conn, admission.mutation())?
-                != ErasureCasOutcomeV1::Applied
-            {
-                return Err(ErasureErrorV1::PolicyConflict);
+            for prepared in admission.admissions() {
+                if apply_sqlite_erasure_cas(&self.conn, prepared.mutation())?
+                    != ErasureCasOutcomeV1::Applied
+                {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
             }
             Self::insert_timeline_with_meta_on(&self.conn, child, chain_head)?;
             self.conn
@@ -4871,7 +4873,7 @@ fn sqlite_fork_admission_receipt(
 
 fn sqlite_fork_admission_is_exact(
     conn: &Connection,
-    admission: &PreparedErasureForkAdmissionV1,
+    admission: &PreparedErasureForkBatchV1,
     chain_head: Hash,
     receipt: (ErasureReferenceV1, String),
 ) -> Result<bool, ErasureErrorV1> {
@@ -4922,20 +4924,26 @@ fn sqlite_fork_admission_is_exact(
     {
         return Ok(false);
     }
-    let manifest = conn
-        .query_row(
-            "SELECT manifest_digest, manifest_cbor FROM erasure_records
-             WHERE request_digest=?1",
-            params![admission.mutation().request().digest().as_slice()],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-        .optional()
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-    let exact_manifest = manifest.is_some_and(|(digest, bytes)| {
-        digest.as_slice() == admission.mutation().next_manifest().digest().digest()
-            && bytes.as_slice() == admission.mutation().next_manifest().canonical_cbor()
-    });
-    Ok(exact_manifest && sqlite_mutation_is_exact(conn, admission.mutation())?)
+    for prepared in admission.admissions() {
+        let mutation = prepared.mutation();
+        let manifest = conn
+            .query_row(
+                "SELECT manifest_digest, manifest_cbor FROM erasure_records
+                 WHERE request_digest=?1",
+                params![mutation.request().digest().as_slice()],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let exact_manifest = manifest.is_some_and(|(digest, bytes)| {
+            digest.as_slice() == mutation.next_manifest().digest().digest()
+                && bytes.as_slice() == mutation.next_manifest().canonical_cbor()
+        });
+        if !exact_manifest || !sqlite_mutation_is_exact(conn, mutation)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 impl ErasurePersistencePortV1 for SqliteStore {
