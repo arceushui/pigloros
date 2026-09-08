@@ -481,7 +481,45 @@ fn admission_grant(
     )
 }
 
-fn provider_receipt(fixture: &Fixture, grant: &AdmissionGrant) -> TestResult<Vec<u8>> {
+fn audit_record(
+    fixture: &Fixture,
+    grant: &AdmissionGrant,
+    sequence: u64,
+    event: u64,
+    previous: Option<[u8; 32]>,
+) -> TestResult<Vec<u8>> {
+    let authority = match event {
+        11 => vec![grant.grant_digest, [41; 32], [44; 32]],
+        12 => vec![grant.grant_digest, [41; 32], [42; 32], [44; 32]],
+        _ => return Err("unsupported audit fixture event".into()),
+    };
+    sign_record(
+        "SAU1",
+        Value::Array(vec![
+            Value::Text("SAU1".to_owned()),
+            integer(1),
+            Value::Bytes(grant.attempt_id.to_vec()),
+            integer(sequence),
+            integer(event),
+            Value::Array(authority.into_iter().map(bytes).collect()),
+            previous.map_or(Value::Null, bytes),
+            Value::Text("runtime".to_owned()),
+        ]),
+        &fixture.authority.runtime,
+    )
+}
+
+fn audit_chain(fixture: &Fixture, grant: &AdmissionGrant) -> TestResult<Vec<Vec<u8>>> {
+    let ready = audit_record(fixture, grant, 0, 11, None)?;
+    let released = audit_record(fixture, grant, 1, 12, Some(wrapped_digest(&ready)?))?;
+    Ok(vec![ready, released])
+}
+
+fn provider_receipt(
+    fixture: &Fixture,
+    grant: &AdmissionGrant,
+    audit_digest: [u8; 32],
+) -> TestResult<Vec<u8>> {
     sign_record(
         "SPR1",
         Value::Array(vec![
@@ -508,7 +546,7 @@ fn provider_receipt(fixture: &Fixture, grant: &AdmissionGrant) -> TestResult<Vec
             bytes([44; 32]),
             bytes([45; 32]),
             bytes([46; 32]),
-            bytes([47; 32]),
+            bytes(audit_digest),
             Value::Text("runtime".to_owned()),
         ]),
         &fixture.authority.runtime,
@@ -817,7 +855,11 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         &image,
         &launch,
     )?;
-    let receipt = admitted.authenticate_receipt(&provider_receipt(&fixture, &grant)?, &grant)?;
+    let audit = audit_chain(&fixture, &grant)?;
+    let receipt = admitted.authenticate_receipt(
+        &provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?,
+        &grant,
+    )?;
     let result = admitted.authenticate_terminal_result(
         &terminal_result(&fixture, &request, &grant, &receipt)?,
         &request,
@@ -826,6 +868,12 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
     )?;
     assert_eq!(result.spr1_digest, Some(receipt.receipt_digest));
     assert_eq!(result.attempt_id, request.attempt_id);
+    assert_eq!(
+        admitted
+            .authenticate_audit_chain(&audit, &receipt, &result)?
+            .len(),
+        2
+    );
 
     let unsupported = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
         &fixture,
