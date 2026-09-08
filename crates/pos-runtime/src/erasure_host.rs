@@ -6,7 +6,7 @@ use pos_core::{
     store::{EventReadBounds, EventStore, SeqRange},
     CoreError, ErasureContainmentGateV1, ErasureGate, ErasureHostErrorV1,
     ErasureInventoryPersistencePortV1, ErasureReferenceV1, ErasureVerifiedInventoryQueryV1,
-    ErasureVerifiedInventoryV1, Event, EventDraft, Timeline, TimelineId,
+    ErasureVerifiedInventoryV1, Event, EventDraft, Seq, Timeline, TimelineId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,6 +230,45 @@ impl<S: EventStore> ErasureReadSenderV1<'_, S> {
             .get_timeline(timeline)
             .map_err(|error| map_store_error(&error))
     }
+
+    /// List only Timelines classified by the installed inventory generation.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn timelines(&mut self) -> Result<Vec<Timeline>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .list_timelines()
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Count visible root Timelines without exceeding `maximum + 1`.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn root_timeline_count_bounded(
+        &mut self,
+        maximum: usize,
+    ) -> Result<usize, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .root_timeline_count_bounded(maximum)
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Return the logical head of one inventory-classified Timeline.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn logical_head(&mut self, timeline: TimelineId) -> Result<Seq, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .logical_head(timeline)
+            .map_err(|error| map_store_error(&error))
+    }
 }
 
 const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
@@ -243,6 +282,7 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pos_core::{CanonicalBytes, EntityId, Kind};
     use pos_store::memory::MemoryStore;
 
     struct FailingInventoryV1;
@@ -308,5 +348,58 @@ mod tests {
             map_store_error(&CoreError::IdGenerationOverflow),
             ErasureHostErrorV1::AdapterFailure
         );
+    }
+
+    #[test]
+    fn read_sender_exposes_generation_bound_events_and_metadata() {
+        let mut store = MemoryStore::new().without_erasure_gate();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("gate binding failed: {error:?}")))
+            });
+        let timeline = store.create_timeline("host").unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("timeline creation failed: {error:?}")))
+        });
+        store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("host.fixture"),
+                    CanonicalBytes::from_vec(Vec::new()),
+                )],
+            )
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("fixture append failed: {error:?}")))
+            });
+
+        let mut host =
+            ErasureExecutionHostV1::recover_verified_empty(store.without_erasure_gate(), 4)
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut reader = host
+            .read_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let bounds = EventReadBounds::new(16, 32, 4, 4);
+        assert_eq!(
+            reader
+                .read_bounded(timeline.id(), SeqRange::all(), bounds)
+                .map(|events| events.len()),
+            Ok(1)
+        );
+        assert_eq!(
+            reader
+                .timeline(timeline.id())
+                .map(|result| result.map(|item| item.id())),
+            Ok(Some(timeline.id()))
+        );
+        assert_eq!(
+            reader
+                .timelines()
+                .map(|items| items.into_iter().map(|item| item.id()).collect()),
+            Ok(vec![timeline.id()])
+        );
+        assert_eq!(reader.root_timeline_count_bounded(1), Ok(1));
+        assert_eq!(reader.logical_head(timeline.id()), Ok(Seq::from_u64(1)));
     }
 }
