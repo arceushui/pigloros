@@ -4256,7 +4256,7 @@ impl ErasureVerifiedInventoryV1 {
                         == Some(state.manifest_digest()) =>
                 {
                     state.manifest_digest = admission.mutation.next_manifest().digest();
-                    state.scope_extensions.push(admission.extension.clone());
+                    state.scope_extensions.push(admission.extension);
                     proof.manifest_digest = state.manifest_digest();
                     proof
                         .bindings
@@ -4264,7 +4264,7 @@ impl ErasureVerifiedInventoryV1 {
                     admission_index += 1;
                 }
                 (false, None) => proof.unaffected.push(input.child.id),
-                (true, None) | (false, Some(_)) | (true, Some(_)) => {
+                (true, None | Some(_)) | (false, Some(_)) => {
                     return Err(ErasureErrorV1::PolicyConflict)
                 }
             }
