@@ -1339,7 +1339,7 @@ fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::erro
     })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
-            "UPDATE erasure_fork_admissions SET fork_seq=1 WHERE operation_digest=?1",
+            "UPDATE erasure_fork_admissions SET fork_seq=2 WHERE operation_digest=?1",
             rusqlite::params![prepared.operation().digest().as_slice()],
         )
     })?;
