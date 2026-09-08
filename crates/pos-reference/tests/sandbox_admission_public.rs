@@ -334,6 +334,7 @@ fn image_manifest(
 struct PolicySelectionDigests {
     provider_manifest: [u8; 32],
     provider_binary: [u8; 32],
+    broker_hard_caps: [u8; 32],
     conformance_report: [u8; 32],
     syscall_set: [u8; 32],
     launch_policy: [u8; 32],
@@ -354,7 +355,7 @@ fn administrator_policy(
         bytes(selection.provider_binary),
         Value::Array(vec![bytes(selection.launch_policy)]),
         Value::Array(vec![bytes(selection.image_manifest)]),
-        bytes([24; 32]),
+        bytes(selection.broker_hard_caps),
         bytes([17; 32]),
         bytes(selection.conformance_report),
         bytes(trust.snapshot_digest()),
@@ -588,6 +589,7 @@ struct Fixture {
     policy: SandboxAdministratorPolicy,
     required_features: Vec<String>,
     provider_binary: Vec<u8>,
+    broker_hard_caps: Vec<u8>,
     spm1: Vec<u8>,
     scs1: Vec<u8>,
     hcp1: Vec<u8>,
@@ -606,6 +608,7 @@ impl Fixture {
         let required_features = vec!["cgroup-v2".to_owned()];
         let feature_digest = feature_set_digest(&required_features)?;
         let provider_binary = b"exact provider binary".to_vec();
+        let broker_hard_caps = b"broker hard caps".to_vec();
         let binary_digest = *blake3::hash(&provider_binary).as_bytes();
         let provider_record = provider_manifest(&authority, binary_digest, feature_digest)?;
         let scs1 = syscall_set(0)?;
@@ -628,6 +631,7 @@ impl Fixture {
             &PolicySelectionDigests {
                 provider_manifest: wrapped_digest(&provider_record)?,
                 provider_binary: binary_digest,
+                broker_hard_caps: *blake3::hash(&broker_hard_caps).as_bytes(),
                 conformance_report: wrapped_digest(&pcr1)?,
                 syscall_set: wrapped_digest(&scs1)?,
                 launch_policy: wrapped_digest(&lps1)?,
@@ -641,6 +645,7 @@ impl Fixture {
             policy,
             required_features,
             provider_binary,
+            broker_hard_caps,
             spm1: provider_record,
             scs1,
             hcp1,
@@ -656,6 +661,7 @@ impl Fixture {
         SandboxProviderAdmissionInputs {
             provider_manifest: &self.spm1,
             provider_binary: &self.provider_binary,
+            broker_hard_caps: &self.broker_hard_caps,
             conformance_report: &self.pcr1,
             host_profile: &self.hcp1,
             syscall_set: &self.scs1,
@@ -706,6 +712,19 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
         ),
         Err(SandboxAdmissionError::ArtifactMismatch)
     );
+    let wrong_broker_caps = SandboxProviderAdmissionInputs {
+        broker_hard_caps: b"changed",
+        ..fixture.inputs()
+    };
+    assert_eq!(
+        AdmittedSandboxProvider::admit(
+            &fixture.policy,
+            &fixture.trust,
+            &fixture.revocation,
+            wrong_broker_caps,
+        ),
+        Err(SandboxAdmissionError::ArtifactMismatch)
+    );
     let unselected_scs1 = syscall_set(1)?;
     let wrong_selection = SandboxProviderAdmissionInputs {
         syscall_set: &unselected_scs1,
@@ -735,6 +754,7 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
         &PolicySelectionDigests {
             provider_manifest: wrapped_digest(&fixture.spm1)?,
             provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
+            broker_hard_caps: *blake3::hash(&fixture.broker_hard_caps).as_bytes(),
             conformance_report: wrapped_digest(&failed_pcr1)?,
             syscall_set: wrapped_digest(&fixture.scs1)?,
             launch_policy: wrapped_digest(&fixture.lps1)?,
@@ -776,6 +796,7 @@ fn provider_admission_rejects_cross_record_architecture_mismatch() -> TestResult
         &PolicySelectionDigests {
             provider_manifest: wrapped_digest(&fixture.spm1)?,
             provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
+            broker_hard_caps: *blake3::hash(&fixture.broker_hard_caps).as_bytes(),
             conformance_report: wrapped_digest(&pcr1)?,
             syscall_set: wrapped_digest(&fixture.scs1)?,
             launch_policy: wrapped_digest(&fixture.lps1)?,
@@ -819,6 +840,7 @@ fn image_admission_rejects_changed_revoked_and_foreign_bytes() -> TestResult {
         &PolicySelectionDigests {
             provider_manifest: wrapped_digest(&fixture.spm1)?,
             provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
+            broker_hard_caps: *blake3::hash(&fixture.broker_hard_caps).as_bytes(),
             conformance_report: wrapped_digest(&fixture.pcr1)?,
             syscall_set: wrapped_digest(&fixture.scs1)?,
             launch_policy: wrapped_digest(&fixture.lps1)?,
