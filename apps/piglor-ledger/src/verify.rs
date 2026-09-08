@@ -383,9 +383,12 @@ mod tests {
     ) -> Result<Result<VerifyReport, crate::CliError>, Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         let timeline = store.create_timeline("ledger").test_ok()?;
         store.append_committed(timeline.id(), &[event]).test_ok()?;
@@ -738,9 +741,12 @@ mod tests {
     fn verify_store_rejects_an_empty_ledger() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("empty-ledger.db");
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         store.create_timeline("ledger").test_ok()?;
         store
@@ -920,9 +926,12 @@ mod tests {
     fn verify_store_handles_missing_ledger_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("novelty.db");
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         store
             .save_key_registry(&pos_core::KeyRegistryStateV1::new())
@@ -1125,9 +1134,12 @@ mod tests {
 
         // Write a prediction event but strip the signature directly via
         // the raw store so the event is unsigned.
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         let tl = store.create_timeline("ledger").test_ok()?;
 
@@ -1200,9 +1212,12 @@ mod tests {
         let sk_text = std::fs::read_to_string(&key_path).test_ok()?;
         let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
 
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         let tl = store.create_timeline("ledger").test_ok()?;
         let payload = CanonicalBytes::from_vec(b"irrelevant".to_vec());
