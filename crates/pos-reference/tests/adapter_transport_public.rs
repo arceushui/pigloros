@@ -545,9 +545,9 @@ fn attempt_reader_rejects_every_header_and_capability_boundary() -> TestResult {
         ),
         (8, integer(0), TransportError::FieldOutOfBounds),
         (9, integer(0), TransportError::InvalidEncoding),
-        (10, integer(257), TransportError::FieldOutOfBounds),
+        (10, integer(65_537), TransportError::FieldOutOfBounds),
         (11, integer(1), TransportError::FieldOutOfBounds),
-        (11, integer(259), TransportError::FieldOutOfBounds),
+        (11, integer(65_539), TransportError::FieldOutOfBounds),
         (12, integer(0), TransportError::FieldOutOfBounds),
         (
             12,
@@ -618,7 +618,12 @@ fn attempt_reader_rejects_every_artifact_and_terminal_boundary() -> TestResult {
         ),
         (3, 2, integer(1), TransportError::InvalidEncoding),
         (3, 3, integer(1), TransportError::InvalidEncoding),
-        (3, 4, integer(1025), TransportError::FieldOutOfBounds),
+        (
+            3,
+            4,
+            integer(128 * 1024 + 1),
+            TransportError::FieldOutOfBounds,
+        ),
         (
             3,
             5,
