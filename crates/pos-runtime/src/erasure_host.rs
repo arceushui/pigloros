@@ -466,9 +466,8 @@ const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
 mod tests {
     use super::*;
     use pos_core::{
-        CanonicalBytes, EntityId, ErasureForkAdmissionInputV1, ErasureForkPersistencePortV1,
-        ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1, EventStore, Kind,
-        TimelineMeta, TimelineMode,
+        CanonicalBytes, EntityId, ErasureForkAdmissionInputV1,
+        ErasurePersistenceInventorySnapshotV1, Kind, TimelineMeta, TimelineMode,
     };
     use pos_store::memory::MemoryStore;
 
