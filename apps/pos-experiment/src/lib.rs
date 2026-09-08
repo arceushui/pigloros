@@ -151,6 +151,12 @@ fn inherit_backtest_erasure_gate(
     Ok(())
 }
 
+fn require_backtest_erasure_gate(
+    gate: Option<Arc<dyn ErasureGate>>,
+) -> Result<Arc<dyn ErasureGate>, pos_core::CoreError> {
+    gate.ok_or(pos_core::CoreError::ErasureContainmentUnavailable)
+}
+
 // Experiment hosts may close their own session, but they are not a Gateway
 // consent issuer.  Keep this durable lifecycle marker outside the canonical
 // `consent.*` namespace so only Gateway APIs can create consent events.
@@ -2342,10 +2348,7 @@ impl BacktestRunner {
         store: &mut dyn pos_core::store::EventStore,
     ) -> Result<BacktestResult, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let erasure_gate = self
-            .erasure_gate
-            .clone()
-            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        let erasure_gate = require_backtest_erasure_gate(self.erasure_gate.clone())?;
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
