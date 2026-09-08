@@ -61,6 +61,16 @@ fn test_registry() -> PluginRegistry {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn backtest_runner(
+    config: BacktestConfig,
+    registry_factory: impl Fn() -> PluginRegistry + Send + 'static,
+) -> BacktestRunner {
+    BacktestRunner::new(config, registry_factory)
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
+#[cfg(test)]
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
@@ -2494,14 +2504,6 @@ mod tests {
     use pos_store::StoreConfig;
 
     // ── Inline test helpers ───────────────────────────────────────────────
-
-    fn backtest_runner(
-        config: BacktestConfig,
-        registry_factory: impl Fn() -> PluginRegistry + Send + 'static,
-    ) -> BacktestRunner {
-        BacktestRunner::new(config, registry_factory)
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
-    }
 
     struct TestPlugin {
         id: PluginId,
