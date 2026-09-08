@@ -5,15 +5,15 @@ use pos_core::{
     AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1,
-    DelegationChainV1, EntityId, Event, EventId, Hash, Kind, ObservationSnapshotV1,
-    ObservationStatusV1, PersistedAuthorityV1, PluginId, PrincipalRefV1, Reducer, SchemaVersion,
-    Seq, State, TimelineId, WallTime, MAX_OBSERVATION_SNAPSHOT_RECORDS,
+    DelegationChainV1, EntityId, ErasureContainmentGateV1, Event, EventId, Hash, Kind,
+    ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1, PluginId, PrincipalRefV1,
+    Reducer, SchemaVersion, Seq, State, TimelineId, WallTime, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 use pos_state::{
     AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
     ProjectionRegistry,
 };
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 trait TestOk<T> {
     fn test_ok(self) -> T;
@@ -31,6 +31,10 @@ impl<T> TestOk<T> for Option<T> {
     fn test_ok(self) -> T {
         self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
     }
+}
+
+fn gated_registry() -> ProjectionRegistry {
+    ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
 }
 
 const fn hash_from_repeated_byte(byte: u8) -> Hash {
@@ -349,7 +353,7 @@ fn materialization_requires_each_observation_identity_before_projection_access()
             Err(expected)
         );
 
-        let mut projections = ProjectionRegistry::new();
+        let mut projections = gated_registry();
         register_profile(&mut projections, Box::new(CountReducer));
         assert_eq!(
             projections.materialize_authorized_observation(
@@ -391,7 +395,7 @@ fn unresolved_principal_precedes_missing_observation_identity() {
         Err(pos_core::AuthorityErrorV1::PrincipalUnresolved)
     );
 
-    let mut projections = ProjectionRegistry::new();
+    let mut projections = gated_registry();
     register_profile(&mut projections, Box::new(CountReducer));
     assert_eq!(
         projections.materialize_authorized_observation(
@@ -438,10 +442,10 @@ fn authorized_materialization_ignores_every_other_subject() {
     let subject = fixture.request.subject_id().test_ok();
     let other = EntityId::new();
     let timeline_id = TimelineId::new();
-    let mut first = ProjectionRegistry::new();
+    let mut first = gated_registry();
     register_profile(&mut first, Box::new(CountReducer));
     first.fold_events(&[event(subject, 1), event(other, 2)]);
-    let mut second = ProjectionRegistry::new();
+    let mut second = gated_registry();
     register_profile(&mut second, Box::new(CountReducer));
     second.fold_events(&[event(subject, 1), event(other, 2), event(other, 3)]);
 
@@ -493,7 +497,7 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
 
     let fixture = authority_fixture();
     let subject = fixture.request.subject_id().test_ok();
-    let mut registry = ProjectionRegistry::new();
+    let mut registry = gated_registry();
     register_profile(&mut registry, Box::new(CountReducer));
     registry.fold_events(&[event(subject, 1)]);
     let observation = registry
@@ -577,7 +581,7 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
 fn materialization_fails_closed_before_reading_without_active_exact_authorization() {
     let fixture = authority_fixture();
     let unrelated = authority_fixture();
-    let mut registry = ProjectionRegistry::new();
+    let mut registry = gated_registry();
     register_profile(&mut registry, Box::new(CountReducer));
     registry.fold_events(&[event(fixture.request.subject_id().test_ok(), 1)]);
     assert_eq!(
@@ -618,7 +622,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
 #[test]
 fn materialization_represents_absence_without_inventing_an_artifact() {
     let fixture = authority_fixture();
-    let mut registry = ProjectionRegistry::new();
+    let mut registry = gated_registry();
     register_profile(&mut registry, Box::new(CountReducer));
     let timeline_id = TimelineId::new();
 
@@ -659,7 +663,7 @@ fn materialization_represents_absence_without_inventing_an_artifact() {
 fn materialization_canonicalizes_nested_projection_values() {
     let fixture = authority_fixture();
     let subject = fixture.request.subject_id().test_ok();
-    let mut registry = ProjectionRegistry::new();
+    let mut registry = gated_registry();
     registry
         .register_observable(
             "profile",
@@ -700,7 +704,7 @@ fn materialization_rejects_denied_authority_and_empty_reducer_names() {
     let denied =
         AuthorityEvaluatorV1::authorize(&fixture.request, &fixture.chain, &untrusted_registry);
     assert!(!denied.is_allowed());
-    let registry = ProjectionRegistry::new();
+    let registry = gated_registry();
     assert_eq!(
         registry.materialize_authorized_observation(
             &fixture.request,
@@ -823,7 +827,7 @@ fn observation_policy_rejects_incomplete_or_noncanonical_configuration() {
 fn observation_policy_is_required_for_materialization() {
     let fixture = authority_fixture();
     let observable_policy = policy(vec!["count".to_owned()]);
-    let mut invalid_registration = ProjectionRegistry::new();
+    let mut invalid_registration = gated_registry();
     assert_eq!(
         invalid_registration.register_observable(
             "",
@@ -842,7 +846,7 @@ fn observation_policy_is_required_for_materialization() {
     );
 
     assert_eq!(
-        ProjectionRegistry::new().materialize_authorized_observation(
+        gated_registry().materialize_authorized_observation(
             &fixture.request,
             &fixture.decision,
             &fixture.authority,
@@ -852,7 +856,7 @@ fn observation_policy_is_required_for_materialization() {
         ),
         Err(pos_core::AuthorityErrorV1::SourceUnavailable)
     );
-    let mut registry = ProjectionRegistry::new();
+    let mut registry = gated_registry();
     registry.register("profile", Box::new(CountReducer));
     assert_eq!(
         registry.materialize_authorized_observation(
@@ -909,7 +913,7 @@ fn observation_policy_rejects_duplicate_permitted_fields() {
 #[test]
 fn prior_observation_snapshot_changes_snapshot_digest_not_policy_provenance() {
     let fixture = authority_fixture();
-    let mut registry = ProjectionRegistry::new();
+    let mut registry = gated_registry();
     register_profile(&mut registry, Box::new(CountReducer));
     let timeline_id = TimelineId::new();
     let without_prior = registry
