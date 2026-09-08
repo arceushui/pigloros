@@ -1119,6 +1119,12 @@ impl PluginRegistry {
         self.erasure_gate.clone()
     }
 
+    /// Report whether this registry's erasure gate has been host-bound.
+    #[must_use]
+    pub fn erasure_gate_is_bound(&self) -> bool {
+        self.erasure_gate_bound
+    }
+
     /// Fold a host-captured Event range into the registered reducers.
     pub fn fold_events(&mut self, events: &[Event]) {
         let visible_events: Vec<Event> = events

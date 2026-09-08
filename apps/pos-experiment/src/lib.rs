@@ -1853,6 +1853,9 @@ impl ExperimentSession {
             .as_ref()
             .ok_or(ExperimentError::MissingForkRegistryFactory)?;
         let mut registry = factory()?;
+        if registry.erasure_gate_is_bound() {
+            return Err(ExperimentError::IncompatibleForkRegistry);
+        }
         if let Some(gate) = self.registry.clone_erasure_gate() {
             registry.bind_erasure_gate(gate);
         }
@@ -5251,6 +5254,34 @@ mod tests {
             session.fork("child"),
             Err(ExperimentError::MissingForkRegistryFactory)
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_rejects_prebound_factory_erasure_gate() {
+        let plugin = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "composition",
+            version: "1.0.0",
+            event_type: "composition.event",
+        };
+        let foreign_gate = Arc::new(ErasureContainmentGateV1::new());
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "prebound-factory-gate".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .with_fork_registry_factory(move || {
+            let mut registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&foreign_gate));
+            registry.register(&CompositionPlugin(plugin), None, None)?;
+            Ok(registry)
+        });
+        experiment
+            .register(&CompositionPlugin(plugin), None, None)
+            .test_ok();
+
+        assert_incompatible_fork(experiment.start().test_ok());
     }
 
     #[test]
