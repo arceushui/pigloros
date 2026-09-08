@@ -1121,7 +1121,7 @@ impl PluginRegistry {
 
     /// Report whether this registry's erasure gate has been host-bound.
     #[must_use]
-    pub fn erasure_gate_is_bound(&self) -> bool {
+    pub const fn erasure_gate_is_bound(&self) -> bool {
         self.erasure_gate_bound
     }
 

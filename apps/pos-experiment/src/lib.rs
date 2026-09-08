@@ -9,6 +9,8 @@
 //! projections on each tick until a [`StopCondition`] is met.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+#[cfg(test)]
+use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::WallTime,
     crypto::Hash,

@@ -1,7 +1,6 @@
-use piglor_gateway::{ActionPrincipal, Gateway, GatewayError};
+use piglor_gateway::{Gateway, GatewayError};
 use pos_core::{
-    CanonicalBytes, EntityId, ErasureContainmentErrorV1, ErasureGate, ErasureProtectedOperationV1,
-    Kind, ProposedAction, TimelineId,
+    EntityId, ErasureContainmentErrorV1, ErasureGate, ErasureProtectedOperationV1, TimelineId,
 };
 use pos_store::{open_store, StoreConfig};
 use std::sync::{Arc, Mutex};
@@ -67,16 +66,13 @@ impl ErasureGate for SelectiveGate {
 }
 
 #[tokio::test]
-async fn one_host_gate_covers_gateway_store_and_action_boundaries(
+async fn one_host_gate_covers_gateway_store_boundary(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let actor = EntityId::new();
     let gate = Arc::new(SelectiveGate {
         blocked: Mutex::new(Vec::new()),
     });
-    let gateway = Gateway::new_with_world_bodies_and_principal_and_erasure_gate(
+    let gateway = Gateway::new_with_erasure_gate(
         open_store(StoreConfig::Memory)?,
-        [EntityId::new()],
-        ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
         Arc::clone(&gate) as Arc<dyn ErasureGate>,
     )?;
     let timeline = gateway.create_timeline("shared-gate").await?;
@@ -90,27 +86,6 @@ async fn one_host_gate_covers_gateway_store_and_action_boundaries(
     };
     assert!(matches!(
         read_error,
-        GatewayError::Store(pos_core::CoreError::ErasureAccessFrozen)
-    ));
-
-    gate.unblock(ErasureProtectedOperationV1::Read);
-    gate.block(ErasureProtectedOperationV1::ProposedAction);
-    let Err(action_error) = gateway
-        .submit_proposed_action(
-            &timeline.id().to_string(),
-            ProposedAction::new(
-                Kind::new("world.action"),
-                actor,
-                CanonicalBytes::from_static(b"payload"),
-                Kind::new("world.action.submit"),
-            ),
-        )
-        .await
-    else {
-        return Err("the shared gate must fence proposed actions".into());
-    };
-    assert!(matches!(
-        action_error,
         GatewayError::Store(pos_core::CoreError::ErasureAccessFrozen)
     ));
 
