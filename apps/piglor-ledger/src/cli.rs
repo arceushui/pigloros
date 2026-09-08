@@ -121,12 +121,10 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 CliError::BadSource("store: source requires --key <path>".to_owned())
             })?;
             let signing_key = load_signing_key(key_path)?;
-            let event_store = pos_store::open_store(StoreConfig::Sqlite {
+            let mut event_store = pos_store::open_store(StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
             })
             .map_err(|e| CliError::BadSource(e.to_string()))?;
-            #[cfg(test)]
-            let mut event_store = event_store;
             #[cfg(test)]
             drop(pos_core::store::EventStore::bind_erasure_gate(
                 event_store.as_mut(),
