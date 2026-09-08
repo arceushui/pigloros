@@ -416,7 +416,6 @@ impl SqliteStore {
     #[must_use]
     pub fn without_erasure_gate(mut self) -> Self {
         self.erasure_gate = None;
-        self.erasure_gate_bound = false;
         self
     }
 
@@ -664,7 +663,9 @@ impl SqliteStore {
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
-            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new())),
+            // A store is not allowed to make protected operations available
+            // before the composition root supplies the host-owned gate.
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
             erasure_gate_bound: false,
             authority_persistence_binding: None,
             #[cfg(test)]

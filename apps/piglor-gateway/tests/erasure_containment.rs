@@ -82,10 +82,13 @@ async fn one_host_gate_covers_gateway_store_and_action_boundaries(
     let timeline = gateway.create_timeline("shared-gate").await?;
 
     gate.block(ErasureProtectedOperationV1::Read);
-    let read_error = gateway
+    let read_error = match gateway
         .read_events_page(&timeline.id().to_string(), 0, 1)
         .await
-        .expect_err("the shared gate must fence EventStore reads");
+    {
+        Ok(_) => return Err("the shared gate must fence EventStore reads".into()),
+        Err(error) => error,
+    };
     assert!(matches!(
         read_error,
         GatewayError::Store(pos_core::CoreError::ErasureAccessFrozen)
@@ -93,7 +96,7 @@ async fn one_host_gate_covers_gateway_store_and_action_boundaries(
 
     gate.unblock(ErasureProtectedOperationV1::Read);
     gate.block(ErasureProtectedOperationV1::ProposedAction);
-    let action_error = gateway
+    let action_error = match gateway
         .submit_proposed_action(
             &timeline.id().to_string(),
             ProposedAction::new(
@@ -104,12 +107,16 @@ async fn one_host_gate_covers_gateway_store_and_action_boundaries(
             ),
         )
         .await
-        .expect_err("the shared gate must fence proposed actions");
+    {
+        Ok(_) => return Err("the shared gate must fence proposed actions".into()),
+        Err(error) => error,
+    };
     assert!(matches!(
         action_error,
         GatewayError::Store(pos_core::CoreError::ErasureAccessFrozen)
     ));
 
     gateway.shutdown().await?;
+    drop(gateway);
     Ok(())
 }

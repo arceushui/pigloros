@@ -201,3 +201,47 @@ fn memory_store_without_erasure_gate_fails_closed() -> Result<(), Box<dyn std::e
 fn sqlite_store_without_erasure_gate_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
     assert_unbound_fails_closed(SqliteStore::open_in_memory()?.without_erasure_gate())
 }
+
+fn assert_gate_removal_cannot_rebind<S: RemoveGate>(
+    mut store: S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let timeline = store.create_timeline("bound-then-removed")?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+    let mut removed = store.without_erasure_gate();
+    let replacement = removed.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    assert!(replacement.is_err());
+    assert_eq!(
+        removed
+            .append(timeline.id(), &[draft()])
+            .err()
+            .map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
+    Ok(())
+}
+
+trait RemoveGate: EventStore {
+    fn without_erasure_gate(self) -> Self;
+}
+
+impl RemoveGate for MemoryStore {
+    fn without_erasure_gate(self) -> Self {
+        MemoryStore::without_erasure_gate(self)
+    }
+}
+
+impl RemoveGate for SqliteStore {
+    fn without_erasure_gate(self) -> Self {
+        SqliteStore::without_erasure_gate(self)
+    }
+}
+
+#[test]
+fn memory_store_gate_removal_cannot_rebind() -> Result<(), Box<dyn std::error::Error>> {
+    assert_gate_removal_cannot_rebind(MemoryStore::new())
+}
+
+#[test]
+fn sqlite_store_gate_removal_cannot_rebind() -> Result<(), Box<dyn std::error::Error>> {
+    assert_gate_removal_cannot_rebind(SqliteStore::open_in_memory()?)
+}

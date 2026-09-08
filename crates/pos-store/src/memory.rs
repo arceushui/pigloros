@@ -458,7 +458,6 @@ impl MemoryStore {
     #[must_use]
     pub fn without_erasure_gate(mut self) -> Self {
         self.erasure_gate = None;
-        self.erasure_gate_bound = false;
         self
     }
 
@@ -480,7 +479,9 @@ impl MemoryStore {
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
             consent_authority_permit: None,
-            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new())),
+            // A store is not allowed to make protected operations available
+            // before the composition root supplies the host-owned gate.
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
             erasure_gate_bound: false,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
