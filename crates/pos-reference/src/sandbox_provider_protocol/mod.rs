@@ -11,10 +11,15 @@ mod execution;
 mod operations;
 mod policy;
 mod revocation;
+mod revocation_update;
 mod trust;
 
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
+pub use revocation_update::{
+    RevocationAcknowledgement, RevocationUpdateRequest, SandboxRevocationUpdateError,
+    SelectorRevocationState,
+};
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use admission::{
