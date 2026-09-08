@@ -6,8 +6,8 @@ use pos_core::{
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, DelegateClassV1, EntityId, Hash, PrincipalRefV1,
-    Seq, TimelineId, DELEGATE_ACTION_V1, MAX_AUTHORITY_REGISTRY_BINDINGS,
+    CapabilityScopeDraftV1, CapabilityScopeV1, DelegateClassV1, EntityId, ErasureContainmentGateV1,
+    Hash, PrincipalRefV1, Seq, TimelineId, DELEGATE_ACTION_V1, MAX_AUTHORITY_REGISTRY_BINDINGS,
     MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_TEXT_BYTES, MAX_PERSISTED_AUTHORITY_GRANTS,
     MAX_PERSISTED_AUTHORITY_STATE_BYTES,
 };
@@ -685,13 +685,15 @@ fn sqlite_migration_preserves_existing_timelines_and_adds_no_authority() {
     let path = directory.path().join("migration.db");
     let timeline_id = {
         let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+        ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
         ok(store.create_timeline("existing")).id()
     };
     {
         let connection = ok(rusqlite::Connection::open(&path));
         ok(connection.execute_batch("DROP TABLE authority_state"));
     }
-    let migrated = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+    let mut migrated = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+    ok(migrated.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
     assert_eq!(
         ok(migrated.get_timeline(timeline_id)).map(|timeline| timeline.id()),
         Some(timeline_id)
