@@ -121,6 +121,11 @@ fn sandbox_requirement() -> SandboxRequirement {
     }
 }
 
+fn enable_sandbox(request: &mut EvaluationRequest) {
+    request.request_id[14..].fill(0);
+    request.sandbox_requirement = Some(sandbox_requirement());
+}
+
 fn valid_report() -> TestResult<ConformanceReport> {
     let corpus = support::corpus()?;
     let mut adapter = PassingAdapter {
@@ -291,7 +296,7 @@ fn request_round_trips_every_adapter_and_optional_identity_shape() -> TestResult
 fn request_round_trips_sandbox_requirement_and_rejects_old_layout() -> TestResult {
     let mut request = valid_request()?;
     let unsandboxed_capability = request.output_capability.capability_digest;
-    request.sandbox_requirement = Some(sandbox_requirement());
+    enable_sandbox(&mut request);
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     assert_ne!(
         request.output_capability.capability_digest,
@@ -316,7 +321,7 @@ fn request_round_trips_sandbox_requirement_and_rejects_old_layout() -> TestResul
 #[test]
 fn sandbox_authority_fields_change_independent_capability_identity() -> TestResult {
     let mut request = valid_request()?;
-    request.sandbox_requirement = Some(sandbox_requirement());
+    enable_sandbox(&mut request);
     let expected = request.expected_output_capability_digest()?;
     let mutations: [(&str, RequirementMutation); 6] = [
         ("LPS1 digest", |value| value.lps1_digest = [41; 32]),
@@ -357,8 +362,28 @@ fn sandbox_authority_fields_change_independent_capability_identity() -> TestResu
 
 #[test]
 fn request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
+    let mut invalid_namespace = valid_request()?;
+    invalid_namespace.sandbox_requirement = Some(sandbox_requirement());
+    invalid_namespace.output_capability.capability_digest =
+        invalid_namespace.expected_output_capability_digest()?;
+    invalid_namespace.request_digest = invalid_namespace.digest()?;
+    assert_eq!(
+        invalid_namespace.to_canonical_cbor(),
+        Err(ProtocolError::FieldOutOfBounds)
+    );
+
+    let mut zero_namespace = invalid_namespace;
+    zero_namespace.request_id = [0; 16];
+    zero_namespace.output_capability.capability_digest =
+        zero_namespace.expected_output_capability_digest()?;
+    zero_namespace.request_digest = zero_namespace.digest()?;
+    assert_eq!(
+        zero_namespace.to_canonical_cbor(),
+        Err(ProtocolError::FieldOutOfBounds)
+    );
+
     let mut request = valid_request()?;
-    request.sandbox_requirement = Some(sandbox_requirement());
+    enable_sandbox(&mut request);
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
     let valid = decoded_value(&request.to_canonical_cbor()?)?;
@@ -409,7 +434,7 @@ fn request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
     );
 
     let mut invalid = valid_request()?;
-    invalid.sandbox_requirement = Some(sandbox_requirement());
+    enable_sandbox(&mut invalid);
     invalid
         .sandbox_requirement
         .as_mut()

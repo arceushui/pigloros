@@ -222,6 +222,9 @@ fn evaluation_request_fields_out_of_bounds(request: &EvaluationRequest) -> bool 
         request.request_digest,
     ];
     request.request_id == [0; 16]
+        || (request.sandbox_requirement.is_some()
+            && (request.request_id[..14].iter().all(|byte| *byte == 0)
+                || request.request_id[14..] != [0, 0]))
         || digests.contains(&[0; 32])
         || request.output_capability.report_bytes_limit == 0
         || request.output_capability.report_bytes_limit > 16 * 1024 * 1024
