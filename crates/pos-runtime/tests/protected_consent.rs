@@ -13,7 +13,7 @@ use pos_runtime::{
     Driver, ObservationView, PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput,
     TimelineHistorySegment,
 };
-use pos_store::{open_store, StoreConfig};
+use pos_store::{open_store, EventStore, StoreConfig};
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
@@ -36,6 +36,12 @@ fn test_err<T: Debug, E>(result: Result<T, E>) -> E {
         }
         Err(error) => error,
     }
+}
+
+fn gated_store() -> Box<dyn EventStore> {
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    test_ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+    store
 }
 
 /// Bind the host-owned erasure gate for all ordinary live-registry fixtures.
@@ -756,9 +762,7 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
 
 #[test]
 fn protected_append_fence_rejects_before_store_append() {
-    use pos_store::{open_store, StoreConfig};
-
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let timeline = test_ok(store.create_timeline("protected-fence"));
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -787,9 +791,7 @@ fn protected_append_fence_rejects_before_store_append() {
 
 #[test]
 fn append_fence_revalidates_caller_supplied_drafts() {
-    use pos_store::{open_store, StoreConfig};
-
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let timeline = test_ok(store.create_timeline("protected-draft-replacement"));
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -815,9 +817,7 @@ fn append_fence_revalidates_caller_supplied_drafts() {
 
 #[test]
 fn public_append_fence_revalidates_caller_supplied_drafts() {
-    use pos_store::{open_store, StoreConfig};
-
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let timeline = test_ok(store.create_timeline("public-draft-replacement"));
     let subject = EntityId::new();
     let mut registry = PluginRegistry::new();
@@ -857,8 +857,6 @@ fn protected_public_seam_aborts_when_the_gate_rejects_a_draft() {
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
-    use pos_store::{open_store, StoreConfig};
-
     let timeline = TimelineId::new();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -905,7 +903,7 @@ fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
 
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let mut empty = PluginRegistry::new();
     assert!(matches!(
         test_err(empty.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[],)),
@@ -1324,7 +1322,7 @@ fn public_registry_rejects_unknown_actions_in_live_and_replay_modes() {
 
 #[test]
 fn public_registry_propagates_public_append_store_errors() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let orphan_timeline = TimelineId::new();
     let mut public_append = PluginRegistry::new();
     test_ok(public_append.step_all_anchored(orphan_timeline, Seq::ZERO));
@@ -1336,7 +1334,7 @@ fn public_registry_propagates_public_append_store_errors() {
 
 #[test]
 fn public_registry_propagates_protected_append_store_errors() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let orphan_timeline = TimelineId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
@@ -1356,7 +1354,7 @@ fn public_registry_propagates_protected_append_store_errors() {
 
 #[test]
 fn public_registry_requires_a_gate_for_protected_append() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let orphan_timeline = TimelineId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
@@ -1377,7 +1375,7 @@ fn public_registry_requires_a_gate_for_protected_append() {
 
 #[test]
 fn public_registry_requires_a_gate_for_public_append() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let orphan_timeline = TimelineId::new();
     let mut public_missing_gate = PluginRegistry::new();
     test_ok(public_missing_gate.step_all_anchored(orphan_timeline, Seq::ZERO));
@@ -1770,7 +1768,7 @@ fn public_registry_requires_snapshot_anchors() {
 
 #[test]
 fn public_registry_commits_and_appends_empty_anchored_steps() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let timeline = test_ok(store.create_timeline("registry-metadata"));
     let mut anchored = PluginRegistry::new();
     assert!(test_ok(anchored.tick_cadenced_anchored(timeline.id(), 0, Seq::ZERO)).is_empty());
