@@ -960,6 +960,41 @@ fn selector_revocation_state_rejects_update_authority_and_signer_substitution() 
 }
 
 #[test]
+fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
+    let fixture = revocation_transition_fixture()?;
+    let update = revocation_update(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        test_nonce(),
+    )?;
+    for field in 2..=7 {
+        let changed = resign_unsigned_field(&update, "RCU1", field, Value::Null, &fixture.signer)?;
+        let mut state = SelectorRevocationState::new(fixture.current.clone());
+        assert!(matches!(
+            state.begin_update(&changed, &fixture.trust, Vec::new(), 1_000),
+            Err(SandboxRevocationUpdateError::Protocol(_))
+                | Err(SandboxRevocationUpdateError::Trust(
+                    SandboxTrustError::Protocol(_)
+                ))
+        ));
+    }
+    assert!(matches!(
+        SelectorRevocationState::new(fixture.current).begin_update(
+            &corrupt_signed_digest(&update)?,
+            &fixture.trust,
+            Vec::new(),
+            1_000
+        ),
+        Err(SandboxRevocationUpdateError::Protocol(
+            ProtocolError::DigestMismatch
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
 fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
     let fixture = revocation_transition_fixture()?;
     let update = revocation_update(
@@ -1054,6 +1089,55 @@ fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
         ),
         Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn selector_revocation_state_rejects_malformed_acknowledgement_fields() -> TestResult {
+    let fixture = revocation_transition_fixture()?;
+    let acknowledgement = revocation_acknowledgement(&fixture.next, &fixture.signer, Vec::new())?;
+    for field in 2..=6 {
+        let changed = resign_unsigned_field(
+            &acknowledgement,
+            "RCA1",
+            field,
+            Value::Null,
+            &fixture.signer,
+        )?;
+        let mut state = SelectorRevocationState::new(fixture.current.clone());
+        assert!(matches!(
+            state.acknowledge(&changed, "runtime", &fixture.signer.verifying_key(), 1_000),
+            Err(SandboxRevocationUpdateError::Protocol(_))
+        ));
+    }
+    let malformed_cancelled_attempt = resign_unsigned_field(
+        &acknowledgement,
+        "RCA1",
+        4,
+        Value::Array(vec![Value::Null]),
+        &fixture.signer,
+    )?;
+    let mut state = SelectorRevocationState::new(fixture.current.clone());
+    assert!(matches!(
+        state.acknowledge(
+            &malformed_cancelled_attempt,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_000
+        ),
+        Err(SandboxRevocationUpdateError::Protocol(_))
+    ));
+    assert!(matches!(
+        SelectorRevocationState::new(fixture.current).acknowledge(
+            &corrupt_signed_digest(&acknowledgement)?,
+            "runtime",
+            &fixture.signer.verifying_key(),
+            1_000
+        ),
+        Err(SandboxRevocationUpdateError::Protocol(
+            ProtocolError::DigestMismatch
+        ))
+    ));
     Ok(())
 }
 
