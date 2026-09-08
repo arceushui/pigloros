@@ -2,6 +2,7 @@
 
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
+use pos_reference::evaluator_protocol::RequiredProviderCapability;
 use pos_reference::sandbox_provider_protocol::{
     AdmissionGrant, AdmittedSandboxProvider, HostCapabilityProfile, LaunchPolicy,
     ProviderConformanceReport, SandboxAdministratorPolicy, SandboxAdmissionError,
@@ -725,6 +726,27 @@ fn complete_provider_and_image_admission_binds_all_authority() -> TestResult {
     );
     let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
     assert_eq!(image.manifest().executable_path, "/adapter");
+    assert!(
+        admitted.supports_required_capability(&RequiredProviderCapability {
+            capability_id: "execute".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        })
+    );
+    assert!(
+        !admitted.supports_required_capability(&RequiredProviderCapability {
+            capability_id: "execute".to_owned(),
+            capability_version: 2,
+            minimum_strength: 1,
+        })
+    );
+    assert!(
+        !admitted.supports_required_capability(&RequiredProviderCapability {
+            capability_id: "execute".to_owned(),
+            capability_version: 1,
+            minimum_strength: 2,
+        })
+    );
     Ok(())
 }
 
