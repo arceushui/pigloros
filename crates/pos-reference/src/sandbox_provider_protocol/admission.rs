@@ -772,6 +772,22 @@ impl AdmittedSandboxProvider {
         Ok(result)
     }
 
+    /// Authenticate the complete SAU1 chain referenced by SPR1 and mirrored by SPY1.
+    ///
+    /// # Errors
+    /// Rejects forged, reordered, incomplete, substituted, or incorrectly bound events.
+    pub fn authenticate_audit_chain(
+        &self,
+        records: &[Vec<u8>],
+        receipt: &SandboxProviderReceipt,
+        result: &SandboxProviderResult,
+    ) -> Result<Vec<super::SandboxAuditRecord>, SandboxAdmissionError> {
+        receipt.verify_signature(&self.runtime_key)?;
+        result.verify_signature(&self.runtime_key)?;
+        super::audit::authenticate_audit_chain(records, receipt, result, &self.runtime_key)
+            .map_err(Into::into)
+    }
+
     fn validate_execute_authority(
         &self,
         request: &SandboxExecuteRequest,

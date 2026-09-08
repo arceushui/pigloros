@@ -4,6 +4,7 @@
 //! reference evaluator a second implementation of the public wire contract.
 
 mod admission;
+mod audit;
 mod authority;
 mod codec;
 mod execution;
@@ -20,6 +21,7 @@ pub use admission::{
     AdmittedSandboxImage, AdmittedSandboxProvider, HostCapabilityProfile, HostFeatureProof,
     ProviderConformanceReport, SandboxAdmissionError, SandboxProviderAdmissionInputs,
 };
+pub use audit::SandboxAuditRecord;
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
