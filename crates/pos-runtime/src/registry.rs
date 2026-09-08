@@ -5311,6 +5311,11 @@ mod erasure_gate_coverage {
             missing.step_all_anchored(timeline, pos_core::clock::Seq::ZERO),
             Err(RuntimeError::ErasureContainment(_))
         ));
+        let mut missing =
+            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        assert!(missing
+            .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
+            .is_ok());
         let mut missing = missing.without_erasure_gate();
         let mut missing_store = pos_store::memory::MemoryStore::new();
         assert!(matches!(
