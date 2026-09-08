@@ -7,8 +7,10 @@ mod authority;
 mod codec;
 mod execution;
 mod operations;
+mod revocation;
 mod trust;
 
+pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use authority::{

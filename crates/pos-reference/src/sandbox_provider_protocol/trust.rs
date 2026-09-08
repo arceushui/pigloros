@@ -4,8 +4,8 @@ use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
 
 use super::codec::{
-    array, bounded_array, decode_document, digest32, fixed_bytes, key_id, require_canonical_order,
-    signed, uint, verify_digest, verify_signature,
+    array, bounded_array, decode_document, fixed_bytes, key_id, require_canonical_order, signed,
+    uint, verify_digest, verify_signature,
 };
 use super::SandboxProviderProtocolError;
 
