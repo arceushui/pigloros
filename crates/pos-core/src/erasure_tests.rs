@@ -1193,11 +1193,13 @@ fn poisoned_containment_fence_fails_closed() {
         let mut panic_during_effect = || {
             std::panic::resume_unwind(Box::new("poison containment fence"));
         };
-        drop(gate.with_fence(
-            timeline,
-            ErasureProtectedOperationV1::Read,
-            &mut panic_during_effect,
-        ));
+        assert!(gate
+            .with_fence(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                &mut panic_during_effect,
+            )
+            .is_ok());
     }));
     assert!(panic_result.is_err());
     assert_eq!(

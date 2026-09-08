@@ -377,6 +377,20 @@ mod tests {
         let mut host =
             ErasureExecutionHostV1::recover_verified_empty(store.without_erasure_gate(), 4)
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.command_sender()
+            .and_then(|mut sender| {
+                sender.append(
+                    timeline.id(),
+                    &[EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("host.second-fixture"),
+                        CanonicalBytes::from_vec(Vec::new()),
+                    )],
+                )
+            })
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("host append failed: {error:?}")))
+            });
         let mut reader = host
             .read_sender()
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -385,7 +399,7 @@ mod tests {
             reader
                 .read_bounded(timeline.id(), SeqRange::all(), bounds)
                 .map(|events| events.len()),
-            Ok(1)
+            Ok(2)
         );
         assert_eq!(
             reader
@@ -400,6 +414,6 @@ mod tests {
             Ok(vec![timeline.id()])
         );
         assert_eq!(reader.root_timeline_count_bounded(1), Ok(1));
-        assert_eq!(reader.logical_head(timeline.id()), Ok(Seq::from_u64(1)));
+        assert_eq!(reader.logical_head(timeline.id()), Ok(Seq::from_u64(2)));
     }
 }
