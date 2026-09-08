@@ -507,7 +507,7 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         )
         .is_err());
     }
-    let mut unknown_signer = fields.clone();
+    let mut unknown_signer = fields;
     unknown_signer[7] = Value::Text("missing".to_owned());
     assert_eq!(
         SandboxRevocationSnapshot::authenticate(
@@ -536,7 +536,14 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
         ),
         Err(SandboxTrustError::Protocol(ProtocolError::SignatureInvalid))
     );
-    let foreign_trust = trusted_registry(2)?;
+    let foreign_trust = SandboxTrustSnapshot::authenticate(
+        &sign(
+            snapshot(vec![key_record("policy", 1)], vec![certificate(9)], "root"),
+            &root,
+        )?,
+        "root",
+        &root.verifying_key(),
+    )?;
     let foreign = SandboxRevocationSnapshot::authenticate(
         &sign_record("RVS1", revocation(&foreign_trust, 6, vec![]), &signer)?,
         &foreign_trust,
