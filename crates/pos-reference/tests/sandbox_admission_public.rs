@@ -3,8 +3,9 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    AdmittedSandboxProvider, SandboxAdministratorPolicy, SandboxAdmissionError,
-    SandboxArchitecture, SandboxProviderAdmissionInputs, SandboxRevocationSnapshot,
+    AdmissionGrant, AdmittedSandboxProvider, LaunchPolicy, SandboxAdministratorPolicy,
+    SandboxAdmissionError, SandboxArchitecture, SandboxExecuteRequest,
+    SandboxProviderAdmissionInputs, SandboxProviderReceipt, SandboxRevocationSnapshot,
     SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
@@ -338,6 +339,7 @@ fn administrator_policy(
     binary_digest: [u8; 32],
     pcr1_digest: [u8; 32],
     scs1_digest: [u8; 32],
+    lps1_digest: [u8; 32],
     sim1_digest: [u8; 32],
 ) -> TestResult<SandboxAdministratorPolicy> {
     let unsigned = Value::Array(vec![
@@ -346,7 +348,7 @@ fn administrator_policy(
         integer(4),
         bytes(spm1_digest),
         bytes(binary_digest),
-        Value::Array(vec![bytes([23; 32])]),
+        Value::Array(vec![bytes(lps1_digest)]),
         Value::Array(vec![bytes(sim1_digest)]),
         bytes([24; 32]),
         bytes([17; 32]),
@@ -365,6 +367,169 @@ fn administrator_policy(
     )?)
 }
 
+fn launch_policy(sim1_digest: [u8; 32]) -> TestResult<Vec<u8>> {
+    self_digested_record(
+        "LPS1",
+        Value::Array(vec![
+            Value::Text("LPS1".to_owned()),
+            integer(1),
+            Value::Text("air-gapped".to_owned()),
+            integer(1),
+            bytes(sim1_digest),
+            Value::Array(vec![Value::Array(vec![integer(0), integer(1)])]),
+            Value::Array(vec![]),
+        ]),
+    )
+}
+
+fn payload_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(payload);
+    *hasher.finalize().as_bytes()
+}
+
+fn execute_request(fixture: &Fixture, launch: &LaunchPolicy) -> TestResult<Vec<u8>> {
+    let input = b"input";
+    self_digested_record(
+        "SPX1",
+        Value::Array(vec![
+            Value::Text("SPX1".to_owned()),
+            integer(1),
+            Value::Array(vec![
+                Value::Bytes(vec![31; 16]),
+                bytes(fixture.policy.policy_digest()),
+                integer(fixture.policy.policy_epoch()),
+                Value::Bytes(vec![32; 16]),
+            ]),
+            Value::Bytes(vec![33; 16]),
+            bytes([34; 32]),
+            bytes([35; 32]),
+            bytes([36; 32]),
+            bytes([37; 32]),
+            bytes([38; 32]),
+            bytes([39; 32]),
+            bytes(launch.policy_digest),
+            bytes(wrapped_digest(&fixture.sim1)?),
+            bytes(fixture.policy.policy_digest()),
+            bytes(fixture.trust.snapshot_digest()),
+            bytes(fixture.revocation.snapshot_digest()),
+            bytes(wrapped_digest(&fixture.spm1)?),
+            bytes([17; 32]),
+            bytes(wrapped_digest(&fixture.pcr1)?),
+            bytes(wrapped_digest(&fixture.hcp1)?),
+            Value::Array(vec![]),
+            Value::Array(vec![
+                integer(u64::try_from(input.len())?),
+                bytes(payload_digest(b"PiglorOS.SandboxInputBytes.v1\0", input)),
+            ]),
+            Value::Array(vec![]),
+        ]),
+    )
+}
+
+fn admission_grant(
+    fixture: &Fixture,
+    request: &SandboxExecuteRequest,
+    launch: &LaunchPolicy,
+) -> TestResult<Vec<u8>> {
+    let authority = &request.authority;
+    sign_record(
+        "AGR1",
+        Value::Array(vec![
+            Value::Text("AGR1".to_owned()),
+            integer(1),
+            Value::Bytes(request.request.request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
+            bytes(authority.evr1_digest),
+            bytes(authority.fixture_contract_digest),
+            bytes(authority.fixture_digest),
+            bytes(authority.execution_profile_digest),
+            bytes(authority.lps1_digest),
+            bytes(authority.sim1_digest),
+            bytes(authority.apt1_digest),
+            bytes(authority.trs1_digest),
+            bytes(authority.rvs1_digest),
+            bytes(authority.spm1_digest),
+            bytes(authority.pcf1_digest),
+            bytes(authority.pcr1_digest),
+            bytes(authority.hcp1_digest),
+            integer(fixture.trust.trust_epoch()),
+            integer(fixture.revocation.revocation_epoch()),
+            integer(fixture.policy.policy_epoch()),
+            bytes([39; 32]),
+            bytes(request.adapter_input.digest),
+            Value::Array(vec![]),
+            bytes(launch.policy_digest),
+            bytes([40; 32]),
+            Value::Text("runtime".to_owned()),
+        ]),
+        &fixture.authority.runtime,
+    )
+}
+
+fn provider_receipt(fixture: &Fixture, grant: &AdmissionGrant) -> TestResult<Vec<u8>> {
+    sign_record(
+        "SPR1",
+        Value::Array(vec![
+            Value::Text("SPR1".to_owned()),
+            integer(1),
+            Value::Bytes(grant.attempt_id.to_vec()),
+            bytes(grant.grant_digest),
+            bytes(grant.authority.spm1_digest),
+            bytes(*blake3::hash(&fixture.provider_binary).as_bytes()),
+            bytes(grant.authority.lps1_digest),
+            bytes(grant.authority.sim1_digest),
+            bytes(grant.authority.apt1_digest),
+            bytes(grant.authority.trs1_digest),
+            bytes(grant.authority.rvs1_digest),
+            integer(grant.trust_epoch),
+            integer(grant.revocation_epoch),
+            integer(grant.policy_epoch),
+            bytes(grant.authority.hcp1_digest),
+            bytes(grant.elm1_digest),
+            Value::Array(vec![]),
+            bytes([41; 32]),
+            bytes([42; 32]),
+            bytes([43; 32]),
+            bytes([44; 32]),
+            bytes([45; 32]),
+            bytes([46; 32]),
+            bytes([47; 32]),
+            Value::Text("runtime".to_owned()),
+        ]),
+        &fixture.authority.runtime,
+    )
+}
+
+fn terminal_result(
+    fixture: &Fixture,
+    request: &SandboxExecuteRequest,
+    grant: &AdmissionGrant,
+    receipt: &SandboxProviderReceipt,
+) -> TestResult<Vec<u8>> {
+    let output = b"output";
+    sign_record(
+        "SPY1",
+        Value::Array(vec![
+            Value::Text("SPY1".to_owned()),
+            integer(1),
+            Value::Bytes(request.request.request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
+            integer(0),
+            Value::Array(vec![
+                integer(u64::try_from(output.len())?),
+                bytes(payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", output)),
+            ]),
+            bytes(grant.grant_digest),
+            bytes(receipt.receipt_digest),
+            Value::Array(vec![integer(11), integer(12)]),
+            Value::Text("runtime".to_owned()),
+        ]),
+        &fixture.authority.runtime,
+    )
+}
+
 struct Fixture {
     authority: SigningAuthority,
     trust: SandboxTrustSnapshot,
@@ -379,6 +544,7 @@ struct Fixture {
     root_image: Vec<u8>,
     executable: Vec<u8>,
     sim1: Vec<u8>,
+    lps1: Vec<u8>,
 }
 
 impl Fixture {
@@ -403,6 +569,7 @@ impl Fixture {
         let root_image = b"img".to_vec();
         let executable = b"adapter executable".to_vec();
         let sim1 = image_manifest(&authority, &root_image, &executable, 0)?;
+        let lps1 = launch_policy(wrapped_digest(&sim1)?)?;
         let policy = administrator_policy(
             &trust,
             &revocation,
@@ -411,6 +578,7 @@ impl Fixture {
             binary_digest,
             wrapped_digest(&pcr1)?,
             wrapped_digest(&scs1)?,
+            wrapped_digest(&lps1)?,
             wrapped_digest(&sim1)?,
         )?;
         Ok(Self {
@@ -427,6 +595,7 @@ impl Fixture {
             root_image,
             executable,
             sim1,
+            lps1,
         })
     }
 
@@ -471,7 +640,7 @@ fn complete_provider_and_image_admission_binds_all_authority() -> TestResult {
         &fixture.root_image,
         &fixture.executable,
     )?;
-    assert_eq!(image.executable_path, "/adapter");
+    assert_eq!(image.manifest().executable_path, "/adapter");
     Ok(())
 }
 
@@ -521,6 +690,7 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
         *blake3::hash(&fixture.provider_binary).as_bytes(),
         wrapped_digest(&failed_pcr1)?,
         wrapped_digest(&fixture.scs1)?,
+        wrapped_digest(&fixture.lps1)?,
         wrapped_digest(&fixture.sim1)?,
     )?;
     let failed_input = SandboxProviderAdmissionInputs {
@@ -559,6 +729,7 @@ fn provider_admission_rejects_cross_record_architecture_mismatch() -> TestResult
         *blake3::hash(&fixture.provider_binary).as_bytes(),
         wrapped_digest(&pcr1)?,
         wrapped_digest(&fixture.scs1)?,
+        wrapped_digest(&fixture.lps1)?,
         wrapped_digest(&fixture.sim1)?,
     )?;
     let inputs = SandboxProviderAdmissionInputs {
@@ -616,5 +787,37 @@ fn image_admission_rejects_changed_revoked_and_foreign_bytes() -> TestResult {
         ),
         Err(SandboxAdmissionError::Revoked)
     );
+    Ok(())
+}
+
+#[test]
+fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(
+        &fixture.policy,
+        &fixture.trust,
+        &fixture.revocation,
+        &fixture.sim1,
+        &fixture.root_image,
+        &fixture.executable,
+    )?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(&fixture, &launch)?)?;
+    let grant = admitted.authenticate_grant(
+        &admission_grant(&fixture, &request, &launch)?,
+        &request,
+        &image,
+        &launch,
+    )?;
+    let receipt = admitted.authenticate_receipt(&provider_receipt(&fixture, &grant)?, &grant)?;
+    let result = admitted.authenticate_terminal_result(
+        &terminal_result(&fixture, &request, &grant, &receipt)?,
+        &request,
+        &grant,
+        &receipt,
+    )?;
+    assert_eq!(result.spr1_digest, Some(receipt.receipt_digest));
+    assert_eq!(result.attempt_id, request.attempt_id);
     Ok(())
 }

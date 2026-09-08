@@ -8,13 +8,68 @@ use super::codec::{
     valid_identifier, valid_key_id, verify_digest, verify_signature,
 };
 use super::{
-    ProviderCapability, SandboxAdministratorPolicy, SandboxArchitecture, SandboxProviderManifest,
-    SandboxProviderProtocolError, SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTrustError,
+    AdmissionGrant, LaunchPolicy, ProviderCapability, SandboxAdministratorPolicy,
+    SandboxArchitecture, SandboxExecuteRequest, SandboxProviderManifest,
+    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult,
+    SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError,
     SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
 const REQUIRED_FEATURE_SET_DOMAIN: &[u8] = b"PiglorOS.RequiredHostFeatureSet.v1\0";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProviderSelectionBinding {
+    manifest: [u8; 32],
+    binary: [u8; 32],
+    profile: [u8; 32],
+    report: [u8; 32],
+    syscall_set: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConformanceSubjectBinding {
+    profile: [u8; 32],
+    binary: [u8; 32],
+    public_contract: [u8; 32],
+    capabilities: [u8; 32],
+    required_features: [u8; 32],
+    host_profile: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GrantBinding {
+    request_id: [u8; 16],
+    attempt_id: [u8; 16],
+    authority: [[u8; 32]; 13],
+    epochs: [u64; 3],
+    input: [u8; 32],
+    exchange_plans: Vec<[u8; 32]>,
+    launch_policy: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReceiptBinding {
+    attempt_id: [u8; 16],
+    authority: [[u8; 32]; 8],
+    epochs: [u64; 3],
+    host_profile: [u8; 32],
+    effective_limits: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExecuteBinding {
+    policy: [u8; 32],
+    policy_epoch: u64,
+    authority: [[u8; 32]; 9],
+}
+
+struct DecodedProviderAdmission {
+    manifest: SandboxProviderManifest,
+    syscall_set: SandboxSyscallSet,
+    host_profile: HostCapabilityProfile,
+    conformance_report: ProviderConformanceReport,
+}
 
 /// One HCP1 feature probe and the digest of its independently retained evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,10 +338,30 @@ pub struct SandboxProviderAdmissionInputs<'a> {
 /// A provider released only after every selector-owned admission check succeeds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmittedSandboxProvider {
+    policy: SandboxAdministratorPolicy,
     manifest: SandboxProviderManifest,
     syscall_set: SandboxSyscallSet,
     host_profile: HostCapabilityProfile,
     conformance_report: ProviderConformanceReport,
+    trust_digest: [u8; 32],
+    trust_epoch: u64,
+    revocation_digest: [u8; 32],
+    revocation_epoch: u64,
+    runtime_key: ed25519_dalek::VerifyingKey,
+}
+
+/// SIM1 and exact image bytes released by selector-owned admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedSandboxImage {
+    manifest: SignedImageManifest,
+}
+
+impl AdmittedSandboxImage {
+    /// Authenticated image manifest bound to exact admitted bytes.
+    #[must_use]
+    pub const fn manifest(&self) -> &SignedImageManifest {
+        &self.manifest
+    }
 }
 
 impl AdmittedSandboxProvider {
@@ -304,19 +379,59 @@ impl AdmittedSandboxProvider {
         revocation: &SandboxRevocationSnapshot,
         inputs: SandboxProviderAdmissionInputs<'_>,
     ) -> Result<Self, SandboxAdmissionError> {
-        let manifest = SandboxProviderManifest::from_canonical_cbor(inputs.provider_manifest)?;
-        let syscall_set = SandboxSyscallSet::from_canonical_cbor(inputs.syscall_set)?;
-        let host_profile = HostCapabilityProfile::from_canonical_cbor(inputs.host_profile)?;
-        let conformance_report =
-            ProviderConformanceReport::from_canonical_cbor(inputs.conformance_report)?;
-        let selection = policy.selection();
+        let decoded = DecodedProviderAdmission {
+            manifest: SandboxProviderManifest::from_canonical_cbor(inputs.provider_manifest)?,
+            syscall_set: SandboxSyscallSet::from_canonical_cbor(inputs.syscall_set)?,
+            host_profile: HostCapabilityProfile::from_canonical_cbor(inputs.host_profile)?,
+            conformance_report: ProviderConformanceReport::from_canonical_cbor(
+                inputs.conformance_report,
+            )?,
+        };
+        Self::validate_selected_provider(policy, revocation, inputs.provider_binary, &decoded)?;
+        let runtime_key = Self::authenticate_provider_signers(trust, revocation, &decoded)?;
+        Self::validate_conformance(inputs.required_features, &decoded)?;
+        Ok(Self {
+            policy: policy.clone(),
+            manifest: decoded.manifest,
+            syscall_set: decoded.syscall_set,
+            host_profile: decoded.host_profile,
+            conformance_report: decoded.conformance_report,
+            trust_digest: trust.snapshot_digest(),
+            trust_epoch: trust.trust_epoch(),
+            revocation_digest: revocation.snapshot_digest(),
+            revocation_epoch: revocation.revocation_epoch(),
+            runtime_key,
+        })
+    }
 
-        if selection.provider_manifest != manifest.manifest_digest
-            || selection.provider_binary != manifest.binary_digest
-            || selection.conformance_profile != manifest.pcf1_digest
-            || selection.conformance_report != conformance_report.report_digest
-            || selection.syscall_set != syscall_set.syscall_set_digest
-        {
+    fn validate_selected_provider(
+        policy: &SandboxAdministratorPolicy,
+        revocation: &SandboxRevocationSnapshot,
+        provider_binary: &[u8],
+        decoded: &DecodedProviderAdmission,
+    ) -> Result<(), SandboxAdmissionError> {
+        let DecodedProviderAdmission {
+            manifest,
+            syscall_set,
+            conformance_report,
+            ..
+        } = decoded;
+        let selection = policy.selection();
+        let supplied_selection = ProviderSelectionBinding {
+            manifest: manifest.manifest_digest,
+            binary: manifest.binary_digest,
+            profile: manifest.pcf1_digest,
+            report: conformance_report.report_digest,
+            syscall_set: syscall_set.syscall_set_digest,
+        };
+        let policy_selection = ProviderSelectionBinding {
+            manifest: selection.provider_manifest,
+            binary: selection.provider_binary,
+            profile: selection.conformance_profile,
+            report: selection.conformance_report,
+            syscall_set: selection.syscall_set,
+        };
+        if policy_selection != supplied_selection {
             return Err(SandboxAdmissionError::PolicyMismatch);
         }
         if revocation.provider_revoked(&manifest.manifest_digest)
@@ -324,13 +439,26 @@ impl AdmittedSandboxProvider {
         {
             return Err(SandboxAdmissionError::Revoked);
         }
-        if digest_bytes(inputs.provider_binary) != manifest.binary_digest {
+        if digest_bytes(provider_binary) != manifest.binary_digest {
             return Err(SandboxAdmissionError::ArtifactMismatch);
         }
+        Ok(())
+    }
+
+    fn authenticate_provider_signers(
+        trust: &SandboxTrustSnapshot,
+        revocation: &SandboxRevocationSnapshot,
+        decoded: &DecodedProviderAdmission,
+    ) -> Result<ed25519_dalek::VerifyingKey, SandboxAdmissionError> {
+        let DecodedProviderAdmission {
+            manifest,
+            host_profile,
+            conformance_report,
+            ..
+        } = decoded;
         if manifest.trust_epoch != trust.trust_epoch() {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-
         let release_key = revocation.active_key(
             trust,
             &manifest.provider_release_key_id,
@@ -352,20 +480,43 @@ impl AdmittedSandboxProvider {
             SandboxTrustRole::IndependentConformanceReviewer,
         )?;
         conformance_report.verify_signature(&reviewer_key)?;
+        Ok(runtime_key)
+    }
 
+    fn validate_conformance(
+        required_features: &[String],
+        decoded: &DecodedProviderAdmission,
+    ) -> Result<(), SandboxAdmissionError> {
+        let DecodedProviderAdmission {
+            manifest,
+            syscall_set,
+            host_profile,
+            conformance_report,
+        } = decoded;
         let capability_digest = capability_set_digest(&manifest.capabilities)?;
-        let feature_digest = required_feature_set_digest(inputs.required_features)?;
-        if conformance_report.pcf1_digest != manifest.pcf1_digest
-            || conformance_report.provider_binary_digest != manifest.binary_digest
-            || conformance_report.public_contract_digest != manifest.public_contract_digest
-            || conformance_report.capability_set_digest != capability_digest
-            || conformance_report.required_hcp1_feature_set_digest != feature_digest
+        let feature_digest = required_feature_set_digest(required_features)?;
+        let reported_subject = ConformanceSubjectBinding {
+            profile: conformance_report.pcf1_digest,
+            binary: conformance_report.provider_binary_digest,
+            public_contract: conformance_report.public_contract_digest,
+            capabilities: conformance_report.capability_set_digest,
+            required_features: conformance_report.required_hcp1_feature_set_digest,
+            host_profile: conformance_report.tested_hcp1_digest,
+        };
+        let admitted_subject = ConformanceSubjectBinding {
+            profile: manifest.pcf1_digest,
+            binary: manifest.binary_digest,
+            public_contract: manifest.public_contract_digest,
+            capabilities: capability_digest,
+            required_features: feature_digest,
+            host_profile: host_profile.profile_digest,
+        };
+        if reported_subject != admitted_subject
             || manifest.required_hcp1_feature_set_digest != feature_digest
-            || conformance_report.tested_hcp1_digest != host_profile.profile_digest
         {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        if inputs.required_features.iter().any(|required| {
+        if required_features.iter().any(|required| {
             !host_profile
                 .feature_proofs
                 .iter()
@@ -380,13 +531,7 @@ impl AdmittedSandboxProvider {
         {
             return Err(SandboxAdmissionError::ArchitectureMismatch);
         }
-
-        Ok(Self {
-            manifest,
-            syscall_set,
-            host_profile,
-            conformance_report,
-        })
+        Ok(())
     }
 
     /// Admit exact SIM1, root-image, and executable bytes for this provider.
@@ -402,7 +547,7 @@ impl AdmittedSandboxProvider {
         manifest_bytes: &[u8],
         root_image: &[u8],
         executable: &[u8],
-    ) -> Result<SignedImageManifest, SandboxAdmissionError> {
+    ) -> Result<AdmittedSandboxImage, SandboxAdmissionError> {
         let image = SignedImageManifest::from_canonical_cbor(manifest_bytes)?;
         if !policy.accepts_image(&image.manifest_digest) {
             return Err(SandboxAdmissionError::PolicyMismatch);
@@ -441,7 +586,246 @@ impl AdmittedSandboxProvider {
             SandboxTrustRole::ImageProject,
         )?;
         image.verify_signature(&image_key)?;
-        Ok(image)
+        Ok(AdmittedSandboxImage { manifest: image })
+    }
+
+    /// Admit an exact LPS1 for an already admitted image.
+    ///
+    /// # Errors
+    /// Rejects an unselected launch policy or a policy bound to another image.
+    pub fn admit_launch_policy(
+        &self,
+        bytes: &[u8],
+        image: &AdmittedSandboxImage,
+    ) -> Result<LaunchPolicy, SandboxAdmissionError> {
+        let launch = LaunchPolicy::from_canonical_cbor(bytes)?;
+        if !self.policy.accepts_launch_policy(&launch.policy_digest) {
+            return Err(SandboxAdmissionError::PolicyMismatch);
+        }
+        if launch.sim1_digest != image.manifest.manifest_digest {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        Ok(launch)
+    }
+
+    /// Authenticate AGR1 and bind it to the exact selected SPX1 authority.
+    ///
+    /// # Errors
+    /// Rejects a forged grant or any request, attempt, artifact, epoch, input,
+    /// exchange-plan, launch-policy, or runtime-key substitution.
+    pub fn authenticate_grant(
+        &self,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+    ) -> Result<AdmissionGrant, SandboxAdmissionError> {
+        self.validate_execute_authority(request, image, launch)?;
+        let grant = AdmissionGrant::from_canonical_cbor(bytes)?;
+        if grant.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        grant.verify_signature(&self.runtime_key)?;
+        let request_authority = &request.authority;
+        let grant_authority = &grant.authority;
+        let expected_plans = request
+            .network_plans
+            .iter()
+            .map(|plan| plan.plan_digest)
+            .collect::<Vec<_>>();
+        let actual = GrantBinding {
+            request_id: grant.request_id,
+            attempt_id: grant.attempt_id,
+            authority: [
+                grant_authority.evr1_digest,
+                grant_authority.fixture_contract_digest,
+                grant_authority.fixture_digest,
+                grant_authority.execution_profile_digest,
+                grant_authority.lps1_digest,
+                grant_authority.sim1_digest,
+                grant_authority.apt1_digest,
+                grant_authority.trs1_digest,
+                grant_authority.rvs1_digest,
+                grant_authority.spm1_digest,
+                grant_authority.pcf1_digest,
+                grant_authority.pcr1_digest,
+                grant_authority.hcp1_digest,
+            ],
+            epochs: [
+                grant.trust_epoch,
+                grant.revocation_epoch,
+                grant.policy_epoch,
+            ],
+            input: grant.input_digest,
+            exchange_plans: grant.exchange_plan_digests.clone(),
+            launch_policy: grant.expected_launch_policy_digest,
+        };
+        let expected = GrantBinding {
+            request_id: request.request.request_id,
+            attempt_id: request.attempt_id,
+            authority: [
+                request_authority.evr1_digest,
+                request_authority.fixture_contract_digest,
+                request_authority.fixture_digest,
+                request_authority.execution_profile_digest,
+                request_authority.lps1_digest,
+                request_authority.sim1_digest,
+                request_authority.apt1_digest,
+                request_authority.trs1_digest,
+                request_authority.rvs1_digest,
+                request_authority.spm1_digest,
+                request_authority.pcf1_digest,
+                request_authority.pcr1_digest,
+                request_authority.hcp1_digest,
+            ],
+            epochs: [
+                self.trust_epoch,
+                self.revocation_epoch,
+                self.policy.policy_epoch(),
+            ],
+            input: request.adapter_input.digest,
+            exchange_plans: expected_plans,
+            launch_policy: launch.policy_digest,
+        };
+        if actual != expected {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        Ok(grant)
+    }
+
+    /// Authenticate an SPR1 and bind it to the admitted provider and AGR1.
+    ///
+    /// # Errors
+    /// Rejects a forged receipt or any lifecycle authority substitution.
+    pub fn authenticate_receipt(
+        &self,
+        bytes: &[u8],
+        grant: &AdmissionGrant,
+    ) -> Result<SandboxProviderReceipt, SandboxAdmissionError> {
+        let receipt = SandboxProviderReceipt::from_canonical_cbor(bytes)?;
+        if receipt.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        receipt.verify_signature(&self.runtime_key)?;
+        let authority = &receipt.authority;
+        let actual = ReceiptBinding {
+            attempt_id: receipt.attempt_id,
+            authority: [
+                authority.agr1_digest,
+                authority.spm1_digest,
+                authority.provider_binary_digest,
+                authority.lps1_digest,
+                authority.sim1_digest,
+                authority.apt1_digest,
+                authority.trs1_digest,
+                authority.rvs1_digest,
+            ],
+            epochs: [
+                receipt.trust_epoch,
+                receipt.revocation_epoch,
+                receipt.policy_epoch,
+            ],
+            host_profile: receipt.hcp1_digest,
+            effective_limits: receipt.elm1_digest,
+        };
+        let expected = ReceiptBinding {
+            attempt_id: grant.attempt_id,
+            authority: [
+                grant.grant_digest,
+                self.manifest.manifest_digest,
+                self.manifest.binary_digest,
+                grant.authority.lps1_digest,
+                grant.authority.sim1_digest,
+                self.policy.policy_digest(),
+                self.trust_digest,
+                self.revocation_digest,
+            ],
+            epochs: [
+                self.trust_epoch,
+                self.revocation_epoch,
+                self.policy.policy_epoch(),
+            ],
+            host_profile: self.host_profile.profile_digest,
+            effective_limits: grant.elm1_digest,
+        };
+        if actual != expected {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        Ok(receipt)
+    }
+
+    /// Authenticate a post-admission SPY1 against its exact AGR1 and SPR1.
+    ///
+    /// # Errors
+    /// Rejects a forged result, pre-admission outcome, identity substitution,
+    /// or lifecycle evidence that does not match the authenticated receipt.
+    pub fn authenticate_terminal_result(
+        &self,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+        grant: &AdmissionGrant,
+        receipt: &SandboxProviderReceipt,
+    ) -> Result<SandboxProviderResult, SandboxAdmissionError> {
+        let result = SandboxProviderResult::from_canonical_cbor(bytes)?;
+        if result.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        result.verify_signature(&self.runtime_key)?;
+        if matches!(
+            result.outcome,
+            SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected
+        ) || result.request_id != request.request.request_id
+            || result.attempt_id != request.attempt_id
+            || grant.request_id != result.request_id
+            || grant.attempt_id != result.attempt_id
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        result.validate_receipt_lifecycle(receipt)?;
+        Ok(result)
+    }
+
+    fn validate_execute_authority(
+        &self,
+        request: &SandboxExecuteRequest,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+    ) -> Result<(), SandboxAdmissionError> {
+        let authority = &request.authority;
+        let actual = ExecuteBinding {
+            policy: request.request.apt1_digest,
+            policy_epoch: request.request.policy_epoch,
+            authority: [
+                authority.lps1_digest,
+                authority.sim1_digest,
+                authority.apt1_digest,
+                authority.trs1_digest,
+                authority.rvs1_digest,
+                authority.spm1_digest,
+                authority.pcf1_digest,
+                authority.pcr1_digest,
+                authority.hcp1_digest,
+            ],
+        };
+        let expected = ExecuteBinding {
+            policy: self.policy.policy_digest(),
+            policy_epoch: self.policy.policy_epoch(),
+            authority: [
+                launch.policy_digest,
+                image.manifest.manifest_digest,
+                self.policy.policy_digest(),
+                self.trust_digest,
+                self.revocation_digest,
+                self.manifest.manifest_digest,
+                self.manifest.pcf1_digest,
+                self.conformance_report.report_digest,
+                self.host_profile.profile_digest,
+            ],
+        };
+        if actual != expected {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        Ok(())
     }
 
     /// Authenticated SPM1 selected for this capability.

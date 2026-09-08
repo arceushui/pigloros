@@ -17,8 +17,8 @@ pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use admission::{
-    AdmittedSandboxProvider, HostCapabilityProfile, HostFeatureProof, ProviderConformanceReport,
-    SandboxAdmissionError, SandboxProviderAdmissionInputs,
+    AdmittedSandboxImage, AdmittedSandboxProvider, HostCapabilityProfile, HostFeatureProof,
+    ProviderConformanceReport, SandboxAdmissionError, SandboxProviderAdmissionInputs,
 };
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
