@@ -11,6 +11,8 @@ provider-identifier = (text .size (1..128)) .and
 safe-detail-text = (text .size (1..256)) .and
   (text .regexp "[^\u0000]+")
 safe-detail = safe-detail-text / null
+argument-text = (text .size (1..256)) .and
+  (text .regexp "[^\u0000]+")
 epoch = uint
 
 provider-capability = [provider-identifier, uint, uint]
@@ -26,7 +28,7 @@ partition-descriptor = [0..2, bytes .size 16, bytes .size 16,
 network-capability = [provider-identifier, 0, 0 / 1,
   (bytes .size 4) / (bytes .size 16), 1..65535, 1..134217728, 1..134217728]
 limit-record = [0..16, uint]
-arguments = [*256 text .size (1..256)]
+arguments = [*256 argument-text]
 limits = [1*17 limit-record]
 network-capabilities = [*256 network-capability]
 identifiers = [*256 provider-identifier]
