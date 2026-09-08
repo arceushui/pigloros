@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 mod bundle_contract;
+mod non_interference;
 mod profile_contract;
 mod provider_contract;
 mod sandbox_provider_contract;
@@ -37,6 +38,12 @@ pub use bundle_contract::{
     BundleManifestV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
     ConformanceBundlePairV1, ConformanceBundleV1, CONFORMANCE_BUNDLE_MAGIC_V1,
     MAX_CONFORMANCE_BUNDLE_BYTES_V1,
+};
+pub use non_interference::{
+    execute_non_interference_pair, execute_wave8_non_interference_matrix,
+    non_interference_normalization_policy_v1, non_interference_surface_names_v1,
+    NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1, NonInterferenceFixturePairV1,
+    NonInterferenceHostRunV1, NonInterferenceInvocationV1, NonInterferenceMatrixMemberV1,
 };
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
@@ -1165,12 +1172,59 @@ pub struct NonInterferenceCaseV1 {
     pub control_input_digest: [u8; 32],
     pub canary_input_digest: [u8; 32],
     pub authoritative_digest: [u8; 32],
+    pub canary_authoritative_digest: [u8; 32],
     pub public_digest: [u8; 32],
+    pub canary_public_digest: [u8; 32],
     pub operational_digest: [u8; 32],
+    pub canary_operational_digest: [u8; 32],
     pub authoritative_equal: bool,
     pub public_equal: bool,
     pub operational_equal: bool,
+    /// First control/canary difference within this mode.
+    pub first_divergence: Option<NonInterferenceDivergenceCoordinateV1>,
+    /// First difference between this mode and the Local control capture.
+    pub first_cross_mode_divergence: Option<NonInterferenceDivergenceCoordinateV1>,
     pub provenance_digest: [u8; 32],
+}
+
+impl NonInterferenceCaseV1 {
+    /// Encode one executed matrix outcome without requiring it to be a pass.
+    ///
+    /// Divergent outcomes are evidence and therefore remain serializable; the
+    /// enclosing profile verifier is responsible for rejecting them as a
+    /// conformance pass.
+    ///
+    /// # Errors
+    /// Returns a serialization error when the record cannot be represented by
+    /// the strict canonical codec.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, pos_core::CoreError> {
+        strict_codec::encode_non_interference_outcome(self)
+            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+    }
+
+    /// Decode one strict canonical matrix outcome.
+    ///
+    /// # Errors
+    /// Returns a serialization error for malformed, noncanonical, or unknown
+    /// fields.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, pos_core::CoreError> {
+        strict_codec::decode_non_interference_outcome(bytes)
+            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+    }
+}
+
+/// Safe location of the first captured control/canary difference.
+///
+/// The coordinate identifies a surface and byte offset only. Captured bytes,
+/// including the unauthorized fixture value, are never copied into evidence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NonInterferenceDivergenceCoordinateV1 {
+    pub fixture_id: String,
+    pub variant: NonInterferenceVariantV1,
+    pub mode: ExecutionModeV1,
+    pub surface_ordinal: u16,
+    pub byte_offset: u64,
 }
 
 pub const NON_INTERFERENCE_FIXTURE_IDS_V1: [&str; 12] = [
@@ -1189,112 +1243,6 @@ pub const NON_INTERFERENCE_FIXTURE_IDS_V1: [&str; 12] = [
 ];
 
 pub const NON_INTERFERENCE_CASE_COUNT_V1: usize = 192;
-
-/// Produce the deterministic Wave 8 matrix fixture set.
-#[must_use]
-pub fn wave8_non_interference_matrix(seed: [u8; 32]) -> Vec<NonInterferenceCaseV1> {
-    let variants = [
-        NonInterferenceVariantV1::Success,
-        NonInterferenceVariantV1::Denial,
-        NonInterferenceVariantV1::WarmCache,
-        NonInterferenceVariantV1::ColdCache,
-    ];
-    let modes = [
-        ExecutionModeV1::Local,
-        ExecutionModeV1::AirGapped,
-        ExecutionModeV1::Replay,
-        ExecutionModeV1::Fork,
-    ];
-    let mut cases = Vec::with_capacity(12 * variants.len() * modes.len());
-    for fixture_id in NON_INTERFERENCE_FIXTURE_IDS_V1 {
-        for variant in variants {
-            for mode in modes {
-                let descriptor = format!("{fixture_id}:{variant:?}:{mode:?}");
-                let control_input_digest = matrix_digest(
-                    b"PiglorOS.NonInterference.ControlInput.v1",
-                    seed,
-                    format!("{descriptor}:control").as_bytes(),
-                );
-                let canary_input_digest = matrix_digest(
-                    b"PiglorOS.NonInterference.CanaryInput.v1",
-                    seed,
-                    format!("{descriptor}:canary").as_bytes(),
-                );
-                let control = matrix_probe_output(seed, fixture_id, variant, mode);
-                let canary = matrix_probe_output(seed, fixture_id, variant, mode);
-                let provenance_descriptor = format!(
-                    "{descriptor}:{}:{}:{}",
-                    hex_digest(&control.authoritative),
-                    hex_digest(&control.public),
-                    hex_digest(&control.operational),
-                );
-                cases.push(NonInterferenceCaseV1 {
-                    fixture_id: fixture_id.to_owned(),
-                    variant,
-                    mode,
-                    control_input_digest,
-                    canary_input_digest,
-                    authoritative_digest: control.authoritative,
-                    public_digest: control.public,
-                    operational_digest: control.operational,
-                    authoritative_equal: control.authoritative == canary.authoritative,
-                    public_equal: control.public == canary.public,
-                    operational_equal: control.operational == canary.operational,
-                    provenance_digest: matrix_digest(
-                        b"PiglorOS.NonInterference.Provenance.v1",
-                        seed,
-                        provenance_descriptor.as_bytes(),
-                    ),
-                });
-            }
-        }
-    }
-    cases
-}
-
-#[derive(Clone, Copy)]
-struct MatrixProbeOutput {
-    authoritative: [u8; 32],
-    public: [u8; 32],
-    operational: [u8; 32],
-}
-
-fn matrix_probe_output(
-    seed: [u8; 32],
-    fixture_id: &str,
-    variant: NonInterferenceVariantV1,
-    mode: ExecutionModeV1,
-) -> MatrixProbeOutput {
-    let descriptor = format!("{fixture_id}:{variant:?}:{mode:?}:stable-input");
-    MatrixProbeOutput {
-        authoritative: matrix_digest(
-            b"PiglorOS.NonInterference.AuthoritativeOutput.v1",
-            seed,
-            descriptor.as_bytes(),
-        ),
-        public: matrix_digest(
-            b"PiglorOS.NonInterference.PublicOutput.v1",
-            seed,
-            descriptor.as_bytes(),
-        ),
-        operational: matrix_digest(
-            b"PiglorOS.NonInterference.OperationalOutput.v1",
-            seed,
-            descriptor.as_bytes(),
-        ),
-    }
-}
-
-fn matrix_digest(domain: &[u8], seed: [u8; 32], descriptor: &[u8]) -> [u8; 32] {
-    let mut bytes = Vec::with_capacity(seed.len() + descriptor.len());
-    bytes.extend_from_slice(&seed);
-    bytes.extend_from_slice(descriptor);
-    let mut input = Vec::with_capacity(domain.len() + 1 + bytes.len());
-    input.extend_from_slice(domain);
-    input.push(0);
-    input.extend_from_slice(&bytes);
-    *blake3::hash(&input).as_bytes()
-}
 
 /// Conformance report, with 24 logical fields represented by grouped values.
 ///
@@ -1896,13 +1844,14 @@ pub mod strict_codec {
         FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1, FixturePrincipalRefV1,
         FollowOnMismatchV1, HostClosureAuditV1, ImplementationIdentityV1, IndependenceEvidenceV1,
         InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1,
-        MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceVariantV1, OwnerFrontierV1,
-        ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1, PluginFailureClassV1,
-        PluginFailureV1, ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1,
-        ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, SafeErrorCodeV1,
-        ScenarioRoomFixtureV1, StructuralCausalTraceEntryV1, SuffixInvalidationReasonV1,
-        SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1, Value,
-        VerificationErrorV1, VerificationOutcomeV1, VerificationResultV1, Wave8ProofContractV1,
+        MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceDivergenceCoordinateV1,
+        NonInterferenceVariantV1, OwnerFrontierV1, ParticipantEventV1, ParticipantViewV1,
+        PluginBoundaryV1, PluginFailureClassV1, PluginFailureV1, ProjectionEvidenceV1,
+        RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1, ReproManifestV1,
+        ReproducibilityClassV1, SafeErrorCodeV1, ScenarioRoomFixtureV1,
+        StructuralCausalTraceEntryV1, SuffixInvalidationReasonV1, SuffixInvalidationV1,
+        TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1, Value, VerificationErrorV1,
+        VerificationOutcomeV1, VerificationResultV1, Wave8ProofContractV1,
         CONFORMANCE_REPORT_MAGIC_V1, DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1,
         EVIDENCE_FORMAT_V1, RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
         VERIFICATION_RECORD_MAGIC_V1,
@@ -4027,33 +3976,120 @@ pub mod strict_codec {
             digest(&case.control_input_digest),
             digest(&case.canary_input_digest),
             digest(&case.authoritative_digest),
+            digest(&case.canary_authoritative_digest),
             digest(&case.public_digest),
+            digest(&case.canary_public_digest),
             digest(&case.operational_digest),
+            digest(&case.canary_operational_digest),
             Value::Bool(case.authoritative_equal),
             Value::Bool(case.public_equal),
             Value::Bool(case.operational_equal),
+            encode_non_interference_coordinate(case.first_divergence.as_ref()),
+            encode_non_interference_coordinate(case.first_cross_mode_divergence.as_ref()),
             digest(&case.provenance_digest),
         ])
+    }
+
+    fn encode_non_interference_coordinate(
+        coordinate: Option<&NonInterferenceDivergenceCoordinateV1>,
+    ) -> Value {
+        optional(coordinate.map(|coordinate| {
+            Value::Array(vec![
+                text(&coordinate.fixture_id),
+                enum_non_interference_variant(coordinate.variant),
+                enum_mode(coordinate.mode),
+                uint(u64::from(coordinate.surface_ordinal)),
+                uint(coordinate.byte_offset),
+            ])
+        }))
+    }
+
+    fn decode_non_interference_coordinate(
+        value: &Value,
+    ) -> Result<Option<NonInterferenceDivergenceCoordinateV1>, StrictCborError> {
+        if matches!(value, Value::Null) {
+            return Ok(None);
+        }
+        let coordinate = array(value, "non_interference_divergence", 5)?;
+        Ok(Some(NonInterferenceDivergenceCoordinateV1 {
+            fixture_id: string(&coordinate[0], "non_interference_divergence_fixture")?,
+            variant: decode_non_interference_variant(&coordinate[1])?,
+            mode: decode_mode(&coordinate[2])?,
+            surface_ordinal: u16::try_from(uint_value(
+                &coordinate[3],
+                "non_interference_divergence_surface",
+            )?)
+            .map_err(|_| StrictCborError::InvalidField {
+                field: "non_interference_divergence_surface".to_owned(),
+            })?,
+            byte_offset: uint_value(&coordinate[4], "non_interference_divergence_offset")?,
+        }))
+    }
+
+    struct DecodedNonInterferenceDigests {
+        control_input: [u8; 32],
+        canary_input: [u8; 32],
+        authoritative: [u8; 32],
+        canary_authoritative: [u8; 32],
+        public: [u8; 32],
+        canary_public: [u8; 32],
+        operational: [u8; 32],
+        canary_operational: [u8; 32],
+        provenance: [u8; 32],
+    }
+
+    fn decode_non_interference_digests(
+        fields: &[Value],
+    ) -> Result<DecodedNonInterferenceDigests, StrictCborError> {
+        Ok(DecodedNonInterferenceDigests {
+            control_input: bytes(&fields[3], "non_interference_control")?,
+            canary_input: bytes(&fields[4], "non_interference_canary")?,
+            authoritative: bytes(&fields[5], "non_interference_authoritative")?,
+            canary_authoritative: bytes(&fields[6], "non_interference_canary_authoritative")?,
+            public: bytes(&fields[7], "non_interference_public")?,
+            canary_public: bytes(&fields[8], "non_interference_canary_public")?,
+            operational: bytes(&fields[9], "non_interference_operational")?,
+            canary_operational: bytes(&fields[10], "non_interference_canary_operational")?,
+            provenance: bytes(&fields[16], "non_interference_provenance")?,
+        })
     }
 
     fn decode_non_interference_case(
         value: &Value,
     ) -> Result<NonInterferenceCaseV1, StrictCborError> {
-        let fields = array(value, "non_interference_case", 12)?;
+        let fields = array(value, "non_interference_case", 17)?;
+        let digests = decode_non_interference_digests(fields)?;
         Ok(NonInterferenceCaseV1 {
             fixture_id: string(&fields[0], "non_interference_fixture")?,
             variant: decode_non_interference_variant(&fields[1])?,
             mode: decode_mode(&fields[2])?,
-            control_input_digest: bytes(&fields[3], "non_interference_control")?,
-            canary_input_digest: bytes(&fields[4], "non_interference_canary")?,
-            authoritative_digest: bytes(&fields[5], "non_interference_authoritative")?,
-            public_digest: bytes(&fields[6], "non_interference_public")?,
-            operational_digest: bytes(&fields[7], "non_interference_operational")?,
-            authoritative_equal: bool_value(&fields[8], "non_interference_authoritative_equal")?,
-            public_equal: bool_value(&fields[9], "non_interference_public_equal")?,
-            operational_equal: bool_value(&fields[10], "non_interference_operational_equal")?,
-            provenance_digest: bytes(&fields[11], "non_interference_provenance")?,
+            control_input_digest: digests.control_input,
+            canary_input_digest: digests.canary_input,
+            authoritative_digest: digests.authoritative,
+            canary_authoritative_digest: digests.canary_authoritative,
+            public_digest: digests.public,
+            canary_public_digest: digests.canary_public,
+            operational_digest: digests.operational,
+            canary_operational_digest: digests.canary_operational,
+            authoritative_equal: bool_value(&fields[11], "non_interference_authoritative_equal")?,
+            public_equal: bool_value(&fields[12], "non_interference_public_equal")?,
+            operational_equal: bool_value(&fields[13], "non_interference_operational_equal")?,
+            first_divergence: decode_non_interference_coordinate(&fields[14])?,
+            first_cross_mode_divergence: decode_non_interference_coordinate(&fields[15])?,
+            provenance_digest: digests.provenance,
         })
+    }
+
+    pub(crate) fn encode_non_interference_outcome(
+        case: &NonInterferenceCaseV1,
+    ) -> Result<Vec<u8>, StrictCborError> {
+        encode_value(&encode_non_interference_case(case))
+    }
+
+    pub(crate) fn decode_non_interference_outcome(
+        bytes: &[u8],
+    ) -> Result<NonInterferenceCaseV1, StrictCborError> {
+        decode_non_interference_case(&decode_value(bytes)?)
     }
 
     pub(crate) fn encode_conformance_report(
@@ -5801,6 +5837,14 @@ fn verify_counterfactual_record_shapes(contract: &CounterfactualContractV1) -> b
 }
 
 fn verify_non_interference_matrix(cases: &[NonInterferenceCaseV1]) -> Result<(), EvidenceError> {
+    if non_interference_matrix_matches(cases) {
+        Ok(())
+    } else {
+        Err(EvidenceError::InvalidNonInterferenceMatrix)
+    }
+}
+
+fn non_interference_matrix_matches(cases: &[NonInterferenceCaseV1]) -> bool {
     let variants = [
         NonInterferenceVariantV1::Success,
         NonInterferenceVariantV1::Denial,
@@ -5821,26 +5865,57 @@ fn verify_non_interference_matrix(cases: &[NonInterferenceCaseV1]) -> Result<(),
             }
         }
     }
-    if cases.len() != expected.len()
-        || cases.iter().zip(expected.iter()).any(|(case, expected)| {
-            case.fixture_id != expected.0
-                || case.variant != expected.1
-                || case.mode != expected.2
-                || case.control_input_digest == [0; 32]
-                || case.canary_input_digest == [0; 32]
-                || case.control_input_digest == case.canary_input_digest
-                || case.authoritative_digest == [0; 32]
-                || case.public_digest == [0; 32]
-                || case.operational_digest == [0; 32]
-                || !case.authoritative_equal
-                || !case.public_equal
-                || !case.operational_equal
-                || case.provenance_digest == [0; 32]
+    cases.len() == expected.len()
+        && cases
+            .iter()
+            .zip(expected.iter())
+            .all(|(case, expected)| non_interference_case_matches(case, expected))
+        && cases.chunks_exact(16).all(|variants| {
+            variants.chunks_exact(4).all(|modes| {
+                modes
+                    .iter()
+                    .skip(1)
+                    .all(|case| non_interference_mode_matches_local(case, &modes[0]))
+            })
         })
-    {
-        return Err(EvidenceError::InvalidNonInterferenceMatrix);
-    }
-    Ok(())
+}
+
+fn non_interference_case_matches(
+    case: &NonInterferenceCaseV1,
+    expected: &(&str, NonInterferenceVariantV1, ExecutionModeV1),
+) -> bool {
+    case.fixture_id == expected.0
+        && case.variant == expected.1
+        && case.mode == expected.2
+        && case.control_input_digest != [0; 32]
+        && case.canary_input_digest != [0; 32]
+        && case.control_input_digest != case.canary_input_digest
+        && case.authoritative_digest != [0; 32]
+        && case.canary_authoritative_digest != [0; 32]
+        && case.public_digest != [0; 32]
+        && case.canary_public_digest != [0; 32]
+        && case.operational_digest != [0; 32]
+        && case.canary_operational_digest != [0; 32]
+        && case.authoritative_equal
+        && case.public_equal
+        && case.operational_equal
+        && case.authoritative_digest == case.canary_authoritative_digest
+        && case.public_digest == case.canary_public_digest
+        && case.operational_digest == case.canary_operational_digest
+        && case.first_divergence.is_none()
+        && case.first_cross_mode_divergence.is_none()
+        && case.provenance_digest != [0; 32]
+}
+
+fn non_interference_mode_matches_local(
+    case: &NonInterferenceCaseV1,
+    local: &NonInterferenceCaseV1,
+) -> bool {
+    case.control_input_digest == local.control_input_digest
+        && case.canary_input_digest == local.canary_input_digest
+        && case.authoritative_digest == local.authoritative_digest
+        && case.public_digest == local.public_digest
+        && case.operational_digest == local.operational_digest
 }
 
 fn verify_participant_views(
@@ -6169,6 +6244,25 @@ pub mod tests {
     use super::*;
 
     type EvidenceMutation = Box<dyn Fn(&mut MoatProofEvidenceV1)>;
+
+    fn executed_non_interference_matrix() -> Vec<NonInterferenceCaseV1> {
+        execute_wave8_non_interference_matrix([1; 32], |run| {
+            let names =
+                non_interference_surface_names_v1(run.subject.fixture_id).unwrap_or_default();
+            Ok(NonInterferenceCaptureV1 {
+                surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
+                authoritative: names
+                    .iter()
+                    .map(|_| run.subject.permitted_input.to_vec())
+                    .collect(),
+                public: names.iter().map(|_| b"public".to_vec()).collect(),
+                operational: names.iter().map(|_| b"operational".to_vec()).collect(),
+                unexpected_network_accesses: 0,
+                provenance_digest: [8; 32],
+            })
+        })
+        .unwrap_or_default()
+    }
 
     pub(crate) fn input() -> MoatProofInputV1 {
         MoatProofInputV1 {
@@ -7054,7 +7148,7 @@ pub mod tests {
                 committed: true,
                 failure_class: None,
             }],
-            non_interference: wave8_non_interference_matrix([1; 32]),
+            non_interference: executed_non_interference_matrix(),
         }
     }
 
@@ -7801,11 +7895,59 @@ pub mod tests {
                         value.contract.non_interference[0].control_input_digest;
                 }),
                 Box::new(|value| value.contract.non_interference[0].authoritative_digest = [0; 32]),
+                Box::new(|value| {
+                    value.contract.non_interference[0].canary_authoritative_digest = [0; 32];
+                }),
                 Box::new(|value| value.contract.non_interference[0].public_digest = [0; 32]),
+                Box::new(|value| {
+                    value.contract.non_interference[0].canary_public_digest = [0; 32];
+                }),
                 Box::new(|value| value.contract.non_interference[0].operational_digest = [0; 32]),
+                Box::new(|value| {
+                    value.contract.non_interference[0].canary_operational_digest = [0; 32];
+                }),
+                Box::new(|value| {
+                    value.contract.non_interference[0].canary_authoritative_digest = [99; 32];
+                }),
+                Box::new(|value| {
+                    value.contract.non_interference[0].canary_public_digest = [99; 32];
+                }),
+                Box::new(|value| {
+                    value.contract.non_interference[0].canary_operational_digest = [99; 32];
+                }),
                 Box::new(|value| value.contract.non_interference[0].authoritative_equal = false),
                 Box::new(|value| value.contract.non_interference[0].public_equal = false),
                 Box::new(|value| value.contract.non_interference[0].operational_equal = false),
+                Box::new(|value| {
+                    value.contract.non_interference[0].first_divergence =
+                        Some(NonInterferenceDivergenceCoordinateV1 {
+                            fixture_id: "NI-TOOL-001".to_owned(),
+                            variant: NonInterferenceVariantV1::Success,
+                            mode: ExecutionModeV1::Local,
+                            surface_ordinal: 0,
+                            byte_offset: 0,
+                        });
+                }),
+                Box::new(|value| {
+                    value.contract.non_interference[0].first_cross_mode_divergence =
+                        Some(NonInterferenceDivergenceCoordinateV1 {
+                            fixture_id: "NI-TOOL-001".to_owned(),
+                            variant: NonInterferenceVariantV1::Success,
+                            mode: ExecutionModeV1::AirGapped,
+                            surface_ordinal: 0,
+                            byte_offset: 0,
+                        });
+                }),
+                Box::new(|value| {
+                    value.contract.non_interference[1].authoritative_digest = [99; 32];
+                    value.contract.non_interference[1].canary_authoritative_digest = [99; 32];
+                }),
+                Box::new(|value| {
+                    value.contract.non_interference[1].control_input_digest = [98; 32];
+                }),
+                Box::new(|value| {
+                    value.contract.non_interference[1].canary_input_digest = [97; 32];
+                }),
                 Box::new(|value| value.contract.non_interference[0].provenance_digest = [0; 32]),
             ];
             for mutate in matrix_mutations {

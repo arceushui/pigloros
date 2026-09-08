@@ -699,59 +699,121 @@ fn validate_non_interference_matrix(value: &serde_json::Value) -> Result<(), Ref
     let mut index = 0;
     for fixture in fixtures {
         for variant in variants {
+            let mut local_digests: Option<NonInterferenceDigestRefs<'_>> = None;
             for mode in modes {
                 let case = cases[index]
                     .as_object()
                     .ok_or(ReferenceError::InvalidForkEvidence(
                         "non-interference case is not an object",
                     ))?;
-                let required = [
-                    "fixture_id",
-                    "variant",
-                    "mode",
-                    "control_input_digest",
-                    "canary_input_digest",
-                    "authoritative_digest",
-                    "public_digest",
-                    "operational_digest",
-                    "authoritative_equal",
-                    "public_equal",
-                    "operational_equal",
-                    "provenance_digest",
-                ];
-                if required.iter().any(|field| !case.contains_key(*field))
-                    || case.keys().any(|field| !required.contains(&field.as_str()))
-                    || case.get("fixture_id") != Some(&serde_json::json!(fixture))
-                    || case.get("variant") != Some(&serde_json::json!(variant))
-                    || case.get("mode") != Some(&serde_json::json!(mode))
-                    || case.get("authoritative_equal") != Some(&serde_json::json!(true))
-                    || case.get("public_equal") != Some(&serde_json::json!(true))
-                    || case.get("operational_equal") != Some(&serde_json::json!(true))
-                    || case.get("control_input_digest") == case.get("canary_input_digest")
-                    || [
-                        "control_input_digest",
-                        "canary_input_digest",
-                        "authoritative_digest",
-                        "public_digest",
-                        "operational_digest",
-                        "provenance_digest",
-                    ]
-                    .iter()
-                    .any(|field| {
-                        case.get(*field)
-                            .and_then(serde_json::Value::as_array)
-                            .is_none_or(Vec::is_empty)
-                    })
-                {
-                    return Err(ReferenceError::InvalidForkEvidence(
-                        "non-interference case is invalid",
-                    ));
+                let digests = validate_non_interference_case(case, fixture, variant, mode)?;
+                if let Some(local) = local_digests {
+                    if digests != local {
+                        return Err(ReferenceError::InvalidForkEvidence(
+                            "non-interference modes diverged",
+                        ));
+                    }
+                } else {
+                    local_digests = Some(digests);
                 }
                 index += 1;
             }
         }
     }
     Ok(())
+}
+
+type NonInterferenceDigestRefs<'a> = (
+    &'a serde_json::Value,
+    &'a serde_json::Value,
+    &'a serde_json::Value,
+    &'a serde_json::Value,
+    &'a serde_json::Value,
+);
+
+fn validate_non_interference_case<'a>(
+    case: &'a serde_json::Map<String, serde_json::Value>,
+    fixture: &str,
+    variant: &str,
+    mode: &str,
+) -> Result<NonInterferenceDigestRefs<'a>, ReferenceError> {
+    let required = [
+        "fixture_id",
+        "variant",
+        "mode",
+        "control_input_digest",
+        "canary_input_digest",
+        "authoritative_digest",
+        "canary_authoritative_digest",
+        "public_digest",
+        "canary_public_digest",
+        "operational_digest",
+        "canary_operational_digest",
+        "authoritative_equal",
+        "public_equal",
+        "operational_equal",
+        "first_divergence",
+        "first_cross_mode_divergence",
+        "provenance_digest",
+    ];
+    let digests = [
+        "control_input_digest",
+        "canary_input_digest",
+        "authoritative_digest",
+        "canary_authoritative_digest",
+        "public_digest",
+        "canary_public_digest",
+        "operational_digest",
+        "canary_operational_digest",
+        "provenance_digest",
+    ];
+    if required.iter().any(|field| !case.contains_key(*field))
+        || case.keys().any(|field| !required.contains(&field.as_str()))
+        || case.get("fixture_id") != Some(&serde_json::json!(fixture))
+        || case.get("variant") != Some(&serde_json::json!(variant))
+        || case.get("mode") != Some(&serde_json::json!(mode))
+        || case.get("authoritative_equal") != Some(&serde_json::json!(true))
+        || case.get("public_equal") != Some(&serde_json::json!(true))
+        || case.get("operational_equal") != Some(&serde_json::json!(true))
+        || !case
+            .get("first_divergence")
+            .is_some_and(serde_json::Value::is_null)
+        || !case
+            .get("first_cross_mode_divergence")
+            .is_some_and(serde_json::Value::is_null)
+        || case.get("control_input_digest") == case.get("canary_input_digest")
+        || case.get("authoritative_digest") != case.get("canary_authoritative_digest")
+        || case.get("public_digest") != case.get("canary_public_digest")
+        || case.get("operational_digest") != case.get("canary_operational_digest")
+        || digests
+            .iter()
+            .any(|field| !is_json_digest(case.get(*field)))
+    {
+        return Err(ReferenceError::InvalidForkEvidence(
+            "non-interference case is invalid",
+        ));
+    }
+    Ok((
+        &case["control_input_digest"],
+        &case["canary_input_digest"],
+        &case["authoritative_digest"],
+        &case["public_digest"],
+        &case["operational_digest"],
+    ))
+}
+
+fn is_json_digest(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|bytes| is_nonzero_json_digest(bytes))
+}
+
+fn is_nonzero_json_digest(bytes: &[serde_json::Value]) -> bool {
+    bytes.len() == 32
+        && bytes.iter().any(|byte| byte.as_u64() != Some(0))
+        && bytes
+            .iter()
+            .all(|byte| byte.as_u64().is_some_and(|byte| u8::try_from(byte).is_ok()))
 }
 
 fn field_value<'a>(
@@ -1121,15 +1183,20 @@ mod tests {
                         "fixture_id": fixture,
                         "variant": variant,
                         "mode": mode,
-                        "control_input_digest": [1],
-                        "canary_input_digest": [2],
-                        "authoritative_digest": [3],
-                        "public_digest": [4],
-                        "operational_digest": [5],
+                        "control_input_digest": vec![1_u8; 32],
+                        "canary_input_digest": vec![2_u8; 32],
+                        "authoritative_digest": vec![3_u8; 32],
+                        "canary_authoritative_digest": vec![3_u8; 32],
+                        "public_digest": vec![4_u8; 32],
+                        "canary_public_digest": vec![4_u8; 32],
+                        "operational_digest": vec![5_u8; 32],
+                        "canary_operational_digest": vec![5_u8; 32],
                         "authoritative_equal": true,
                         "public_equal": true,
                         "operational_equal": true,
-                        "provenance_digest": [6]
+                        "first_divergence": null,
+                        "first_cross_mode_divergence": null,
+                        "provenance_digest": vec![6_u8; 32]
                     }));
                 }
             }
@@ -1585,7 +1652,8 @@ mod tests {
     fn rejects_every_contract_and_matrix_shape_boundary() -> Result<(), ReferenceError> {
         rejects_contract_field_shapes()?;
         rejects_plugin_boundary_shapes()?;
-        rejects_matrix_shapes()
+        rejects_matrix_shapes()?;
+        rejects_matrix_digest_and_cross_mode_shapes()
     }
 
     fn rejects_contract_field_shapes() -> Result<(), ReferenceError> {
@@ -1710,8 +1778,13 @@ mod tests {
             ("control_input_digest", serde_json::json!([2])),
             ("canary_input_digest", serde_json::json!([])),
             ("authoritative_digest", serde_json::json!([])),
+            ("canary_authoritative_digest", serde_json::json!([])),
             ("public_digest", serde_json::json!([])),
+            ("canary_public_digest", serde_json::json!([])),
             ("operational_digest", serde_json::json!([])),
+            ("canary_operational_digest", serde_json::json!([])),
+            ("first_divergence", serde_json::json!({})),
+            ("first_cross_mode_divergence", serde_json::json!({})),
             ("provenance_digest", serde_json::json!([])),
         ];
         for (field, invalid) in matrix_cases {
@@ -1773,6 +1846,66 @@ mod tests {
                 "non-interference case is invalid"
             ))
         ));
+
+        Ok(())
+    }
+
+    fn rejects_matrix_digest_and_cross_mode_shapes() -> Result<(), ReferenceError> {
+        let (baseline, counterfactual) = fork_fixture();
+        let mut invalid_digest_byte = parse_json(&counterfactual)?;
+        invalid_digest_byte["contract"]["non_interference"][0]["provenance_digest"] =
+            serde_json::json!(vec![256_u64; 32]);
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &invalid_digest_byte.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "non-interference case is invalid"
+            ))
+        ));
+
+        let mut zero_digest = parse_json(&counterfactual)?;
+        zero_digest["contract"]["non_interference"][0]["provenance_digest"] =
+            serde_json::json!(vec![0_u8; 32]);
+        assert!(matches!(
+            verify_fork_json(&baseline, &zero_digest.to_string(), "world.action.v1"),
+            Err(ReferenceError::InvalidForkEvidence(
+                "non-interference case is invalid"
+            ))
+        ));
+
+        let mut cross_mode_divergence = parse_json(&counterfactual)?;
+        for field in ["authoritative_digest", "canary_authoritative_digest"] {
+            cross_mode_divergence["contract"]["non_interference"][1][field] =
+                serde_json::json!(vec![99_u8; 32]);
+        }
+        assert!(matches!(
+            verify_fork_json(
+                &baseline,
+                &cross_mode_divergence.to_string(),
+                "world.action.v1"
+            ),
+            Err(ReferenceError::InvalidForkEvidence(
+                "non-interference modes diverged"
+            ))
+        ));
+        for field in ["control_input_digest", "canary_input_digest"] {
+            let mut cross_mode_input_divergence = parse_json(&counterfactual)?;
+            cross_mode_input_divergence["contract"]["non_interference"][1][field] =
+                serde_json::json!(vec![99_u8; 32]);
+            assert!(matches!(
+                verify_fork_json(
+                    &baseline,
+                    &cross_mode_input_divergence.to_string(),
+                    "world.action.v1"
+                ),
+                Err(ReferenceError::InvalidForkEvidence(
+                    "non-interference modes diverged"
+                ))
+            ));
+        }
         Ok(())
     }
 }

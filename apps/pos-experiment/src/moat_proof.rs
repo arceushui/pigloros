@@ -7,12 +7,14 @@
 
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 use pos_conformance::{
-    compare, compare_authoritative_outputs, schema_id_for_event_type, verify_counterfactual_fork,
-    verify_evidence, wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
-    CausalTraceEntryV1, ComparisonV1, CounterfactualContractV1, DependencyClassV1,
-    DependencyNodeV1, DivergenceClassV1, ExecutionModeV1, FixtureAuthorizationDecisionV1,
-    FixtureCapabilityGrantV1, FixturePrincipalRefV1, HostClosureAuditV1, InputDependencyV1,
-    InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
+    compare, compare_authoritative_outputs, execute_wave8_non_interference_matrix,
+    non_interference_surface_names_v1, schema_id_for_event_type, verify_counterfactual_fork,
+    verify_evidence, wave8_plugin_boundary, AuthoritativeEventV1, CausalTraceEntryV1, ComparisonV1,
+    CounterfactualContractV1, DependencyClassV1, DependencyNodeV1, DivergenceClassV1,
+    ExecutionModeV1, FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1,
+    FixturePrincipalRefV1, HostClosureAuditV1, InputDependencyV1, InterventionV1,
+    InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
+    NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1, NonInterferenceHostRunV1,
     ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1,
     ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
     ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
@@ -323,6 +325,8 @@ pub enum MoatProofError {
     ExecutionModesDiverged(ComparisonV1),
     #[error("Wave 8 reaction and atomicity conformance gates failed")]
     ReactionGatesFailed,
+    #[error("non-interference execution failed: {0}")]
+    NonInterference(#[from] NonInterferenceExecutionErrorV1),
     #[error("consent-revoked session accepted a post-revocation append")]
     ConsentAppendAccepted,
     #[error("consent probe did not commit its host-owned closure marker")]
@@ -663,7 +667,6 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
         host_closure: host_closure.clone(),
         contract,
     })
-    .map_err(MoatProofError::from)
 }
 
 fn causal_trace(events: &[Event], ids: &HashMap<EventId, u64>) -> Vec<CausalTraceEntryV1> {
@@ -1315,7 +1318,7 @@ fn build_wave8_contract(
     events: &[AuthoritativeEventV1],
     factual_events: &[AuthoritativeEventV1],
     participant_views: &[ParticipantViewV1],
-) -> Result<Wave8ProofContractV1, pos_core::CoreError> {
+) -> Result<Wave8ProofContractV1, MoatProofError> {
     let policy_digest = profile_digest();
     let room_parts = build_room_parts(
         context.input,
@@ -1339,7 +1342,8 @@ fn build_wave8_contract(
         policy_digest,
         room_parts.exogenous_digest,
     )
-    .map(|counterfactual| {
+    .map_err(MoatProofError::from)
+    .and_then(|counterfactual| {
         let atomicity = build_atomicity(
             context.input,
             events,
@@ -1347,18 +1351,121 @@ fn build_wave8_contract(
             counterfactual.generation,
             serialized_digest(&events.to_vec()),
         );
-        Wave8ProofContractV1 {
-            scenario_room: room_parts.room,
-            plugin_boundary: wave8_plugin_boundary(),
-            knowledge_snapshots,
-            authorization_decisions,
-            counterfactual,
-            atomicity,
-            non_interference: wave8_non_interference_matrix(
-                context.input.digest().unwrap_or([0; 32]),
-            ),
-        }
+        capture_non_interference_surfaces(context, events, participant_views).and_then(|captures| {
+            execute_wave8_non_interference_matrix(context.topology.input_digest, |run| {
+                Ok(execute_reference_non_interference_run(
+                    run,
+                    &captures.authoritative,
+                    &captures.public,
+                    &captures.operational,
+                    captures.provenance_digest,
+                ))
+            })
+            .map_err(MoatProofError::from)
+            .map(|non_interference| Wave8ProofContractV1 {
+                scenario_room: room_parts.room,
+                plugin_boundary: wave8_plugin_boundary(),
+                knowledge_snapshots,
+                authorization_decisions,
+                counterfactual,
+                atomicity,
+                non_interference,
+            })
+        })
     })
+}
+
+struct CapturedNonInterferenceSurfaces {
+    authoritative: Vec<u8>,
+    public: Vec<u8>,
+    operational: Vec<u8>,
+    provenance_digest: [u8; 32],
+}
+
+fn capture_non_interference_surfaces(
+    context: &EvidenceContext<'_>,
+    events: &[AuthoritativeEventV1],
+    participant_views: &[ParticipantViewV1],
+) -> Result<CapturedNonInterferenceSurfaces, MoatProofError> {
+    let authoritative = capture_bytes(&events.to_vec())?;
+    let public = capture_bytes(&participant_views.to_vec())?;
+    let operational = capture_bytes(&(context.failure_probes, context.host_closure))?;
+    let mut provenance = Vec::new();
+    provenance.extend_from_slice(&serialized_digest(&events.to_vec()));
+    provenance.extend_from_slice(&serialized_digest(&participant_views.to_vec()));
+    provenance.extend_from_slice(&serialized_digest(&context.failure_probes.to_vec()));
+    Ok(CapturedNonInterferenceSurfaces {
+        authoritative,
+        public,
+        operational,
+        provenance_digest: digest_domain(b"PiglorOS.NonInterference.Execution.v1", &provenance),
+    })
+}
+
+fn execute_reference_non_interference_run(
+    run: &NonInterferenceHostRunV1<'_>,
+    authoritative: &[u8],
+    public: &[u8],
+    operational: &[u8],
+    base_provenance_digest: [u8; 32],
+) -> NonInterferenceCaptureV1 {
+    // The host binds the denied value to this execution's provenance, but the
+    // subject output is derived exclusively from its permitted invocation.
+    // This is the reference harness seam; #193 supplies the channel-specific
+    // public adapters and immutable execution artifacts that consume it.
+    let denied_value_digest = digest_domain(
+        b"PiglorOS.NonInterference.DeniedHostValue.v1",
+        run.unauthorized_value,
+    );
+    let subject_output = digest_domain(
+        b"PiglorOS.NonInterference.ReferenceSubject.v1",
+        run.subject.permitted_input,
+    );
+    let mut provenance = Vec::with_capacity(96);
+    provenance.extend_from_slice(&base_provenance_digest);
+    provenance.extend_from_slice(&denied_value_digest);
+    provenance.extend_from_slice(&subject_output);
+    let surface_names =
+        non_interference_surface_names_v1(run.subject.fixture_id).unwrap_or_default();
+    NonInterferenceCaptureV1 {
+        surface_names: surface_names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        authoritative: reference_surface_values(surface_names, authoritative, &subject_output),
+        public: reference_surface_values(surface_names, public, &subject_output),
+        operational: reference_surface_values(surface_names, operational, &subject_output),
+        // This pure reference subject has no network operation in its API.
+        unexpected_network_accesses: 0,
+        provenance_digest: digest_domain(
+            b"PiglorOS.NonInterference.ReferenceExecution.v1",
+            &provenance,
+        ),
+    }
+}
+
+fn reference_surface_values(
+    surface_names: &[&str],
+    captured: &[u8],
+    subject_output: &[u8; 32],
+) -> Vec<Vec<u8>> {
+    let captured_digest = digest_domain(b"PiglorOS.NonInterference.CapturedSurface.v1", captured);
+    surface_names
+        .iter()
+        .map(|name| {
+            let mut value = Vec::new();
+            value.extend_from_slice(&captured_digest);
+            value.extend_from_slice(subject_output);
+            value.extend_from_slice(name.as_bytes());
+            digest_domain(b"PiglorOS.NonInterference.NamedSurface.v1", &value).to_vec()
+        })
+        .collect()
+}
+
+fn capture_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, NonInterferenceExecutionErrorV1> {
+    pos_crypto::canonical::encode(value)
+        .map(|bytes| bytes.as_slice().to_vec())
+        .map_err(|_| NonInterferenceExecutionErrorV1::CaptureUnavailable)
 }
 
 fn owner_frontiers(nodes: &[DependencyNodeV1]) -> Vec<pos_conformance::OwnerFrontierV1> {
@@ -2910,5 +3017,62 @@ mod run_coverage_entrypoints {
         let mut input = proof_input();
         input.scenario_id.clear();
         assert!(run_local_and_air_gapped(input).is_err());
+    }
+
+    #[test]
+    fn reference_non_interference_execution_keeps_denied_values_host_owned() {
+        let subject = pos_conformance::NonInterferenceInvocationV1 {
+            fixture_id: "NI-TOOL-001",
+            variant: pos_conformance::NonInterferenceVariantV1::Success,
+            mode: ExecutionModeV1::Local,
+            permitted_input: b"permitted",
+        };
+        let control = execute_reference_non_interference_run(
+            &NonInterferenceHostRunV1 {
+                member: pos_conformance::NonInterferenceMatrixMemberV1::Control,
+                subject,
+                unauthorized_value: b"control-secret",
+            },
+            b"authoritative",
+            b"public",
+            b"operational",
+            [8; 32],
+        );
+        let canary = execute_reference_non_interference_run(
+            &NonInterferenceHostRunV1 {
+                member: pos_conformance::NonInterferenceMatrixMemberV1::Canary,
+                subject,
+                unauthorized_value: b"canary-secret",
+            },
+            b"authoritative",
+            b"public",
+            b"operational",
+            [8; 32],
+        );
+        assert_eq!(control.authoritative, canary.authoritative);
+        assert_eq!(control.public, canary.public);
+        assert_eq!(control.operational, canary.operational);
+        assert_ne!(control.provenance_digest, canary.provenance_digest);
+    }
+
+    #[test]
+    fn capture_serialization_failure_is_closed() {
+        struct FailingSerialize;
+
+        impl Serialize for FailingSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(<S::Error as serde::ser::Error>::custom(
+                    "intentional fixture failure",
+                ))
+            }
+        }
+
+        assert_eq!(
+            capture_bytes(&FailingSerialize),
+            Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+        );
     }
 }

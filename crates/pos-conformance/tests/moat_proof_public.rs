@@ -5,6 +5,24 @@
 use pos_conformance::*;
 use std::collections::BTreeMap;
 
+fn executed_non_interference_matrix() -> Vec<NonInterferenceCaseV1> {
+    execute_wave8_non_interference_matrix([1; 32], |run| {
+        let names = non_interference_surface_names_v1(run.subject.fixture_id).unwrap_or_default();
+        Ok(NonInterferenceCaptureV1 {
+            surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
+            authoritative: names
+                .iter()
+                .map(|_| run.subject.permitted_input.to_vec())
+                .collect(),
+            public: names.iter().map(|_| b"public".to_vec()).collect(),
+            operational: names.iter().map(|_| b"operational".to_vec()).collect(),
+            unexpected_network_accesses: 0,
+            provenance_digest: [8; 32],
+        })
+    })
+    .unwrap_or_default()
+}
+
 #[derive(Clone, Copy)]
 enum EvidenceField {
     Magic,
@@ -638,7 +656,7 @@ fn proof_contract_fixture() -> Wave8ProofContractV1 {
             committed: true,
             failure_class: None,
         }],
-        non_interference: wave8_non_interference_matrix([1; 32]),
+        non_interference: executed_non_interference_matrix(),
     }
 }
 
