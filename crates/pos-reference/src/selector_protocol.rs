@@ -1339,6 +1339,34 @@ mod tests {
     }
 
     #[test]
+    fn audit_record_rejects_every_closed_shape_boundary() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        for event in 0_u8..=13 {
+            let authority_count = if event == 12 { 4 } else { 3 };
+            let authority = (1..=authority_count)
+                .map(|value| [value; 32])
+                .collect::<Vec<_>>();
+            let (record, _) = audit_record(&encoded, 0, event, authority, None)?;
+            SandboxAuditRecord::from_canonical_cbor(&record)
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+        }
+
+        let invalid = [
+            (0, 14, vec![[1; 32]; 3], None),
+            (0, 1, vec![[1; 32]; 2], None),
+            (0, 1, vec![[0; 32], [1; 32], [2; 32]], None),
+            (0, 1, vec![[1; 32]; 3], Some([1; 32])),
+            (1, 1, vec![[1; 32]; 3], None),
+            (1, 1, vec![[1; 32]; 3], Some([0; 32])),
+        ];
+        for (sequence, event, authority, previous) in invalid {
+            let (record, _) = audit_record(&encoded, sequence, event, authority, previous)?;
+            assert!(SandboxAuditRecord::from_canonical_cbor(&record).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn output_and_absent_evidence_validators_close_every_field() -> Result<(), AdapterError> {
         let trailing = [1_u8, 2, 3];
         let valid = Value::Array(vec![
