@@ -891,8 +891,7 @@ fn sqlite_fork_insert_failure_rolls_back_erasure_successor(
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch(&format!(
         "CREATE TRIGGER reject_erasure_child BEFORE INSERT ON timelines
-         WHEN NEW.id = '{}' BEGIN SELECT RAISE(ABORT, 'fault'); END;",
-        child
+         WHEN NEW.id = '{child}' BEGIN SELECT RAISE(ABORT, 'fault'); END;"
     ))?;
     drop(connection);
 
