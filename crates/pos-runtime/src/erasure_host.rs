@@ -754,31 +754,32 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let stale = ErasureReferenceV1::from_digest([32; 32]);
 
-        let mut sender = host
-            .command_sender()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        sender.generation = stale;
-        assert_eq!(
-            sender.create_timeline("stale"),
-            Err(ErasureHostErrorV1::StaleGeneration)
-        );
-        assert_eq!(
-            sender.fork_timeline(root.id(), Seq::ZERO, "stale"),
-            Err(ErasureHostErrorV1::StaleGeneration)
-        );
-        assert_eq!(
-            sender.commit_fork_admission(batch),
-            Err(ErasureHostErrorV1::StaleGeneration)
-        );
-        assert_eq!(
-            sender.recover_fork_admission(ErasureReferenceV1::from_digest([33; 32])),
-            Err(ErasureHostErrorV1::StaleGeneration)
-        );
-        assert_eq!(
-            sender.append(root.id(), &[]),
-            Err(ErasureHostErrorV1::StaleGeneration)
-        );
-        drop(sender);
+        {
+            let mut sender = host
+                .command_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            sender.generation = stale;
+            assert_eq!(
+                sender.create_timeline("stale"),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.fork_timeline(root.id(), Seq::ZERO, "stale"),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.commit_fork_admission(batch),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.recover_fork_admission(ErasureReferenceV1::from_digest([33; 32])),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.append(root.id(), &[]),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+        }
 
         let mut reader = host
             .read_sender()
