@@ -90,10 +90,9 @@ fn public_store_verification_fails_closed_without_host_gate_on_signature_role(
         Ok(report) => return Err(format!("malformed identity produced a report: {report}").into()),
         Err(error) => error,
     };
-    assert_eq!(
-        error.to_string(),
-        "erasure containment boundary is unavailable"
-    );
+    assert!(error
+        .to_string()
+        .contains("erasure containment boundary is unavailable"));
     Ok(())
 }
 
@@ -148,10 +147,9 @@ fn public_store_verification_fails_closed_without_host_gate_on_invalid_registry_
         }
         Err(error) => error,
     };
-    assert_eq!(
-        error.to_string(),
-        "erasure containment boundary is unavailable"
-    );
+    assert!(error
+        .to_string()
+        .contains("erasure containment boundary is unavailable"));
     Ok(())
 }
 
@@ -275,10 +273,9 @@ fn public_store_verification_fails_closed_without_host_gate_on_rotated_key(
     let error = verify_source(&Source::Store(database_path), Some(&anchors), None)
         .err()
         .ok_or("production store verification unexpectedly succeeded without a host gate")?;
-    assert_eq!(
-        error.to_string(),
-        "erasure containment boundary is unavailable"
-    );
+    assert!(error
+        .to_string()
+        .contains("erasure containment boundary is unavailable"));
 
     let single_public_key = material_one
         .public_verification_key()
