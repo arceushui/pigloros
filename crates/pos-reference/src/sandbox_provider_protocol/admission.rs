@@ -338,6 +338,8 @@ pub struct SandboxProviderAdmissionInputs<'a> {
     pub provider_manifest: &'a [u8],
     /// Exact installed provider executable bytes.
     pub provider_binary: &'a [u8],
+    /// Exact independently installed broker hard-cap bytes selected by APT1.
+    pub broker_hard_caps: &'a [u8],
     /// Canonical independently signed PCR1 bytes.
     pub conformance_report: &'a [u8],
     /// Canonical runtime-signed current HCP1 bytes.
@@ -398,7 +400,13 @@ impl AdmittedSandboxProvider {
                 inputs.conformance_report,
             )?,
         };
-        Self::validate_selected_provider(policy, revocation, inputs.provider_binary, &decoded)?;
+        Self::validate_selected_provider(
+            policy,
+            revocation,
+            inputs.provider_binary,
+            inputs.broker_hard_caps,
+            &decoded,
+        )?;
         let runtime_key = Self::authenticate_provider_signers(trust, revocation, &decoded)?;
         Self::validate_conformance(inputs.required_features, &decoded)?;
         Ok(Self {
@@ -417,6 +425,7 @@ impl AdmittedSandboxProvider {
         policy: &SandboxAdministratorPolicy,
         revocation: &SandboxRevocationSnapshot,
         provider_binary: &[u8],
+        broker_hard_caps: &[u8],
         decoded: &DecodedProviderAdmission,
     ) -> Result<(), SandboxAdmissionError> {
         let DecodedProviderAdmission {
@@ -442,6 +451,9 @@ impl AdmittedSandboxProvider {
         };
         if policy_selection != supplied_selection {
             return Err(SandboxAdmissionError::PolicyMismatch);
+        }
+        if digest_bytes(broker_hard_caps) != selection.broker_hard_caps {
+            return Err(SandboxAdmissionError::ArtifactMismatch);
         }
         if revocation.provider_revoked(&manifest.manifest_digest)
             || revocation.provider_revoked(&manifest.binary_digest)
