@@ -112,7 +112,7 @@ pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<()
     for (index, artifact) in attempt.auxiliary.iter().enumerate() {
         write_artifact(&mut writer, &mut transcript, 2, as_u64(index)?, artifact)?;
     }
-    write_attempt_footer(&mut writer, transcript)?;
+    write_attempt_footer(&mut writer, &transcript)?;
     writer.flush().map_err(io_error)
 }
 
@@ -146,7 +146,7 @@ fn write_attempt_header(
 
 fn write_attempt_footer(
     writer: &mut impl Write,
-    transcript: blake3::Hasher,
+    transcript: &blake3::Hasher,
 ) -> Result<(), TransportError> {
     write_frame(
         writer,
