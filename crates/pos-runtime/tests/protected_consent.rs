@@ -1381,7 +1381,7 @@ fn public_registry_requires_a_gate_for_public_append() {
     let orphan_timeline = TimelineId::new();
     let mut public_missing_gate = PluginRegistry::new();
     test_ok(public_missing_gate.step_all_anchored(orphan_timeline, Seq::ZERO));
-    public_missing_gate = public_missing_gate.without_consent_gate();
+    let public_missing_gate = public_missing_gate.without_consent_gate();
     assert!(matches!(
         public_missing_gate.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
         Err(RuntimeError::ConsentOperationUnavailable)
