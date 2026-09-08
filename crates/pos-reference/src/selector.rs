@@ -116,7 +116,16 @@ impl SelectorAdapter {
     }
 
     fn invoke(attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
-        let mut stream = connect_selector().map_err(|_| AdapterError::Unavailable)?;
+        Self::invoke_at(Path::new(SANDBOX_SELECTOR_SOCKET), 0, attempt)
+    }
+
+    fn invoke_at(
+        socket_path: &Path,
+        expected_uid: u32,
+        attempt: &CaseAttempt,
+    ) -> Result<SubjectObservation, AdapterError> {
+        let mut stream =
+            connect_at(socket_path, expected_uid).map_err(|_| AdapterError::Unavailable)?;
         let watchdog = Duration::from_millis(attempt.watchdog_ms);
         stream
             .set_read_timeout(Some(watchdog))
@@ -237,11 +246,15 @@ fn digest_name(digest: [u8; 32]) -> String {
 }
 
 fn connect_selector() -> Result<UnixStream, SelectorBoundaryError> {
-    let path = PathBuf::from(SANDBOX_SELECTOR_SOCKET);
+    connect_at(Path::new(SANDBOX_SELECTOR_SOCKET), 0)
+}
+
+fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoundaryError> {
+    let path = PathBuf::from(path);
     let before =
         std::fs::symlink_metadata(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
     if !before.file_type().is_socket()
-        || before.uid() != 0
+        || before.uid() != expected_uid
         || before.mode() & 0o777 != SELECTOR_SOCKET_MODE
     {
         return Err(SelectorBoundaryError::ArtifactInvalid);
@@ -252,7 +265,10 @@ fn connect_selector() -> Result<UnixStream, SelectorBoundaryError> {
         socket_peercred(stream.as_fd()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     let after =
         std::fs::symlink_metadata(path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-    if credentials.uid.as_raw() != 0 || before.dev() != after.dev() || before.ino() != after.ino() {
+    if credentials.uid.as_raw() != expected_uid
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
+    {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
     Ok(stream)
@@ -261,6 +277,11 @@ fn connect_selector() -> Result<UnixStream, SelectorBoundaryError> {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::net::UnixListener;
+
+    use crate::adapter_transport::{read_attempt, write_observation};
+    use crate::evaluator::{AttemptArtifact, AttemptTransportCaps, ResourceUsage, SubjectResult};
+    use crate::profile::DeterministicBudget;
 
     use super::*;
 
@@ -314,6 +335,100 @@ mod tests {
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&image_directory, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    fn attempt() -> CaseAttempt {
+        let artifact = |bytes: Vec<u8>| AttemptArtifact {
+            digest: *blake3::hash(&bytes).as_bytes(),
+            bytes,
+        };
+        CaseAttempt {
+            case_id: "selector-case".to_owned(),
+            claim_layer: 1,
+            family: 2,
+            mode: 1,
+            fixture_digest: [3; 32],
+            schema: artifact(vec![4]),
+            payload: artifact(vec![5]),
+            auxiliary: Vec::new(),
+            budget: DeterministicBudget {
+                memory_bytes: 1,
+                cpu_fuel: 2,
+                host_calls: 3,
+                event_count: 4,
+                output_bytes: 5,
+                storage_bytes: 6,
+                execution_steps: 7,
+                simulation_time_ns: 8,
+            },
+            watchdog_ms: 1_000,
+            network_allowed: false,
+            capability_ids: vec!["sandbox".to_owned()],
+            transport_caps: AttemptTransportCaps {
+                max_member_bytes: 1024,
+                max_attempt_bytes: 4096,
+            },
+        }
+    }
+
+    #[test]
+    fn selector_transport_authenticates_socket_and_round_trips(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        let expected = SubjectObservation {
+            result: SubjectResult::Unavailable,
+            usage: ResourceUsage::default(),
+        };
+        let server_expected = expected.clone();
+        let server = std::thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            read_attempt(&mut stream).map_err(|error| error.to_string())?;
+            write_observation(&mut stream, &server_expected).map_err(|error| error.to_string())
+        });
+
+        assert_eq!(
+            SelectorAdapter::invoke_at(&socket, uid, &attempt()),
+            Ok(expected)
+        );
+        server.join().map_err(|_| "selector server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn selector_transport_rejects_missing_wrong_type_mode_and_owner(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let missing = temporary.path().join("missing.sock");
+        assert_eq!(
+            connect_at(&missing, 0).map(|_| ()),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+
+        let regular = temporary.path().join("regular");
+        std::fs::write(&regular, b"not a socket")?;
+        assert_eq!(
+            connect_at(&regular, 0).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        assert_eq!(
+            connect_at(&socket, uid).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        assert_eq!(
+            connect_at(&socket, uid.wrapping_add(1)).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        drop(listener);
         Ok(())
     }
 }
