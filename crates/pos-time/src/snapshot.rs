@@ -188,12 +188,13 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
-        ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-        ReplayClaimEvaluatorV1, State,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureContainmentGateV1,
+        ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, Reducer,
+        RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, State,
     };
     use pos_state::{EntityStateProjection, ProjectionRegistry};
     use pos_store::{open_store, StoreConfig};
+    use std::sync::Arc;
 
     struct ReadFailStore;
 
@@ -316,12 +317,20 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn open_test_store() -> Box<dyn EventStore> {
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
+        store
+    }
+
     // ── tests ─────────────────────────────────────────────────────────────────
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn snapshot_captures_state_at_head() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("snap").test_ok();
         let entity = EntityId::new();
 
@@ -342,7 +351,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_passes_on_fresh_store() {
         // No tail events: snapshot IS the full replay.
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("consistent").test_ok();
         let entity = EntityId::new();
 
@@ -367,7 +376,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_with_tail_events() {
         // Take a snapshot, then append more events. Verification should still pass.
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("with-tail").test_ok();
         let entity = EntityId::new();
 
@@ -397,7 +406,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn snapshot_isolates_multiple_reducers() {
         // Register two reducers — their states should be tracked independently.
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("multi-reducer").test_ok();
         let entity = EntityId::new();
 
@@ -478,12 +487,13 @@ mod extra_tests {
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId},
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
-        ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-        ReplayClaimEvaluatorV1, State,
+        ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureContainmentGateV1,
+        ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, Reducer,
+        RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, State,
     };
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
+    use std::sync::Arc;
 
     const SNAPSHOT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([41; 32]);
 
@@ -634,13 +644,21 @@ mod extra_tests {
         EventDraft::new(entity, Kind::new("t"), CanonicalBytes::from_vec(vec![]))
     }
 
+    fn open_test_store() -> Box<dyn EventStore> {
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
+        store
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_detects_corrupted_snapshot() {
         // Covers the case where snapshot.registry has been tampered with.
         // Build a valid snapshot via normal snapshot(), then manually corrupt
         // the registry map before verifying.
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
 

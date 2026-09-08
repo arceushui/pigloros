@@ -129,10 +129,11 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
-        Event, Reducer, State,
+        ErasureContainmentGateV1, Event, Reducer, State,
     };
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
+    use std::sync::Arc;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -177,13 +178,21 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn open_test_store() -> Box<dyn EventStore> {
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
+        store
+    }
+
     // ── tests ─────────────────────────────────────────────────────────────────
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_identical_timelines_no_diff() {
         // Fork a timeline, append nothing to either fork. Diff should be empty.
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let parent = store.create_timeline("parent").test_ok();
         let entity = EntityId::new();
 
@@ -216,7 +225,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_diverged_timelines_detects_differences() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let parent = store.create_timeline("parent").test_ok();
         let shared_entity = EntityId::new();
 
@@ -260,7 +269,7 @@ mod tests {
         // Two registries must not share state even when both see events for the
         // same entity. This exercises the isolation guarantee that motivated the
         // fix from a single shared reducers slice.
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let parent = store.create_timeline("parent").test_ok();
         let entity = EntityId::new();
 
@@ -305,7 +314,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_unknown_timeline_returns_store_error() {
-        let store = open_store(StoreConfig::Memory).test_ok();
+        let store = open_test_store();
         let mut reg_a = make_registry();
         let mut reg_b = make_registry();
         let err = compare(
@@ -324,7 +333,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_second_timeline_missing_returns_error() {
         // Covers the `events_b` read error path (first timeline exists).
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let a = store.create_timeline("a").test_ok();
         let mut reg_a = make_registry();
         let mut reg_b = make_registry();

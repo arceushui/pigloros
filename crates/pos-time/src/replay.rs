@@ -106,11 +106,12 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
         store::{EventStore, SeqRange},
-        CoreError, Event, Reducer, State,
+        CoreError, ErasureContainmentGateV1, Event, Reducer, State,
     };
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
+    use std::sync::Arc;
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([43; 32]);
@@ -147,6 +148,14 @@ mod tests {
             REPLAY_DIGEST,
             &replay_evaluation(pos_core::ArtifactStateV1::Retained),
         )
+    }
+
+    fn open_test_store() -> Box<dyn EventStore> {
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
+        store
     }
 
     fn replay_at(
@@ -282,7 +291,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_empty_timeline_is_noop() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("empty").test_ok();
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
@@ -297,7 +306,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_full_timeline_folds_all_events() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("full").test_ok();
         let entity = EntityId::new();
 
@@ -314,7 +323,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_at_seq_stops_at_boundary() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("partial").test_ok();
         let entity = EntityId::new();
 
@@ -355,7 +364,7 @@ mod tests {
         #[test]
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn replay_is_deterministic(event_count in 0usize..20) {
-            let mut store = open_store(StoreConfig::Memory).test_ok();
+            let mut store = open_test_store();
             let tl = store.create_timeline("det").test_ok();
             let entity = EntityId::new();
 
