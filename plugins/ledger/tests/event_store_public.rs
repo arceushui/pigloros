@@ -2,8 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey;
 use pos_core::{
-    Event, EventDraft, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, Seq, SeqRange, Timeline, TimelineId,
+    ErasureContainmentGateV1, Event, EventDraft, EventStore, Hash, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Seq, SeqRange, Timeline,
+    TimelineId,
 };
 use pos_crypto::{chain::Blake3Hasher, key_roles::key_material_digest};
 use pos_plugin_ledger::EventLedgerStore;
@@ -88,6 +89,7 @@ fn destruction_propagates_a_final_commit_failure() -> Result<(), Box<dyn std::er
     ))?;
 
     let mut inner = MemoryStore::new();
+    inner.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
     let timeline = inner.create_timeline("ledger")?;
     inner.save_key_registry(&registry)?;
     let mut store = EventLedgerStore::new(
