@@ -60,10 +60,6 @@ fn gated_experiment(config: ExperimentConfig) -> Experiment {
     Experiment::new(config).with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
 }
 
-fn gated_registry() -> PluginRegistry {
-    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
-}
-
 fn gated_memory_store() -> MemoryStore {
     let mut store = MemoryStore::new();
     store
