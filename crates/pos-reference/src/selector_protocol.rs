@@ -22,21 +22,21 @@ const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
 const SLY1_DOMAIN: &[u8] = b"PiglorOS.SLY1.v1\0";
 
-pub(crate) struct EncodedSelectorRequest {
-    pub(crate) control: Vec<u8>,
-    pub(crate) attempt_stream: Vec<u8>,
-    pub(crate) provider_request_id: [u8; 16],
-    pub(crate) attempt_id: [u8; 16],
-    pub(crate) digest: [u8; 32],
+pub struct EncodedSelectorRequest {
+    pub control: Vec<u8>,
+    pub attempt_stream: Vec<u8>,
+    pub provider_request_id: [u8; 16],
+    pub attempt_id: [u8; 16],
+    pub digest: [u8; 32],
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct DecodedSelectorReply {
-    pub(crate) observation: Result<SubjectObservation, AdapterError>,
-    pub(crate) provenance: Option<[u8; 32]>,
+pub struct DecodedSelectorReply {
+    pub observation: Result<SubjectObservation, AdapterError>,
+    pub provenance: Option<[u8; 32]>,
 }
 
-pub(crate) fn encode_request(
+pub fn encode_request(
     request: &EvaluationRequest,
     request_bytes: &[u8],
     attempt: &CaseAttempt,
@@ -72,7 +72,7 @@ pub(crate) fn encode_request(
     })
 }
 
-pub(crate) fn decode_reply(
+pub fn decode_reply(
     control: &[u8],
     trailing: &[u8],
     request: &EncodedSelectorRequest,
@@ -313,6 +313,7 @@ fn is_magic(value: &Value, magic: &str) -> bool {
 mod tests {
     use std::collections::HashSet;
 
+    use crate::adapter_transport::write_observation;
     use crate::evaluator::{AttemptArtifact, AttemptTransportCaps};
     use crate::evaluator_protocol::{ImplementationIdentity, OutputCapability, SubjectAdapterKind};
     use crate::profile::DeterministicBudget;
@@ -432,6 +433,290 @@ mod tests {
         encode_with_limit(&value, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)
     }
 
+    fn optional_digest(value: Option<[u8; 32]>) -> Value {
+        value.map_or(Value::Null, |digest| Value::Bytes(digest.to_vec()))
+    }
+
+    fn protocol_record(
+        magic: &str,
+        fields: Vec<Value>,
+        signed: bool,
+    ) -> Result<(Vec<u8>, [u8; 32]), AdapterError> {
+        let unsigned = Value::Array(fields);
+        let unsigned_bytes = encode_with_limit(&unsigned, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut domain = format!("PiglorOS.{magic}.v1").into_bytes();
+        domain.push(0);
+        let digest = domain_digest(&domain, &unsigned_bytes);
+        let mut wrapper = vec![unsigned, Value::Bytes(digest.to_vec())];
+        if signed {
+            wrapper.push(Value::Bytes(vec![1; 64]));
+        }
+        let bytes = encode_with_limit(&Value::Array(wrapper), CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        Ok((bytes, digest))
+    }
+
+    fn execute_request(
+        request: &EncodedSelectorRequest,
+        evr1_digest: [u8; 32],
+    ) -> Result<Vec<u8>, AdapterError> {
+        let mut fields = vec![
+            Value::Text("SPX1".to_owned()),
+            integer(1),
+            Value::Array(vec![
+                Value::Bytes(request.provider_request_id.to_vec()),
+                Value::Bytes(vec![12; 32]),
+                integer(1),
+                Value::Bytes(vec![13; 16]),
+            ]),
+            Value::Bytes(request.attempt_id.to_vec()),
+        ];
+        for digest in 20_u8..35 {
+            fields.push(Value::Bytes(vec![digest; 32]));
+        }
+        fields[12] = Value::Bytes(vec![12; 32]);
+        fields.extend([
+            Value::Array(vec![Value::Text("execute".to_owned())]),
+            descriptor(
+                &request.attempt_stream,
+                domain_digest(INPUT_DOMAIN, &request.attempt_stream),
+            )?,
+            Value::Array(Vec::new()),
+        ]);
+        fields[4] = Value::Bytes(evr1_digest.to_vec());
+        protocol_record("SPX1", fields, false).map(|(bytes, _)| bytes)
+    }
+
+    fn audit_record(
+        request: &EncodedSelectorRequest,
+        sequence: u64,
+        event: u8,
+        authority: Vec<[u8; 32]>,
+        previous: Option<[u8; 32]>,
+    ) -> Result<(Vec<u8>, [u8; 32]), AdapterError> {
+        protocol_record(
+            "SAU1",
+            vec![
+                Value::Text("SAU1".to_owned()),
+                integer(1),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(sequence),
+                integer(u64::from(event)),
+                Value::Array(
+                    authority
+                        .into_iter()
+                        .map(|digest| Value::Bytes(digest.to_vec()))
+                        .collect(),
+                ),
+                optional_digest(previous),
+                Value::Text("runtime-key".to_owned()),
+            ],
+            true,
+        )
+    }
+
+    fn admitted_reply(
+        request: &EncodedSelectorRequest,
+        evr1_digest: [u8; 32],
+        outcome: u64,
+    ) -> Result<(Vec<u8>, Vec<u8>, [u8; 32]), AdapterError> {
+        let (grant, grant_digest) = protocol_record(
+            "AGR1",
+            {
+                let mut fields = vec![
+                    Value::Text("AGR1".to_owned()),
+                    integer(1),
+                    Value::Bytes(request.provider_request_id.to_vec()),
+                    Value::Bytes(request.attempt_id.to_vec()),
+                ];
+                for digest in 40_u8..53 {
+                    fields.push(Value::Bytes(vec![digest; 32]));
+                }
+                fields.extend([
+                    integer(1),
+                    integer(2),
+                    integer(3),
+                    Value::Bytes(vec![53; 32]),
+                    Value::Bytes(vec![54; 32]),
+                    Value::Array(Vec::new()),
+                    Value::Bytes(vec![55; 32]),
+                    Value::Bytes(vec![56; 32]),
+                    Value::Text("runtime-key".to_owned()),
+                ]);
+                fields[4] = Value::Bytes(evr1_digest.to_vec());
+                fields
+            },
+            true,
+        )?;
+        let (events, ready, release) = match outcome {
+            0 => (vec![11, 12], Some([61; 32]), Some([62; 32])),
+            1 => (vec![1], None, None),
+            4 => (vec![0], None, None),
+            _ => return Err(AdapterError::ProtocolFailure),
+        };
+        let observed = [63; 32];
+        let elm = [64; 32];
+        let termination = [65; 32];
+        let mut audit_bytes = Vec::new();
+        let mut previous = None;
+        for (sequence, event) in events.iter().copied().enumerate() {
+            let authority = match event {
+                11 => vec![
+                    grant_digest,
+                    ready.ok_or(AdapterError::ProtocolFailure)?,
+                    observed,
+                ],
+                12 => vec![
+                    grant_digest,
+                    ready.ok_or(AdapterError::ProtocolFailure)?,
+                    release.ok_or(AdapterError::ProtocolFailure)?,
+                    observed,
+                ],
+                _ => vec![grant_digest, elm, termination],
+            };
+            let (bytes, digest) = audit_record(
+                request,
+                u64::try_from(sequence).map_err(|_| AdapterError::ProtocolFailure)?,
+                event,
+                authority,
+                previous,
+            )?;
+            audit_bytes.push(bytes);
+            previous = Some(digest);
+        }
+        let sau1_digest = previous.ok_or(AdapterError::ProtocolFailure)?;
+        let (receipt, receipt_digest) = protocol_record(
+            "SPR1",
+            vec![
+                Value::Text("SPR1".to_owned()),
+                integer(1),
+                Value::Bytes(request.attempt_id.to_vec()),
+                Value::Bytes(grant_digest.to_vec()),
+                Value::Bytes(vec![66; 32]),
+                Value::Bytes(vec![67; 32]),
+                Value::Bytes(vec![68; 32]),
+                Value::Bytes(vec![69; 32]),
+                Value::Bytes(vec![70; 32]),
+                Value::Bytes(vec![71; 32]),
+                Value::Bytes(vec![72; 32]),
+                integer(1),
+                integer(2),
+                integer(3),
+                Value::Bytes(vec![73; 32]),
+                Value::Bytes(elm.to_vec()),
+                Value::Array(Vec::new()),
+                optional_digest(ready),
+                optional_digest(release),
+                Value::Bytes(vec![74; 32]),
+                Value::Bytes(observed.to_vec()),
+                Value::Bytes(vec![75; 32]),
+                Value::Bytes(termination.to_vec()),
+                Value::Bytes(sau1_digest.to_vec()),
+                Value::Text("runtime-key".to_owned()),
+            ],
+            true,
+        )?;
+        let mut trailing = Vec::new();
+        let output = if outcome == 0 {
+            let observation = SubjectObservation {
+                result: SubjectResult::Output(vec![77]),
+                usage: ResourceUsage::default(),
+            };
+            write_observation(&mut trailing, &observation)
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            Some((
+                u64::try_from(trailing.len()).map_err(|_| AdapterError::ProtocolFailure)?,
+                domain_digest(OUTPUT_DOMAIN, &trailing),
+            ))
+        } else {
+            None
+        };
+        let (result, _) = protocol_record(
+            "SPY1",
+            vec![
+                Value::Text("SPY1".to_owned()),
+                integer(1),
+                Value::Bytes(request.provider_request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(outcome),
+                output.as_ref().map_or(Value::Null, |(length, digest)| {
+                    Value::Array(vec![integer(*length), Value::Bytes(digest.to_vec())])
+                }),
+                Value::Bytes(grant_digest.to_vec()),
+                Value::Bytes(receipt_digest.to_vec()),
+                Value::Array(
+                    events
+                        .into_iter()
+                        .map(|event| integer(u64::from(event)))
+                        .collect(),
+                ),
+                Value::Text("runtime-key".to_owned()),
+            ],
+            true,
+        )?;
+        let fields = vec![
+            Value::Text("SLY1".to_owned()),
+            integer(1),
+            Value::Bytes(request.provider_request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
+            Value::Bytes(request.digest.to_vec()),
+            Value::Bytes(execute_request(request, evr1_digest)?),
+            integer(0),
+            Value::Bytes(result),
+            Value::Bytes(grant),
+            Value::Bytes(receipt),
+            Value::Array(audit_bytes.into_iter().map(Value::Bytes).collect()),
+            output.map_or(Value::Null, |(length, digest)| {
+                Value::Array(vec![integer(length), Value::Bytes(digest.to_vec())])
+            }),
+        ];
+        let (control, _) = protocol_record("SLY1", fields, false)?;
+        Ok((control, trailing, receipt_digest))
+    }
+
+    fn unavailable_reply(
+        request: &EncodedSelectorRequest,
+        evr1_digest: [u8; 32],
+        outcome: u64,
+    ) -> Result<Vec<u8>, AdapterError> {
+        let (result, _) = protocol_record(
+            "SPY1",
+            vec![
+                Value::Text("SPY1".to_owned()),
+                integer(1),
+                Value::Bytes(request.provider_request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(outcome),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Array(Vec::new()),
+                Value::Text("runtime-key".to_owned()),
+            ],
+            true,
+        )?;
+        protocol_record(
+            "SLY1",
+            vec![
+                Value::Text("SLY1".to_owned()),
+                integer(1),
+                Value::Bytes(request.provider_request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                Value::Bytes(request.digest.to_vec()),
+                Value::Bytes(execute_request(request, evr1_digest)?),
+                integer(0),
+                Value::Bytes(result),
+                Value::Null,
+                Value::Null,
+                Value::Array(Vec::new()),
+                Value::Null,
+            ],
+            false,
+        )
+        .map(|(bytes, _)| bytes)
+    }
+
     #[test]
     fn sle1_preserves_pre_and_post_admission_failure_classes() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
@@ -448,6 +733,158 @@ mod tests {
         );
         assert_eq!(
             decode_reply(b"not-cbor", &[], &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sly1_maps_every_terminal_class_and_preserves_completed_output() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        for outcome in [0, 1, 4] {
+            let (control, trailing, receipt_digest) = admitted_reply(&encoded, [14; 32], outcome)?;
+            let reply = decode_reply(&control, &trailing, &encoded, [14; 32], 1024)?;
+            assert_eq!(reply.provenance, Some(receipt_digest));
+            if outcome == 0 {
+                assert_eq!(
+                    reply.observation?,
+                    SubjectObservation {
+                        result: SubjectResult::Output(vec![77]),
+                        usage: ResourceUsage::default(),
+                    }
+                );
+            } else {
+                assert_eq!(
+                    reply.observation?,
+                    SubjectObservation {
+                        result: SubjectResult::Unavailable,
+                        usage: ResourceUsage::default(),
+                    }
+                );
+            }
+        }
+        for outcome in [2, 3] {
+            let control = unavailable_reply(&encoded, [14; 32], outcome)?;
+            let reply = decode_reply(&control, &[], &encoded, [14; 32], 1024)?;
+            assert_eq!(
+                reply,
+                DecodedSelectorReply {
+                    observation: Ok(SubjectObservation {
+                        result: SubjectResult::Unavailable,
+                        usage: ResourceUsage::default(),
+                    }),
+                    provenance: None,
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sly1_rejects_outer_identity_digest_and_evidence_shape_mismatches() -> Result<(), AdapterError>
+    {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array_values(&decoded).map_err(|_| AdapterError::ProtocolFailure)?;
+        let unsigned = array_values(&wrapper[0]).map_err(|_| AdapterError::ProtocolFailure)?;
+        for index in [1_usize, 2, 3, 4, 6] {
+            let mut changed = unsigned.to_vec();
+            changed[index] = integer(99);
+            let (changed, _) = protocol_record("SLY1", changed, false)?;
+            assert_eq!(
+                decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        let mut changed = unsigned.to_vec();
+        changed[8] = Value::Null;
+        let (changed, _) = protocol_record("SLY1", changed, false)?;
+        assert_eq!(
+            decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        let unavailable = unavailable_reply(&encoded, [14; 32], 2)?;
+        assert_eq!(
+            decode_reply(&unavailable, &[1], &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sly1_rejects_wrong_execute_authority_and_output_descriptor() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        assert_eq!(
+            decode_reply(&control, &trailing, &encoded, [99; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            decode_reply(&control, &trailing, &encoded, [14; 32], 1),
+            Err(AdapterError::ProtocolFailure)
+        );
+        let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array_values(&decoded).map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut fields = array_values(&wrapper[0])
+            .map_err(|_| AdapterError::ProtocolFailure)?
+            .to_vec();
+        fields[11] = Value::Array(vec![integer(0), Value::Bytes(vec![0; 32])]);
+        let (changed, _) = protocol_record("SLY1", fields, false)?;
+        assert_eq!(
+            decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sly1_provider_error_is_closed_and_requires_absent_evidence() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (provider_error, _) = protocol_record(
+            "SPE1",
+            vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                integer(0),
+                Value::Null,
+                Value::Text("runtime-key".to_owned()),
+            ],
+            true,
+        )?;
+        let fields = vec![
+            Value::Text("SLY1".to_owned()),
+            integer(1),
+            Value::Bytes(encoded.provider_request_id.to_vec()),
+            Value::Bytes(encoded.attempt_id.to_vec()),
+            Value::Bytes(encoded.digest.to_vec()),
+            Value::Bytes(execute_request(&encoded, [14; 32])?),
+            integer(1),
+            Value::Bytes(provider_error),
+            Value::Null,
+            Value::Null,
+            Value::Array(Vec::new()),
+            Value::Null,
+        ];
+        let (control, _) = protocol_record("SLY1", fields.clone(), false)?;
+        assert_eq!(
+            decode_reply(&control, &[], &encoded, [14; 32], 1024),
+            Ok(DecodedSelectorReply {
+                observation: Err(AdapterError::ProtocolFailure),
+                provenance: None,
+            })
+        );
+        let mut with_evidence = fields;
+        with_evidence[8] = Value::Bytes(vec![1]);
+        let (control, _) = protocol_record("SLY1", with_evidence, false)?;
+        assert_eq!(
+            decode_reply(&control, &[], &encoded, [14; 32], 1024),
             Err(AdapterError::ProtocolFailure)
         );
         Ok(())
