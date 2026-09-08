@@ -27,6 +27,7 @@ pub(crate) struct EncodedSelectorRequest {
     pub digest: [u8; 32],
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct DecodedSelectorReply {
     pub observation: Result<SubjectObservation, AdapterError>,
     pub provenance: Option<[u8; 32]>,
@@ -300,4 +301,151 @@ fn is_magic(value: &Value, magic: &str) -> bool {
         .and_then(|fields| fields.first())
         .and_then(|field| text(field).ok())
         == Some(magic)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::evaluator::{AttemptArtifact, AttemptTransportCaps};
+    use crate::evaluator_protocol::{ImplementationIdentity, OutputCapability, SubjectAdapterKind};
+    use crate::profile::DeterministicBudget;
+
+    use super::*;
+
+    fn request() -> EvaluationRequest {
+        EvaluationRequest {
+            request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+            profile_digest: [2; 32],
+            fixture_bundle_digest: [3; 32],
+            subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+            subject_artifact_digest: [4; 32],
+            implementation: ImplementationIdentity {
+                implementation_id: "subject".to_owned(),
+                source_digest: [5; 32],
+                build_digest: [6; 32],
+                binary_digest: [7; 32],
+                public_contract_digest: [8; 32],
+                organization_id: None,
+            },
+            execution_profile_digest: [9; 32],
+            trust_policy_snapshot_digest: [10; 32],
+            output_capability: OutputCapability {
+                capability_digest: [11; 32],
+                report_bytes_limit: 1,
+                diagnostic_bytes_limit: 0,
+            },
+            evaluator_protocol_digest: [12; 32],
+            evaluator_hard_caps_digest: [13; 32],
+            sandbox_requirement: None,
+            request_digest: [14; 32],
+        }
+    }
+
+    fn attempt() -> CaseAttempt {
+        let artifact = |bytes: Vec<u8>| AttemptArtifact {
+            digest: *blake3::hash(&bytes).as_bytes(),
+            bytes,
+        };
+        CaseAttempt {
+            case_id: "case".to_owned(),
+            claim_layer: 1,
+            family: 1,
+            mode: 1,
+            fixture_digest: [15; 32],
+            schema: artifact(vec![1]),
+            payload: artifact(vec![2]),
+            auxiliary: Vec::new(),
+            budget: DeterministicBudget {
+                memory_bytes: 1,
+                cpu_fuel: 1,
+                host_calls: 1,
+                event_count: 1,
+                output_bytes: 1024,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+            },
+            watchdog_ms: 100,
+            network_allowed: false,
+            capability_ids: vec!["execute".to_owned()],
+            transport_caps: AttemptTransportCaps {
+                max_member_bytes: 1024,
+                max_attempt_bytes: 4096,
+            },
+        }
+    }
+
+    #[test]
+    fn case_ordinal_ids_are_injective_across_the_complete_namespace() {
+        let namespace = request().request_id;
+        let mut provider = HashSet::new();
+        let mut attempts = HashSet::new();
+        for ordinal in 0..=u16::MAX {
+            assert!(provider.insert(derived_id(namespace, ordinal)));
+            assert!(attempts.insert(derived_id(namespace, ordinal ^ 0x8000)));
+        }
+        assert_eq!(provider.len(), usize::from(u16::MAX) + 1);
+        assert_eq!(attempts.len(), usize::from(u16::MAX) + 1);
+    }
+
+    #[test]
+    fn slx1_binds_exact_request_attempt_and_stream() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 7)?;
+        assert_eq!(&encoded.provider_request_id[14..], &7_u16.to_be_bytes());
+        assert_eq!(&encoded.attempt_id[14..], &(7_u16 ^ 0x8000).to_be_bytes());
+        let value = decode_canonical_with_limit(&encoded.control, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array(&value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
+        let fields = array(&wrapper[0], 6).map_err(|_| AdapterError::ProtocolFailure)?;
+        assert_eq!(bytes(&fields[4])?, b"evr1");
+        assert!(!encoded.attempt_stream.is_empty());
+        assert_eq!(
+            fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?,
+            encoded.digest
+        );
+        Ok(())
+    }
+
+    fn local_error(phase: u64) -> Vec<u8> {
+        let value = Value::Array(vec![
+            Value::Text("SLE1".to_owned()),
+            integer(1),
+            integer(phase),
+            integer(1),
+            Value::Bytes(vec![1; 16]),
+            Value::Bytes(vec![2; 16]),
+            if phase == 2 {
+                Value::Bytes(vec![3; 32])
+            } else {
+                Value::Null
+            },
+            integer(if phase == 2 { 7 } else { 4 }),
+            Value::Null,
+        ]);
+        encode_with_limit(&value, CONTROL_LIMIT).expect("bounded test SLE1")
+    }
+
+    #[test]
+    fn sle1_preserves_pre_and_post_admission_failure_classes() {
+        let encoded =
+            encode_request(&request(), b"evr1", &attempt(), 0).expect("valid selector request");
+        let pre = decode_reply(&local_error(0), &[], &encoded, [14; 32], 1024)
+            .expect("valid pre-admission SLE1");
+        assert_eq!(pre.observation, Err(AdapterError::Unavailable));
+        let post = decode_reply(&local_error(2), &[], &encoded, [14; 32], 1024)
+            .expect("valid post-admission SLE1");
+        assert_eq!(
+            post.observation,
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
+        assert_eq!(
+            decode_reply(&local_error(0), &[1], &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            decode_reply(b"not-cbor", &[], &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+    }
 }
