@@ -162,13 +162,13 @@ fn public_store_verification_fails_closed_without_a_host_gate(
     let database_path = directory.path().join("ledger.db");
     let key_path = directory.path().join("signing-key");
 
-    let error = run(&[
+    run(&[
         "piglor-ledger".to_owned(),
         "keygen".to_owned(),
         "--out".to_owned(),
         key_path.to_string_lossy().into_owned(),
     ])?;
-    run(&[
+    let error = run(&[
         "piglor-ledger".to_owned(),
         "predict".to_owned(),
         "--source".to_owned(),
