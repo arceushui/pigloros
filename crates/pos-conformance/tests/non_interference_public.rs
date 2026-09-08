@@ -1,8 +1,10 @@
 use pos_conformance::{
     execute_non_interference_pair, execute_wave8_non_interference_matrix,
-    non_interference_normalization_policy_v1, non_interference_surface_names_v1, ExecutionModeV1,
+    non_interference_capture_profiles_v1, non_interference_normalization_policy_v1,
+    non_interference_surface_names_v1, normalize_non_interference_capture_v1, ExecutionModeV1,
     NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1, NonInterferenceFixturePairV1,
-    NonInterferenceMatrixMemberV1, NonInterferenceVariantV1, NON_INTERFERENCE_CASE_COUNT_V1,
+    NonInterferenceMatrixMemberV1, NonInterferenceRawCaptureV1, NonInterferenceRawOperationalV1,
+    NonInterferenceVariantV1, NON_INTERFERENCE_CASE_COUNT_V1,
 };
 use std::cell::Cell;
 use std::fmt::Debug;
@@ -27,14 +29,57 @@ fn capture(bytes: &[u8]) -> NonInterferenceCaptureV1 {
 }
 
 fn capture_for(fixture_id: &str, bytes: &[u8]) -> NonInterferenceCaptureV1 {
+    test_ok(normalize_non_interference_capture_v1(
+        fixture_id,
+        raw_capture_for(fixture_id, bytes),
+    ))
+}
+
+fn raw_capture_for(fixture_id: &str, bytes: &[u8]) -> NonInterferenceRawCaptureV1 {
     let names = non_interference_surface_names_v1(fixture_id).unwrap_or_default();
-    NonInterferenceCaptureV1 {
+    NonInterferenceRawCaptureV1 {
         surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
         authoritative: names.iter().map(|_| bytes.to_vec()).collect(),
         public: names.iter().map(|_| b"public-outcome".to_vec()).collect(),
-        operational: names.iter().map(|_| b"allowed-count:1".to_vec()).collect(),
+        operational: names
+            .iter()
+            .map(|_| raw_operational_for(fixture_id))
+            .collect(),
         unexpected_network_accesses: 0,
         provenance_digest: [9; 32],
+    }
+}
+
+fn raw_operational_for(fixture_id: &str) -> NonInterferenceRawOperationalV1 {
+    match fixture_id {
+        "NI-TOOL-001" => NonInterferenceRawOperationalV1::CategoryCountDigest {
+            category: 7,
+            count: 1,
+            digest: [8; 32],
+            excluded_sensitive: b"provider text".to_vec(),
+        },
+        "NI-CACHE-002" => NonInterferenceRawOperationalV1::CountClass {
+            class: 2,
+            count: 1,
+            excluded_sensitive: b"cache key and latency".to_vec(),
+        },
+        "NI-STATE-003" | "NI-NET-010" => NonInterferenceRawOperationalV1::CategoryCount {
+            category: 3,
+            count: 1,
+            excluded_sensitive: b"diagnostic details".to_vec(),
+        },
+        "NI-OBS-004" | "NI-CRASH-012" => {
+            NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
+                category: 4,
+                count: 1,
+                padded_length: 64,
+                excluded_sensitive: b"stack path and raw identifiers".to_vec(),
+            }
+        }
+        "NI-TIME-005" => NonInterferenceRawOperationalV1::OmitOperational {
+            excluded_sensitive: b"wall time and duration".to_vec(),
+        },
+        _ => NonInterferenceRawOperationalV1::ByteExact(b"byte-exact".to_vec()),
     }
 }
 
@@ -157,9 +202,9 @@ fn unavailable_capture_and_unexpected_network_access_fail_closed() {
 
     assert_eq!(
         execute_non_interference_pair(&fixture(), |_| {
-            let mut value = capture(b"captured");
-            value.unexpected_network_accesses = 1;
-            Ok(value)
+            let mut raw = raw_capture_for("NI-TOOL-001", b"captured");
+            raw.unexpected_network_accesses = 1;
+            normalize_non_interference_capture_v1("NI-TOOL-001", raw)
         }),
         Err(NonInterferenceExecutionErrorV1::UnexpectedNetworkAccess)
     );
@@ -179,11 +224,11 @@ fn unavailable_capture_and_unexpected_network_access_fail_closed() {
     let call = Cell::new(false);
     assert_eq!(
         execute_non_interference_pair(&fixture(), |_| {
-            let mut value = capture(b"captured");
+            let mut raw = raw_capture_for("NI-TOOL-001", b"captured");
             if call.replace(true) {
-                value.provenance_digest = [0; 32];
+                raw.provenance_digest = [0; 32];
             }
-            Ok(value)
+            normalize_non_interference_capture_v1("NI-TOOL-001", raw)
         }),
         Err(NonInterferenceExecutionErrorV1::CaptureOutOfBounds)
     );
@@ -289,15 +334,15 @@ fn in_bound_adversarial_near_match_is_admitted_in_linear_work() {
 
 #[test]
 fn every_capture_bound_fails_closed() {
-    let mut empty_value = capture(b"captured");
+    let mut empty_value = raw_capture_for("NI-TOOL-001", b"captured");
     empty_value.authoritative[0].clear();
-    let mut excessive_bytes = capture(b"captured");
-    excessive_bytes.authoritative[0] = vec![0; 16 * 1024 * 1024 + 1];
-    let mut missing_provenance = capture(b"captured");
+    let mut excessive_bytes = raw_capture_for("NI-TOOL-001", b"captured");
+    excessive_bytes.authoritative[0] = vec![0; 1024 * 1024 + 1];
+    let mut missing_provenance = raw_capture_for("NI-TOOL-001", b"captured");
     missing_provenance.provenance_digest = [0; 32];
-    for invalid_capture in [empty_value, excessive_bytes, missing_provenance] {
+    for raw in [empty_value, excessive_bytes, missing_provenance] {
         assert_eq!(
-            execute_non_interference_pair(&fixture(), |_| Ok(invalid_capture.clone())),
+            normalize_non_interference_capture_v1("NI-TOOL-001", raw),
             Err(NonInterferenceExecutionErrorV1::CaptureOutOfBounds)
         );
     }
@@ -313,32 +358,279 @@ fn capture_inventory_is_complete_ordered_and_fixture_bound() {
     );
     let mut captures = Vec::new();
 
-    let mut wrong_name = capture(b"captured");
+    let mut wrong_name = raw_capture_for("NI-TOOL-001", b"captured");
     wrong_name.surface_names[0] = "unknown surface".to_owned();
     captures.push(wrong_name);
 
-    let mut reordered = capture(b"captured");
+    let mut reordered = raw_capture_for("NI-TOOL-001", b"captured");
     reordered.surface_names.swap(0, 1);
     captures.push(reordered);
 
-    let mut missing_authoritative = capture(b"captured");
+    let mut missing_authoritative = raw_capture_for("NI-TOOL-001", b"captured");
     missing_authoritative.authoritative.pop();
     captures.push(missing_authoritative);
 
-    let mut missing_public = capture(b"captured");
+    let mut missing_public = raw_capture_for("NI-TOOL-001", b"captured");
     missing_public.public.pop();
     captures.push(missing_public);
 
-    let mut missing_operational = capture(b"captured");
+    let mut missing_operational = raw_capture_for("NI-TOOL-001", b"captured");
     missing_operational.operational.pop();
     captures.push(missing_operational);
 
-    for invalid_capture in captures {
+    for raw in captures {
         assert_eq!(
-            execute_non_interference_pair(&fixture(), |_| Ok(invalid_capture.clone())),
+            normalize_non_interference_capture_v1("NI-TOOL-001", raw),
             Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
         );
     }
+}
+
+#[test]
+fn canonical_capture_profiles_match_the_adr_059_public_contract() {
+    let expected = [
+        (
+            "NI-TOOL-001",
+            &[
+                "Imported-service registry",
+                "tool result handle",
+                "Plugin imports",
+                "staged EventDrafts",
+                "public outcome",
+                "audit record",
+            ][..],
+        ),
+        (
+            "NI-CACHE-002",
+            &[
+                "Cache API return",
+                "snapshot bytes",
+                "Plugin inputs",
+                "typed errors",
+                "logs/metrics",
+                "evaluator bundle",
+            ][..],
+        ),
+        (
+            "NI-STATE-003",
+            &[
+                "Migration request/result",
+                "activated state",
+                "PluginInvocation",
+                "PluginOutput",
+                "EventDrafts",
+                "quarantine/error",
+            ][..],
+        ),
+        (
+            "NI-OBS-004",
+            &[
+                "Structured logs",
+                "metric names/labels/counts",
+                "trace spans",
+                "crash artifact",
+                "public support bundle",
+            ][..],
+        ),
+        (
+            "NI-TIME-005",
+            &[
+                "Plugin imports",
+                "deterministic deadline",
+                "safe-stop record",
+                "status/error",
+                "logs/metrics",
+                "evaluator input",
+            ][..],
+        ),
+        (
+            "NI-PUBLIC-006",
+            &[
+                "HTTP/Plugin error",
+                "status transition",
+                "cursor bytes",
+                "page count",
+                "response length/padding",
+            ][..],
+        ),
+        (
+            "NI-EVAL-007",
+            &[
+                "Export bundle",
+                "manifest",
+                "fixture descriptor",
+                "evaluator stdin/files",
+                "ConformanceReport",
+            ][..],
+        ),
+        (
+            "NI-FORK-008",
+            &[
+                "Fork parent/cut",
+                "CounterfactualPlan",
+                "RecomputationFrontier",
+                "SuffixInvalidation",
+                "snapshots",
+                "checkpoints",
+                "result",
+                "ReproManifest",
+                "exports",
+            ][..],
+        ),
+        (
+            "NI-ARCHIVE-009",
+            &[
+                "Member table",
+                "archive bytes",
+                "decompressed bundle",
+                "digest",
+                "evaluator import",
+                "logs",
+            ][..],
+        ),
+        (
+            "NI-NET-010",
+            &[
+                "Capability checks",
+                "attempted-call records",
+                "retry count",
+                "Plugin output",
+                "Timeline",
+                "logs",
+                "evaluator bundle",
+            ][..],
+        ),
+        (
+            "NI-SERVICE-011",
+            &[
+                "Exact request digest",
+                "frozen response projection",
+                "call ordinal",
+                "PluginInvocation",
+                "generated dependency edges",
+            ][..],
+        ),
+        (
+            "NI-CRASH-012",
+            &[
+                "Guest error",
+                "host error mapping",
+                "quarantine",
+                "crash report",
+                "support archive",
+                "next Tick status",
+            ][..],
+        ),
+    ];
+    let profiles = non_interference_capture_profiles_v1();
+    assert_eq!(profiles.len(), expected.len());
+    for (profile, (fixture_id, surfaces)) in profiles.iter().zip(expected) {
+        assert_eq!(profile.fixture_id, fixture_id);
+        assert!(profile
+            .surface_names
+            .iter()
+            .map(String::as_str)
+            .eq(surfaces.iter().copied()));
+        assert_eq!(
+            profile.variants,
+            [
+                NonInterferenceVariantV1::Success,
+                NonInterferenceVariantV1::Denial,
+                NonInterferenceVariantV1::WarmCache,
+                NonInterferenceVariantV1::ColdCache,
+            ]
+        );
+        assert_eq!(
+            profile.modes,
+            [
+                ExecutionModeV1::Local,
+                ExecutionModeV1::AirGapped,
+                ExecutionModeV1::Replay,
+                ExecutionModeV1::Fork,
+            ]
+        );
+        assert_eq!(profile.normalization_version, 1);
+        assert_eq!(profile.max_surface_bytes, 1024 * 1024);
+        assert_ne!(profile.profile_digest, [0; 32]);
+    }
+}
+
+#[test]
+fn typed_normalizers_remove_only_declared_sensitive_operational_fields() {
+    let secret = b"must-not-survive-normalization";
+    for profile in non_interference_capture_profiles_v1() {
+        let mut raw = raw_capture_for(&profile.fixture_id, b"authoritative");
+        for operational in &mut raw.operational {
+            match operational {
+                NonInterferenceRawOperationalV1::CategoryCountDigest {
+                    excluded_sensitive, ..
+                }
+                | NonInterferenceRawOperationalV1::CountClass {
+                    excluded_sensitive, ..
+                }
+                | NonInterferenceRawOperationalV1::CategoryCount {
+                    excluded_sensitive, ..
+                }
+                | NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
+                    excluded_sensitive,
+                    ..
+                }
+                | NonInterferenceRawOperationalV1::OmitOperational { excluded_sensitive } => {
+                    *excluded_sensitive = secret.to_vec();
+                }
+                NonInterferenceRawOperationalV1::ByteExact(_) => {}
+            }
+        }
+        let normalized = test_ok(normalize_non_interference_capture_v1(
+            &profile.fixture_id,
+            raw,
+        ));
+        assert!(normalized
+            .operational
+            .iter()
+            .all(|surface| !surface.windows(secret.len()).any(|window| window == secret)));
+    }
+}
+
+#[test]
+fn typed_normalizers_reject_wrong_shape_and_invalid_allowed_values() {
+    let mut wrong_type = raw_capture_for("NI-CACHE-002", b"captured");
+    wrong_type.operational[0] = NonInterferenceRawOperationalV1::ByteExact(b"opaque".to_vec());
+    assert_eq!(
+        normalize_non_interference_capture_v1("NI-CACHE-002", wrong_type),
+        Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+    );
+
+    let mut zero_digest = raw_capture_for("NI-TOOL-001", b"captured");
+    zero_digest.operational[0] = NonInterferenceRawOperationalV1::CategoryCountDigest {
+        category: 1,
+        count: 1,
+        digest: [0; 32],
+        excluded_sensitive: Vec::new(),
+    };
+    assert_eq!(
+        normalize_non_interference_capture_v1("NI-TOOL-001", zero_digest),
+        Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+    );
+
+    let mut invalid_padding = raw_capture_for("NI-OBS-004", b"captured");
+    invalid_padding.operational[0] = NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
+        category: 1,
+        count: 1,
+        padded_length: 63,
+        excluded_sensitive: Vec::new(),
+    };
+    assert_eq!(
+        normalize_non_interference_capture_v1("NI-OBS-004", invalid_padding),
+        Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+    );
+
+    let mut empty_exact = raw_capture_for("NI-PUBLIC-006", b"captured");
+    empty_exact.operational[0] = NonInterferenceRawOperationalV1::ByteExact(Vec::new());
+    assert_eq!(
+        normalize_non_interference_capture_v1("NI-PUBLIC-006", empty_exact),
+        Err(NonInterferenceExecutionErrorV1::CaptureUnavailable)
+    );
 }
 
 #[test]
@@ -371,29 +663,34 @@ fn divergence_order_covers_length_surface_and_category_boundaries() {
         (
             capture(b"same"),
             {
-                let mut value = capture(b"same");
-                value.authoritative[1] = b"extra".to_vec();
-                value
+                let mut raw = raw_capture_for("NI-TOOL-001", b"same");
+                raw.authoritative[1] = b"extra".to_vec();
+                test_ok(normalize_non_interference_capture_v1("NI-TOOL-001", raw))
             },
             (1, 0),
         ),
         (
             capture(b"same"),
             {
-                let mut value = capture(b"same");
-                value.public[0] = b"Public-outcome".to_vec();
-                value
+                let mut raw = raw_capture_for("NI-TOOL-001", b"same");
+                raw.public[0] = b"Public-outcome".to_vec();
+                test_ok(normalize_non_interference_capture_v1("NI-TOOL-001", raw))
             },
             (0, 4),
         ),
         (
             capture(b"same"),
             {
-                let mut value = capture(b"same");
-                value.operational[0] = b"allowed-count:2".to_vec();
-                value
+                let mut raw = raw_capture_for("NI-TOOL-001", b"same");
+                raw.operational[0] = NonInterferenceRawOperationalV1::CategoryCountDigest {
+                    category: 7,
+                    count: 2,
+                    digest: [8; 32],
+                    excluded_sensitive: b"different secret".to_vec(),
+                };
+                test_ok(normalize_non_interference_capture_v1("NI-TOOL-001", raw))
             },
-            (0, 32),
+            (0, 23),
         ),
     ];
     for (control, canary, expected) in cases {

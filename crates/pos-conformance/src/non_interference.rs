@@ -7,6 +7,133 @@ use serde::{Deserialize, Serialize};
 const MAX_PERMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_UNAUTHORIZED_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SURFACE_BYTES: usize = 1024 * 1024;
+const NORMALIZATION_VERSION_V1: u16 = 1;
+
+/// Executable operational normalization selected by a canonical capture profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NonInterferenceNormalizationV1 {
+    CategoryCountDigest,
+    CountClass,
+    CategoryCount,
+    CategoryCountPaddedLength,
+    OmitOperational,
+    ByteExact,
+}
+
+/// Canonical typed profile for one ADR-059 matrix row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NonInterferenceCaptureProfileV1 {
+    pub fixture_id: String,
+    pub surface_names: Vec<String>,
+    pub variants: Vec<NonInterferenceVariantV1>,
+    pub modes: Vec<ExecutionModeV1>,
+    pub normalization: NonInterferenceNormalizationV1,
+    pub normalization_version: u16,
+    pub max_surface_bytes: u64,
+    pub profile_digest: [u8; 32],
+}
+
+/// One raw operational surface captured before allowed normalization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NonInterferenceRawOperationalV1 {
+    CategoryCountDigest {
+        category: u16,
+        count: u32,
+        digest: [u8; 32],
+        excluded_sensitive: Vec<u8>,
+    },
+    CountClass {
+        class: u16,
+        count: u32,
+        excluded_sensitive: Vec<u8>,
+    },
+    CategoryCount {
+        category: u16,
+        count: u32,
+        excluded_sensitive: Vec<u8>,
+    },
+    CategoryCountPaddedLength {
+        category: u16,
+        count: u32,
+        padded_length: u32,
+        excluded_sensitive: Vec<u8>,
+    },
+    OmitOperational {
+        excluded_sensitive: Vec<u8>,
+    },
+    ByteExact(Vec<u8>),
+}
+
+/// Host-owned raw capture input. Only the normalizer can produce the capture
+/// accepted by the matrix runner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NonInterferenceRawCaptureV1 {
+    pub surface_names: Vec<String>,
+    pub authoritative: Vec<Vec<u8>>,
+    pub public: Vec<Vec<u8>>,
+    pub operational: Vec<NonInterferenceRawOperationalV1>,
+    pub unexpected_network_accesses: u32,
+    pub provenance_digest: [u8; 32],
+}
+
+/// Return all twelve canonical ADR-059 capture profiles in matrix order.
+#[must_use]
+pub fn non_interference_capture_profiles_v1() -> Vec<NonInterferenceCaptureProfileV1> {
+    crate::NON_INTERFERENCE_FIXTURE_IDS_V1
+        .iter()
+        .filter_map(|fixture_id| capture_profile(fixture_id))
+        .collect()
+}
+
+fn capture_profile(fixture_id: &str) -> Option<NonInterferenceCaptureProfileV1> {
+    let surface_names = non_interference_surface_names_v1(fixture_id)?
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+    let normalization = normalization_for(fixture_id)?;
+    let variants = vec![
+        NonInterferenceVariantV1::Success,
+        NonInterferenceVariantV1::Denial,
+        NonInterferenceVariantV1::WarmCache,
+        NonInterferenceVariantV1::ColdCache,
+    ];
+    let modes = vec![
+        ExecutionModeV1::Local,
+        ExecutionModeV1::AirGapped,
+        ExecutionModeV1::Replay,
+        ExecutionModeV1::Fork,
+    ];
+    let mut profile = NonInterferenceCaptureProfileV1 {
+        fixture_id: fixture_id.to_owned(),
+        surface_names,
+        variants,
+        modes,
+        normalization,
+        normalization_version: NORMALIZATION_VERSION_V1,
+        max_surface_bytes: MAX_SURFACE_BYTES as u64,
+        profile_digest: [0; 32],
+    };
+    profile.profile_digest = profile_digest(&profile);
+    Some(profile)
+}
+
+const fn normalization_for(fixture_id: &str) -> Option<NonInterferenceNormalizationV1> {
+    match fixture_id.as_bytes() {
+        b"NI-TOOL-001" => Some(NonInterferenceNormalizationV1::CategoryCountDigest),
+        b"NI-CACHE-002" => Some(NonInterferenceNormalizationV1::CountClass),
+        b"NI-STATE-003" | b"NI-NET-010" => Some(NonInterferenceNormalizationV1::CategoryCount),
+        b"NI-OBS-004" | b"NI-CRASH-012" => {
+            Some(NonInterferenceNormalizationV1::CategoryCountPaddedLength)
+        }
+        b"NI-TIME-005" => Some(NonInterferenceNormalizationV1::OmitOperational),
+        b"NI-PUBLIC-006" | b"NI-EVAL-007" | b"NI-FORK-008" | b"NI-ARCHIVE-009"
+        | b"NI-SERVICE-011" => Some(NonInterferenceNormalizationV1::ByteExact),
+        _ => None,
+    }
+}
 
 /// Return the canonical ADR-059 capture surface order for one matrix row.
 #[must_use]
@@ -282,6 +409,178 @@ pub struct NonInterferenceCaptureV1 {
     pub operational: Vec<Vec<u8>>,
     pub unexpected_network_accesses: u32,
     pub provenance_digest: [u8; 32],
+    normalization_digest: [u8; 32],
+}
+
+/// Normalize a host-owned raw capture according to its canonical row profile.
+///
+/// Excluded sensitive operational fields are deliberately absent from the
+/// returned value. Authoritative and public surfaces remain byte-exact.
+///
+/// # Errors
+/// Returns a closed error for an unknown profile, incomplete inventory,
+/// mismatched typed normalizer, live network access, or a deterministic bound
+/// violation.
+pub fn normalize_non_interference_capture_v1(
+    fixture_id: &str,
+    raw: NonInterferenceRawCaptureV1,
+) -> Result<NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1> {
+    let profile =
+        capture_profile(fixture_id).ok_or(NonInterferenceExecutionErrorV1::CaptureUnavailable)?;
+    if raw.surface_names != profile.surface_names
+        || raw.authoritative.len() != profile.surface_names.len()
+        || raw.public.len() != profile.surface_names.len()
+        || raw.operational.len() != profile.surface_names.len()
+    {
+        return Err(NonInterferenceExecutionErrorV1::CaptureUnavailable);
+    }
+    if raw.unexpected_network_accesses != 0 {
+        return Err(NonInterferenceExecutionErrorV1::UnexpectedNetworkAccess);
+    }
+    if raw.provenance_digest == [0; 32]
+        || raw
+            .authoritative
+            .iter()
+            .chain(&raw.public)
+            .any(|value| value.is_empty() || value.len() > MAX_SURFACE_BYTES)
+    {
+        return Err(NonInterferenceExecutionErrorV1::CaptureOutOfBounds);
+    }
+    let operational = raw
+        .operational
+        .iter()
+        .map(|value| normalize_operational(profile.normalization, value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut capture = NonInterferenceCaptureV1 {
+        surface_names: raw.surface_names,
+        authoritative: raw.authoritative,
+        public: raw.public,
+        operational,
+        unexpected_network_accesses: raw.unexpected_network_accesses,
+        provenance_digest: raw.provenance_digest,
+        normalization_digest: [0; 32],
+    };
+    capture.normalization_digest = normalized_capture_digest(&profile, &capture);
+    capture.validate(fixture_id).map(|()| capture)
+}
+
+fn normalized_capture_digest(
+    profile: &NonInterferenceCaptureProfileV1,
+    capture: &NonInterferenceCaptureV1,
+) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&profile.profile_digest);
+    for name in &capture.surface_names {
+        append_bytes(&mut bytes, name.as_bytes());
+    }
+    for value in capture
+        .authoritative
+        .iter()
+        .chain(&capture.public)
+        .chain(&capture.operational)
+    {
+        append_bytes(&mut bytes, value);
+    }
+    bytes.extend_from_slice(&capture.unexpected_network_accesses.to_be_bytes());
+    bytes.extend_from_slice(&capture.provenance_digest);
+    domain_digest(b"PiglorOS.NonInterference.NormalizedCapture.v1", &bytes)
+}
+
+fn normalize_operational(
+    normalization: NonInterferenceNormalizationV1,
+    raw: &NonInterferenceRawOperationalV1,
+) -> Result<Vec<u8>, NonInterferenceExecutionErrorV1> {
+    let mut output = Vec::new();
+    match (normalization, raw) {
+        (
+            NonInterferenceNormalizationV1::CategoryCountDigest,
+            NonInterferenceRawOperationalV1::CategoryCountDigest {
+                category,
+                count,
+                digest,
+                excluded_sensitive: _,
+            },
+        ) if *digest != [0; 32] => {
+            output.extend_from_slice(&category.to_be_bytes());
+            output.extend_from_slice(&count.to_be_bytes());
+            output.extend_from_slice(digest);
+        }
+        (
+            NonInterferenceNormalizationV1::CountClass,
+            NonInterferenceRawOperationalV1::CountClass {
+                class,
+                count,
+                excluded_sensitive: _,
+            },
+        )
+        | (
+            NonInterferenceNormalizationV1::CategoryCount,
+            NonInterferenceRawOperationalV1::CategoryCount {
+                category: class,
+                count,
+                excluded_sensitive: _,
+            },
+        ) => {
+            output.extend_from_slice(&class.to_be_bytes());
+            output.extend_from_slice(&count.to_be_bytes());
+        }
+        (
+            NonInterferenceNormalizationV1::CategoryCountPaddedLength,
+            NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
+                category,
+                count,
+                padded_length,
+                excluded_sensitive: _,
+            },
+        ) if *padded_length > 0 && padded_length.is_power_of_two() => {
+            output.extend_from_slice(&category.to_be_bytes());
+            output.extend_from_slice(&count.to_be_bytes());
+            output.extend_from_slice(&padded_length.to_be_bytes());
+        }
+        (
+            NonInterferenceNormalizationV1::OmitOperational,
+            NonInterferenceRawOperationalV1::OmitOperational {
+                excluded_sensitive: _,
+            },
+        ) => output.push(0),
+        (
+            NonInterferenceNormalizationV1::ByteExact,
+            NonInterferenceRawOperationalV1::ByteExact(value),
+        ) if !value.is_empty() && value.len() <= MAX_SURFACE_BYTES => {
+            output.extend_from_slice(value);
+        }
+        _ => return Err(NonInterferenceExecutionErrorV1::CaptureUnavailable),
+    }
+    Ok(output)
+}
+
+fn profile_digest(profile: &NonInterferenceCaptureProfileV1) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    append_bytes(&mut bytes, profile.fixture_id.as_bytes());
+    for name in &profile.surface_names {
+        append_bytes(&mut bytes, name.as_bytes());
+    }
+    for variant in &profile.variants {
+        bytes.push(variant_code(*variant));
+    }
+    for mode in &profile.modes {
+        bytes.push(mode_code(*mode));
+    }
+    bytes.push(normalization_code(profile.normalization));
+    bytes.extend_from_slice(&profile.normalization_version.to_be_bytes());
+    bytes.extend_from_slice(&profile.max_surface_bytes.to_be_bytes());
+    domain_digest(b"PiglorOS.NonInterference.CaptureProfile.v1", &bytes)
+}
+
+const fn normalization_code(value: NonInterferenceNormalizationV1) -> u8 {
+    match value {
+        NonInterferenceNormalizationV1::CategoryCountDigest => 0,
+        NonInterferenceNormalizationV1::CountClass => 1,
+        NonInterferenceNormalizationV1::CategoryCount => 2,
+        NonInterferenceNormalizationV1::CategoryCountPaddedLength => 3,
+        NonInterferenceNormalizationV1::OmitOperational => 4,
+        NonInterferenceNormalizationV1::ByteExact => 5,
+    }
 }
 
 impl NonInterferenceCaptureV1 {
@@ -291,6 +590,8 @@ impl NonInterferenceCaptureV1 {
         }
         let expected_names = non_interference_surface_names_v1(fixture_id)
             .ok_or(NonInterferenceExecutionErrorV1::CaptureUnavailable)?;
+        let profile = capture_profile(fixture_id)
+            .ok_or(NonInterferenceExecutionErrorV1::CaptureUnavailable)?;
         if !self
             .surface_names
             .iter()
@@ -299,6 +600,7 @@ impl NonInterferenceCaptureV1 {
             || self.authoritative.len() != expected_names.len()
             || self.public.len() != expected_names.len()
             || self.operational.len() != expected_names.len()
+            || self.normalization_digest != normalized_capture_digest(&profile, self)
         {
             return Err(NonInterferenceExecutionErrorV1::CaptureUnavailable);
         }

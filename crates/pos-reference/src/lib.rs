@@ -11,6 +11,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod non_interference_report;
+
+pub use non_interference_report::{
+    verify_non_interference_report_v1, IndependentNonInterferenceReportErrorV1,
+};
+
 pub mod adapter_transport;
 pub mod evaluator;
 pub mod evaluator_build_identity;
@@ -189,7 +195,20 @@ fn validate_contract(
         .ok_or(ReferenceError::InvalidForkEvidence(
             "non-interference matrix is missing",
         ))?;
-    validate_non_interference_matrix(matrix)
+    match contract
+        .get("non_interference_status")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("not_executed_capture_unavailable")
+            if matrix.as_array().is_some_and(Vec::is_empty) =>
+        {
+            Ok(())
+        }
+        Some("executed") => validate_non_interference_matrix(matrix),
+        _ => Err(ReferenceError::InvalidForkEvidence(
+            "non-interference execution status is invalid",
+        )),
+    }
 }
 
 fn verify_fork_suffix(
@@ -561,6 +580,7 @@ fn validate_contract_shape(
         "authorization_decisions",
         "counterfactual",
         "atomicity",
+        "non_interference_status",
         "non_interference",
     ];
     for field in required {
@@ -591,6 +611,9 @@ fn validate_contract_shape(
         || !contract
             .get("atomicity")
             .is_some_and(serde_json::Value::is_array)
+        || !contract
+            .get("non_interference_status")
+            .is_some_and(serde_json::Value::is_string)
         || !contract
             .get("non_interference")
             .is_some_and(serde_json::Value::is_array)
@@ -922,6 +945,7 @@ mod tests {
                 "authorization_decisions": [],
                 "counterfactual": {},
                 "atomicity": [],
+                "non_interference_status": "not_executed_capture_unavailable",
                 "non_interference": []
             }
         })
@@ -1278,6 +1302,7 @@ mod tests {
                 "authorization_decisions": [],
                 "counterfactual": {},
                 "atomicity": [],
+                "non_interference_status": "executed",
                 "non_interference": non_interference_fixture()
             }
         });
@@ -1665,6 +1690,7 @@ mod tests {
             "authorization_decisions",
             "counterfactual",
             "atomicity",
+            "non_interference_status",
             "non_interference",
         ];
         for field in contract_fields {
@@ -1685,6 +1711,7 @@ mod tests {
             "knowledge_snapshots",
             "authorization_decisions",
             "atomicity",
+            "non_interference_status",
             "non_interference",
         ] {
             let mut value = parse_json(&counterfactual)?;

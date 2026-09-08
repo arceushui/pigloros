@@ -8,19 +8,58 @@ use std::collections::BTreeMap;
 fn executed_non_interference_matrix() -> Vec<NonInterferenceCaseV1> {
     execute_wave8_non_interference_matrix([1; 32], |run| {
         let names = non_interference_surface_names_v1(run.subject.fixture_id).unwrap_or_default();
-        Ok(NonInterferenceCaptureV1 {
-            surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
-            authoritative: names
-                .iter()
-                .map(|_| run.subject.permitted_input.to_vec())
-                .collect(),
-            public: names.iter().map(|_| b"public".to_vec()).collect(),
-            operational: names.iter().map(|_| b"operational".to_vec()).collect(),
-            unexpected_network_accesses: 0,
-            provenance_digest: [8; 32],
-        })
+        normalize_non_interference_capture_v1(
+            run.subject.fixture_id,
+            NonInterferenceRawCaptureV1 {
+                surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
+                authoritative: names
+                    .iter()
+                    .map(|_| run.subject.permitted_input.to_vec())
+                    .collect(),
+                public: names.iter().map(|_| b"public".to_vec()).collect(),
+                operational: names
+                    .iter()
+                    .map(|_| test_raw_operational(run.subject.fixture_id))
+                    .collect(),
+                unexpected_network_accesses: 0,
+                provenance_digest: [8; 32],
+            },
+        )
     })
     .unwrap_or_default()
+}
+
+fn test_raw_operational(fixture_id: &str) -> NonInterferenceRawOperationalV1 {
+    match fixture_id {
+        "NI-TOOL-001" => NonInterferenceRawOperationalV1::CategoryCountDigest {
+            category: 1,
+            count: 1,
+            digest: [7; 32],
+            excluded_sensitive: Vec::new(),
+        },
+        "NI-CACHE-002" => NonInterferenceRawOperationalV1::CountClass {
+            class: 1,
+            count: 1,
+            excluded_sensitive: Vec::new(),
+        },
+        "NI-STATE-003" | "NI-NET-010" => NonInterferenceRawOperationalV1::CategoryCount {
+            category: 1,
+            count: 1,
+            excluded_sensitive: Vec::new(),
+        },
+        "NI-OBS-004" | "NI-CRASH-012" => {
+            NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
+                category: 1,
+                count: 1,
+                padded_length: 64,
+                excluded_sensitive: Vec::new(),
+            }
+        }
+        "NI-TIME-005" => NonInterferenceRawOperationalV1::OmitOperational {
+            excluded_sensitive: Vec::new(),
+        },
+        _ => NonInterferenceRawOperationalV1::ByteExact(b"operational".to_vec()),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -656,6 +695,7 @@ fn proof_contract_fixture() -> Wave8ProofContractV1 {
             committed: true,
             failure_class: None,
         }],
+        non_interference_status: pos_conformance::NonInterferenceExecutionStatusV1::Executed,
         non_interference: executed_non_interference_matrix(),
     }
 }
@@ -1497,7 +1537,7 @@ fn public_moat_proof_contract_excludes_cnr1_and_rejects_the_retired_field() {
         &evidence_fields[EvidenceField::Contract.index()],
         "decode proof-contract fixture structure",
     );
-    assert_eq!(contract_fields.len(), 7);
+    assert_eq!(contract_fields.len(), 8);
 
     let retired_shape = append_retired_contract_field(&encoded);
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
@@ -1516,6 +1556,33 @@ fn public_moat_proof_contract_excludes_cnr1_and_rejects_the_retired_field() {
         ciborium::Value::Array(trailing_contract_fields);
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &ciborium::Value::Array(trailing_evidence_fields),
+    )));
+}
+
+#[test]
+fn non_interference_execution_status_cannot_turn_missing_or_placeholder_results_into_a_pass() {
+    let mut evidence = public_evidence_fixture();
+    evidence.contract.non_interference_status =
+        pos_conformance::NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable;
+    assert!(verify_evidence(&evidence).is_err());
+
+    evidence.contract.non_interference.clear();
+    assert!(verify_evidence(&evidence).is_ok());
+
+    evidence.contract.non_interference_status =
+        pos_conformance::NonInterferenceExecutionStatusV1::Executed;
+    assert!(verify_evidence(&evidence).is_err());
+
+    let encoded = decode_value(ok(public_evidence_fixture().to_canonical_cbor()));
+    let mut evidence_fields = cloned_array_fields(&encoded, "decode evidence fixture structure");
+    let mut contract_fields = cloned_array_fields(
+        &evidence_fields[EvidenceField::Contract.index()],
+        "decode proof-contract fixture structure",
+    );
+    contract_fields[6] = ciborium::Value::Integer(2_u64.into());
+    evidence_fields[EvidenceField::Contract.index()] = ciborium::Value::Array(contract_fields);
+    expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+        &ciborium::Value::Array(evidence_fields),
     )));
 }
 

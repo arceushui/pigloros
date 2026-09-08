@@ -18,6 +18,7 @@ use std::io::Cursor;
 
 mod bundle_contract;
 mod non_interference;
+mod non_interference_report;
 mod profile_contract;
 mod provider_contract;
 mod sandbox_provider_contract;
@@ -41,9 +42,18 @@ pub use bundle_contract::{
 };
 pub use non_interference::{
     execute_non_interference_pair, execute_wave8_non_interference_matrix,
-    non_interference_normalization_policy_v1, non_interference_surface_names_v1,
-    NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1, NonInterferenceFixturePairV1,
-    NonInterferenceHostRunV1, NonInterferenceInvocationV1, NonInterferenceMatrixMemberV1,
+    non_interference_capture_profiles_v1, non_interference_normalization_policy_v1,
+    non_interference_surface_names_v1, normalize_non_interference_capture_v1,
+    NonInterferenceCaptureProfileV1, NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1,
+    NonInterferenceFixturePairV1, NonInterferenceHostRunV1, NonInterferenceInvocationV1,
+    NonInterferenceMatrixMemberV1, NonInterferenceNormalizationV1, NonInterferenceRawCaptureV1,
+    NonInterferenceRawOperationalV1,
+};
+pub use non_interference_report::{
+    non_interference_normalization_digest_v1, NonInterferenceModeResultRefV1,
+    NonInterferenceReportErrorV1, NonInterferenceReportOutcomeV1, NonInterferenceReportV1,
+    MAX_NON_INTERFERENCE_REPORT_BYTES_V1, NON_INTERFERENCE_REPORT_MAGIC_V1,
+    NON_INTERFERENCE_REPORT_OUTCOME_COUNT_V1,
 };
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
@@ -1162,6 +1172,18 @@ pub enum NonInterferenceVariantV1 {
     ColdCache,
 }
 
+/// Whether the enclosing evidence contains genuine ADR-059 executions.
+///
+/// `NotExecutedCaptureUnavailable` is not a conformance pass. It lets a host
+/// publish its other Wave 8 evidence without fabricating non-interference
+/// results before concrete capture adapters are available.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NonInterferenceExecutionStatusV1 {
+    NotExecutedCaptureUnavailable,
+    Executed,
+}
+
 /// One control/canary equality result from the mandatory matrix.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1413,6 +1435,7 @@ pub struct Wave8ProofContractV1 {
     pub authorization_decisions: Vec<FixtureAuthorizationDecisionV1>,
     pub counterfactual: CounterfactualContractV1,
     pub atomicity: Vec<TickAtomicityV1>,
+    pub non_interference_status: NonInterferenceExecutionStatusV1,
     pub non_interference: Vec<NonInterferenceCaseV1>,
 }
 
@@ -1845,8 +1868,9 @@ pub mod strict_codec {
         FollowOnMismatchV1, HostClosureAuditV1, ImplementationIdentityV1, IndependenceEvidenceV1,
         InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1,
         MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceDivergenceCoordinateV1,
-        NonInterferenceVariantV1, OwnerFrontierV1, ParticipantEventV1, ParticipantViewV1,
-        PluginBoundaryV1, PluginFailureClassV1, PluginFailureV1, ProjectionEvidenceV1,
+        NonInterferenceExecutionStatusV1, NonInterferenceVariantV1, OwnerFrontierV1,
+        ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1, PluginFailureClassV1,
+        PluginFailureV1, ProjectionEvidenceV1,
         RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1, ReproManifestV1,
         ReproducibilityClassV1, SafeErrorCodeV1, ScenarioRoomFixtureV1,
         StructuralCausalTraceEntryV1, SuffixInvalidationReasonV1, SuffixInvalidationV1,
@@ -4298,6 +4322,13 @@ pub mod strict_codec {
             ),
             encode_counterfactual(&contract.counterfactual),
             Value::Array(contract.atomicity.iter().map(encode_atomicity).collect()),
+            Value::Integer(
+                match contract.non_interference_status {
+                    NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable => 0,
+                    NonInterferenceExecutionStatusV1::Executed => 1,
+                }
+                .into(),
+            ),
             Value::Array(
                 contract
                     .non_interference
@@ -4309,7 +4340,7 @@ pub mod strict_codec {
     }
 
     fn decode_contract(value: &Value) -> Result<Wave8ProofContractV1, StrictCborError> {
-        let fields = array(value, "wave8_contract", 7)?;
+        let fields = array(value, "wave8_contract", 8)?;
         Ok(Wave8ProofContractV1 {
             scenario_room: decode_room(&fields[0])?,
             plugin_boundary: decode_plugin_boundary(&fields[1])?,
@@ -4326,7 +4357,16 @@ pub mod strict_codec {
                 .iter()
                 .map(decode_atomicity)
                 .collect::<Result<Vec<_>, _>>()?,
-            non_interference: array_values(&fields[6], "non_interference")?
+            non_interference_status: match uint_value(&fields[6], "non_interference_status")? {
+                0 => NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable,
+                1 => NonInterferenceExecutionStatusV1::Executed,
+                _ => {
+                    return Err(StrictCborError::InvalidField {
+                        field: "non_interference_status".to_owned(),
+                    });
+                }
+            },
+            non_interference: array_values(&fields[7], "non_interference")?
                 .iter()
                 .map(decode_non_interference_case)
                 .collect::<Result<Vec<_>, _>>()?,
@@ -5129,7 +5169,16 @@ fn verify_contract_header(evidence: &MoatProofEvidenceV1) -> Result<(), Evidence
         .plugin_boundary
         .validate()
         .map_err(|_| EvidenceError::InvalidContract)?;
-    verify_non_interference_matrix(&contract.non_interference)?;
+    match contract.non_interference_status {
+        NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable => {
+            if !contract.non_interference.is_empty() {
+                return Err(EvidenceError::InvalidNonInterferenceMatrix);
+            }
+        }
+        NonInterferenceExecutionStatusV1::Executed => {
+            verify_non_interference_matrix(&contract.non_interference)?;
+        }
+    }
     let room = &contract.scenario_room;
     if room.input_digest != evidence.manifest.input_digest
         || evidence.manifest.scenario_room_digest != room.room_digest
@@ -6249,19 +6298,59 @@ pub mod tests {
         execute_wave8_non_interference_matrix([1; 32], |run| {
             let names =
                 non_interference_surface_names_v1(run.subject.fixture_id).unwrap_or_default();
-            Ok(NonInterferenceCaptureV1 {
-                surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
-                authoritative: names
-                    .iter()
-                    .map(|_| run.subject.permitted_input.to_vec())
-                    .collect(),
-                public: names.iter().map(|_| b"public".to_vec()).collect(),
-                operational: names.iter().map(|_| b"operational".to_vec()).collect(),
-                unexpected_network_accesses: 0,
-                provenance_digest: [8; 32],
-            })
+            let operational = names
+                .iter()
+                .map(|_| test_raw_operational(run.subject.fixture_id))
+                .collect();
+            normalize_non_interference_capture_v1(
+                run.subject.fixture_id,
+                NonInterferenceRawCaptureV1 {
+                    surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
+                    authoritative: names
+                        .iter()
+                        .map(|_| run.subject.permitted_input.to_vec())
+                        .collect(),
+                    public: names.iter().map(|_| b"public".to_vec()).collect(),
+                    operational,
+                    unexpected_network_accesses: 0,
+                    provenance_digest: [8; 32],
+                },
+            )
         })
         .unwrap_or_default()
+    }
+
+    fn test_raw_operational(fixture_id: &str) -> NonInterferenceRawOperationalV1 {
+        match fixture_id {
+            "NI-TOOL-001" => NonInterferenceRawOperationalV1::CategoryCountDigest {
+                category: 1,
+                count: 1,
+                digest: [7; 32],
+                excluded_sensitive: Vec::new(),
+            },
+            "NI-CACHE-002" => NonInterferenceRawOperationalV1::CountClass {
+                class: 1,
+                count: 1,
+                excluded_sensitive: Vec::new(),
+            },
+            "NI-STATE-003" | "NI-NET-010" => NonInterferenceRawOperationalV1::CategoryCount {
+                category: 1,
+                count: 1,
+                excluded_sensitive: Vec::new(),
+            },
+            "NI-OBS-004" | "NI-CRASH-012" => {
+                NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
+                    category: 1,
+                    count: 1,
+                    padded_length: 64,
+                    excluded_sensitive: Vec::new(),
+                }
+            }
+            "NI-TIME-005" => NonInterferenceRawOperationalV1::OmitOperational {
+                excluded_sensitive: Vec::new(),
+            },
+            _ => NonInterferenceRawOperationalV1::ByteExact(b"operational".to_vec()),
+        }
     }
 
     pub(crate) fn input() -> MoatProofInputV1 {
@@ -7148,6 +7237,7 @@ pub mod tests {
                 committed: true,
                 failure_class: None,
             }],
+            non_interference_status: NonInterferenceExecutionStatusV1::Executed,
             non_interference: executed_non_interference_matrix(),
         }
     }
