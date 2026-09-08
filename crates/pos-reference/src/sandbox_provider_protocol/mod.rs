@@ -3,6 +3,7 @@
 //! This module deliberately does not depend on `pos-conformance`. It gives the
 //! reference evaluator a second implementation of the public wire contract.
 
+mod admission;
 mod authority;
 mod codec;
 mod execution;
@@ -15,6 +16,10 @@ pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
+pub use admission::{
+    AdmittedSandboxProvider, HostCapabilityProfile, HostFeatureProof, ProviderConformanceReport,
+    SandboxAdmissionError, SandboxProviderAdmissionInputs,
+};
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
