@@ -954,6 +954,13 @@ fn checked_event_coordinates(
 }
 
 impl Gateway {
+    #[cfg(test)]
+    fn bind_test_erasure_gate<S: EventStore>(store: &mut S) {
+        assert!(store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .is_ok());
+    }
+
     async fn enqueue_consent_cleanup(&self, scope: AppendDedupScope) {
         let mut pending = self.pending_consent_cleanup.lock().await;
         if !pending.contains(&scope) {
@@ -1094,7 +1101,9 @@ impl Gateway {
     /// Human action submission is intentionally disabled until the host supplies
     /// both a World body catalogue and a provider-neutral [`GatewayAuthorization`].
     #[must_use]
-    pub fn new(store: Box<dyn EventStore>) -> Self {
+    pub fn new(mut store: Box<dyn EventStore>) -> Self {
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1154,9 +1163,11 @@ impl Gateway {
     /// Wrap a store and configure the World body catalogue used for actions.
     #[must_use]
     pub fn new_with_world_bodies(
-        store: Box<dyn EventStore>,
+        mut store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
     ) -> Self {
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1183,10 +1194,12 @@ impl Gateway {
 
     #[cfg(test)]
     fn new_with_world_bodies_and_principal_for_test(
-        store: Box<dyn EventStore>,
+        mut store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
         principal: ActionPrincipal,
     ) -> Self {
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1255,6 +1268,9 @@ impl Gateway {
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1285,9 +1301,11 @@ impl Gateway {
     /// authentication, rate limiting, and geographic admission in one queue turn.
     #[must_use]
     pub fn new_with_owntracks_ingress(
-        store: pos_store::sqlite::SqliteStore,
+        mut store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,
     ) -> Self {
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1353,6 +1371,8 @@ impl Gateway {
     where
         S: EventStore + GeoLocationAdmissionStore + pos_core::OwnTracksIngressStore + 'static,
     {
+        let mut store = store;
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -2332,7 +2352,8 @@ impl Gateway {
     }
 
     #[cfg(test)]
-    fn with_bus_capacity(store: Box<dyn EventStore>, capacity: usize) -> Self {
+    fn with_bus_capacity(mut store: Box<dyn EventStore>, capacity: usize) -> Self {
+        Self::bind_test_erasure_gate(&mut store);
         let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(
