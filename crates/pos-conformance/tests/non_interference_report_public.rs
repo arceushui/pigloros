@@ -489,6 +489,10 @@ fn independent_verifier_rejects_every_report_shape_boundary() {
 
     for value in invalid {
         assert_eq!(
+            value.to_canonical_cbor(),
+            Err(NonInterferenceReportErrorV1::InvalidShape)
+        );
+        assert_eq!(
             value.validate(&trusted_signer(), &[trusted_executor()], &artifacts),
             Err(NonInterferenceReportErrorV1::InvalidShape)
         );
