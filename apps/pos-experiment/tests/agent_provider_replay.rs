@@ -737,6 +737,33 @@ fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
 }
 
 #[test]
+fn backtest_runner_rejects_a_removed_bound_train_gate() {
+    let removed: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let error = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "removed-train-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        move || {
+            PluginRegistry::new()
+                .with_erasure_gate(Arc::clone(&removed))
+                .without_erasure_gate()
+        },
+    )
+    .with_erasure_gate(host)
+    .run()
+    .err()
+    .test_ok();
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
+}
+
+#[test]
 fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
     let calls = Arc::new(AtomicU64::new(0));
     let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
