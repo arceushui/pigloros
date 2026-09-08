@@ -5998,8 +5998,7 @@ mod coverage_paths {
     }
 
     #[test]
-    fn complete_inventory_rejects_partial_duplicate_stale_and_over_limit(
-    ) -> Result<(), ErasureErrorV1> {
+    fn complete_inventory_rejects_partial_stale_and_over_limit() -> Result<(), ErasureErrorV1> {
         let timeline = TimelineId::new();
         assert_eq!(
             ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 0),
@@ -6056,15 +6055,45 @@ mod coverage_paths {
         );
         assert_eq!(
             ErasureVerifiedInventoryV1::from_verified_recovery(
-                vec![(state.clone(), proof.clone())],
+                vec![(state.clone(), proof)],
                 vec![timeline, TimelineId::new()],
                 4,
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+        let stale_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            reference(54),
+            vec![(timeline, reference(53))],
+            Vec::new(),
+        );
         assert_eq!(
             ErasureVerifiedInventoryV1::from_verified_recovery(
-                vec![(state.clone(), proof.clone())],
+                vec![(state, stale_proof)],
+                vec![timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_inventory_rejects_duplicate_or_invalid_topology() -> Result<(), ErasureErrorV1> {
+        let timeline = TimelineId::new();
+        let state = inventory_state(
+            reference(51),
+            reference(52),
+            reference(53),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(53))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), proof)],
                 vec![timeline, timeline],
                 4,
             ),
@@ -6090,20 +6119,7 @@ mod coverage_paths {
         );
         assert_eq!(
             ErasureVerifiedInventoryV1::from_verified_recovery(
-                vec![(state.clone(), duplicate_unaffected)],
-                vec![timeline],
-                4,
-            ),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        let stale_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
-            reference(54),
-            vec![(timeline, reference(53))],
-            Vec::new(),
-        );
-        assert_eq!(
-            ErasureVerifiedInventoryV1::from_verified_recovery(
-                vec![(state, stale_proof)],
+                vec![(state, duplicate_unaffected)],
                 vec![timeline],
                 4,
             ),
