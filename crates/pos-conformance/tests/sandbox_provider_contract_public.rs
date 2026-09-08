@@ -1,5 +1,4 @@
-#[path = "support/sandbox_vector.rs"]
-mod sandbox_vector_support;
+include!("support/sandbox_vector.rs");
 
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
@@ -20,7 +19,6 @@ use pos_conformance::{
 use sha2::{Digest, Sha256};
 
 use pos_reference::sandbox_provider_protocol as independent;
-use sandbox_vector_support::verify_and_materialize_vector;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 type ResultMutation = fn(&mut SandboxProviderResultV1);

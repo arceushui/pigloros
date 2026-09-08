@@ -1,7 +1,6 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-#[path = "support/sandbox_vector.rs"]
-mod sandbox_vector_support;
+include!("support/sandbox_vector.rs");
 
 use ciborium::value::Value;
 use pos_conformance::{
@@ -17,7 +16,6 @@ use pos_conformance::{
     SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
     VerificationOutcomeV1, VerificationResultV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
-use sandbox_vector_support::verify_and_materialize_vector as verify_and_materialize_sandbox_vector;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -1227,7 +1225,7 @@ fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult 
     let bytes = request.to_canonical_cbor()?;
     assert_eq!(EvaluatorRequestV1::from_canonical_cbor(&bytes)?, request);
     pos_reference::evaluator_protocol::EvaluationRequest::from_canonical_cbor(&bytes)?;
-    verify_and_materialize_sandbox_vector("evr1", &bytes)?;
+    verify_and_materialize_vector("evr1", &bytes)?;
 
     let Value::Array(mut old_layout) = ciborium::from_reader(bytes.as_slice())? else {
         return Err("EVR1 must encode as an array".into());

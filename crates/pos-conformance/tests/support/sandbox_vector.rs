@@ -1,6 +1,6 @@
 use std::path::Path;
 
-pub(super) fn verify_and_materialize_vector(
+fn verify_and_materialize_vector(
     name: &str,
     bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
