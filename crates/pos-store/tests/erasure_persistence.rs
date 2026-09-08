@@ -842,7 +842,7 @@ where
     let parent = first.max(second);
     let shared = Rc::new(RefCell::new(store));
     let request = request()?;
-    let coordinator = frozen_coordinator(Rc::clone(&shared), &request, target())?;
+    let mut coordinator = frozen_coordinator(Rc::clone(&shared), &request, target())?;
     let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
     let child = TimelineId::new();
     let input = ErasureForkAdmissionInputV1 {
