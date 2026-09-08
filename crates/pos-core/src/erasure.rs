@@ -3875,11 +3875,11 @@ pub trait ErasureInventoryPersistencePortV1 {
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1>;
 }
 
-/// EventStore adapter capability owned exclusively by the erasure execution host.
+/// `EventStore` adapter capability owned exclusively by the erasure execution host.
 ///
 /// This marker joins protected Event operations with the complete-inventory
 /// snapshot port without exposing either raw capability to Gateway, Replay, or
-/// Plugin callers. MemoryStore and SQLite are the two production adapters at
+/// Plugin callers. `MemoryStore` and `SQLite` are the two production adapters at
 /// this seam.
 pub trait ErasureHostStoreV1: crate::store::EventStore + ErasureInventoryPersistencePortV1 {}
 
