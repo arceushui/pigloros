@@ -1280,7 +1280,7 @@ fn launch_and_execute_admission_reject_each_selected_authority_mismatch() -> Tes
 
     let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
     let request_bytes = execute_request(&fixture, &launch, &["execute"])?;
-    let changed_request = redigest_unsigned_field(&request_bytes, "SPX1", 12, bytes([99; 32]))?;
+    let changed_request = redigest_unsigned_field(&request_bytes, "SPX1", 10, bytes([99; 32]))?;
     let request = SandboxExecuteRequest::from_canonical_cbor(&changed_request)?;
     assert_eq!(
         admitted.authenticate_grant(
