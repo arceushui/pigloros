@@ -416,7 +416,7 @@ mod tests {
     }
 
     fn local_error(phase: u64) -> Result<Vec<u8>, AdapterError> {
-        let value = Value::Array(vec![
+        local_error_with_fields(vec![
             Value::Text("SLE1".to_owned()),
             integer(1),
             integer(phase),
@@ -430,8 +430,12 @@ mod tests {
             },
             integer(if phase == 2 { 7 } else { 4 }),
             Value::Null,
-        ]);
-        encode_with_limit(&value, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)
+        ])
+    }
+
+    fn local_error_with_fields(fields: Vec<Value>) -> Result<Vec<u8>, AdapterError> {
+        encode_with_limit(&Value::Array(fields), CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)
     }
 
     fn optional_digest(value: Option<[u8; 32]>) -> Value {
@@ -802,6 +806,23 @@ mod tests {
         protocol_record("SLY1", changed, false).map(|(control, _)| control)
     }
 
+    fn rewrite_provider_result(
+        fields: &[Value],
+        mutate: impl FnOnce(&mut Vec<Value>),
+    ) -> Result<Vec<Value>, AdapterError> {
+        let result = decode_canonical_with_limit(bytes(&fields[7])?, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array_values(&result).map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut unsigned = array_values(&wrapper[0])
+            .map_err(|_| AdapterError::ProtocolFailure)?
+            .to_vec();
+        mutate(&mut unsigned);
+        let (result, _) = protocol_record("SPY1", unsigned, true)?;
+        let mut changed = fields.to_vec();
+        changed[7] = Value::Bytes(result);
+        Ok(changed)
+    }
+
     fn rewrite_audit(
         fields: &[Value],
         index: usize,
@@ -845,6 +866,104 @@ mod tests {
     }
 
     #[test]
+    fn sle1_accepts_every_phase_operation_and_failure_code() -> Result<(), AdapterError> {
+        use crate::sandbox_provider_protocol::{
+            SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
+        };
+
+        let valid_cases = [
+            (0, None, None, None, None, 2),
+            (0, Some(0), None, None, None, 4),
+            (0, Some(1), Some([1; 16]), Some([2; 16]), None, 5),
+            (0, Some(1), Some([1; 16]), Some([2; 16]), None, 6),
+            (1, Some(1), Some([1; 16]), Some([2; 16]), None, 0),
+            (1, Some(1), Some([1; 16]), Some([2; 16]), None, 1),
+            (1, Some(1), Some([1; 16]), Some([2; 16]), None, 3),
+            (1, Some(1), Some([1; 16]), Some([2; 16]), None, 8),
+            (2, Some(1), Some([1; 16]), Some([2; 16]), Some([3; 32]), 3),
+            (2, Some(1), Some([1; 16]), Some([2; 16]), Some([3; 32]), 7),
+            (2, Some(1), Some([1; 16]), Some([2; 16]), Some([3; 32]), 8),
+        ];
+        for (phase, operation, request_id, attempt_id, grant, code) in valid_cases {
+            let bytes = local_error_with_fields(vec![
+                Value::Text("SLE1".to_owned()),
+                integer(1),
+                integer(phase),
+                operation.map_or(Value::Null, integer),
+                request_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                attempt_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                grant.map_or(Value::Null, |digest| Value::Bytes(digest.to_vec())),
+                integer(code),
+                Value::Null,
+            ])?;
+            SandboxLocalError::from_canonical_cbor(&bytes)
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+        }
+
+        for (code, expected) in [
+            (0, SandboxProviderOperation::Describe),
+            (1, SandboxProviderOperation::Execute),
+            (2, SandboxProviderOperation::Cancel),
+            (3, SandboxProviderOperation::Reconcile),
+        ] {
+            let bytes = local_error_with_fields(vec![
+                Value::Text("SLE1".to_owned()),
+                integer(1),
+                integer(0),
+                integer(code),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                integer(2),
+                Value::Null,
+            ])?;
+            let decoded = SandboxLocalError::from_canonical_cbor(&bytes)
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            assert_eq!(decoded.operation, Some(expected));
+            assert_eq!(decoded.phase, SandboxLocalErrorPhase::BeforeSpx1);
+            assert_eq!(decoded.code, SandboxLocalErrorCode::PolicyUnavailable);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sle1_rejects_zero_and_inconsistent_phase_bindings() -> Result<(), AdapterError> {
+        let invalid_cases = [
+            (0, Some(1), Some([0; 16]), Some([2; 16]), None, 5),
+            (0, Some(1), Some([1; 16]), Some([0; 16]), None, 5),
+            (0, Some(1), Some([1; 16]), Some([2; 16]), Some([0; 32]), 5),
+            (0, Some(0), Some([1; 16]), Some([2; 16]), None, 5),
+            (0, Some(1), Some([1; 16]), None, None, 5),
+            (0, Some(1), Some([1; 16]), Some([2; 16]), Some([3; 32]), 5),
+            (1, None, Some([1; 16]), Some([2; 16]), None, 0),
+            (1, Some(1), None, Some([2; 16]), None, 0),
+            (1, Some(1), Some([1; 16]), None, None, 0),
+            (1, Some(1), Some([1; 16]), Some([2; 16]), Some([3; 32]), 0),
+            (1, Some(1), Some([1; 16]), Some([2; 16]), None, 7),
+            (2, None, Some([1; 16]), Some([2; 16]), Some([3; 32]), 7),
+            (2, Some(1), None, Some([2; 16]), Some([3; 32]), 7),
+            (2, Some(1), Some([1; 16]), None, Some([3; 32]), 7),
+            (2, Some(1), Some([1; 16]), Some([2; 16]), None, 7),
+            (2, Some(1), Some([1; 16]), Some([2; 16]), Some([3; 32]), 0),
+        ];
+        for (phase, operation, request_id, attempt_id, grant, code) in invalid_cases {
+            let bytes = local_error_with_fields(vec![
+                Value::Text("SLE1".to_owned()),
+                integer(1),
+                integer(phase),
+                operation.map_or(Value::Null, integer),
+                request_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                attempt_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                grant.map_or(Value::Null, |digest| Value::Bytes(digest.to_vec())),
+                integer(code),
+                Value::Null,
+            ])?;
+            assert!(SandboxLocalError::from_canonical_cbor(&bytes).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn sly1_maps_every_terminal_class_and_preserves_completed_output() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
         for outcome in [0, 1, 4] {
@@ -883,6 +1002,46 @@ mod tests {
                 }
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn admitted_reply_rejects_each_result_identity_and_noncompleted_output(
+    ) -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, _, _) = admitted_reply(&encoded, [14; 32], 1)?;
+        let evidence = admitted_evidence(&control)?;
+
+        assert_eq!(
+            decode_provider_result(&evidence.fields, &[], &encoded, 1024),
+            Ok(DecodedSelectorReply {
+                observation: Ok(SubjectObservation {
+                    result: SubjectResult::Unavailable,
+                    usage: ResourceUsage::default(),
+                }),
+                provenance: Some(evidence.receipt.receipt_digest),
+            })
+        );
+        for index in [2_usize, 3] {
+            let fields = rewrite_provider_result(&evidence.fields, |result| {
+                result[index] = Value::Bytes(vec![99; 16]);
+            })?;
+            assert_eq!(
+                decode_provider_result(&fields, &[], &encoded, 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+
+        let mut descriptor = evidence.fields.clone();
+        descriptor[11] = Value::Array(vec![integer(0), Value::Bytes(vec![0; 32])]);
+        assert_eq!(
+            decode_provider_result(&descriptor, &[], &encoded, 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            decode_provider_result(&evidence.fields, &[1], &encoded, 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
         Ok(())
     }
 
@@ -1162,6 +1321,20 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+        let mut truncated = evidence.fields.clone();
+        let Value::Array(records) = &mut truncated[10] else {
+            return Err(AdapterError::ProtocolFailure);
+        };
+        records.pop();
+        assert_eq!(
+            validate_evidence(
+                &truncated,
+                &evidence.result,
+                &evidence.grant,
+                &evidence.receipt,
+            ),
+            Err(AdapterError::ProtocolFailure)
+        );
         Ok(())
     }
 
@@ -1175,7 +1348,10 @@ mod tests {
         assert_eq!(validate_output_descriptor(&valid, &trailing), Ok(()));
         for invalid in [
             Value::Null,
-            Value::Array(vec![integer(2), Value::Bytes(vec![0; 32])]),
+            Value::Array(vec![
+                integer(2),
+                Value::Bytes(domain_digest(OUTPUT_DOMAIN, &trailing).to_vec()),
+            ]),
             Value::Array(vec![integer(3), Value::Bytes(vec![0; 32])]),
         ] {
             assert_eq!(
