@@ -974,10 +974,8 @@ fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
         let mut state = SelectorRevocationState::new(fixture.current.clone());
         assert!(matches!(
             state.begin_update(&changed, &fixture.trust, Vec::new(), 1_000),
-            Err(SandboxRevocationUpdateError::Protocol(_))
-                | Err(SandboxRevocationUpdateError::Trust(
-                    SandboxTrustError::Protocol(_)
-                ))
+            Err(SandboxRevocationUpdateError::Protocol(_)
+                | SandboxRevocationUpdateError::Trust(SandboxTrustError::Protocol(_)))
         ));
     }
     assert!(matches!(
