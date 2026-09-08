@@ -246,6 +246,7 @@ mod coverage_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fork_action_response_notice_lookup_and_read_share_logical_sequence() {
         let mut store = MemoryStore::new();
+        Gateway::bind_test_erasure_gate(&mut store);
         let root = store.create_timeline("logical-root").test_ok();
         let entity = EntityId::new();
         store
@@ -4705,6 +4706,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn root_limit_excludes_forks_and_imported_children() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let root = store.create_timeline("root").test_ok();
         store.fork(root.id(), Seq::ZERO, "fork").test_ok();
         let imported_child = TimelineMeta::forked_from(root.id(), Seq::ZERO, "imported-child");
@@ -4740,6 +4742,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn child_event_limit_counts_owned_not_inherited_events() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let root = store.create_timeline("root").test_ok();
         let root_draft = EventDraft::new(
             EntityId::new(),
@@ -5107,6 +5110,7 @@ mod tests {
         let database = TemporarySqliteFile::new("atomic-ceiling");
         let path = database.path.clone();
         let mut seed = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        Gateway::bind_test_erasure_gate(seed.as_mut());
         let timeline = seed.create_timeline("sqlite").test_ok();
         let entity = EntityId::new();
         let prefill = EventDraft::new(
@@ -5187,6 +5191,7 @@ mod tests {
             path: ":memory:".to_owned(),
         })
         .test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let root = store.create_timeline("root").test_ok();
         let small = EventDraft::new(
             EntityId::new(),
@@ -5219,6 +5224,7 @@ mod tests {
             path: ":memory:".to_owned(),
         })
         .test_ok();
+        Gateway::bind_test_erasure_gate(external.as_mut());
         let timeline = external.create_timeline("external").test_ok();
         let oversized = EventDraft::new(
             EntityId::new(),
@@ -5243,6 +5249,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn imported_oversized_event_type_returns_actionable_413_on_bundled_stores() {
         let mut source = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(source.as_mut());
         let timeline = source.create_timeline("import-source").test_ok();
         source
             .append(
@@ -5270,6 +5277,7 @@ mod tests {
             .test_ok(),
         ];
         for mut destination in destinations {
+            Gateway::bind_test_erasure_gate(destination.as_mut());
             import_timeline_with_id(destination.as_mut(), export.clone()).test_ok();
             let error = Gateway::new(destination)
                 .read_events_page(&timeline.id().to_string(), 0, 1)
@@ -5292,6 +5300,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn imported_deep_fork_returns_actionable_413() {
         let mut source = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(source.as_mut());
         let root = source.create_timeline("root").test_ok();
         let mut timelines = vec![root];
         for depth in 1..=MAX_FORK_DEPTH + 1 {
@@ -5303,6 +5312,7 @@ mod tests {
         }
 
         let mut destination = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(destination.as_mut());
         for timeline in &timelines {
             let export = export_timeline_own(
                 source.as_ref(),
@@ -5579,6 +5589,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fork_with_more_than_ten_thousand_logical_events_pages_to_exhaustion() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let root = store.create_timeline("root").test_ok();
         let drafts: Vec<_> = (0..MAX_EVENTS_PER_TIMELINE)
             .map(|_| {

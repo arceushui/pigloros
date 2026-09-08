@@ -1122,6 +1122,7 @@ osf_link = \"https://osf.io/example\"\n";
 
     fn app_with_preloaded_bytes(payloads: Vec<Vec<u8>>) -> (Router, String) {
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let timeline = store.create_timeline("shared-writer").test_ok();
         let drafts: Vec<EventDraft> = payloads
             .into_iter()

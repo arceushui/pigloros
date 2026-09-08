@@ -2172,6 +2172,7 @@ mod tests {
     fn execute_consent_revocation_reports_a_lost_session_after_append(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new()))?;
         let timeline = store
             .create_timeline("lost-revocation-session")
             .test_ok()?
@@ -3723,12 +3724,14 @@ mod tests {
 
         let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
         let worker_lifecycle = std::sync::Arc::clone(&lifecycle);
+        let mut worker_store = super::ExecutorStore::Generic(Box::new(MemoryStore::new()));
+        worker_store.bind_test_erasure_gate();
         let worker = tokio::task::spawn_blocking(move || {
             super::worker_loop(
                 &worker_lifecycle,
                 std::sync::Arc::new(tokio::sync::Notify::new()),
                 &mut receiver,
-                super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
+                worker_store,
                 None,
                 Some(observer),
             );
@@ -5177,6 +5180,7 @@ mod tests {
     async fn pending_append_identity_cleanup_forwards_durable_marker(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new()))?;
         let timeline = store.create_timeline("pending-cleanup").test_ok()?.id();
         let scope = AppendDedupScope::from_keyed_hash([201; 32]);
         for key in [202, 203] {
