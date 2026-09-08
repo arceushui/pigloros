@@ -1,8 +1,5 @@
 //! Canonical SLX1/SLY1 codec for the root selector boundary.
 
-// The private module is shared with its selector sibling through the crate root.
-#![allow(clippy::redundant_pub_crate)]
-
 use ciborium::value::Value;
 
 use crate::adapter_transport::{read_observation, write_attempt};
@@ -25,21 +22,21 @@ const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
 const SLY1_DOMAIN: &[u8] = b"PiglorOS.SLY1.v1\0";
 
-pub(super) struct EncodedSelectorRequest {
-    pub(super) control: Vec<u8>,
-    pub(super) attempt_stream: Vec<u8>,
-    pub(super) provider_request_id: [u8; 16],
-    pub(super) attempt_id: [u8; 16],
-    pub(super) digest: [u8; 32],
+pub(crate) struct EncodedSelectorRequest {
+    pub(crate) control: Vec<u8>,
+    pub(crate) attempt_stream: Vec<u8>,
+    pub(crate) provider_request_id: [u8; 16],
+    pub(crate) attempt_id: [u8; 16],
+    pub(crate) digest: [u8; 32],
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct DecodedSelectorReply {
-    pub(super) observation: Result<SubjectObservation, AdapterError>,
-    pub(super) provenance: Option<[u8; 32]>,
+pub(crate) struct DecodedSelectorReply {
+    pub(crate) observation: Result<SubjectObservation, AdapterError>,
+    pub(crate) provenance: Option<[u8; 32]>,
 }
 
-pub(super) fn encode_request(
+pub(crate) fn encode_request(
     request: &EvaluationRequest,
     request_bytes: &[u8],
     attempt: &CaseAttempt,
@@ -75,7 +72,7 @@ pub(super) fn encode_request(
     })
 }
 
-pub(super) fn decode_reply(
+pub(crate) fn decode_reply(
     control: &[u8],
     trailing: &[u8],
     request: &EncodedSelectorRequest,
