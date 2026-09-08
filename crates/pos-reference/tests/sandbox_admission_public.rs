@@ -3,10 +3,10 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    AdmissionGrant, AdmittedSandboxProvider, LaunchPolicy, SandboxAdministratorPolicy,
-    SandboxAdmissionError, SandboxArchitecture, SandboxExecuteRequest,
-    SandboxProviderAdmissionInputs, SandboxProviderReceipt, SandboxRevocationSnapshot,
-    SandboxTrustSnapshot,
+    AdmissionGrant, AdmittedSandboxProvider, HostCapabilityProfile, LaunchPolicy,
+    ProviderConformanceReport, SandboxAdministratorPolicy, SandboxAdmissionError,
+    SandboxArchitecture, SandboxExecuteRequest, SandboxProviderAdmissionInputs,
+    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -52,6 +52,38 @@ fn sign_record(magic: &str, unsigned: Value, key: &SigningKey) -> TestResult<Vec
         bytes(digest),
         Value::Bytes(key.sign(&message).to_bytes().to_vec()),
     ]))
+}
+
+fn resign_unsigned_field(
+    encoded: &[u8],
+    magic: &str,
+    field: usize,
+    replacement: Value,
+    key: &SigningKey,
+) -> TestResult<Vec<u8>> {
+    resign_unsigned_fields(encoded, magic, &[(field, replacement)], key)
+}
+
+fn resign_unsigned_fields(
+    encoded: &[u8],
+    magic: &str,
+    replacements: &[(usize, Value)],
+    key: &SigningKey,
+) -> TestResult<Vec<u8>> {
+    let Value::Array(wrapper) = ciborium::from_reader(encoded)? else {
+        return Err("signed wrapper must be an array".into());
+    };
+    let Value::Array(mut unsigned) = wrapper
+        .into_iter()
+        .next()
+        .ok_or("signed wrapper prefix missing")?
+    else {
+        return Err("signed wrapper prefix must be an array".into());
+    };
+    for (field, replacement) in replacements {
+        *unsigned.get_mut(*field).ok_or("unsigned field missing")? = replacement.clone();
+    }
+    sign_record(magic, Value::Array(unsigned), key)
 }
 
 fn self_digested_record(magic: &str, unsigned: Value) -> TestResult<Vec<u8>> {
@@ -911,5 +943,195 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         ),
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn admission_evidence_rejects_closed_host_and_report_boundaries() -> TestResult {
+    let fixture = Fixture::new()?;
+    for (field, replacement) in [
+        (3, Value::Text(String::new())),
+        (4, Value::Array(Vec::new())),
+        (5, bytes([0; 32])),
+        (6, bytes([0; 32])),
+        (7, bytes([0; 32])),
+        (8, Value::Text(String::new())),
+    ] {
+        let changed = resign_unsigned_field(
+            &fixture.hcp1,
+            "HCP1",
+            field,
+            replacement,
+            &fixture.authority.runtime,
+        )?;
+        assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
+    }
+
+    let duplicate_features = Value::Array(vec![
+        Value::Array(vec![
+            Value::Text("cgroup-v2".to_owned()),
+            integer(1),
+            bytes([18; 32]),
+        ]),
+        Value::Array(vec![
+            Value::Text("cgroup-v2".to_owned()),
+            integer(1),
+            bytes([18; 32]),
+        ]),
+    ]);
+    let changed = resign_unsigned_field(
+        &fixture.hcp1,
+        "HCP1",
+        4,
+        duplicate_features,
+        &fixture.authority.runtime,
+    )?;
+    assert!(HostCapabilityProfile::from_canonical_cbor(&changed).is_err());
+
+    for (field, replacement) in [
+        (2, bytes([0; 32])),
+        (3, bytes([0; 32])),
+        (4, bytes([0; 32])),
+        (5, bytes([0; 32])),
+        (6, bytes([0; 32])),
+        (8, bytes([0; 32])),
+        (9, integer(1)),
+        (10, Value::Text(String::new())),
+    ] {
+        let changed = resign_unsigned_field(
+            &fixture.pcr1,
+            "PCR1",
+            field,
+            replacement,
+            &fixture.authority.reviewer,
+        )?;
+        assert!(ProviderConformanceReport::from_canonical_cbor(&changed).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn provider_admission_rejects_invalid_required_feature_sets() -> TestResult {
+    let fixture = Fixture::new()?;
+    for required_features in [
+        Vec::new(),
+        vec![String::new()],
+        vec!["cgroup-v2".to_owned(), "cgroup-v2".to_owned()],
+        vec!["z-feature".to_owned(), "a-feature".to_owned()],
+    ] {
+        let inputs = SandboxProviderAdmissionInputs {
+            required_features: &required_features,
+            ..fixture.inputs()
+        };
+        assert_eq!(
+            AdmittedSandboxProvider::admit(
+                &fixture.policy,
+                &fixture.trust,
+                &fixture.revocation,
+                inputs,
+            ),
+            Err(SandboxAdmissionError::HostCapabilityMismatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let grant_bytes = admission_grant(&fixture, &request, &launch)?;
+
+    for (field, replacement) in [
+        (21, bytes([99; 32])),
+        (25, Value::Text("other-runtime".to_owned())),
+    ] {
+        let changed = resign_unsigned_field(
+            &grant_bytes,
+            "AGR1",
+            field,
+            replacement,
+            &fixture.authority.runtime,
+        )?;
+        assert_eq!(
+            admitted.authenticate_grant(&changed, &request, &image, &launch),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+    }
+
+    let grant = admitted.authenticate_grant(&grant_bytes, &request, &image, &launch)?;
+    let audit = audit_chain(&fixture, &grant)?;
+    let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
+    for (field, replacement) in [
+        (14, bytes([99; 32])),
+        (24, Value::Text("other-runtime".to_owned())),
+    ] {
+        let changed = resign_unsigned_field(
+            &receipt_bytes,
+            "SPR1",
+            field,
+            replacement,
+            &fixture.authority.runtime,
+        )?;
+        assert_eq!(
+            admitted.authenticate_receipt(&changed, &grant),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+    }
+
+    let receipt = admitted.authenticate_receipt(&receipt_bytes, &grant)?;
+    let result_bytes = terminal_result(&fixture, &request, &grant, &receipt)?;
+    for replacements in [
+        vec![(2, Value::Bytes(vec![77; 16]))],
+        vec![(9, Value::Text("other-runtime".to_owned()))],
+        vec![
+            (4, integer(2)),
+            (5, Value::Null),
+            (6, Value::Null),
+            (7, Value::Null),
+            (8, Value::Array(Vec::new())),
+        ],
+    ] {
+        let changed = resign_unsigned_fields(
+            &result_bytes,
+            "SPY1",
+            &replacements,
+            &fixture.authority.runtime,
+        )?;
+        assert_eq!(
+            admitted.authenticate_terminal_result(&changed, &request, &grant, &receipt),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+    }
+
+    let result =
+        admitted.authenticate_terminal_result(&result_bytes, &request, &grant, &receipt)?;
+    assert!(admitted
+        .authenticate_audit_chain(&[], &receipt, &result)
+        .is_err());
+
+    let changed_second =
+        resign_unsigned_field(&audit[1], "SAU1", 3, integer(2), &fixture.authority.runtime)?;
+    assert!(admitted
+        .authenticate_audit_chain(&[audit[0].clone(), changed_second], &receipt, &result)
+        .is_err());
+
+    let changed_authority = resign_unsigned_field(
+        &audit[1],
+        "SAU1",
+        5,
+        Value::Array(vec![bytes([99; 32])]),
+        &fixture.authority.runtime,
+    )?;
+    assert!(admitted
+        .authenticate_audit_chain(&[audit[0].clone(), changed_authority], &receipt, &result)
+        .is_err());
     Ok(())
 }
