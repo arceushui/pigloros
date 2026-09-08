@@ -51,11 +51,12 @@ pub use verify::run as verify_source;
 /// without fabricating erasure evidence.
 #[cfg(test)]
 pub(crate) fn bind_test_store_gate(
-    store: &mut dyn pos_core::store::EventStore,
-) -> Result<(), pos_core::CoreError> {
+    mut store: Box<dyn pos_core::store::EventStore>,
+) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
     store.bind_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new(),
-    ))
+    ))?;
+    Ok(store)
 }
 
 /// Return the committed author identity used for ledger Events.

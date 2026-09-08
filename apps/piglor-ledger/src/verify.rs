@@ -168,10 +168,11 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
 fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
     let supplied_public_keys = parse_supplied_public_keys(pubkey_hex)?;
 
-    let mut store = pos_store::open_store_read_only(&db.to_string_lossy())
+    let store = pos_store::open_store_read_only(&db.to_string_lossy())
         .map_err(|e| CliError::BadSource(e.to_string()))?;
     #[cfg(test)]
-    crate::bind_test_store_gate(store.as_mut()).map_err(|e| CliError::BadSource(e.to_string()))?;
+    let store =
+        crate::bind_test_store_gate(store).map_err(|e| CliError::BadSource(e.to_string()))?;
     let registry = store
         .load_key_registry()
         .map_err(|e| CliError::BadSource(e.to_string()))?;

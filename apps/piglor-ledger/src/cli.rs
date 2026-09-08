@@ -121,12 +121,12 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 CliError::BadSource("store: source requires --key <path>".to_owned())
             })?;
             let signing_key = load_signing_key(key_path)?;
-            let mut event_store = pos_store::open_store(StoreConfig::Sqlite {
+            let event_store = pos_store::open_store(StoreConfig::Sqlite {
                 path: db.to_string_lossy().into_owned(),
             })
             .map_err(|e| CliError::BadSource(e.to_string()))?;
             #[cfg(test)]
-            crate::bind_test_store_gate(event_store.as_mut())
+            let event_store = crate::bind_test_store_gate(event_store)
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             let persisted_registry = event_store
                 .load_key_registry()
@@ -373,10 +373,10 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
     let ledger = match &source {
         Source::Toml(dir) => TomlLedgerStore::new(dir).load(&today)?,
         Source::Store(db) => {
-            let mut store = pos_store::open_store_read_only(&db.to_string_lossy())
+            let store = pos_store::open_store_read_only(&db.to_string_lossy())
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             #[cfg(test)]
-            crate::bind_test_store_gate(store.as_mut())
+            let store = crate::bind_test_store_gate(store)
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             let timeline_id = find_ledger_timeline(store.as_ref())?;
             pos_plugin_ledger::load_ledger_from_store(store.as_ref(), timeline_id, &today)?
@@ -1973,8 +1973,8 @@ mod tests {
         ])
         .test_ok()?;
 
-        let mut store = pos_store::open_store_read_only(&db.to_string_lossy()).test_ok()?;
-        crate::bind_test_store_gate(store.as_mut()).test_ok()?;
+        let store = pos_store::open_store_read_only(&db.to_string_lossy()).test_ok()?;
+        let store = crate::bind_test_store_gate(store).test_ok()?;
         let timeline = find_ledger_timeline(store.as_ref())?;
         let event = store
             .read(timeline, pos_core::store::SeqRange::all())
