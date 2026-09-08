@@ -5293,6 +5293,7 @@ mod coverage_public_error_paths {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod erasure_gate_coverage {
     use super::*;
     use pos_store::EventStore;
