@@ -340,8 +340,132 @@ fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoun
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
+    use std::thread;
 
     use super::*;
+
+    fn selector_request() -> EvaluationRequest {
+        use crate::evaluator_protocol::{
+            ImplementationIdentity, OutputCapability, SubjectAdapterKind,
+        };
+
+        EvaluationRequest {
+            request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+            profile_digest: [2; 32],
+            fixture_bundle_digest: [3; 32],
+            subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+            subject_artifact_digest: [4; 32],
+            implementation: ImplementationIdentity {
+                implementation_id: "subject".to_owned(),
+                source_digest: [5; 32],
+                build_digest: [6; 32],
+                binary_digest: [7; 32],
+                public_contract_digest: [8; 32],
+                organization_id: None,
+            },
+            execution_profile_digest: [9; 32],
+            trust_policy_snapshot_digest: [10; 32],
+            output_capability: OutputCapability {
+                capability_digest: [11; 32],
+                report_bytes_limit: 1,
+                diagnostic_bytes_limit: 0,
+            },
+            evaluator_protocol_digest: [12; 32],
+            evaluator_hard_caps_digest: [13; 32],
+            sandbox_requirement: None,
+            request_digest: [14; 32],
+        }
+    }
+
+    fn selector_attempt() -> CaseAttempt {
+        use crate::evaluator::{AttemptArtifact, AttemptTransportCaps};
+        use crate::profile::DeterministicBudget;
+
+        let artifact = |bytes: Vec<u8>| AttemptArtifact {
+            digest: *blake3::hash(&bytes).as_bytes(),
+            bytes,
+        };
+        CaseAttempt {
+            case_id: "case".to_owned(),
+            claim_layer: 1,
+            family: 1,
+            mode: 1,
+            fixture_digest: [15; 32],
+            schema: artifact(vec![1]),
+            payload: artifact(vec![2]),
+            auxiliary: Vec::new(),
+            budget: DeterministicBudget {
+                memory_bytes: 1,
+                cpu_fuel: 1,
+                host_calls: 1,
+                event_count: 1,
+                output_bytes: 1024,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+            },
+            watchdog_ms: 1_000,
+            network_allowed: false,
+            capability_ids: vec!["execute".to_owned()],
+            transport_caps: AttemptTransportCaps {
+                max_member_bytes: 1024,
+                max_attempt_bytes: 4096,
+            },
+        }
+    }
+
+    fn local_unavailable() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let value = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("SLE1".to_owned()),
+            ciborium::value::Value::Integer(1_u64.into()),
+            ciborium::value::Value::Integer(0_u64.into()),
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Integer(2_u64.into()),
+            ciborium::value::Value::Null,
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn invoke_with_reply(
+        control: Vec<u8>,
+        trailing: Vec<u8>,
+    ) -> Result<crate::selector_protocol::DecodedSelectorReply, AdapterError> {
+        let temporary = tempfile::tempdir().map_err(|_| AdapterError::ProtocolFailure)?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket).map_err(|_| AdapterError::ProtocolFailure)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )
+        .map_err(|_| AdapterError::ProtocolFailure)?;
+        let uid = std::fs::metadata(&socket)
+            .map_err(|_| AdapterError::ProtocolFailure)?
+            .uid();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request)?;
+            let length = u32::try_from(control.len())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            stream.write_all(&length.to_be_bytes())?;
+            stream.write_all(&control)?;
+            stream.write_all(&trailing)
+        });
+        let request = selector_request();
+        let attempt = selector_attempt();
+        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
+        let result = SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]);
+        server
+            .join()
+            .map_err(|_| AdapterError::ProtocolFailure)?
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        result
+    }
 
     #[test]
     fn immutable_artifact_retains_verified_descriptor() -> Result<(), Box<dyn std::error::Error>> {
@@ -365,6 +489,60 @@ mod tests {
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&provider_directory, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_kind_directories_are_closed_and_stable() {
+        assert_eq!(SandboxArtifactKind::Authority.directory(), "authority");
+        assert_eq!(SandboxArtifactKind::Provider.directory(), "providers");
+        assert_eq!(SandboxArtifactKind::Image.directory(), "images");
+    }
+
+    #[test]
+    fn immutable_artifact_rejects_invalid_path_components() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path();
+        let uid = std::fs::metadata(root)?.uid();
+        assert_eq!(
+            open_under(
+                &root.join("missing"),
+                SandboxArtifactKind::Authority,
+                [1; 32],
+                uid
+            )
+            .map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            open_under(
+                root,
+                SandboxArtifactKind::Authority,
+                [1; 32],
+                uid.wrapping_add(1)
+            )
+            .map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        let authority = root.join("authority");
+        std::fs::create_dir(&authority)?;
+        assert_eq!(
+            open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o500))?;
+        let digest_path = authority.join(digest_name([1; 32]));
+        std::fs::create_dir(&digest_path)?;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
+        assert_eq!(
+            open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::remove_dir(&digest_path)?;
         Ok(())
     }
 
@@ -426,6 +604,49 @@ mod tests {
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         drop(listener);
+        Ok(())
+    }
+
+    #[test]
+    fn selector_adapter_requires_an_explicit_case_ordinal() {
+        let request = selector_request();
+        let mut adapter = SelectorAdapter::new(&request, b"evr1");
+        assert_eq!(adapter.kind(), request.subject_adapter);
+        assert_eq!(
+            adapter.subject_artifact_digest(),
+            request.subject_artifact_digest
+        );
+        assert_eq!(
+            adapter.execute(&selector_attempt()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(adapter.take_execution_provenance_digest(), None);
+    }
+
+    #[test]
+    fn selector_transport_exchanges_a_bounded_local_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let reply = invoke_with_reply(local_unavailable()?, Vec::new())?;
+        assert_eq!(reply.observation, Err(AdapterError::Unavailable));
+        assert_eq!(reply.provenance, None);
+        Ok(())
+    }
+
+    #[test]
+    fn selector_transport_rejects_empty_and_truncated_control(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            invoke_with_reply(Vec::new(), Vec::new()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            invoke_with_reply(vec![0xff], Vec::new()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            invoke_with_reply(local_unavailable()?, vec![1]),
+            Err(AdapterError::ProtocolFailure)
+        );
         Ok(())
     }
 }
