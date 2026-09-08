@@ -22,21 +22,21 @@ const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
 const SLY1_DOMAIN: &[u8] = b"PiglorOS.SLY1.v1\0";
 
-pub(super) struct EncodedSelectorRequest {
-    pub(super) control: Vec<u8>,
-    pub(super) attempt_stream: Vec<u8>,
-    pub(super) provider_request_id: [u8; 16],
-    pub(super) attempt_id: [u8; 16],
-    pub(super) digest: [u8; 32],
+pub struct EncodedSelectorRequest {
+    pub control: Vec<u8>,
+    pub attempt_stream: Vec<u8>,
+    pub provider_request_id: [u8; 16],
+    pub attempt_id: [u8; 16],
+    pub digest: [u8; 32],
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct DecodedSelectorReply {
-    pub(super) observation: Result<SubjectObservation, AdapterError>,
-    pub(super) provenance: Option<[u8; 32]>,
+pub struct DecodedSelectorReply {
+    pub observation: Result<SubjectObservation, AdapterError>,
+    pub provenance: Option<[u8; 32]>,
 }
 
-pub(super) fn encode_request(
+pub fn encode_request(
     request: &EvaluationRequest,
     request_bytes: &[u8],
     attempt: &CaseAttempt,
@@ -72,7 +72,7 @@ pub(super) fn encode_request(
     })
 }
 
-pub(super) fn decode_reply(
+pub fn decode_reply(
     control: &[u8],
     trailing: &[u8],
     request: &EncodedSelectorRequest,
@@ -413,7 +413,7 @@ mod tests {
         Ok(())
     }
 
-    fn local_error(phase: u64) -> Vec<u8> {
+    fn local_error(phase: u64) -> Result<Vec<u8>, AdapterError> {
         let value = Value::Array(vec![
             Value::Text("SLE1".to_owned()),
             integer(1),
@@ -429,29 +429,27 @@ mod tests {
             integer(if phase == 2 { 7 } else { 4 }),
             Value::Null,
         ]);
-        encode_with_limit(&value, CONTROL_LIMIT).expect("bounded test SLE1")
+        encode_with_limit(&value, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)
     }
 
     #[test]
-    fn sle1_preserves_pre_and_post_admission_failure_classes() {
-        let encoded =
-            encode_request(&request(), b"evr1", &attempt(), 0).expect("valid selector request");
-        let pre = decode_reply(&local_error(0), &[], &encoded, [14; 32], 1024)
-            .expect("valid pre-admission SLE1");
+    fn sle1_preserves_pre_and_post_admission_failure_classes() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let pre = decode_reply(&local_error(0)?, &[], &encoded, [14; 32], 1024)?;
         assert_eq!(pre.observation, Err(AdapterError::Unavailable));
-        let post = decode_reply(&local_error(2), &[], &encoded, [14; 32], 1024)
-            .expect("valid post-admission SLE1");
+        let post = decode_reply(&local_error(2)?, &[], &encoded, [14; 32], 1024)?;
         assert_eq!(
             post.observation,
             Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         assert_eq!(
-            decode_reply(&local_error(0), &[1], &encoded, [14; 32], 1024),
+            decode_reply(&local_error(0)?, &[1], &encoded, [14; 32], 1024),
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(
             decode_reply(b"not-cbor", &[], &encoded, [14; 32], 1024),
             Err(AdapterError::ProtocolFailure)
         );
+        Ok(())
     }
 }

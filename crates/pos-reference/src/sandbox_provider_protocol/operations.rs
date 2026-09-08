@@ -148,7 +148,7 @@ fn validate_local_error_shape(
                 ) {
                     execute && request && attempt
                 } else {
-                    (!attempt && (!request || execute)) || (execute && request && attempt)
+                    (!request && !attempt) || (request && execute)
                 }
         }
         SandboxLocalErrorPhase::AfterSpx1BeforeAdmission => {
