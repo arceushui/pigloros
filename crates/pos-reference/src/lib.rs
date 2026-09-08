@@ -752,6 +752,7 @@ type NonInterferenceDigestRefs<'a> = (
     &'a serde_json::Value,
     &'a serde_json::Value,
     &'a serde_json::Value,
+    &'a serde_json::Value,
 );
 
 fn validate_non_interference_case<'a>(
@@ -764,6 +765,7 @@ fn validate_non_interference_case<'a>(
         "fixture_id",
         "variant",
         "mode",
+        "fixture_digest",
         "control_input_digest",
         "canary_input_digest",
         "authoritative_digest",
@@ -780,6 +782,7 @@ fn validate_non_interference_case<'a>(
         "provenance_digest",
     ];
     let digests = [
+        "fixture_digest",
         "control_input_digest",
         "canary_input_digest",
         "authoritative_digest",
@@ -817,6 +820,7 @@ fn validate_non_interference_case<'a>(
         ));
     }
     Ok((
+        &case["fixture_digest"],
         &case["control_input_digest"],
         &case["canary_input_digest"],
         &case["authoritative_digest"],
@@ -1215,6 +1219,7 @@ mod tests {
                         "fixture_id": fixture,
                         "variant": variant,
                         "mode": mode,
+                        "fixture_digest": vec![7_u8; 32],
                         "control_input_digest": vec![1_u8; 32],
                         "canary_input_digest": vec![2_u8; 32],
                         "authoritative_digest": vec![3_u8; 32],
@@ -1818,6 +1823,7 @@ mod tests {
             ("fixture_id", serde_json::json!("wrong")),
             ("variant", serde_json::json!("wrong")),
             ("mode", serde_json::json!("wrong")),
+            ("fixture_digest", serde_json::json!([])),
             ("authoritative_equal", serde_json::json!(false)),
             ("public_equal", serde_json::json!(false)),
             ("operational_equal", serde_json::json!(false)),

@@ -271,6 +271,64 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
     }
 }
 
+#[test]
+fn executed_public_evidence_round_trips_through_the_independent_fork_verifier() {
+    let serialized = ok(public_evidence_fixture().to_json());
+    let mut baseline: serde_json::Value = ok(serde_json::from_str(&serialized));
+    let mut counterfactual = baseline.clone();
+    baseline["manifest"]["fork_cut_seq"] = serde_json::json!(1);
+    counterfactual["manifest"]["fork_cut_seq"] = serde_json::json!(1);
+    baseline["authoritative_events"] = serde_json::json!([
+        event_json(1, "body", "world.observation.v1", 1, None),
+        event_json(2, "agent", "proof.agent.reaction.v1", 2, Some(1)),
+        event_json(3, "society", "society.signal", 3, Some(2)),
+    ]);
+    counterfactual["authoritative_events"] = serde_json::json!([
+        event_json(1, "body", "world.observation.v1", 1, None),
+        event_json(2, "operator", "world.action.v1", 24, Some(1)),
+        event_json(3, "body", "world.observation.v1", 25, Some(2)),
+        event_json(4, "agent", "proof.agent.reaction.v1", 26, Some(3)),
+        event_json(5, "society", "society.signal", 27, Some(4)),
+    ]);
+    let baseline_json = baseline.to_string();
+    let counterfactual_json = counterfactual.to_string();
+    if let Err(error) =
+        pos_reference::verify_fork_json(&baseline_json, &counterfactual_json, "world.action.v1")
+    {
+        std::panic::resume_unwind(Box::new(format!(
+            "independent verifier rejected public evidence: {error}"
+        )));
+    }
+
+    let mut rebound: serde_json::Value = ok(serde_json::from_str(&counterfactual_json));
+    rebound["contract"]["non_interference"][1]["fixture_digest"][0] = serde_json::json!(255);
+    match pos_reference::verify_fork_json(&baseline_json, &rebound.to_string(), "world.action.v1") {
+        Err(pos_reference::ReferenceError::InvalidForkEvidence(message)) => {
+            assert_eq!(message, "non-interference modes diverged");
+        }
+        other => std::panic::resume_unwind(Box::new(format!(
+            "fixture-digest rebinding was not rejected as mode divergence: {other:?}"
+        ))),
+    }
+}
+
+fn event_json(
+    seq: u64,
+    entity: &str,
+    event_type: &str,
+    digest: u8,
+    causation_seq: Option<u64>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "seq": seq,
+        "tick": seq,
+        "entity": entity,
+        "event_type": event_type,
+        "payload_digest": vec![digest; 32],
+        "causation_seq": causation_seq,
+    })
+}
+
 fn artifact_evaluation(
     transition_rule: pos_core::ArtifactTransitionRuleV1,
     enclosing_claim: pos_core::ErasureReplayClaimV1,
