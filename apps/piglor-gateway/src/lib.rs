@@ -644,13 +644,13 @@ fn gateway_action_registry_builder(
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
-    let _ = registry.register_with_approver(
+    drop(registry.register_with_approver(
         &descriptor,
         None,
         None,
         Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
         [Kind::new(EVENT_TYPE_ACTION)],
-    );
+    ));
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
     }
