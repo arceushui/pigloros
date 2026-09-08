@@ -1,7 +1,8 @@
+use ciborium::value::Value;
 use ed25519_dalek::Verifier;
-use pos_core::CanonicalBytes;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Cursor;
 
 const MAX_REPORT_BYTES: usize = 64 * 1024;
 const MAX_EXECUTION_ARTIFACT_BYTES: usize = 4 * 1024;
@@ -355,9 +356,7 @@ pub fn verify_non_interference_report_v1(
     if bytes.len() > MAX_REPORT_BYTES {
         return Err(IndependentNonInterferenceReportErrorV1::TooLarge);
     }
-    let canonical = CanonicalBytes::from_vec(bytes.to_vec());
-    let report: Report = pos_crypto::canonical::decode(&canonical)
-        .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
+    let report: Report = decode(bytes)?;
     if encode(&report)? != bytes {
         return Err(IndependentNonInterferenceReportErrorV1::NonCanonical);
     }
@@ -477,10 +476,6 @@ fn validate_shape(report: &Report) -> Result<(), IndependentNonInterferenceRepor
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the independent verifier keeps the complete NIA1 validation sequence explicit"
-)]
 fn validate_execution_artifacts(
     report: &Report,
     trusted_executor_public_keys: &[[u8; 32]],
@@ -491,71 +486,7 @@ fn validate_execution_artifacts(
     }
     let mut resolved = BTreeMap::new();
     for bytes in execution_artifacts {
-        if bytes.len() > MAX_EXECUTION_ARTIFACT_BYTES {
-            return Err(IndependentNonInterferenceReportErrorV1::TooLarge);
-        }
-        let canonical = CanonicalBytes::from_vec(bytes.clone());
-        let artifact: ExecutionArtifact = pos_crypto::canonical::decode(&canonical)
-            .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
-        if encode(&artifact)?.as_slice() != bytes.as_slice() {
-            return Err(IndependentNonInterferenceReportErrorV1::NonCanonical);
-        }
-        let (_, surfaces, normalizations) = FIXTURES
-            .iter()
-            .find(|(fixture_id, _, _)| *fixture_id == artifact.fixture_id)
-            .ok_or(IndependentNonInterferenceReportErrorV1::InvalidShape)?;
-        let profile = profile_digest(&artifact.fixture_id, surfaces, normalizations);
-        if artifact.magic != "NIA1"
-            || artifact.version != 1
-            || artifact.profile_digest != profile
-            || artifact.normalization_digest
-                != domain_digest(b"PiglorOS.NonInterference.Normalization.v1", &profile)
-            || artifact.fixture_digest == [0; 32]
-            || artifact.result_digest == [0; 32]
-            || artifact.execution_provenance_digest == [0; 32]
-            || artifact.executor_public_key == [0; 32]
-            || !trusted_executor_public_keys.contains(&artifact.executor_public_key)
-        {
-            return Err(IndependentNonInterferenceReportErrorV1::InvalidShape);
-        }
-        match (artifact.equal, &artifact.divergence) {
-            (true, None) => {}
-            (false, Some(coordinate))
-                if coordinate.fixture_id == artifact.fixture_id
-                    && coordinate.variant == artifact.variant
-                    && coordinate.mode == artifact.mode
-                    && usize::from(coordinate.surface_ordinal) < surfaces.len()
-                    && coordinate.byte_offset <= 3 * 1024 * 1024 => {}
-            _ => return Err(IndependentNonInterferenceReportErrorV1::InvalidShape),
-        }
-        let unsigned = encode(&UnsignedExecutionArtifact {
-            magic: artifact.magic.clone(),
-            version: artifact.version,
-            fixture_id: artifact.fixture_id.clone(),
-            variant: artifact.variant,
-            mode: artifact.mode,
-            fixture_digest: artifact.fixture_digest,
-            profile_digest: artifact.profile_digest,
-            normalization_digest: artifact.normalization_digest,
-            result_digest: artifact.result_digest,
-            execution_provenance_digest: artifact.execution_provenance_digest,
-            equal: artifact.equal,
-            divergence: artifact.divergence.clone(),
-            executor_public_key: artifact.executor_public_key,
-        })?;
-        let key = ed25519_dalek::VerifyingKey::from_bytes(&artifact.executor_public_key)
-            .map_err(|_| IndependentNonInterferenceReportErrorV1::SignatureInvalid)?;
-        let signature: [u8; 64] = artifact
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| IndependentNonInterferenceReportErrorV1::SignatureInvalid)?;
-        key.verify(
-            &execution_artifact_signature_message(&unsigned),
-            &ed25519_dalek::Signature::from_bytes(&signature),
-        )
-        .map_err(|_| IndependentNonInterferenceReportErrorV1::SignatureInvalid)?;
-        let digest = domain_digest(b"PiglorOS.NonInterference.ExecutionArtifact.v1", bytes);
+        let (digest, artifact) = decode_execution_artifact(bytes, trusted_executor_public_keys)?;
         if resolved.insert(digest, artifact).is_some() {
             return Err(IndependentNonInterferenceReportErrorV1::InvalidShape);
         }
@@ -589,6 +520,84 @@ fn validate_execution_artifacts(
         }
     }
     Ok(())
+}
+
+fn decode_execution_artifact(
+    bytes: &[u8],
+    trusted_executor_public_keys: &[[u8; 32]],
+) -> Result<([u8; 32], ExecutionArtifact), IndependentNonInterferenceReportErrorV1> {
+    if bytes.len() > MAX_EXECUTION_ARTIFACT_BYTES {
+        return Err(IndependentNonInterferenceReportErrorV1::TooLarge);
+    }
+    let artifact: ExecutionArtifact = decode(bytes)?;
+    if encode(&artifact)?.as_slice() != bytes {
+        return Err(IndependentNonInterferenceReportErrorV1::NonCanonical);
+    }
+    let (_, surfaces, normalizations) = FIXTURES
+        .iter()
+        .find(|(fixture_id, _, _)| *fixture_id == artifact.fixture_id)
+        .ok_or(IndependentNonInterferenceReportErrorV1::InvalidShape)?;
+    let profile = profile_digest(&artifact.fixture_id, surfaces, normalizations);
+    if artifact.magic != "NIA1"
+        || artifact.version != 1
+        || artifact.profile_digest != profile
+        || artifact.normalization_digest
+            != domain_digest(b"PiglorOS.NonInterference.Normalization.v1", &profile)
+        || artifact.fixture_digest == [0; 32]
+        || artifact.result_digest == [0; 32]
+        || artifact.execution_provenance_digest == [0; 32]
+        || artifact.executor_public_key == [0; 32]
+        || !trusted_executor_public_keys.contains(&artifact.executor_public_key)
+    {
+        return Err(IndependentNonInterferenceReportErrorV1::InvalidShape);
+    }
+    match (artifact.equal, &artifact.divergence) {
+        (true, None) => {}
+        (false, Some(coordinate))
+            if coordinate.fixture_id == artifact.fixture_id
+                && coordinate.variant == artifact.variant
+                && coordinate.mode == artifact.mode
+                && usize::from(coordinate.surface_ordinal) < surfaces.len()
+                && coordinate.byte_offset <= 3 * 1024 * 1024 => {}
+        _ => return Err(IndependentNonInterferenceReportErrorV1::InvalidShape),
+    }
+    verify_execution_artifact_signature(&artifact)?;
+    Ok((
+        domain_digest(b"PiglorOS.NonInterference.ExecutionArtifact.v1", bytes),
+        artifact,
+    ))
+}
+
+fn verify_execution_artifact_signature(
+    artifact: &ExecutionArtifact,
+) -> Result<(), IndependentNonInterferenceReportErrorV1> {
+    let unsigned = encode(&UnsignedExecutionArtifact {
+        magic: artifact.magic.clone(),
+        version: artifact.version,
+        fixture_id: artifact.fixture_id.clone(),
+        variant: artifact.variant,
+        mode: artifact.mode,
+        fixture_digest: artifact.fixture_digest,
+        profile_digest: artifact.profile_digest,
+        normalization_digest: artifact.normalization_digest,
+        result_digest: artifact.result_digest,
+        execution_provenance_digest: artifact.execution_provenance_digest,
+        equal: artifact.equal,
+        divergence: artifact.divergence.clone(),
+        executor_public_key: artifact.executor_public_key,
+    })?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&artifact.executor_public_key)
+        .map_err(|_| IndependentNonInterferenceReportErrorV1::SignatureInvalid)?;
+    let signature: [u8; 64] = artifact
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| IndependentNonInterferenceReportErrorV1::SignatureInvalid)?;
+    key.verify(
+        &execution_artifact_signature_message(&unsigned),
+        &ed25519_dalek::Signature::from_bytes(&signature),
+    )
+    .map_err(|_| IndependentNonInterferenceReportErrorV1::SignatureInvalid)
 }
 
 fn profile_digest(fixture_id: &str, surfaces: &[&str], normalizations: &[u8]) -> [u8; 32] {
@@ -664,7 +673,85 @@ fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, IndependentNonInterferenceReportErrorV1> {
-    pos_crypto::canonical::encode(value)
-        .map(|bytes| bytes.as_slice().to_vec())
-        .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)
+    let json = serde_json::to_value(value)
+        .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
+    let canonical = sort_map_keys(json_to_cbor(json)?)?;
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&canonical, &mut bytes)
+        .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
+    Ok(bytes)
+}
+
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, IndependentNonInterferenceReportErrorV1> {
+    let mut cursor = Cursor::new(bytes);
+    let value = ciborium::from_reader(&mut cursor)
+        .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(IndependentNonInterferenceReportErrorV1::NonCanonical);
+    }
+    Ok(value)
+}
+
+fn json_to_cbor(json: serde_json::Value) -> Result<Value, IndependentNonInterferenceReportErrorV1> {
+    use serde_json::Value as JsonValue;
+    match json {
+        JsonValue::Null => Ok(Value::Null),
+        JsonValue::Bool(value) => Ok(Value::Bool(value)),
+        JsonValue::Number(value) => value.as_i64().map_or_else(
+            || {
+                value.as_u64().map_or_else(
+                    || Err(IndependentNonInterferenceReportErrorV1::NonCanonical),
+                    |value| Ok(Value::Integer(value.into())),
+                )
+            },
+            |value| Ok(Value::Integer(value.into())),
+        ),
+        JsonValue::String(value) => Ok(Value::Text(value)),
+        JsonValue::Array(values) => values
+            .into_iter()
+            .map(json_to_cbor)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        JsonValue::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| json_to_cbor(value).map(|value| (Value::Text(key), value)))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Map),
+    }
+}
+
+fn sort_map_keys(value: Value) -> Result<Value, IndependentNonInterferenceReportErrorV1> {
+    match value {
+        Value::Map(pairs) => {
+            let mut sortable = pairs
+                .into_iter()
+                .map(|(key, value)| {
+                    canonical_key_bytes(&key)
+                        .and_then(|bytes| sort_map_keys(value).map(|value| (bytes, key, value)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            sortable.sort_by(|(left, _, _), (right, _, _)| {
+                left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+            });
+            Ok(Value::Map(
+                sortable
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect(),
+            ))
+        }
+        Value::Array(values) => values
+            .into_iter()
+            .map(sort_map_keys)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        other => Ok(other),
+    }
+}
+
+fn canonical_key_bytes(key: &Value) -> Result<Vec<u8>, IndependentNonInterferenceReportErrorV1> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(key, &mut bytes)
+        .map_err(|_| IndependentNonInterferenceReportErrorV1::NonCanonical)?;
+    Ok(bytes)
 }

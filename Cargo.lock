@@ -4496,8 +4496,6 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "libc",
- "pos-core",
- "pos-crypto",
  "rustix 1.1.4",
  "serde",
  "serde_json",

@@ -402,146 +402,144 @@ fn capture_inventory_is_complete_ordered_and_fixture_bound() {
     }
 }
 
+const EXPECTED_CAPTURE_INVENTORY: [(&str, &[&str]); 12] = [
+    (
+        "NI-TOOL-001",
+        &[
+            "Imported-service registry",
+            "tool result handle",
+            "Plugin imports",
+            "staged EventDrafts",
+            "public outcome",
+            "audit record",
+        ],
+    ),
+    (
+        "NI-CACHE-002",
+        &[
+            "Cache API return",
+            "snapshot bytes",
+            "Plugin inputs",
+            "typed errors",
+            "logs/metrics",
+            "evaluator bundle",
+        ],
+    ),
+    (
+        "NI-STATE-003",
+        &[
+            "Migration request/result",
+            "activated state",
+            "PluginInvocation",
+            "PluginOutput",
+            "EventDrafts",
+            "quarantine/error",
+        ],
+    ),
+    (
+        "NI-OBS-004",
+        &[
+            "Structured logs",
+            "metric names/labels/counts",
+            "trace spans",
+            "crash artifact",
+            "public support bundle",
+        ],
+    ),
+    (
+        "NI-TIME-005",
+        &[
+            "Plugin imports",
+            "deterministic deadline",
+            "safe-stop record",
+            "status/error",
+            "logs/metrics",
+            "evaluator input",
+        ],
+    ),
+    (
+        "NI-PUBLIC-006",
+        &[
+            "HTTP/Plugin error",
+            "status transition",
+            "cursor bytes",
+            "page count",
+            "response length/padding",
+        ],
+    ),
+    (
+        "NI-EVAL-007",
+        &[
+            "Export bundle",
+            "manifest",
+            "fixture descriptor",
+            "evaluator stdin/files",
+            "ConformanceReport",
+        ],
+    ),
+    (
+        "NI-FORK-008",
+        &[
+            "Fork parent/cut",
+            "CounterfactualPlan",
+            "RecomputationFrontier",
+            "SuffixInvalidation",
+            "snapshots",
+            "checkpoints",
+            "result",
+            "ReproManifest",
+            "exports",
+        ],
+    ),
+    (
+        "NI-ARCHIVE-009",
+        &[
+            "Member table",
+            "archive bytes",
+            "decompressed bundle",
+            "digest",
+            "evaluator import",
+            "logs",
+        ],
+    ),
+    (
+        "NI-NET-010",
+        &[
+            "Capability checks",
+            "attempted-call records",
+            "retry count",
+            "Plugin output",
+            "Timeline",
+            "logs",
+            "evaluator bundle",
+        ],
+    ),
+    (
+        "NI-SERVICE-011",
+        &[
+            "Exact request digest",
+            "frozen response projection",
+            "call ordinal",
+            "PluginInvocation",
+            "generated dependency edges",
+        ],
+    ),
+    (
+        "NI-CRASH-012",
+        &[
+            "Guest error",
+            "host error mapping",
+            "quarantine",
+            "crash report",
+            "support archive",
+            "next Tick status",
+        ],
+    ),
+];
+
 #[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the independent golden inventory intentionally lists every ADR-059 surface"
-)]
 fn canonical_capture_profiles_match_the_adr_059_public_contract() {
-    let expected = [
-        (
-            "NI-TOOL-001",
-            &[
-                "Imported-service registry",
-                "tool result handle",
-                "Plugin imports",
-                "staged EventDrafts",
-                "public outcome",
-                "audit record",
-            ][..],
-        ),
-        (
-            "NI-CACHE-002",
-            &[
-                "Cache API return",
-                "snapshot bytes",
-                "Plugin inputs",
-                "typed errors",
-                "logs/metrics",
-                "evaluator bundle",
-            ][..],
-        ),
-        (
-            "NI-STATE-003",
-            &[
-                "Migration request/result",
-                "activated state",
-                "PluginInvocation",
-                "PluginOutput",
-                "EventDrafts",
-                "quarantine/error",
-            ][..],
-        ),
-        (
-            "NI-OBS-004",
-            &[
-                "Structured logs",
-                "metric names/labels/counts",
-                "trace spans",
-                "crash artifact",
-                "public support bundle",
-            ][..],
-        ),
-        (
-            "NI-TIME-005",
-            &[
-                "Plugin imports",
-                "deterministic deadline",
-                "safe-stop record",
-                "status/error",
-                "logs/metrics",
-                "evaluator input",
-            ][..],
-        ),
-        (
-            "NI-PUBLIC-006",
-            &[
-                "HTTP/Plugin error",
-                "status transition",
-                "cursor bytes",
-                "page count",
-                "response length/padding",
-            ][..],
-        ),
-        (
-            "NI-EVAL-007",
-            &[
-                "Export bundle",
-                "manifest",
-                "fixture descriptor",
-                "evaluator stdin/files",
-                "ConformanceReport",
-            ][..],
-        ),
-        (
-            "NI-FORK-008",
-            &[
-                "Fork parent/cut",
-                "CounterfactualPlan",
-                "RecomputationFrontier",
-                "SuffixInvalidation",
-                "snapshots",
-                "checkpoints",
-                "result",
-                "ReproManifest",
-                "exports",
-            ][..],
-        ),
-        (
-            "NI-ARCHIVE-009",
-            &[
-                "Member table",
-                "archive bytes",
-                "decompressed bundle",
-                "digest",
-                "evaluator import",
-                "logs",
-            ][..],
-        ),
-        (
-            "NI-NET-010",
-            &[
-                "Capability checks",
-                "attempted-call records",
-                "retry count",
-                "Plugin output",
-                "Timeline",
-                "logs",
-                "evaluator bundle",
-            ][..],
-        ),
-        (
-            "NI-SERVICE-011",
-            &[
-                "Exact request digest",
-                "frozen response projection",
-                "call ordinal",
-                "PluginInvocation",
-                "generated dependency edges",
-            ][..],
-        ),
-        (
-            "NI-CRASH-012",
-            &[
-                "Guest error",
-                "host error mapping",
-                "quarantine",
-                "crash report",
-                "support archive",
-                "next Tick status",
-            ][..],
-        ),
-    ];
+    let expected = EXPECTED_CAPTURE_INVENTORY;
     let profiles = non_interference_capture_profiles_v1();
     assert_eq!(profiles.len(), expected.len());
     for (profile, (fixture_id, surfaces)) in profiles.iter().zip(expected) {

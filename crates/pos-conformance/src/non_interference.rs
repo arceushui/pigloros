@@ -146,10 +146,6 @@ fn capture_profile(fixture_id: &str) -> Option<NonInterferenceCaptureProfileV1> 
     Some(profile)
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the canonical ADR-059 inventory keeps every surface and normalizer in one definition"
-)]
 fn surface_definitions(fixture_id: &str) -> Option<Vec<NonInterferenceSurfaceDefinitionV1>> {
     use NonInterferenceNormalizationV1::{
         ByteExact, CategoryCount, CategoryCountDigest, CategoryCountPaddedLength, CountClass,
@@ -202,6 +198,15 @@ fn surface_definitions(fixture_id: &str) -> Option<Vec<NonInterferenceSurfaceDef
             surface("page count", CategoryCount),
             surface("response length/padding", CategoryCount),
         ]),
+        _ => remaining_surface_definitions(fixture_id),
+    }
+}
+
+fn remaining_surface_definitions(
+    fixture_id: &str,
+) -> Option<Vec<NonInterferenceSurfaceDefinitionV1>> {
+    use NonInterferenceNormalizationV1::{ByteExact, CategoryCount, CategoryCountPaddedLength};
+    match fixture_id.as_bytes() {
         b"NI-EVAL-007" => Some(vec![
             surface("Export bundle", ByteExact),
             surface("manifest", ByteExact),
