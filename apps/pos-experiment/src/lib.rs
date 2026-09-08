@@ -2751,7 +2751,7 @@ mod tests {
     }
 
     fn composition_registry(plugins: &[CompositionPluginSpec]) -> PluginRegistry {
-        let mut registry = test_registry();
+        let mut registry = PluginRegistry::new();
         for spec in plugins {
             registry
                 .register(&CompositionPlugin(*spec), None, None)
@@ -8000,6 +8000,10 @@ mod fault_injection_tests {
     }
 
     impl EventStore for FailLogicalHeadStore {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
         }
