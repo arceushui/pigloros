@@ -20,9 +20,9 @@ use pos_core::{
     ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedTopologyObservationV1, EventStore, Seq,
-    TimelineId, TimelineMeta, TimelineMode, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedTopologyObservationV1,
+    EventStore, Seq, TimelineId, TimelineMeta, TimelineMode, ERASURE_MAX_INVENTORY_REQUESTS,
     ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
@@ -33,7 +33,7 @@ pub mod erasure_support;
 use erasure_support::{
     freeze_evidence_fixture, obligation, persistence_request as request,
     persistence_target as target, reference, retry_admission as fixture_retry_admission,
-    FreezeEvidenceFixtureInput, RetryAdmissionFixture,
+    FreezeEvidenceFixtureInput, RequestFixtureInput, RetryAdmissionFixture,
 };
 
 struct PermitErasureGate;
@@ -641,6 +641,136 @@ where
     Ok((shared, request.reference(), child, prepared))
 }
 
+fn assert_overlapping_fork_batch<S>(mut store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
+    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
+    let parent = store.create_timeline("overlap-parent")?.id();
+    store.append(
+        parent,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.overlap"),
+            pos_core::CanonicalBytes::from_vec(vec![1]),
+        )],
+    )?;
+    let shared = Rc::new(RefCell::new(store));
+    let first_request = request()?;
+    let second_request = erasure_support::request(RequestFixtureInput {
+        request: reference(41),
+        subject: reference(42),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(43)],
+        requester: reference(44),
+        authorization: reference(45),
+        policy: reference(46),
+        request_position: 9,
+        horizon_position: 20,
+        provenance: reference(47),
+    })?;
+    let required_target = target();
+    let mut first = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![required_target],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let mut second = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![required_target],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    for (coordinator, request) in [
+        (&mut first, first_request.clone()),
+        (&mut second, second_request.clone()),
+    ] {
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(31))?;
+        coordinator.freeze_inventory(request.reference(), &transition())?;
+    }
+
+    let generation = shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .generation();
+    let child = TimelineId::new();
+    let child_scope = reference(101);
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(103),
+        expected_inventory_generation: generation,
+        child_scope,
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("overlap-child".to_owned()),
+            owner: Some(pos_core::EntityId::new()),
+            fork_point: Some((parent, Seq::from_u64(1))),
+        },
+    };
+    let prepare = |coordinator: &ErasureCoordinatorStateMachineV1<Host<S>>,
+                   request: ErasureReferenceV1,
+                   provenance: ErasureReferenceV1| {
+        let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request,
+            scope_members: vec![reference(9)],
+            target_closure: target_closure_digest(&[required_target]),
+            lineage_rule: Some(reference(100)),
+        })?;
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: scope.reference(),
+            fork: child_scope,
+            lineage_rule: reference(100),
+            predecessor_extension: None,
+            admission_provenance: provenance,
+        })?;
+        coordinator.prepare_fork_admission(request, extension, input.clone())
+    };
+    let admissions = vec![
+        prepare(&first, first_request.reference(), reference(102))?,
+        prepare(&second, second_request.reference(), reference(104))?,
+    ];
+    let inventory = first.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let batch = inventory.prepare_fork_batch(input, admissions)?;
+    assert_eq!(batch.admissions().len(), 2);
+    assert_eq!(
+        shared.borrow_mut().commit_fork_admission(batch.clone())?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    assert_eq!(
+        shared
+            .borrow()
+            .scope_index_count(first_request.reference())?,
+        1
+    );
+    assert_eq!(
+        shared
+            .borrow()
+            .scope_index_count(second_request.reference())?,
+        1
+    );
+    assert!(shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    assert_eq!(
+        shared.borrow_mut().commit_fork_admission(batch)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
+    Ok(())
+}
+
 #[test]
 fn memory_manifest_cas_survives_restart_and_retains_indexes(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -684,6 +814,12 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureCasOutcomeV1::ExactRetry
     );
     Ok(())
+}
+
+#[test]
+fn memory_fork_admission_commits_every_overlapping_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_overlapping_fork_batch(MemoryStore::new())
 }
 
 #[test]
@@ -921,6 +1057,13 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
         .topology()
         .contains(&child));
     Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_admission_commits_every_overlapping_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_overlapping_fork_batch(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]
