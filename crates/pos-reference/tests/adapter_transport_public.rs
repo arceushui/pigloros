@@ -269,22 +269,24 @@ fn attempt_writer_rejects_invalid_public_values() {
 }
 
 #[test]
-fn attempt_writer_reports_capability_and_artifact_frame_failures() {
-    let capability_writer = FailAfterWrites {
-        successful_writes_remaining: 2,
-    };
-    assert_eq!(
-        write_attempt(capability_writer, &attempt()),
-        Err(TransportError::InvalidEncoding)
-    );
-
-    let artifact_chunk_writer = FailAfterWrites {
-        successful_writes_remaining: 8,
-    };
-    assert_eq!(
-        write_attempt(artifact_chunk_writer, &attempt()),
-        Err(TransportError::InvalidEncoding)
-    );
+fn attempt_writer_reports_failures_at_each_stream_phase() {
+    for (phase, successful_writes_remaining) in [
+        ("header", 0),
+        ("capability", 2),
+        ("schema artifact", 8),
+        ("payload artifact", 10),
+        ("auxiliary artifact", 14),
+        ("terminal frame", 22),
+    ] {
+        let writer = FailAfterWrites {
+            successful_writes_remaining,
+        };
+        assert_eq!(
+            write_attempt(writer, &attempt()),
+            Err(TransportError::InvalidEncoding),
+            "{phase} write failure must be closed"
+        );
+    }
 }
 
 #[test]
