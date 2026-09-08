@@ -133,7 +133,11 @@ fn event_authority_matches(record: &SandboxAuditRecord, receipt: &SandboxProvide
     let grant = receipt.authority.agr1_digest;
     let observed = receipt.kernel_observation_evidence;
     let expected = match record.event_code {
-        0..=10 => vec![grant, receipt.elm1_digest, receipt.termination_evidence],
+        0..=10 => Some(vec![
+            grant,
+            receipt.elm1_digest,
+            receipt.termination_evidence,
+        ]),
         11 => receipt
             .ready1_digest
             .map(|ready| vec![grant, ready, observed]),
