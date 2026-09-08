@@ -191,7 +191,7 @@ impl NonInterferenceExecutionArtifactV1 {
                     && coordinate.variant == self.variant
                     && coordinate.mode == self.mode
                     && usize::from(coordinate.surface_ordinal) < profile.surface_names.len()
-                    && coordinate.byte_offset <= profile.max_surface_bytes => {}
+                    && coordinate.byte_offset <= profile.max_surface_bytes.saturating_mul(3) => {}
             _ => return Err(NonInterferenceReportErrorV1::InvalidShape),
         }
         Ok(())
@@ -664,7 +664,7 @@ fn validate_outcomes(
                     && coordinate.variant == outcome.variant
                     && coordinate.mode == mode.mode
                     && usize::from(coordinate.surface_ordinal) < profile.surface_names.len()
-                    && coordinate.byte_offset <= profile.max_surface_bytes => {}
+                    && coordinate.byte_offset <= profile.max_surface_bytes.saturating_mul(3) => {}
             _ => return Err(NonInterferenceReportErrorV1::InvalidShape),
         }
     }

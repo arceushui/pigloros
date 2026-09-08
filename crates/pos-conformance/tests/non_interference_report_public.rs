@@ -165,7 +165,7 @@ fn report_records_the_first_failed_mode_without_claiming_conformance() {
         variant: NonInterferenceVariantV1::Success,
         mode: ExecutionModeV1::AirGapped,
         surface_ordinal: 2,
-        byte_offset: 4,
+        byte_offset: 2 * 1024 * 1024,
     });
     let artifacts = execution_artifacts(&mut values);
     let report = test_ok(NonInterferenceReportV1::sign(

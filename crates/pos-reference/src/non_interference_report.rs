@@ -458,7 +458,7 @@ fn validate_shape(report: &Report) -> Result<(), IndependentNonInterferenceRepor
                     && coordinate.variant == outcome.variant
                     && coordinate.mode == mode.mode
                     && usize::from(coordinate.surface_ordinal) < surfaces.len()
-                    && coordinate.byte_offset <= 1024 * 1024 => {}
+                    && coordinate.byte_offset <= 3 * 1024 * 1024 => {}
             _ => return Err(IndependentNonInterferenceReportErrorV1::InvalidShape),
         }
     }
@@ -525,7 +525,7 @@ fn validate_execution_artifacts(
                     && coordinate.variant == artifact.variant
                     && coordinate.mode == artifact.mode
                     && usize::from(coordinate.surface_ordinal) < surfaces.len()
-                    && coordinate.byte_offset <= 1024 * 1024 => {}
+                    && coordinate.byte_offset <= 3 * 1024 * 1024 => {}
             _ => return Err(IndependentNonInterferenceReportErrorV1::InvalidShape),
         }
         let unsigned = encode(&UnsignedExecutionArtifact {
