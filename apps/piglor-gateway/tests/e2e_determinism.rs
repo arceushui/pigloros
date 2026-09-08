@@ -441,6 +441,7 @@ struct MultiRateScenario {
     society_entity: EntityId,
     fast_entity: EntityId,
     slow_entity: EntityId,
+    erasure_gate: Arc<dyn pos_core::ErasureGate>,
     fast_decisions: Arc<AtomicUsize>,
     slow_decisions: Arc<AtomicUsize>,
     probe_log: Arc<Mutex<Vec<u64>>>,
@@ -459,9 +460,15 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let address = listener.local_addr().test_ok()?;
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
+    let erasure_gate: Arc<dyn pos_core::ErasureGate> =
+        Arc::new(ErasureContainmentGateV1::new());
+    let mut gateway_store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?;
+    gateway_store
+        .bind_erasure_gate(Arc::clone(&erasure_gate))
+        .test_ok()?;
     let state = AppState {
         gateway: Gateway::new_with_world_bodies_and_authorization(
-            open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+            gateway_store,
             [human_body],
             gateway_authorization_for(human_entity)?,
         ),
@@ -522,6 +529,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         society_entity,
         fast_entity,
         slow_entity,
+        erasure_gate,
         fast_decisions: Arc::new(AtomicUsize::new(0)),
         slow_decisions: Arc::new(AtomicUsize::new(0)),
         probe_log: Arc::new(Mutex::new(Vec::new())),
@@ -554,7 +562,7 @@ fn register_experiment(
             path: scenario.path.clone(),
         },
     })
-    .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    .with_erasure_gate(Arc::clone(&scenario.erasure_gate));
     experiment
         .register(&observation, Some(Box::new(EntityStateProjection)), None)
         .test_ok()?;
@@ -636,7 +644,7 @@ async fn run_tick_boundaries(
     })
     .test_ok()?;
     pending_store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
         .test_ok()?;
     let pending = pending_store
         .append(
@@ -867,7 +875,7 @@ fn assert_replay(
     .test_ok()?;
     let mut first_store = first_store;
     first_store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
         .test_ok()?;
     let stored = first_store
         .read(scenario.timeline, SeqRange::all())
@@ -896,7 +904,7 @@ fn assert_replay(
     .test_ok()?;
     let mut second_store = second_store;
     second_store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
         .test_ok()?;
     let mut second_replay = replay_registry();
     pos_time::replay(
