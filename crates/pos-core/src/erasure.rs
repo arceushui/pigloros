@@ -4989,14 +4989,18 @@ impl ErasureForkRecoveryV1 {
                 hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
                 hasher.update(name.as_bytes());
             }
-            None => hasher.update(&[0]),
+            None => {
+                hasher.update(&[0]);
+            }
         }
         match child.owner {
             Some(owner) => {
                 hasher.update(&[1]);
                 hasher.update(&owner.inner().to_bytes());
             }
-            None => hasher.update(&[0]),
+            None => {
+                hasher.update(&[0]);
+            }
         }
         if let Some((parent, at_seq)) = child.fork_point {
             hasher.update(&parent.inner().to_bytes());
