@@ -3860,6 +3860,45 @@ impl ErasurePersistenceInventorySnapshotV1 {
     pub fn topology(&self) -> &[TimelineId] {
         &self.topology
     }
+
+    /// Return the generation derived from this complete durable snapshot.
+    ///
+    /// Adapters use this value only inside their atomic transaction to reject
+    /// a stale host admission. It is not independently trusted runtime
+    /// authority until core recovery verifies the snapshot.
+    #[must_use]
+    pub fn generation(&self) -> ErasureReferenceV1 {
+        erasure_inventory_generation(&self.request_heads, &self.topology)
+    }
+}
+
+fn erasure_inventory_generation(
+    request_heads: &[(ErasureReferenceV1, ErasureReferenceV1)],
+    topology: &[TimelineId],
+) -> ErasureReferenceV1 {
+    let mut topology_hasher = blake3::Hasher::new();
+    topology_hasher.update(b"pigloros/erasure-inventory-topology/v1");
+    topology_hasher.update(
+        &u64::try_from(topology.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for timeline in topology {
+        topology_hasher.update(&timeline.inner().to_bytes());
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros/erasure-verified-inventory/v1");
+    hasher.update(
+        &u64::try_from(request_heads.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for (request, head) in request_heads {
+        hasher.update(&request.digest());
+        hasher.update(&head.digest());
+    }
+    hasher.update(topology_hasher.finalize().as_bytes());
+    ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
 }
 
 /// Adapter capability for one bounded, complete inventory read snapshot.
@@ -4086,7 +4125,7 @@ impl ErasureVerifiedInventoryV1 {
                 });
             }
         }
-        let generation = Self::compute_generation(&request_heads, &topology);
+        let generation = erasure_inventory_generation(&request_heads, &topology);
         Ok(Self {
             generation,
             request_heads,
@@ -4116,35 +4155,6 @@ impl ErasureVerifiedInventoryV1 {
         (observed.iter().copied().eq(topology.iter().copied()))
             .then_some(())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
-    }
-
-    fn compute_generation(
-        request_heads: &[(ErasureReferenceV1, ErasureReferenceV1)],
-        topology: &[TimelineId],
-    ) -> ErasureReferenceV1 {
-        let mut topology_hasher = blake3::Hasher::new();
-        topology_hasher.update(b"pigloros/erasure-inventory-topology/v1");
-        topology_hasher.update(
-            &u64::try_from(topology.len())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
-        for timeline in topology {
-            topology_hasher.update(&timeline.inner().to_bytes());
-        }
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"pigloros/erasure-verified-inventory/v1");
-        hasher.update(
-            &u64::try_from(request_heads.len())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
-        for (request, head) in request_heads {
-            hasher.update(&request.digest());
-            hasher.update(&head.digest());
-        }
-        hasher.update(topology_hasher.finalize().as_bytes());
-        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
     }
 
     /// Return the complete-inventory generation bound to cache and cursor use.
@@ -5873,6 +5883,15 @@ mod coverage_paths {
             Err(ErasureContainmentErrorV1::AccessFrozen)
         );
         assert_eq!(inventory.authorize(unaffected), Ok(()));
+
+        let mut topology = vec![affected, unaffected];
+        topology.sort_unstable();
+        let snapshot = ErasurePersistenceInventorySnapshotV1::new(
+            inventory.request_heads.clone(),
+            topology,
+            4,
+        )?;
+        assert_eq!(snapshot.generation(), inventory.generation());
 
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let generation = inventory.generation();
