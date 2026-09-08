@@ -132,6 +132,8 @@ pub enum AdapterError {
     WatchdogExpired,
     #[error("subject adapter protocol failed")]
     ProtocolFailure,
+    #[error("authenticated sandbox evidence was lost or invalid")]
+    AuthenticatedEvidenceFailure,
 }
 
 /// Bytes emitted by a successful evaluator process invocation.
@@ -336,6 +338,9 @@ fn evaluate_case(
     let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
     let observation = adapter.execute(&attempt);
     let provider_provenance = adapter.take_execution_provenance_digest();
+    if observation == Err(AdapterError::AuthenticatedEvidenceFailure) {
+        return Err(EvaluatorError::AdapterIdentity);
+    }
     enforce_observed_coordinate_limit(
         &observation,
         profile.evaluator_hard_caps.max_coordinate_bytes,
