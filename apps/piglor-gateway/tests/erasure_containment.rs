@@ -122,6 +122,7 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
         Arc::new(ErasureContainmentGateV1::new()),
     )?;
     geo_gateway.shutdown().await?;
+    drop(geo_gateway);
 
     let directory = tempfile::tempdir()?;
     let owner_key_path = directory.path().join("owner.key");
@@ -138,5 +139,6 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
         Arc::new(ErasureContainmentGateV1::new()),
     )?;
     owntracks_gateway.shutdown().await?;
+    drop(owntracks_gateway);
     Ok(())
 }

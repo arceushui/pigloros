@@ -644,16 +644,15 @@ fn gateway_action_registry_builder(
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
-    let registration = registry.register_with_approver(
-        &descriptor,
-        None,
-        None,
-        Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
-        [Kind::new(EVENT_TYPE_ACTION)],
-    );
-    if registration.is_err() {
-        return PluginRegistry::new().without_erasure_gate();
-    }
+    registry
+        .register_with_approver(
+            &descriptor,
+            None,
+            None,
+            Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
+            [Kind::new(EVENT_TYPE_ACTION)],
+        )
+        .expect("gateway action plugin registration is deterministic");
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
     }
