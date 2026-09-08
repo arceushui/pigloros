@@ -318,15 +318,17 @@ pub enum StoreConfig {
 /// # Examples
 ///
 /// ```rust
+/// use std::sync::Arc;
+///
 /// use pos_core::{
 ///     clock::Seq,
 ///     event::{CanonicalBytes, EventDraft, Kind},
 ///     ids::EntityId,
-///     store::SeqRange,
+///     store::{EventStore, SeqRange},
 ///     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
 ///     ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1,
 ///     ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
-///     ReplayClaimEvaluatorV1,
+///     ErasureContainmentGateV1, ReplayClaimEvaluatorV1,
 /// };
 /// use pos_store::{
 ///     export_timeline_own, import_timeline_with_id, open_store, StoreConfig,
@@ -334,6 +336,8 @@ pub enum StoreConfig {
 ///
 /// // Parent-then-child CoW sync (identity-preserving).
 /// let mut src = open_store(StoreConfig::Memory).unwrap();
+/// src.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+///     .unwrap();
 /// let root = src.create_timeline("root").unwrap();
 /// let entity = EntityId::new();
 /// src.append(
@@ -373,6 +377,8 @@ pub enum StoreConfig {
 /// let (root_artifact, root_evaluation) = host_export_authorization(root.id());
 /// let (child_artifact, child_evaluation) = host_export_authorization(child.id());
 /// let mut dst = open_store(StoreConfig::Memory).unwrap();
+/// dst.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+///     .unwrap();
 /// import_timeline_with_id(
 ///     &mut *dst,
 ///     export_timeline_own(&*src, root.id(), root_artifact, &root_evaluation).unwrap(),
