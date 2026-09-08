@@ -990,7 +990,7 @@ fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
         ));
     }
     assert!(matches!(
-        SelectorRevocationState::new(fixture.current).begin_update(
+        SelectorRevocationState::new(fixture.current.clone()).begin_update(
             &corrupt_signed_digest(&update)?,
             &fixture.trust,
             Vec::new(),
