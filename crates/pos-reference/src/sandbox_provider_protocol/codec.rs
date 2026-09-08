@@ -5,6 +5,9 @@ use ed25519_dalek::Verifier;
 
 use super::SandboxProviderProtocolError;
 
+pub(super) const MAX_INPUT_BYTES_U64: u64 = 128 * 1024 * 1024;
+pub(super) const MAX_SAFE_DETAIL_BYTES: usize = 256;
+
 const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 pub(super) const MAX_LIST_ENTRIES: usize = 256;

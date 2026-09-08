@@ -165,6 +165,10 @@ impl SandboxProviderManifestV1 {
             || digests.contains(&[0; 32])
             || self.capabilities.is_empty()
             || self.capabilities.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
+            || self
+                .capabilities
+                .iter()
+                .any(|capability| !identifier(&capability.capability_id, MAX_IDENTIFIER_BYTES))
             || self.architectures.is_empty()
             || self.architectures.len() > 2
         {
@@ -175,11 +179,7 @@ impl SandboxProviderManifestV1 {
             .iter()
             .map(capability_value)
             .collect::<Vec<_>>();
-        if self
-            .capabilities
-            .iter()
-            .any(|capability| !identifier(&capability.capability_id, MAX_IDENTIFIER_BYTES))
-            || !canonically_ordered(&capability_values)?
+        if !canonically_ordered(&capability_values)?
             || !self.architectures.windows(2).all(|pair| pair[0] < pair[1])
         {
             return Err(SandboxContractErrorV1::NonCanonicalOrder);

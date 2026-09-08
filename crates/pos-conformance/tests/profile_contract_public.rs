@@ -1360,6 +1360,18 @@ fn public_request_rejects_every_malformed_sandbox_requirement_field() -> TestRes
         replace_value_path(&mut malformed, &path, replacement)?;
         assert!(EvaluatorRequestV1::from_canonical_cbor(&canonical_value(&malformed)?).is_err());
     }
+
+    let mut invalid_identifier = request;
+    invalid_identifier
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .required_provider_capability
+        .capability_id = "Invalid".to_owned();
+    assert_eq!(
+        invalid_identifier.to_canonical_cbor(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
     Ok(())
 }
 

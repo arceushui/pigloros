@@ -5,7 +5,8 @@ digest32 = bytes .size 32
 sha256 = bytes .size 32
 id16 = bytes .size 16
 key-id = text .size (1..128)
-identifier = text .size (1..128)
+identifier = (text .size (1..128)) .and
+  (text .regexp "[a-z0-9][a-z0-9._/-]{0,127}")
 safe-detail-text = (text .size (1..256)) .and
   (text .regexp "[^\u0000]+")
 safe-detail = safe-detail-text / null

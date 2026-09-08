@@ -47,6 +47,7 @@ provider-capability = [
   minimum-strength: uint
 ]
 
-identifier = tstr .size (1..128)
+identifier = (tstr .size (1..128)) .and
+  (tstr .regexp "[a-z0-9][a-z0-9._/-]{0,127}")
 identifier-16 = bstr .size 16
 digest = bstr .size 32

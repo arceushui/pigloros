@@ -1008,7 +1008,18 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
 }
 
 const fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
-    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+    let Some(first) = value.as_bytes().first() else {
+        return Err(ProtocolError::FieldOutOfBounds);
+    };
+    if value.len() > MAX_IDENTIFIER_BYTES
+        || !value.is_ascii()
+        || !(first.is_ascii_lowercase() || first.is_ascii_digit())
+        || !value.as_bytes().iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'/' | b'-')
+        })
+    {
         Err(ProtocolError::FieldOutOfBounds)
     } else {
         Ok(())

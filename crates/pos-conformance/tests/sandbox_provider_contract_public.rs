@@ -30,7 +30,20 @@ fn verify_and_materialize_vector(name: &str, bytes: &[u8]) -> TestResult {
     let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("vectors/sandbox-provider-v1")
         .join(filename);
-    if std::fs::read(&committed)? != bytes {
+    let existing = match std::fs::read(&committed) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("committed vector {} is missing", committed.display()).into());
+        }
+        Err(error) => {
+            return Err(format!(
+                "committed vector {} is unreadable: {error}",
+                committed.display()
+            )
+            .into());
+        }
+    };
+    if existing != bytes {
         return Err(format!("committed vector {} has drifted", committed.display()).into());
     }
     Ok(())
@@ -626,6 +639,13 @@ fn authority_contracts_reject_order_digest_and_partition_changes() -> TestResult
         Err(SandboxContractErrorV1::NonCanonicalOrder)
     );
 
+    let mut invalid_capability = manifest();
+    invalid_capability.capabilities[0].capability_id = "Invalid".to_owned();
+    assert_eq!(
+        invalid_capability.sign(&key),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+
     let mut zero_limit_policy = launch_policy();
     zero_limit_policy.effective_limits[0].value = 0;
     let zero_limit_policy = zero_limit_policy.seal()?;
@@ -689,6 +709,14 @@ fn execute_and_admission_contracts_round_trip_and_reject_gaps() -> TestResult {
     );
     independent::SandboxExecuteRequest::from_canonical_cbor(&request_bytes)?;
     verify_and_materialize_vector("spx1", &request_bytes)?;
+
+    let mut invalid_capability = execute_request()?;
+    invalid_capability.capability_ids[0] = "Invalid".to_owned();
+    assert_eq!(
+        invalid_capability.seal(),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+
     let mut gap = execute_request()?;
     gap.network_plans[1] = network_plan(2)?;
     assert_eq!(gap.seal(), Err(SandboxContractErrorV1::InconsistentFields));

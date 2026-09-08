@@ -3,11 +3,9 @@ use ciborium::value::Value;
 use super::codec::{
     array, bool_value, bytes_value, decode_document, digest32, id16, key_id, optional_id16,
     optional_text, require_signature, self_digested, signed, text_value, uint, uint_value,
-    valid_key_id, validate_magic, verify_digest, verify_signature,
+    valid_key_id, validate_magic, verify_digest, verify_signature, MAX_SAFE_DETAIL_BYTES,
 };
 use super::SandboxProviderProtocolError;
-
-const MAX_SAFE_DETAIL_BYTES: usize = 256;
 
 /// Closed Sandbox Provider operation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

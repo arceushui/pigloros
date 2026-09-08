@@ -407,6 +407,19 @@ fn request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
         invalid.to_canonical_cbor(),
         Err(ProtocolError::FieldOutOfBounds)
     );
+
+    let mut invalid = valid_request()?;
+    invalid.sandbox_requirement = Some(sandbox_requirement());
+    invalid
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .required_provider_capability
+        .capability_id = "Invalid".to_owned();
+    assert_eq!(
+        invalid.to_canonical_cbor(),
+        Err(ProtocolError::FieldOutOfBounds)
+    );
     Ok(())
 }
 

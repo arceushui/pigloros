@@ -21,7 +21,7 @@ const SPR1: &str = "SPR1";
 const SBC1: &str = "SBC1";
 const NXP1: &str = "NXP1";
 const NXP1_DIGEST_DOMAIN: &[u8] = b"PiglorOS.NetworkExchangePlan.v1\0";
-const MAX_IDENTIFIER_BYTES: usize = 128;
+pub(super) const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_INPUT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SAFE_DETAIL_BYTES: usize = 256;
 const LAUNCHER_READY_EVENT: u64 = 11;
@@ -745,20 +745,20 @@ impl SandboxExecuteRequestV1 {
             || digests.contains(&[0; 32])
             || self.authority.apt1_digest != self.apt1_digest
             || self.capability_ids.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
+            || self
+                .capability_ids
+                .iter()
+                .any(|value| !identifier(value, MAX_IDENTIFIER_BYTES))
             || self.network_plans.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
         self.adapter_input
             .validate_for_direction(PayloadDirectionV1::Input)?;
-        if self
+        if !self
             .capability_ids
-            .iter()
-            .any(|value| !identifier(value, MAX_IDENTIFIER_BYTES))
-            || !self
-                .capability_ids
-                .windows(2)
-                .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+            .windows(2)
+            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
         {
             return Err(SandboxContractErrorV1::NonCanonicalOrder);
         }
@@ -821,7 +821,7 @@ impl SandboxExecuteRequestV1 {
     }
 }
 
-fn request_authority_value(value: &RequestAuthorityV1) -> Value {
+pub(super) fn request_authority_value(value: &RequestAuthorityV1) -> Value {
     Value::Array(vec![
         value_bytes(&value.request_id),
         value_bytes(&value.apt1_digest),
@@ -830,7 +830,9 @@ fn request_authority_value(value: &RequestAuthorityV1) -> Value {
     ])
 }
 
-fn decode_request_authority(value: &Value) -> Result<RequestAuthorityV1, SandboxContractErrorV1> {
+pub(super) fn decode_request_authority(
+    value: &Value,
+) -> Result<RequestAuthorityV1, SandboxContractErrorV1> {
     let fields = array::<4>(value)?;
     Ok(RequestAuthorityV1 {
         request_id: fixed(&fields[0])?,
@@ -840,7 +842,9 @@ fn decode_request_authority(value: &Value) -> Result<RequestAuthorityV1, Sandbox
     })
 }
 
-fn validate_request_authority(value: &RequestAuthorityV1) -> Result<(), SandboxContractErrorV1> {
+pub(super) fn validate_request_authority(
+    value: &RequestAuthorityV1,
+) -> Result<(), SandboxContractErrorV1> {
     if value.request_id == [0; 16] || value.apt1_digest == [0; 32] || value.nonce == [0; 16] {
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     } else {
@@ -1086,7 +1090,7 @@ fn decode_digest_list(value: &Value) -> Result<Vec<[u8; 32]>, SandboxContractErr
     values.iter().map(fixed).collect()
 }
 
-const fn bounded_text(value: &str, maximum: usize) -> bool {
+pub(super) const fn bounded_text(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum
 }
 

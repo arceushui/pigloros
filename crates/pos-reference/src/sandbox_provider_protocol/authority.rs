@@ -5,13 +5,13 @@ use super::codec::{
     array, bounded_array, byte_string, bytes_value, decode_document, decode_text_list, digest32,
     fixed_bytes, id16, identifier, key_id, normalized_absolute_path, require_canonical_order,
     require_signature, self_digested, signed, text, text_value, uint, uint_value, usize_u64,
-    valid_identifier, valid_key_id, verify_digest, verify_signature, MAX_LIST_ENTRIES,
+    valid_identifier, valid_key_id, verify_digest, verify_signature, MAX_INPUT_BYTES_U64,
+    MAX_LIST_ENTRIES,
 };
 use super::SandboxProviderProtocolError;
 
 const MAX_ARGUMENT_BYTES: usize = 256;
 const MAX_SYSCALL_NAMES: usize = 512;
-const MAX_INPUT_BYTES_U64: u64 = 128 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_PKCS7_BYTES: usize = 1024 * 1024;
 

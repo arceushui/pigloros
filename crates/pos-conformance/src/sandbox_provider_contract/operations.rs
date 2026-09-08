@@ -6,7 +6,10 @@ use super::codec::{
     array, decode, digest, encode, fixed, sign, text, uint, validate_magic, value_bytes,
     value_text, value_uint, verify,
 };
-use super::protocol::RequestAuthorityV1;
+use super::protocol::{
+    bounded_text, decode_request_authority, request_authority_value, validate_request_authority,
+    RequestAuthorityV1, MAX_IDENTIFIER_BYTES,
+};
 use super::SandboxContractErrorV1;
 
 const SDQ1: &str = "SDQ1";
@@ -16,7 +19,6 @@ const SCY1: &str = "SCY1";
 const SRQ1: &str = "SRQ1";
 const SRY1: &str = "SRY1";
 const SLE1: &str = "SLE1";
-const MAX_KEY_ID_BYTES: usize = 128;
 const MAX_SAFE_DETAIL_BYTES: usize = 256;
 
 /// Closed Sandbox Provider operation identity.
@@ -220,40 +222,6 @@ pub struct SandboxLocalErrorV1 {
     pub safe_detail: Option<String>,
 }
 
-fn authority_value(authority: &RequestAuthorityV1) -> Value {
-    Value::Array(vec![
-        value_bytes(&authority.request_id),
-        value_bytes(&authority.apt1_digest),
-        value_uint(authority.policy_epoch),
-        value_bytes(&authority.nonce),
-    ])
-}
-
-fn decode_authority(value: &Value) -> Result<RequestAuthorityV1, SandboxContractErrorV1> {
-    let fields = array::<4>(value)?;
-    Ok(RequestAuthorityV1 {
-        request_id: fixed(&fields[0])?,
-        apt1_digest: fixed(&fields[1])?,
-        policy_epoch: uint(&fields[2])?,
-        nonce: fixed(&fields[3])?,
-    })
-}
-
-fn validate_authority(authority: &RequestAuthorityV1) -> Result<(), SandboxContractErrorV1> {
-    if authority.request_id == [0; 16]
-        || authority.apt1_digest == [0; 32]
-        || authority.nonce == [0; 16]
-    {
-        Err(SandboxContractErrorV1::FieldOutOfBounds)
-    } else {
-        Ok(())
-    }
-}
-
-const fn valid_key_id(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_KEY_ID_BYTES
-}
-
 fn validate_signature(signature: &[u8; 64]) -> Result<(), SandboxContractErrorV1> {
     (signature != &[0; 64])
         .then_some(())
@@ -316,7 +284,7 @@ macro_rules! impl_attempt_request {
             }
 
             fn validate_unsigned(&self) -> Result<(), SandboxContractErrorV1> {
-                validate_authority(&self.authority)?;
+                validate_request_authority(&self.authority)?;
                 if self.attempt_id == [0; 16] || self.agr1_digest == [0; 32] {
                     Err(SandboxContractErrorV1::FieldOutOfBounds)
                 } else {
@@ -328,7 +296,7 @@ macro_rules! impl_attempt_request {
                 Value::Array(vec![
                     value_text($magic),
                     value_uint(1),
-                    authority_value(&self.authority),
+                    request_authority_value(&self.authority),
                     value_bytes(&self.attempt_id),
                     value_bytes(&self.agr1_digest),
                 ])
@@ -346,7 +314,7 @@ impl SandboxDescribeRequestV1 {
     /// # Errors
     /// Returns a closed contract error when authority is invalid.
     pub fn seal(mut self) -> Result<Self, SandboxContractErrorV1> {
-        validate_authority(&self.authority)?;
+        validate_request_authority(&self.authority)?;
         self.request_digest = digest(SDQ1, &self.unsigned_value())?;
         Ok(self)
     }
@@ -356,7 +324,7 @@ impl SandboxDescribeRequestV1 {
     /// # Errors
     /// Returns a closed contract error for invalid request data.
     pub fn validate(&self) -> Result<(), SandboxContractErrorV1> {
-        validate_authority(&self.authority)?;
+        validate_request_authority(&self.authority)?;
         if self.request_digest == [0; 32] {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);
         }
@@ -384,7 +352,7 @@ impl SandboxDescribeRequestV1 {
         let unsigned = array::<3>(&fields[0])?;
         validate_magic(unsigned, SDQ1)?;
         let request = Self {
-            authority: decode_authority(&unsigned[2])?,
+            authority: decode_request_authority(&unsigned[2])?,
             request_digest: fixed(&fields[1])?,
         };
         request.validate().map(|()| request)
@@ -394,7 +362,7 @@ impl SandboxDescribeRequestV1 {
         Value::Array(vec![
             value_text(SDQ1),
             value_uint(1),
-            authority_value(&self.authority),
+            request_authority_value(&self.authority),
         ])
     }
 }
@@ -446,7 +414,7 @@ fn decode_attempt_request(
     let unsigned = array::<5>(&fields[0])?;
     validate_magic(unsigned, magic)?;
     Ok((
-        decode_authority(&unsigned[2])?,
+        decode_request_authority(&unsigned[2])?,
         fixed(&unsigned[3])?,
         fixed(&unsigned[4])?,
         fixed(&fields[1])?,
@@ -710,7 +678,10 @@ fn validate_response_fields(
     digests: &[[u8; 32]],
     key_id: &str,
 ) -> Result<(), SandboxContractErrorV1> {
-    if request_id == [0; 16] || digests.contains(&[0; 32]) || !valid_key_id(key_id) {
+    if request_id == [0; 16]
+        || digests.contains(&[0; 32])
+        || !bounded_text(key_id, MAX_IDENTIFIER_BYTES)
+    {
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     } else {
         Ok(())

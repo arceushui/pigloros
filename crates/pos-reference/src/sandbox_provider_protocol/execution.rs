@@ -6,13 +6,12 @@ use super::codec::{
     invalid_digest_list, key_id, nonzero_optional, optional_bytes_value, optional_digest,
     optional_digest_value, optional_id16, optional_text, optional_u8, require_signature,
     self_digested, signed, text_value, uint, uint_value, valid_key_id, validate_identifier_order,
-    validate_magic, verify_digest, verify_digest_with_domain, verify_signature, MAX_LIST_ENTRIES,
+    validate_magic, verify_digest, verify_digest_with_domain, verify_signature,
+    MAX_INPUT_BYTES_U64, MAX_LIST_ENTRIES, MAX_SAFE_DETAIL_BYTES,
 };
 use super::operations::{decode_request_authority, validate_request_authority, RequestAuthority};
 use super::SandboxProviderProtocolError;
 
-const MAX_SAFE_DETAIL_BYTES: usize = 256;
-const MAX_INPUT_BYTES_U64: u64 = 128 * 1024 * 1024;
 const PAYLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_PAYLOAD_CHUNKS: u64 = 128;
 const LAUNCHER_READY_EVENT: u8 = 11;

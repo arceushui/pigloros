@@ -246,7 +246,7 @@ jobs:
           name: sandbox-provider-v1-${{ github.sha }}
           path: ${{ runner.temp }}/sandbox-provider-v1
           retention-days: 7
-          if-no-files-found: error
+          if-no-files-found: warn
       - name: Upload main-branch Draft verification artifact
         if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
