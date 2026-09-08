@@ -315,21 +315,6 @@ impl ProjectionRegistry {
         Self::default()
     }
 
-    /// Check the host-owned erasure fence before materializing a protected
-    /// projection observation. The registry never infers scope from cached
-    /// projection state; the gate must use verified durable evidence.
-    ///
-    /// # Errors
-    /// Returns the payload-free containment error when the Timeline is frozen
-    /// or its effective boundary cannot be established.
-    pub fn authorize_erasure_observation(
-        &self,
-        gate: &dyn ErasureGate,
-        timeline: TimelineId,
-    ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-        gate.authorize(timeline, ErasureProtectedOperationV1::Snapshot)
-    }
-
     /// Bind the host-owned erasure gate used by protected observations.
     #[must_use]
     pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
@@ -1840,10 +1825,6 @@ mod tests {
         registry.bind_erasure_gate(blocked_gate.clone());
         // A second binding cannot replace the host gate with a permissive one.
         registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
-        assert_eq!(
-            registry.authorize_erasure_observation(blocked_gate.as_ref(), timeline),
-            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
-        );
         assert_eq!(
             registry.materialize_authorized_observation(
                 &fixture.request,

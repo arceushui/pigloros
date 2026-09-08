@@ -107,24 +107,37 @@ fn bind_fork_registry_erasure_gate(
 fn bind_backtest_erasure_gate(
     store: &mut dyn pos_core::store::EventStore,
     registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
 ) -> Result<Arc<dyn ErasureGate>, pos_core::CoreError> {
-    let gate = if registry.erasure_gate_is_bound() {
-        registry
+    if registry.erasure_gate_is_bound() {
+        let existing = registry
             .clone_erasure_gate()
-            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        if !Arc::ptr_eq(&existing, &gate) {
+            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
+        }
     } else {
-        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
         registry.bind_erasure_gate(Arc::clone(&gate));
-        gate
-    };
+    }
     store.bind_erasure_gate(Arc::clone(&gate))?;
     Ok(gate)
 }
 
-fn propagate_backtest_erasure_gate(registry: &mut PluginRegistry, gate: Arc<dyn ErasureGate>) {
-    if !registry.erasure_gate_is_bound() {
+fn inherit_backtest_erasure_gate(
+    registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<(), pos_core::CoreError> {
+    if registry.erasure_gate_is_bound() {
+        let existing = registry
+            .clone_erasure_gate()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        if !Arc::ptr_eq(&existing, &gate) {
+            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
+        }
+    } else {
         registry.bind_erasure_gate(gate);
     }
+    Ok(())
 }
 
 // Experiment hosts may close their own session, but they are not a Gateway
@@ -2172,6 +2185,7 @@ pub struct BacktestResult {
 /// persistence baseline (events-per-tick ratio).
 pub struct BacktestRunner {
     config: BacktestConfig,
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
     /// Factory callable that produces a fresh, pre-registered `PluginRegistry`
     /// (or just an empty one — callers may register plugins after calling
     /// [`BacktestRunner::run`] if they prefer to use the returned `Experiment`).
@@ -2286,8 +2300,17 @@ impl BacktestRunner {
     ) -> Self {
         Self {
             config,
+            erasure_gate: None,
             registry_factory: Box::new(registry_factory),
         }
+    }
+
+    /// Bind the one host-owned erasure gate shared by both registries and the
+    /// EventStore for the complete backtest.
+    #[must_use]
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
+        self.erasure_gate = Some(gate);
+        self
     }
 
     /// Run the backtest: train phase then eval phase.
@@ -2308,16 +2331,22 @@ impl BacktestRunner {
         store: &mut dyn pos_core::store::EventStore,
     ) -> Result<BacktestResult, ExperimentError> {
         let store_config = self.config.store_config.clone();
+        let erasure_gate = self
+            .erasure_gate
+            .clone()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
         let mut train_registry = (self.registry_factory)();
-        let (erasure_gate, train_tl) = bind_backtest_erasure_gate(store, &mut train_registry)
-            .and_then(|gate| {
-                store
-                    .create_timeline(&train_name)
-                    .map(|timeline| (gate, timeline))
-            })?;
+        let (erasure_gate, train_tl) =
+            bind_backtest_erasure_gate(store, &mut train_registry, erasure_gate).and_then(
+                |gate| {
+                    store
+                        .create_timeline(&train_name)
+                        .map(|timeline| (gate, timeline))
+                },
+            )?;
         let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
@@ -2337,7 +2366,7 @@ impl BacktestRunner {
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
-        propagate_backtest_erasure_gate(&mut eval_registry, erasure_gate);
+        inherit_backtest_erasure_gate(&mut eval_registry, erasure_gate)?;
         let inherited =
             restore_inherited_eval_events(store, eval_tl_id, train_head_seq, &mut eval_registry)?;
         hydrate_projections(&mut eval_registry, &inherited);
@@ -2464,6 +2493,14 @@ mod tests {
     use pos_store::StoreConfig;
 
     // ── Inline test helpers ───────────────────────────────────────────────
+
+    fn backtest_runner(
+        config: BacktestConfig,
+        registry_factory: impl Fn() -> PluginRegistry + Send + 'static,
+    ) -> BacktestRunner {
+        BacktestRunner::new(config, registry_factory)
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    }
 
     struct TestPlugin {
         id: PluginId,
@@ -5836,7 +5873,7 @@ mod tests {
 
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok().to_owned();
-        let result = BacktestRunner::new(
+        let result = backtest_runner(
             BacktestConfig {
                 experiment_name: "nested-result-branch".to_owned(),
                 train_ticks: 2,
@@ -6287,7 +6324,7 @@ mod tests {
     #[test]
     fn nonempty_backtest_builds_durable_run_results_in_the_unit_seam() {
         let entity = EntityId::new();
-        let runner = BacktestRunner::new(
+        let runner = backtest_runner(
             BacktestConfig {
                 experiment_name: "unit-backtest".to_owned(),
                 train_ticks: 1,
@@ -6672,7 +6709,7 @@ mod coverage_entrypoints {
     fn backtest_builds_train_and_eval_results_through_public_runner() {
         let plugin_id = PluginId::new();
         let entity = EntityId::new();
-        let runner = BacktestRunner::new(
+        let runner = backtest_runner(
             BacktestConfig {
                 experiment_name: "coverage-nonempty-backtest".to_owned(),
                 train_ticks: 1,
@@ -7484,7 +7521,7 @@ mod coverage_entrypoints {
             eval_ticks: 1,
             store_config: StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, pos_runtime::PluginRegistry::new);
+        let runner = backtest_runner(config, pos_runtime::PluginRegistry::new);
         let _ = ok(runner.run());
     }
 }
@@ -7673,7 +7710,7 @@ mod backtest_tests {
             store_config: pos_store::StoreConfig::Memory,
         };
 
-        let runner = BacktestRunner::new(config, make_registry);
+        let runner = backtest_runner(config, make_registry);
         let result = runner.run().test_ok();
 
         assert_eq!(result.train_result.ticks, 3);
@@ -7692,7 +7729,7 @@ mod backtest_tests {
 
     #[test]
     fn backtest_eval_hydrates_a_non_empty_training_history() {
-        let result = BacktestRunner::new(
+        let result = backtest_runner(
             BacktestConfig {
                 experiment_name: "bt-coverage-history".to_owned(),
                 train_ticks: 1,
@@ -7717,7 +7754,7 @@ mod backtest_tests {
             store_config: pos_store::StoreConfig::Memory,
         };
 
-        let runner = BacktestRunner::new(config, make_registry);
+        let runner = backtest_runner(config, make_registry);
         let result = runner.run().test_ok();
         assert_eq!(result.train_events, 2);
         assert_eq!(result.eval_events, 0);
@@ -7736,7 +7773,7 @@ mod backtest_tests {
             eval_ticks: 1,
             store_config: pos_store::StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, || {
+        let runner = backtest_runner(config, || {
             let plugin = BtPlugin {
                 id: pos_core::ids::PluginId::new(),
             };
@@ -7784,7 +7821,7 @@ mod backtest_tests {
             eval_ticks: 0,
             store_config: pos_store::StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, || {
+        let runner = backtest_runner(config, || {
             let plugin = EmptyPlugin {
                 id: pos_core::ids::PluginId::new(),
             };
@@ -7814,7 +7851,7 @@ mod backtest_tests {
             store_config: pos_store::StoreConfig::Memory,
         };
 
-        let runner = BacktestRunner::new(config, make_registry);
+        let runner = backtest_runner(config, make_registry);
         let result = runner.run().test_ok();
 
         assert_eq!(result.train_events, 4);
@@ -7932,7 +7969,7 @@ mod backtest_tests {
             eval_ticks: 1,
             store_config: pos_store::StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, move || {
+        let runner = backtest_runner(config, move || {
             let plugin = BtPlugin {
                 id: pos_core::ids::PluginId::new(),
             };
@@ -7967,7 +8004,7 @@ mod backtest_tests {
             eval_ticks: 1,
             store_config: pos_store::StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, move || {
+        let runner = backtest_runner(config, move || {
             let n = call_count.fetch_add(1, Ordering::SeqCst);
             let plugin = BtPlugin {
                 id: pos_core::ids::PluginId::new(),
@@ -8287,7 +8324,7 @@ mod fault_injection_tests {
                 calls: Cell::new(0),
                 fail_on_call,
             };
-            let runner = BacktestRunner::new(
+            let runner = backtest_runner(
                 BacktestConfig {
                     experiment_name: format!("bt-result-error-{fail_on_call}"),
                     train_ticks: 0,
@@ -9180,7 +9217,7 @@ mod fault_injection_tests {
                 path: dir.path().to_str().test_ok().to_owned(),
             },
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner(config, registry_with_emit_driver);
         assert!(runner.run().is_err());
     }
 
@@ -9201,7 +9238,7 @@ mod fault_injection_tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner(config, registry_with_emit_driver);
         let result = runner.run();
         set_writable(&path);
         assert!(result.is_err());
@@ -9221,7 +9258,7 @@ mod fault_injection_tests {
                 path: path_str.clone(),
             },
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner(config, registry_with_emit_driver);
         let _ = runner.run().test_ok();
         let conn = Connection::open(&path).test_ok();
         conn.execute(
@@ -9235,7 +9272,7 @@ mod fault_injection_tests {
             eval_ticks: 0,
             store_config: StoreConfig::Sqlite { path: path_str },
         };
-        let runner2 = BacktestRunner::new(config2, registry_with_emit_driver);
+        let runner2 = backtest_runner(config2, registry_with_emit_driver);
         assert!(runner2.run().is_ok());
     }
 
@@ -9316,7 +9353,7 @@ mod fault_injection_tests {
             eval_ticks: 0,
             store_config: StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner(config, registry_with_emit_driver);
         let result = runner.run_on_store(&mut store);
         assert!(matches!(
             result,
@@ -9337,7 +9374,7 @@ mod fault_injection_tests {
             eval_ticks: 0,
             store_config: StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner(config, registry_with_emit_driver);
         let result = runner.run_on_store(&mut store);
         assert!(matches!(
             result,

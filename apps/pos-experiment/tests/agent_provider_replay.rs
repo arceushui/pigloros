@@ -72,6 +72,14 @@ fn gated_memory_store() -> MemoryStore {
     store
 }
 
+fn backtest_runner(
+    config: BacktestConfig,
+    registry_factory: impl Fn() -> PluginRegistry + Send + 'static,
+) -> BacktestRunner {
+    BacktestRunner::new(config, registry_factory)
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
 struct TickRecordingProvider {
     response: BoundedProviderBytes,
     ticks: Arc<Mutex<Vec<u64>>>,
@@ -670,15 +678,68 @@ fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
 }
 
 #[test]
+fn backtest_runner_requires_one_host_owned_erasure_gate() {
+    let error = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "missing-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        PluginRegistry::new,
+    )
+    .run()
+    .err()
+    .test_ok();
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
+}
+
+#[test]
+fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let error = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "foreign-eval-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        {
+            let calls = Arc::clone(&calls);
+            move || {
+                let mut registry = PluginRegistry::new();
+                if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    registry.bind_erasure_gate(Arc::clone(&foreign));
+                }
+                registry
+            }
+        },
+    )
+    .with_erasure_gate(host)
+    .run()
+    .err()
+    .test_ok();
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
+}
+
+#[test]
 fn backtest_runner_completes_both_empty_phases() {
-    let result = BacktestRunner::new(
+    let result = backtest_runner(
         BacktestConfig {
             experiment_name: "agent-provider-backtest".to_owned(),
             train_ticks: 1,
             eval_ticks: 1,
             store_config: StoreConfig::Memory,
         },
-        gated_registry,
+        PluginRegistry::new,
     )
     .run()
     .test_ok();
@@ -701,7 +762,7 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
     let accepted = accepted_response_bytes(0, CONFIDENCE);
     let runner_host = host;
     let runner_plugin = Arc::clone(&plugin);
-    let result = BacktestRunner::new(
+    let result = backtest_runner(
         BacktestConfig {
             experiment_name: "agent-provider-backtest-non-empty".to_owned(),
             train_ticks: 1,
@@ -716,7 +777,7 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
                 runner_host.provenance.clone(),
                 Box::new(provider),
             );
-            let mut registry = gated_registry();
+            let mut registry = PluginRegistry::new();
             registry
                 .register(
                     runner_plugin.as_ref(),
@@ -742,7 +803,7 @@ fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
     let train_ticks = Arc::new(Mutex::new(Vec::new()));
     let eval_ticks = Arc::new(Mutex::new(Vec::new()));
     let factory_calls = Arc::new(AtomicU64::new(0));
-    let result = BacktestRunner::new(
+    let result = backtest_runner(
         BacktestConfig {
             experiment_name: "agent-provider-backtest-tick-continuity".to_owned(),
             train_ticks: 1,
@@ -769,7 +830,7 @@ fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
                         ticks,
                     }),
                 );
-                let mut registry = gated_registry();
+                let mut registry = PluginRegistry::new();
                 registry
                     .register(
                         &AgentPlugin::new(),
@@ -1169,7 +1230,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
 #[test]
 fn durable_backtest_builds_public_run_results() {
     let directory = tempfile::tempdir().test_ok();
-    let result = BacktestRunner::new(
+    let result = backtest_runner(
         BacktestConfig {
             experiment_name: "durable-backtest-results".to_owned(),
             train_ticks: 1,
@@ -1182,7 +1243,7 @@ fn durable_backtest_builds_public_run_results() {
                     .into_owned(),
             },
         },
-        gated_registry,
+        PluginRegistry::new,
     )
     .run()
     .test_ok();

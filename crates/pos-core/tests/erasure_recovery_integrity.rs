@@ -457,15 +457,6 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
         Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
     );
 
-    let frozen_gate = ErasureContainmentGateV1::new_fail_closed();
-    let frozen_timeline = TimelineId::new();
-    frozen_gate
-        .install_verified_state(&verified, &[(frozen_timeline, reference(7))])
-        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-    assert_eq!(
-        frozen_gate.authorize(frozen_timeline, ErasureProtectedOperationV1::Read),
-        Err(pos_core::ErasureContainmentErrorV1::AccessFrozen)
-    );
     Ok(())
 }
 

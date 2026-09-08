@@ -311,7 +311,8 @@ impl ErasureContainmentGateV1 {
     /// # Errors
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] for a
     /// conflicting binding.
-    pub fn bind_timeline(
+    #[cfg(test)]
+    pub(crate) fn bind_timeline(
         &self,
         timeline: TimelineId,
         scope: ErasureReferenceV1,
@@ -351,7 +352,8 @@ impl ErasureContainmentGateV1 {
     /// Publishing is replacement-only for one request identity. It never
     /// clears a previously published frozen state: a caller must provide the
     /// monotonic state recovered from the durable predecessor chain.
-    pub fn publish_verified_state(&self, state: ErasureVerifiedStateV1) {
+    #[cfg(test)]
+    pub(crate) fn publish_verified_state(&self, state: ErasureVerifiedStateV1) {
         let _fence = self
             .fence_lock
             .lock()
@@ -382,7 +384,8 @@ impl ErasureContainmentGateV1 {
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
     /// evidence or topology binding is incomplete or conflicts with an
     /// installed boundary.
-    pub fn install_verified_state(
+    #[cfg(test)]
+    pub(crate) fn install_verified_state(
         &self,
         state: &ErasureVerifiedStateV1,
         bindings: &[(TimelineId, ErasureReferenceV1)],
@@ -509,7 +512,8 @@ impl ErasureContainmentGateV1 {
     /// # Errors
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
     /// query cannot establish a verified state or the topology binding fails.
-    pub fn install_from_verified_query<Q: ErasureVerifiedStateQueryV1>(
+    #[cfg(test)]
+    pub(crate) fn install_from_verified_query<Q: ErasureVerifiedStateQueryV1>(
         &self,
         query: &mut Q,
         request: ErasureReferenceV1,
