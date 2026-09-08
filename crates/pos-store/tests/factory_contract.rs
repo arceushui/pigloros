@@ -1,9 +1,11 @@
 //! Black-box deduplication contracts for the documented `pos-store` factory seam.
 
+use pos_core::ErasureContainmentGateV1;
 use pos_store::{
     open_store, AppendDedupKey, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome,
-    CanonicalBytes, EntityId, EventDraft, Kind, StoreConfig, WallTime,
+    CanonicalBytes, EntityId, EventDraft, EventStore, Kind, StoreConfig, WallTime,
 };
+use std::sync::Arc;
 
 trait TestResultExt<T> {
     fn test_ok(self) -> T;
@@ -41,10 +43,18 @@ fn assert_appended(outcome: &AppendOrDuplicateOutcome) {
     }
 }
 
+fn gated_sqlite_store() -> Box<dyn EventStore> {
+    let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok();
+    store
+}
+
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_factory_releases_identity_when_timeline_is_deleted() {
-    let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
+    let mut store = gated_sqlite_store();
     let original = store.create_timeline("original").test_ok();
     let draft = draft();
     let first = store
@@ -73,7 +83,7 @@ fn sqlite_factory_releases_identity_when_timeline_is_deleted() {
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_factory_runs_the_bounded_root_count_contract() {
-    let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
+    let mut store = gated_sqlite_store();
     store.create_timeline("root").test_ok();
     assert_eq!(store.root_timeline_count_bounded(1).test_ok(), 1);
 }
