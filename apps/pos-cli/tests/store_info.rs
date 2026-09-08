@@ -58,8 +58,8 @@ fn corrupt_timeline_listing_fails_without_partial_stdout() -> Result<(), Box<dyn
         "unexpected stderr: {stderr}"
     );
     assert!(
-        stderr.contains("erasure containment boundary is unavailable"),
-        "missing fail-closed reason in stderr: {stderr}"
+        stderr.contains("Invalid column type"),
+        "missing root cause in stderr: {stderr}"
     );
     Ok(())
 }
