@@ -115,7 +115,7 @@ impl SelectorAdapter {
         }
     }
 
-    fn invoke(&self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+    fn invoke(attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
         let mut stream = connect_selector().map_err(|_| AdapterError::Unavailable)?;
         let watchdog = Duration::from_millis(attempt.watchdog_ms);
         stream
@@ -141,7 +141,7 @@ impl SubjectAdapter for SelectorAdapter {
     }
 
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
-        self.invoke(attempt)
+        Self::invoke(attempt)
     }
 }
 

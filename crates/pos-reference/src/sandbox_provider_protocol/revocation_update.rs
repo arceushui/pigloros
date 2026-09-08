@@ -173,6 +173,12 @@ struct CompletedRevocationUpdate {
     acknowledgement: [u8; 32],
 }
 
+impl CompletedRevocationUpdate {
+    const fn matches_request(self, identity: RequestIdentity) -> bool {
+        self.request == identity.request_digest && self.wire == identity.wire_digest
+    }
+}
+
 /// Selector-owned state that serializes revocation transitions and retains replay identity.
 #[derive(Clone, Debug)]
 pub struct SelectorRevocationState {
@@ -210,9 +216,7 @@ impl SelectorRevocationState {
         validate_cancelled_attempts(&expected_cancelled_attempt_ids)?;
         let identity = request_identity(bytes)?;
         if let Some(completed) = self.completed.get(&identity.request_id) {
-            return if completed.request == identity.request_digest
-                && completed.wire == identity.wire_digest
-            {
+            return if completed.matches_request(identity) {
                 Ok(())
             } else {
                 Err(SandboxRevocationUpdateError::RequestIdentityConflict)
