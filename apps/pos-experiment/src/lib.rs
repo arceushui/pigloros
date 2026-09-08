@@ -81,6 +81,52 @@ fn open_store_with_gate(
     Ok(store)
 }
 
+fn bind_registry_erasure_gate(
+    store: &mut dyn pos_core::store::EventStore,
+    registry: &PluginRegistry,
+) -> Result<(), pos_core::CoreError> {
+    if let Some(gate) = registry.clone_erasure_gate() {
+        store.bind_erasure_gate(gate)?;
+    }
+    Ok(())
+}
+
+fn bind_fork_registry_erasure_gate(
+    registry: &mut PluginRegistry,
+    parent: &PluginRegistry,
+) -> Result<(), ExperimentError> {
+    if registry.erasure_gate_is_bound() {
+        return Err(ExperimentError::IncompatibleForkRegistry);
+    }
+    if let Some(gate) = parent.clone_erasure_gate() {
+        registry.bind_erasure_gate(gate);
+    }
+    Ok(())
+}
+
+fn bind_backtest_erasure_gate(
+    store: &mut dyn pos_core::store::EventStore,
+    registry: &mut PluginRegistry,
+) -> Result<Arc<dyn ErasureGate>, pos_core::CoreError> {
+    let gate = if registry.erasure_gate_is_bound() {
+        registry
+            .clone_erasure_gate()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?
+    } else {
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        registry.bind_erasure_gate(Arc::clone(&gate));
+        gate
+    };
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    Ok(gate)
+}
+
+fn propagate_backtest_erasure_gate(registry: &mut PluginRegistry, gate: Arc<dyn ErasureGate>) {
+    if !registry.erasure_gate_is_bound() {
+        registry.bind_erasure_gate(gate);
+    }
+}
+
 // Experiment hosts may close their own session, but they are not a Gateway
 // consent issuer.  Keep this durable lifecycle marker outside the canonical
 // `consent.*` namespace so only Gateway APIs can create consent events.
@@ -1032,9 +1078,7 @@ impl Experiment {
             bind_test_erasure_gate(&mut registry);
             registry
         };
-        if let Some(gate) = registry.clone_erasure_gate() {
-            store.bind_erasure_gate(gate)?;
-        }
+        bind_registry_erasure_gate(store.as_mut(), &registry)?;
         let parent_composition = registry.composition();
         let timeline = store.create_timeline(&self.config.name)?;
         Ok(ExperimentSession {
@@ -1111,9 +1155,7 @@ impl Experiment {
     ) -> Result<ExperimentSession, ExperimentError> {
         #[cfg(test)]
         bind_test_erasure_gate(&mut self.registry);
-        if let Some(gate) = self.registry.clone_erasure_gate() {
-            store.bind_erasure_gate(gate)?;
-        }
+        bind_registry_erasure_gate(store.as_mut(), &self.registry)?;
         let parent_composition = self.registry.composition();
         let timeline = store
             .get_timeline(timeline_id)?
@@ -1274,15 +1316,14 @@ impl Experiment {
                 .fork(timeline.id(), current_head, name)
                 .map_err(ExperimentError::from);
         };
-        if let Err(error) = gate.with_token_fence(
+        gate.with_token_fence(
             timeline.id(),
             token,
             current_head.as_u64(),
             now_secs,
             &mut append,
-        ) {
-            return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
-        }
+        )
+        .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))?;
         fork_result
     }
 }
@@ -1931,12 +1972,7 @@ impl ExperimentSession {
             .as_ref()
             .ok_or(ExperimentError::MissingForkRegistryFactory)?;
         let mut registry = factory()?;
-        if registry.erasure_gate_is_bound() {
-            return Err(ExperimentError::IncompatibleForkRegistry);
-        }
-        if let Some(gate) = self.registry.clone_erasure_gate() {
-            registry.bind_erasure_gate(gate);
-        }
+        bind_fork_registry_erasure_gate(&mut registry, &self.registry)?;
         if let Some(gate) = self.registry.clone_consent_gate() {
             registry = registry.with_consent_gate(gate);
         }
@@ -2270,21 +2306,11 @@ impl BacktestRunner {
         let store_config = self.config.store_config.clone();
 
         // --- Train phase ---
+        let mut train_registry = (self.registry_factory)();
+        let erasure_gate = bind_backtest_erasure_gate(store, &mut train_registry)?;
         let train_name = format!("{}-train", self.config.experiment_name);
         let train_tl = store.create_timeline(&train_name)?;
         let train_tl_id = train_tl.id();
-
-        let mut train_registry = (self.registry_factory)();
-        let erasure_gate = if train_registry.erasure_gate_is_bound() {
-            train_registry
-                .clone_erasure_gate()
-                .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?
-        } else {
-            let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
-            train_registry.bind_erasure_gate(Arc::clone(&gate));
-            gate
-        };
-        store.bind_erasure_gate(Arc::clone(&erasure_gate))?;
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
             store,
@@ -2303,9 +2329,7 @@ impl BacktestRunner {
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
-        if !eval_registry.erasure_gate_is_bound() {
-            eval_registry.bind_erasure_gate(erasure_gate);
-        }
+        propagate_backtest_erasure_gate(&mut eval_registry, erasure_gate);
         let inherited =
             restore_inherited_eval_events(store, eval_tl_id, train_head_seq, &mut eval_registry)?;
         hydrate_projections(&mut eval_registry, &inherited);
