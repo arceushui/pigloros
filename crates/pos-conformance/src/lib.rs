@@ -1872,10 +1872,10 @@ fn typed_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<[u8; 32], pos_
 /// preventing serde's map representation from becoming a protocol by accident.
 pub mod strict_codec {
     use super::{
-        AuthoritativeEventV1, BTreeMap, CaseOutcomeStatusV1, CaseOutcomeV1, CausalTraceEntryV1,
-        ClaimLayerV1, ConformanceReportV1, ConsentAuditV1, CounterfactualContractV1, Cursor,
-        DependencyClassV1, DependencyNodeV1, DigestSizeV1, DivergenceLocationKindV1,
-        DivergenceMismatchKindV1, DivergenceReportV1, ExecutionModeV1,
+        domain_digest, AuthoritativeEventV1, BTreeMap, CaseOutcomeStatusV1, CaseOutcomeV1,
+        CausalTraceEntryV1, ClaimLayerV1, ConformanceReportV1, ConsentAuditV1,
+        CounterfactualContractV1, Cursor, DependencyClassV1, DependencyNodeV1, DigestSizeV1,
+        DivergenceLocationKindV1, DivergenceMismatchKindV1, DivergenceReportV1, ExecutionModeV1,
         FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1, FixturePrincipalRefV1,
         FollowOnMismatchV1, HostClosureAuditV1, ImplementationIdentityV1, IndependenceEvidenceV1,
         InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1,
@@ -2522,14 +2522,6 @@ pub mod strict_codec {
         } else {
             bytes(value, field).map(Some)
         }
-    }
-
-    fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
-        let mut input = Vec::with_capacity(domain.len() + 1 + bytes.len());
-        input.extend_from_slice(domain);
-        input.push(0);
-        input.extend_from_slice(bytes);
-        *blake3::hash(&input).as_bytes()
     }
 
     fn decode_value(bytes: &[u8]) -> Result<Value, StrictCborError> {

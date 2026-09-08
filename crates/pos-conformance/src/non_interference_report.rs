@@ -328,7 +328,7 @@ pub enum NonInterferenceReportErrorV1 {
     SignatureInvalid,
     #[error("non-interference report is not canonical")]
     NonCanonical,
-    #[error("non-interference report exceeds 64 KiB")]
+    #[error("non-interference evidence exceeds its declared size bound")]
     TooLarge,
     #[error("non-interference report contains a prohibited secret")]
     SecretDetected,

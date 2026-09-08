@@ -2,9 +2,10 @@ use pos_conformance::{
     execute_non_interference_pair, execute_wave8_non_interference_matrix,
     non_interference_capture_profiles_v1, non_interference_normalization_policy_v1,
     non_interference_surface_names_v1, normalize_non_interference_capture_v1, ExecutionModeV1,
-    NonInterferenceCaptureV1, NonInterferenceExecutionErrorV1, NonInterferenceFixturePairV1,
-    NonInterferenceMatrixMemberV1, NonInterferenceNormalizationV1, NonInterferenceRawCaptureV1,
-    NonInterferenceRawOperationalV1, NonInterferenceVariantV1, NON_INTERFERENCE_CASE_COUNT_V1,
+    NonInterferenceCaptureV1, NonInterferenceCaseV1, NonInterferenceExecutionErrorV1,
+    NonInterferenceFixturePairV1, NonInterferenceMatrixMemberV1, NonInterferenceNormalizationV1,
+    NonInterferenceRawCaptureV1, NonInterferenceRawOperationalV1, NonInterferenceVariantV1,
+    NON_INTERFERENCE_CASE_COUNT_V1,
 };
 use std::cell::Cell;
 use std::fmt::Debug;
@@ -1020,6 +1021,41 @@ fn strict_outcome_decoder_rejects_each_scalar_field_type() {
         &mut not_an_array,
     ));
     assert!(pos_conformance::NonInterferenceCaseV1::from_canonical_cbor(&not_an_array).is_err());
+}
+
+#[test]
+fn strict_outcome_wire_round_trips_every_variant_and_mode() {
+    let outcome = test_ok(execute_non_interference_pair(&fixture(), |_| {
+        Ok(capture(b"same"))
+    }));
+    for variant in [
+        NonInterferenceVariantV1::Success,
+        NonInterferenceVariantV1::Denial,
+        NonInterferenceVariantV1::WarmCache,
+        NonInterferenceVariantV1::ColdCache,
+    ] {
+        let mut expected = outcome.clone();
+        expected.variant = variant;
+        let encoded = test_ok(expected.to_canonical_cbor());
+        assert_eq!(
+            test_ok(NonInterferenceCaseV1::from_canonical_cbor(&encoded)),
+            expected
+        );
+    }
+    for mode in [
+        ExecutionModeV1::Local,
+        ExecutionModeV1::AirGapped,
+        ExecutionModeV1::Replay,
+        ExecutionModeV1::Fork,
+    ] {
+        let mut expected = outcome.clone();
+        expected.mode = mode;
+        let encoded = test_ok(expected.to_canonical_cbor());
+        assert_eq!(
+            test_ok(NonInterferenceCaseV1::from_canonical_cbor(&encoded)),
+            expected
+        );
+    }
 }
 
 #[test]

@@ -734,6 +734,14 @@ fn report_refuses_secret_material_and_oversized_input() {
     );
 }
 
+#[test]
+fn shared_size_error_does_not_claim_the_report_limit_for_artifacts() {
+    assert_eq!(
+        NonInterferenceReportErrorV1::TooLarge.to_string(),
+        "non-interference evidence exceeds its declared size bound"
+    );
+}
+
 fn assert_both_verifiers_reject_artifacts(
     report: &NonInterferenceReportV1,
     artifacts: &[Vec<u8>],
