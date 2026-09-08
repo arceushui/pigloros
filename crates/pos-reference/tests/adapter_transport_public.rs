@@ -560,7 +560,11 @@ fn attempt_reader_rejects_every_header_and_capability_boundary() -> TestResult {
             integer(1024 * 1024 * 1024 + 1),
             TransportError::FieldOutOfBounds,
         ),
-        (12, integer(4097), TransportError::FieldOutOfBounds),
+        (
+            12,
+            integer(512 * 1024 + 1),
+            TransportError::FieldOutOfBounds,
+        ),
     ] {
         let mut changed = valid.clone();
         replace_field(&mut changed[0], field, replacement)?;
