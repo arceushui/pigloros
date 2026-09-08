@@ -78,12 +78,9 @@ impl ErasureExecutionHostV1 {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         }
         self.state = HostStateV1::Closed;
-        let inventory = match query.verified_inventory(maximum_requests) {
-            Ok(inventory) => inventory,
-            Err(_) => {
-                self.state = HostStateV1::Poisoned;
-                return Err(ErasureHostErrorV1::RecoveryUnavailable);
-            }
+        let Ok(inventory) = query.verified_inventory(maximum_requests) else {
+            self.state = HostStateV1::Poisoned;
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         self.publish_inventory(inventory, maximum_requests)
     }
