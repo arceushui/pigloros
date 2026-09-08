@@ -232,7 +232,7 @@ impl<S: EventStore> ErasureReadSenderV1<'_, S> {
     }
 }
 
-fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
+const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     match error {
         CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
         CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,

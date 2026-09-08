@@ -7,7 +7,7 @@ use std::{
     cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    sync::RwLock,
+    sync::{Arc, RwLock},
 };
 
 use crate::ids::TimelineId;
@@ -299,13 +299,18 @@ pub trait ErasureGate: Send + Sync {
 /// published here. A Timeline is bound to an opaque scope reference by the
 /// authoritative topology resolver; no selector is re-evaluated by this gate.
 pub struct ErasureContainmentGateV1 {
-    inventory: RwLock<Option<ErasureVerifiedInventoryV1>>,
-    timeline_scopes: RwLock<BTreeMap<TimelineId, ErasureReferenceV1>>,
-    verified_unaffected: RwLock<BTreeMap<TimelineId, ErasureReferenceV1>>,
-    states: RwLock<BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>>,
-    blocked_timelines: RwLock<BTreeSet<TimelineId>>,
+    authority: RwLock<Arc<ErasureGateStateV1>>,
     fence_lock: std::sync::Mutex<()>,
     fail_closed_unbound: bool,
+}
+
+#[derive(Clone, Default)]
+struct ErasureGateStateV1 {
+    inventory: Option<ErasureVerifiedInventoryV1>,
+    timeline_scopes: BTreeMap<TimelineId, ErasureReferenceV1>,
+    verified_unaffected: BTreeMap<TimelineId, ErasureReferenceV1>,
+    states: BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
+    blocked_timelines: BTreeSet<TimelineId>,
 }
 
 thread_local! {
@@ -335,11 +340,13 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            inventory: RwLock::new(None),
-            timeline_scopes: RwLock::new(BTreeMap::new()),
-            verified_unaffected: RwLock::new(BTreeMap::new()),
-            states: RwLock::new(BTreeMap::new()),
-            blocked_timelines: RwLock::new(BTreeSet::new()),
+            authority: RwLock::new(Arc::new(ErasureGateStateV1 {
+                inventory: None,
+                timeline_scopes: BTreeMap::new(),
+                verified_unaffected: BTreeMap::new(),
+                states: BTreeMap::new(),
+                blocked_timelines: BTreeSet::new(),
+            })),
             fence_lock: std::sync::Mutex::new(()),
             fail_closed_unbound: false,
         }
@@ -350,11 +357,13 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub const fn new_fail_closed() -> Self {
         Self {
-            inventory: RwLock::new(None),
-            timeline_scopes: RwLock::new(BTreeMap::new()),
-            verified_unaffected: RwLock::new(BTreeMap::new()),
-            states: RwLock::new(BTreeMap::new()),
-            blocked_timelines: RwLock::new(BTreeSet::new()),
+            authority: RwLock::new(Arc::new(ErasureGateStateV1 {
+                inventory: None,
+                timeline_scopes: BTreeMap::new(),
+                verified_unaffected: BTreeMap::new(),
+                states: BTreeMap::new(),
+                blocked_timelines: BTreeSet::new(),
+            })),
             fence_lock: std::sync::Mutex::new(()),
             fail_closed_unbound: true,
         }
@@ -376,31 +385,29 @@ impl ErasureContainmentGateV1 {
         let _fence = self
             .fence_lock
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut bindings = self
-            .timeline_scopes
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let has_unaffected_binding = self
-            .verified_unaffected
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        let current = self
+            .authority
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&timeline);
-        if has_unaffected_binding {
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .clone();
+        if current.verified_unaffected.contains_key(&timeline) {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
-        let result = match bindings.get(&timeline) {
+        match current.timeline_scopes.get(&timeline) {
             Some(existing) if *existing != scope => {
-                Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+                return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
             }
-            Some(_) => Ok(()),
-            None => {
-                bindings.insert(timeline, scope);
-                Ok(())
-            }
-        };
-        drop(bindings);
-        result
+            Some(_) => return Ok(()),
+            None => {}
+        }
+        let mut candidate = (*current).clone();
+        candidate.timeline_scopes.insert(timeline, scope);
+        *self
+            .authority
+            .write()
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)? = Arc::new(candidate);
+        Ok(())
     }
 
     /// Publish a recovered verified state for subsequent containment checks.
@@ -410,21 +417,23 @@ impl ErasureContainmentGateV1 {
     /// monotonic state recovered from the durable predecessor chain.
     #[cfg(test)]
     pub(crate) fn publish_verified_state(&self, state: ErasureVerifiedStateV1) {
-        let _fence = self
-            .fence_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Ok(_fence) = self.fence_lock.lock() else {
+            return;
+        };
         let request = state.request().reference();
-        let mut states = self
-            .states
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if states.get(&request).is_some_and(|existing| {
+        let Ok(current) = self.authority.read().map(|state| state.clone()) else {
+            return;
+        };
+        if current.states.get(&request).is_some_and(|existing| {
             Self::containment_rank(existing.lifecycle()) > Self::containment_rank(state.lifecycle())
         }) {
             return;
         }
-        states.insert(request, state);
+        let mut candidate = (*current).clone();
+        candidate.states.insert(request, state);
+        if let Ok(mut authority) = self.authority.write() {
+            *authority = Arc::new(candidate);
+        }
     }
 
     /// Atomically install one recovered ERS1 snapshot and its host-resolved
@@ -481,7 +490,7 @@ impl ErasureContainmentGateV1 {
         let _fence = self
             .fence_lock
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
         if bindings
             .iter()
             .any(|(_, scope)| !state.scope_contains(*scope))
@@ -513,47 +522,44 @@ impl ErasureContainmentGateV1 {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
         let request = state.request().reference();
-        let mut states = self
-            .states
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if states.get(&request).is_some_and(|existing| {
+        let current = self
+            .authority
+            .read()
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .clone();
+        if current.states.get(&request).is_some_and(|existing| {
             Self::containment_rank(existing.lifecycle()) > Self::containment_rank(state.lifecycle())
         }) {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
-        let mut timeline_scopes = self
-            .timeline_scopes
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if bindings.iter().any(|(timeline, scope)| {
-            timeline_scopes
+            current
+                .timeline_scopes
                 .get(timeline)
                 .is_some_and(|existing| *existing != *scope)
         }) {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
-        let mut verified_unaffected = self
-            .verified_unaffected
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if unaffected.iter().any(|(timeline, manifest)| {
-            verified_unaffected
+            current
+                .verified_unaffected
                 .get(timeline)
                 .is_some_and(|existing| *existing != *manifest)
         }) {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
-        states.insert(request, state.clone());
-        drop(states);
+        let mut candidate = (*current).clone();
+        candidate.states.insert(request, state.clone());
         for (timeline, scope) in bindings {
-            timeline_scopes.insert(*timeline, *scope);
+            candidate.timeline_scopes.insert(*timeline, *scope);
         }
-        drop(timeline_scopes);
         for (timeline, manifest) in unaffected {
-            verified_unaffected.insert(*timeline, *manifest);
+            candidate.verified_unaffected.insert(*timeline, *manifest);
         }
-        drop(verified_unaffected);
+        *self
+            .authority
+            .write()
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)? = Arc::new(candidate);
         Ok(())
     }
 
@@ -625,10 +631,14 @@ impl ErasureContainmentGateV1 {
             .fence_lock
             .lock()
             .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        let replacement = ErasureGateStateV1 {
+            inventory: Some(candidate),
+            ..ErasureGateStateV1::default()
+        };
         *self
-            .inventory
+            .authority
             .write()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)? = Some(candidate);
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)? = Arc::new(replacement);
         Ok(generation)
     }
 
@@ -638,9 +648,10 @@ impl ErasureContainmentGateV1 {
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] before a
     /// complete inventory is installed or after lock poisoning.
     pub fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
-        self.inventory
+        self.authority
             .read()
             .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .inventory
             .as_ref()
             .map(ErasureVerifiedInventoryV1::generation)
             .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)
@@ -661,53 +672,37 @@ impl ErasureContainmentGateV1 {
     /// Mark the narrowest authenticated boundary unavailable after recovery
     /// cannot establish its effective erasure scope.
     pub fn block_timeline(&self, timeline: TimelineId) {
-        let _fence = self
-            .fence_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.blocked_timelines
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(timeline);
+        let Ok(_fence) = self.fence_lock.lock() else {
+            return;
+        };
+        let Ok(current) = self.authority.read().map(|state| state.clone()) else {
+            return;
+        };
+        let mut candidate = (*current).clone();
+        candidate.blocked_timelines.insert(timeline);
+        if let Ok(mut authority) = self.authority.write() {
+            *authority = Arc::new(candidate);
+        }
     }
 
-    fn authorize_locked(
+    fn authorize_state(
         &self,
         timeline: TimelineId,
         _operation: ErasureProtectedOperationV1,
-        states: &BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
+        authority: &ErasureGateStateV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
-        if let Some(inventory) = self
-            .inventory
-            .read()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
-            .as_ref()
-        {
+        if let Some(inventory) = authority.inventory.as_ref() {
             return inventory.authorize(timeline);
         }
-        if self
-            .blocked_timelines
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&timeline)
-        {
+        if authority.blocked_timelines.contains(&timeline) {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
-        let scope = self
-            .timeline_scopes
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&timeline)
-            .copied();
+        let scope = authority.timeline_scopes.get(&timeline).copied();
         let Some(scope) = scope else {
-            let verified_manifest = self
-                .verified_unaffected
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&timeline)
-                .copied();
+            let verified_manifest = authority.verified_unaffected.get(&timeline).copied();
             if let Some(manifest) = verified_manifest {
-                return if states
+                return if authority
+                    .states
                     .values()
                     .any(|state| state.manifest_digest() == manifest)
                 {
@@ -723,7 +718,7 @@ impl ErasureContainmentGateV1 {
             };
         };
         let mut matched = false;
-        for state in states.values() {
+        for state in authority.states.values() {
             if state.scope_contains(scope) {
                 matched = true;
                 state.permit_protected_operation(scope)?;
@@ -743,11 +738,16 @@ impl ErasureGate for ErasureContainmentGateV1 {
         timeline: TimelineId,
         operation: ErasureProtectedOperationV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
-        let states = self
-            .states
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        let authority = self
+            .authority
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.authorize_locked(timeline, operation, &states)
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .clone();
+        self.authorize_state(timeline, operation, &authority)
     }
 
     fn with_fence(
@@ -758,19 +758,25 @@ impl ErasureGate for ErasureContainmentGateV1 {
     ) -> Result<(), ErasureContainmentErrorV1> {
         let identity = std::ptr::from_ref(self) as usize;
         if ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity)) {
-            self.authorize(timeline, operation)?;
+            let authority = self
+                .authority
+                .read()
+                .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+                .clone();
+            self.authorize_state(timeline, operation, &authority)?;
             effect();
             return Ok(());
         }
         let _fence = self
             .fence_lock
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let states = self
-            .states
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        let authority = self
+            .authority
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.authorize_locked(timeline, operation, &states)?;
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .clone();
+        self.authorize_state(timeline, operation, &authority)?;
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
         effect();

@@ -1184,3 +1184,22 @@ fn fail_closed_gate_rejects_unbound_timeline() {
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
 }
+
+#[test]
+fn poisoned_containment_fence_fails_closed() {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut panic_during_effect = || panic!("poison containment fence");
+        let _ = gate.with_fence(
+            timeline,
+            ErasureProtectedOperationV1::Read,
+            &mut panic_during_effect,
+        );
+    }));
+    assert!(panic_result.is_err());
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+}
