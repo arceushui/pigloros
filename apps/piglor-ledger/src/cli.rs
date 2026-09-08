@@ -121,26 +121,32 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 CliError::BadSource("store: source requires --key <path>".to_owned())
             })?;
             let signing_key = load_signing_key(key_path)?;
-            let mut event_store = pos_store::open_store(StoreConfig::Sqlite {
-                path: db.to_string_lossy().into_owned(),
-            })
-            .map_err(|e| CliError::BadSource(e.to_string()))?;
+            let event_store = std::cell::RefCell::new(
+                pos_store::open_store(StoreConfig::Sqlite {
+                    path: db.to_string_lossy().into_owned(),
+                })
+                .map_err(|e| CliError::BadSource(e.to_string()))?,
+            );
             #[cfg(test)]
-            let event_store = crate::bind_test_store_gate(event_store)
-                .map_err(|e| CliError::BadSource(e.to_string()))?;
+            let event_store = std::cell::RefCell::new(
+                crate::bind_test_store_gate(event_store.into_inner())
+                    .map_err(|e| CliError::BadSource(e.to_string()))?,
+            );
             let persisted_registry = event_store
+                .borrow()
                 .load_key_registry()
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             let (registry_state, identity) =
                 ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
             let timeline_id = event_store
+                .borrow_mut()
                 .initialize_timeline_with_key_registry("ledger", &registry_state)
                 .map_err(|error| CliError::BadSource(error.to_string()))?
                 .id();
             let registry = Arc::new(Mutex::new(registry_state));
             Ok(Box::new(
                 EventLedgerStore::new(
-                    event_store,
+                    event_store.into_inner(),
                     timeline_id,
                     crate::well_known_entity(),
                     signing_key,
