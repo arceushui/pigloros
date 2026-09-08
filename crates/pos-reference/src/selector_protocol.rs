@@ -858,14 +858,17 @@ mod tests {
     #[test]
     fn sly1_rejects_wrong_execute_authority_and_output_descriptor() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
-        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let (control, trailing, receipt_digest) = admitted_reply(&encoded, [14; 32], 0)?;
         assert_eq!(
             decode_reply(&control, &trailing, &encoded, [99; 32], 1024),
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(
             decode_reply(&control, &trailing, &encoded, [14; 32], 0),
-            Err(AdapterError::ProtocolFailure)
+            Ok(DecodedSelectorReply {
+                observation: Err(AdapterError::ProtocolFailure),
+                provenance: Some(receipt_digest),
+            })
         );
         let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
             .map_err(|_| AdapterError::ProtocolFailure)?;
