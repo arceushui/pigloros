@@ -676,16 +676,9 @@ async fn run_tick_boundaries(
             emitted_events: 2,
         }
     );
-    let session_task = tokio::task::spawn_blocking(move || {
-        let result = session.step_cadenced(100_000_000);
-        (session, result)
-    });
-    let ready_rx = scenario.ready_rx.take().test_ok()?;
-    tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(5)).test_ok())
-        .await
-        .test_ok()
-        .map_err(|error| std::io::Error::other(format!("readiness join: {error}")))?
-        .map_err(|error| std::io::Error::other(format!("readiness receive: {error}")))?;
+    // The shared erasure fence serializes protected effects. Admit the human
+    // action before the next Plugin-input fence so this fixture does not hold
+    // an AI boundary open while waiting for another protected append.
     let human = request_http(
         scenario.address,
         "POST",
@@ -708,6 +701,16 @@ async fn run_tick_boundaries(
     .await
     .map_err(|error| std::io::Error::other(format!("human action request: {error}")))?;
     assert_eq!(human.status, 201);
+    let session_task = tokio::task::spawn_blocking(move || {
+        let result = session.step_cadenced(100_000_000);
+        (session, result)
+    });
+    let ready_rx = scenario.ready_rx.take().test_ok()?;
+    tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(5)).test_ok())
+        .await
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("readiness join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("readiness receive: {error}")))?;
     scenario.guard.release_policy();
     let (mut session, boundary_at_100_ms) = session_task
         .await
