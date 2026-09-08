@@ -208,6 +208,8 @@ struct ExecutionArtifact {
     variant: Variant,
     #[serde(rename = "o")]
     mode: Mode,
+    #[serde(rename = "f")]
+    fixture_digest: [u8; 32],
     #[serde(rename = "p")]
     profile_digest: [u8; 32],
     #[serde(rename = "n")]
@@ -216,6 +218,10 @@ struct ExecutionArtifact {
     result_digest: [u8; 32],
     #[serde(rename = "e")]
     execution_provenance_digest: [u8; 32],
+    #[serde(rename = "q")]
+    equal: bool,
+    #[serde(rename = "d")]
+    divergence: Option<Coordinate>,
     #[serde(rename = "k")]
     executor_public_key: [u8; 32],
     #[serde(rename = "s")]
@@ -234,6 +240,8 @@ struct UnsignedExecutionArtifact {
     variant: Variant,
     #[serde(rename = "o")]
     mode: Mode,
+    #[serde(rename = "f")]
+    fixture_digest: [u8; 32],
     #[serde(rename = "p")]
     profile_digest: [u8; 32],
     #[serde(rename = "n")]
@@ -242,6 +250,10 @@ struct UnsignedExecutionArtifact {
     result_digest: [u8; 32],
     #[serde(rename = "e")]
     execution_provenance_digest: [u8; 32],
+    #[serde(rename = "q")]
+    equal: bool,
+    #[serde(rename = "d")]
+    divergence: Option<Coordinate>,
     #[serde(rename = "k")]
     executor_public_key: [u8; 32],
 }
@@ -445,7 +457,8 @@ fn validate_shape(report: &Report) -> Result<(), IndependentNonInterferenceRepor
                 if coordinate.fixture_id == outcome.fixture_id
                     && coordinate.variant == outcome.variant
                     && coordinate.mode == mode.mode
-                    && usize::from(coordinate.surface_ordinal) < surfaces.len() => {}
+                    && usize::from(coordinate.surface_ordinal) < surfaces.len()
+                    && coordinate.byte_offset <= 1024 * 1024 => {}
             _ => return Err(IndependentNonInterferenceReportErrorV1::InvalidShape),
         }
     }
@@ -464,6 +477,10 @@ fn validate_shape(report: &Report) -> Result<(), IndependentNonInterferenceRepor
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the independent verifier keeps the complete NIA1 validation sequence explicit"
+)]
 fn validate_execution_artifacts(
     report: &Report,
     trusted_executor_public_keys: &[[u8; 32]],
@@ -493,6 +510,7 @@ fn validate_execution_artifacts(
             || artifact.profile_digest != profile
             || artifact.normalization_digest
                 != domain_digest(b"PiglorOS.NonInterference.Normalization.v1", &profile)
+            || artifact.fixture_digest == [0; 32]
             || artifact.result_digest == [0; 32]
             || artifact.execution_provenance_digest == [0; 32]
             || artifact.executor_public_key == [0; 32]
@@ -500,16 +518,29 @@ fn validate_execution_artifacts(
         {
             return Err(IndependentNonInterferenceReportErrorV1::InvalidShape);
         }
+        match (artifact.equal, &artifact.divergence) {
+            (true, None) => {}
+            (false, Some(coordinate))
+                if coordinate.fixture_id == artifact.fixture_id
+                    && coordinate.variant == artifact.variant
+                    && coordinate.mode == artifact.mode
+                    && usize::from(coordinate.surface_ordinal) < surfaces.len()
+                    && coordinate.byte_offset <= 1024 * 1024 => {}
+            _ => return Err(IndependentNonInterferenceReportErrorV1::InvalidShape),
+        }
         let unsigned = encode(&UnsignedExecutionArtifact {
             magic: artifact.magic.clone(),
             version: artifact.version,
             fixture_id: artifact.fixture_id.clone(),
             variant: artifact.variant,
             mode: artifact.mode,
+            fixture_digest: artifact.fixture_digest,
             profile_digest: artifact.profile_digest,
             normalization_digest: artifact.normalization_digest,
             result_digest: artifact.result_digest,
             execution_provenance_digest: artifact.execution_provenance_digest,
+            equal: artifact.equal,
+            divergence: artifact.divergence.clone(),
             executor_public_key: artifact.executor_public_key,
         })?;
         let key = ed25519_dalek::VerifyingKey::from_bytes(&artifact.executor_public_key)
@@ -537,13 +568,24 @@ fn validate_execution_artifacts(
             if artifact.fixture_id != outcome.fixture_id
                 || artifact.variant != outcome.variant
                 || artifact.mode != reference.mode
+                || artifact.fixture_digest != outcome.fixture_digest
                 || artifact.profile_digest != outcome.profile_digest
                 || artifact.normalization_digest != outcome.normalization_digest
                 || artifact.result_digest != reference.result_digest
                 || artifact.execution_provenance_digest != reference.execution_provenance_digest
+                || artifact.equal != reference.equal
             {
                 return Err(IndependentNonInterferenceReportErrorV1::InvalidShape);
             }
+        }
+        let first_failed = outcome.modes.iter().position(|reference| !reference.equal);
+        if first_failed.and_then(|index| {
+            resolved[&outcome.modes[index].artifact_digest]
+                .divergence
+                .as_ref()
+        }) != outcome.first_divergence.as_ref()
+        {
+            return Err(IndependentNonInterferenceReportErrorV1::InvalidShape);
         }
     }
     Ok(())

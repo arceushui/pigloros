@@ -43,10 +43,13 @@ pub struct NonInterferenceExecutionArtifactBodyV1 {
     pub fixture_id: String,
     pub variant: NonInterferenceVariantV1,
     pub mode: ExecutionModeV1,
+    pub fixture_digest: [u8; 32],
     pub profile_digest: [u8; 32],
     pub normalization_digest: [u8; 32],
     pub result_digest: [u8; 32],
     pub execution_provenance_digest: [u8; 32],
+    pub equal: bool,
+    pub divergence: Option<NonInterferenceDivergenceCoordinateV1>,
 }
 
 /// Immutable content-addressed result supplied by a concrete #193 executor.
@@ -63,6 +66,8 @@ pub struct NonInterferenceExecutionArtifactV1 {
     pub variant: NonInterferenceVariantV1,
     #[serde(rename = "o")]
     pub mode: ExecutionModeV1,
+    #[serde(rename = "f")]
+    pub fixture_digest: [u8; 32],
     #[serde(rename = "p")]
     pub profile_digest: [u8; 32],
     #[serde(rename = "n")]
@@ -71,6 +76,10 @@ pub struct NonInterferenceExecutionArtifactV1 {
     pub result_digest: [u8; 32],
     #[serde(rename = "e")]
     pub execution_provenance_digest: [u8; 32],
+    #[serde(rename = "q")]
+    pub equal: bool,
+    #[serde(rename = "d")]
+    pub divergence: Option<NonInterferenceDivergenceCoordinateV1>,
     #[serde(rename = "k")]
     pub executor_public_key: [u8; 32],
     #[serde(rename = "s")]
@@ -92,10 +101,13 @@ impl NonInterferenceExecutionArtifactV1 {
             fixture_id: body.fixture_id,
             variant: body.variant,
             mode: body.mode,
+            fixture_digest: body.fixture_digest,
             profile_digest: body.profile_digest,
             normalization_digest: body.normalization_digest,
             result_digest: body.result_digest,
             execution_provenance_digest: body.execution_provenance_digest,
+            equal: body.equal,
+            divergence: body.divergence,
             executor_public_key: signing_key.verifying_key().to_bytes(),
             signature: Signature::from_bytes([0; 64]),
         };
@@ -165,11 +177,22 @@ impl NonInterferenceExecutionArtifactV1 {
             || self.version != 1
             || self.profile_digest != profile.profile_digest
             || self.normalization_digest != normalization_digest(profile.profile_digest)
+            || self.fixture_digest == [0; 32]
             || self.result_digest == [0; 32]
             || self.execution_provenance_digest == [0; 32]
             || self.executor_public_key == [0; 32]
         {
             return Err(NonInterferenceReportErrorV1::InvalidShape);
+        }
+        match (self.equal, &self.divergence) {
+            (true, None) => {}
+            (false, Some(coordinate))
+                if coordinate.fixture_id == self.fixture_id
+                    && coordinate.variant == self.variant
+                    && coordinate.mode == self.mode
+                    && usize::from(coordinate.surface_ordinal) < profile.surface_names.len()
+                    && coordinate.byte_offset <= profile.max_surface_bytes => {}
+            _ => return Err(NonInterferenceReportErrorV1::InvalidShape),
         }
         Ok(())
     }
@@ -181,10 +204,13 @@ impl NonInterferenceExecutionArtifactV1 {
             fixture_id: self.fixture_id.clone(),
             variant: self.variant,
             mode: self.mode,
+            fixture_digest: self.fixture_digest,
             profile_digest: self.profile_digest,
             normalization_digest: self.normalization_digest,
             result_digest: self.result_digest,
             execution_provenance_digest: self.execution_provenance_digest,
+            equal: self.equal,
+            divergence: self.divergence.clone(),
             executor_public_key: self.executor_public_key,
         })
     }
@@ -202,6 +228,8 @@ struct UnsignedNonInterferenceExecutionArtifactV1 {
     variant: NonInterferenceVariantV1,
     #[serde(rename = "o")]
     mode: ExecutionModeV1,
+    #[serde(rename = "f")]
+    fixture_digest: [u8; 32],
     #[serde(rename = "p")]
     profile_digest: [u8; 32],
     #[serde(rename = "n")]
@@ -210,6 +238,10 @@ struct UnsignedNonInterferenceExecutionArtifactV1 {
     result_digest: [u8; 32],
     #[serde(rename = "e")]
     execution_provenance_digest: [u8; 32],
+    #[serde(rename = "q")]
+    equal: bool,
+    #[serde(rename = "d")]
+    divergence: Option<NonInterferenceDivergenceCoordinateV1>,
     #[serde(rename = "k")]
     executor_public_key: [u8; 32],
 }
@@ -541,14 +573,25 @@ impl NonInterferenceReportV1 {
                 if artifact.fixture_id != outcome.fixture_id
                     || artifact.variant != outcome.variant
                     || artifact.mode != reference.mode
+                    || artifact.fixture_digest != outcome.fixture_digest
                     || artifact.profile_digest != outcome.profile_digest
                     || artifact.normalization_digest != outcome.normalization_digest
                     || artifact.result_digest != reference.result_digest
                     || artifact.execution_provenance_digest != reference.execution_provenance_digest
+                    || artifact.equal != reference.equal
                     || !trusted_executor_public_keys.contains(&artifact.executor_public_key)
                 {
                     return Err(NonInterferenceReportErrorV1::InvalidShape);
                 }
+            }
+            let first_failed = outcome.modes.iter().position(|reference| !reference.equal);
+            if first_failed.and_then(|index| {
+                resolved[&outcome.modes[index].artifact_digest]
+                    .divergence
+                    .as_ref()
+            }) != outcome.first_divergence.as_ref()
+            {
+                return Err(NonInterferenceReportErrorV1::InvalidShape);
             }
         }
         Ok(())
@@ -620,7 +663,8 @@ fn validate_outcomes(
                 if coordinate.fixture_id == outcome.fixture_id
                     && coordinate.variant == outcome.variant
                     && coordinate.mode == mode.mode
-                    && usize::from(coordinate.surface_ordinal) < profile.surface_names.len() => {}
+                    && usize::from(coordinate.surface_ordinal) < profile.surface_names.len()
+                    && coordinate.byte_offset <= profile.max_surface_bytes => {}
             _ => return Err(NonInterferenceReportErrorV1::InvalidShape),
         }
     }

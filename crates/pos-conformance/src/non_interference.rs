@@ -22,6 +22,12 @@ pub enum NonInterferenceNormalizationV1 {
     ByteExact,
 }
 
+#[derive(Clone, Copy)]
+struct NonInterferenceSurfaceDefinitionV1 {
+    name: &'static str,
+    normalization: NonInterferenceNormalizationV1,
+}
+
 impl NonInterferenceNormalizationV1 {
     const fn description(self) -> &'static str {
         match self {
@@ -105,11 +111,15 @@ pub fn non_interference_capture_profiles_v1() -> Vec<NonInterferenceCaptureProfi
 }
 
 fn capture_profile(fixture_id: &str) -> Option<NonInterferenceCaptureProfileV1> {
-    let surface_names = non_interference_surface_names_v1(fixture_id)?
+    let definitions = surface_definitions(fixture_id)?;
+    let surface_names = definitions
         .iter()
-        .map(|value| (*value).to_owned())
+        .map(|value| value.name.to_owned())
         .collect::<Vec<_>>();
-    let surface_normalizations = normalizations_for(fixture_id)?.to_vec();
+    let surface_normalizations = definitions
+        .iter()
+        .map(|value| value.normalization)
+        .collect();
     let variants = vec![
         NonInterferenceVariantV1::Success,
         NonInterferenceVariantV1::Denial,
@@ -136,142 +146,145 @@ fn capture_profile(fixture_id: &str) -> Option<NonInterferenceCaptureProfileV1> 
     Some(profile)
 }
 
-const fn normalizations_for(fixture_id: &str) -> Option<&'static [NonInterferenceNormalizationV1]> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "the canonical ADR-059 inventory keeps every surface and normalizer in one definition"
+)]
+fn surface_definitions(fixture_id: &str) -> Option<Vec<NonInterferenceSurfaceDefinitionV1>> {
     use NonInterferenceNormalizationV1::{
         ByteExact, CategoryCount, CategoryCountDigest, CategoryCountPaddedLength, CountClass,
         OmitOperational,
     };
     match fixture_id.as_bytes() {
-        b"NI-TOOL-001" => Some(&[CategoryCountDigest; 6]),
-        b"NI-CACHE-002" => Some(&[CountClass; 6]),
-        b"NI-STATE-003" => Some(&[CategoryCount; 6]),
-        b"NI-OBS-004" => Some(&[CategoryCountPaddedLength; 5]),
-        b"NI-TIME-005" => Some(&[
-            ByteExact,
-            OmitOperational,
-            ByteExact,
-            CategoryCount,
-            CategoryCount,
-            ByteExact,
+        b"NI-TOOL-001" => Some(vec![
+            surface("Imported-service registry", CategoryCountDigest),
+            surface("tool result handle", CategoryCountDigest),
+            surface("Plugin imports", CategoryCountDigest),
+            surface("staged EventDrafts", CategoryCountDigest),
+            surface("public outcome", CategoryCountDigest),
+            surface("audit record", CategoryCountDigest),
         ]),
-        b"NI-PUBLIC-006" => Some(&[CategoryCount; 5]),
-        b"NI-EVAL-007" | b"NI-SERVICE-011" => Some(&[ByteExact; 5]),
-        b"NI-FORK-008" => Some(&[ByteExact; 9]),
-        b"NI-ARCHIVE-009" => Some(&[ByteExact; 6]),
-        b"NI-NET-010" => Some(&[CategoryCount; 7]),
-        b"NI-CRASH-012" => Some(&[CategoryCountPaddedLength; 6]),
+        b"NI-CACHE-002" => Some(vec![
+            surface("Cache API return", CountClass),
+            surface("snapshot bytes", CountClass),
+            surface("Plugin inputs", CountClass),
+            surface("typed errors", CountClass),
+            surface("logs/metrics", CountClass),
+            surface("evaluator bundle", CountClass),
+        ]),
+        b"NI-STATE-003" => Some(vec![
+            surface("Migration request/result", CategoryCount),
+            surface("activated state", CategoryCount),
+            surface("PluginInvocation", CategoryCount),
+            surface("PluginOutput", CategoryCount),
+            surface("EventDrafts", CategoryCount),
+            surface("quarantine/error", CategoryCount),
+        ]),
+        b"NI-OBS-004" => Some(vec![
+            surface("Structured logs", CategoryCountPaddedLength),
+            surface("metric names/labels/counts", CategoryCountPaddedLength),
+            surface("trace spans", CategoryCountPaddedLength),
+            surface("crash artifact", CategoryCountPaddedLength),
+            surface("public support bundle", CategoryCountPaddedLength),
+        ]),
+        b"NI-TIME-005" => Some(vec![
+            surface("Plugin imports", ByteExact),
+            surface("deterministic deadline", OmitOperational),
+            surface("safe-stop record", ByteExact),
+            surface("status/error", CategoryCount),
+            surface("logs/metrics", CategoryCount),
+            surface("evaluator input", ByteExact),
+        ]),
+        b"NI-PUBLIC-006" => Some(vec![
+            surface("HTTP/Plugin error", CategoryCount),
+            surface("status transition", CategoryCount),
+            surface("cursor bytes", CategoryCount),
+            surface("page count", CategoryCount),
+            surface("response length/padding", CategoryCount),
+        ]),
+        b"NI-EVAL-007" => Some(vec![
+            surface("Export bundle", ByteExact),
+            surface("manifest", ByteExact),
+            surface("fixture descriptor", ByteExact),
+            surface("evaluator stdin/files", ByteExact),
+            surface("ConformanceReport", ByteExact),
+        ]),
+        b"NI-FORK-008" => Some(vec![
+            surface("Fork parent/cut", ByteExact),
+            surface("CounterfactualPlan", ByteExact),
+            surface("RecomputationFrontier", ByteExact),
+            surface("SuffixInvalidation", ByteExact),
+            surface("snapshots", ByteExact),
+            surface("checkpoints", ByteExact),
+            surface("result", ByteExact),
+            surface("ReproManifest", ByteExact),
+            surface("exports", ByteExact),
+        ]),
+        b"NI-ARCHIVE-009" => Some(vec![
+            surface("Member table", ByteExact),
+            surface("archive bytes", ByteExact),
+            surface("decompressed bundle", ByteExact),
+            surface("digest", ByteExact),
+            surface("evaluator import", ByteExact),
+            surface("logs", ByteExact),
+        ]),
+        b"NI-NET-010" => Some(vec![
+            surface("Capability checks", CategoryCount),
+            surface("attempted-call records", CategoryCount),
+            surface("retry count", CategoryCount),
+            surface("Plugin output", CategoryCount),
+            surface("Timeline", CategoryCount),
+            surface("logs", CategoryCount),
+            surface("evaluator bundle", CategoryCount),
+        ]),
+        b"NI-SERVICE-011" => Some(vec![
+            surface("Exact request digest", ByteExact),
+            surface("frozen response projection", ByteExact),
+            surface("call ordinal", ByteExact),
+            surface("PluginInvocation", ByteExact),
+            surface("generated dependency edges", ByteExact),
+        ]),
+        b"NI-CRASH-012" => Some(vec![
+            surface("Guest error", CategoryCountPaddedLength),
+            surface("host error mapping", CategoryCountPaddedLength),
+            surface("quarantine", CategoryCountPaddedLength),
+            surface("crash report", CategoryCountPaddedLength),
+            surface("support archive", CategoryCountPaddedLength),
+            surface("next Tick status", CategoryCountPaddedLength),
+        ]),
         _ => None,
+    }
+}
+
+const fn surface(
+    name: &'static str,
+    normalization: NonInterferenceNormalizationV1,
+) -> NonInterferenceSurfaceDefinitionV1 {
+    NonInterferenceSurfaceDefinitionV1 {
+        name,
+        normalization,
     }
 }
 
 /// Return the canonical ADR-059 capture surface order for one matrix row.
 #[must_use]
-pub fn non_interference_surface_names_v1(fixture_id: &str) -> Option<&'static [&'static str]> {
-    match fixture_id {
-        "NI-TOOL-001" => Some(&[
-            "Imported-service registry",
-            "tool result handle",
-            "Plugin imports",
-            "staged EventDrafts",
-            "public outcome",
-            "audit record",
-        ]),
-        "NI-CACHE-002" => Some(&[
-            "Cache API return",
-            "snapshot bytes",
-            "Plugin inputs",
-            "typed errors",
-            "logs/metrics",
-            "evaluator bundle",
-        ]),
-        "NI-STATE-003" => Some(&[
-            "Migration request/result",
-            "activated state",
-            "PluginInvocation",
-            "PluginOutput",
-            "EventDrafts",
-            "quarantine/error",
-        ]),
-        "NI-OBS-004" => Some(&[
-            "Structured logs",
-            "metric names/labels/counts",
-            "trace spans",
-            "crash artifact",
-            "public support bundle",
-        ]),
-        "NI-TIME-005" => Some(&[
-            "Plugin imports",
-            "deterministic deadline",
-            "safe-stop record",
-            "status/error",
-            "logs/metrics",
-            "evaluator input",
-        ]),
-        "NI-PUBLIC-006" => Some(&[
-            "HTTP/Plugin error",
-            "status transition",
-            "cursor bytes",
-            "page count",
-            "response length/padding",
-        ]),
-        "NI-EVAL-007" => Some(&[
-            "Export bundle",
-            "manifest",
-            "fixture descriptor",
-            "evaluator stdin/files",
-            "ConformanceReport",
-        ]),
-        "NI-FORK-008" => Some(&[
-            "Fork parent/cut",
-            "CounterfactualPlan",
-            "RecomputationFrontier",
-            "SuffixInvalidation",
-            "snapshots",
-            "checkpoints",
-            "result",
-            "ReproManifest",
-            "exports",
-        ]),
-        "NI-ARCHIVE-009" => Some(&[
-            "Member table",
-            "archive bytes",
-            "decompressed bundle",
-            "digest",
-            "evaluator import",
-            "logs",
-        ]),
-        "NI-NET-010" => Some(&[
-            "Capability checks",
-            "attempted-call records",
-            "retry count",
-            "Plugin output",
-            "Timeline",
-            "logs",
-            "evaluator bundle",
-        ]),
-        "NI-SERVICE-011" => Some(&[
-            "Exact request digest",
-            "frozen response projection",
-            "call ordinal",
-            "PluginInvocation",
-            "generated dependency edges",
-        ]),
-        "NI-CRASH-012" => Some(&[
-            "Guest error",
-            "host error mapping",
-            "quarantine",
-            "crash report",
-            "support archive",
-            "next Tick status",
-        ]),
-        _ => None,
-    }
+pub fn non_interference_surface_names_v1(fixture_id: &str) -> Option<Vec<&'static str>> {
+    surface_definitions(fixture_id).map(|definitions| {
+        definitions
+            .iter()
+            .map(|definition| definition.name)
+            .collect()
+    })
 }
 
 /// Return the canonical ADR-059 operational normalization rule for one row.
 #[must_use]
 pub fn non_interference_normalization_policy_v1(fixture_id: &str) -> Option<&'static str> {
-    let values = normalizations_for(fixture_id)?;
+    let definitions = surface_definitions(fixture_id)?;
+    let values = definitions
+        .iter()
+        .map(|definition| definition.normalization)
+        .collect::<Vec<_>>();
     if values.windows(2).all(|pair| pair[0] == pair[1]) {
         Some(values[0].description())
     } else {

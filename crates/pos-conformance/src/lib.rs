@@ -6299,21 +6299,32 @@ pub mod tests {
 
     fn executed_non_interference_matrix() -> Vec<NonInterferenceCaseV1> {
         execute_wave8_non_interference_matrix([1; 32], |run| {
-            let names =
-                non_interference_surface_names_v1(run.subject.fixture_id).unwrap_or_default();
-            let operational = names
+            let Some(profile) = non_interference_capture_profiles_v1()
+                .into_iter()
+                .find(|profile| profile.fixture_id == run.subject.fixture_id)
+            else {
+                return Err(NonInterferenceExecutionErrorV1::CaptureUnavailable);
+            };
+            let operational = profile
+                .surface_normalizations
                 .iter()
-                .map(|_| test_raw_operational(run.subject.fixture_id))
+                .copied()
+                .map(test_raw_operational)
                 .collect();
             normalize_non_interference_capture_v1(
                 run.subject.fixture_id,
                 NonInterferenceRawCaptureV1 {
-                    surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
-                    authoritative: names
+                    surface_names: profile.surface_names.clone(),
+                    authoritative: profile
+                        .surface_names
                         .iter()
                         .map(|_| run.subject.permitted_input.to_vec())
                         .collect(),
-                    public: names.iter().map(|_| b"public".to_vec()).collect(),
+                    public: profile
+                        .surface_names
+                        .iter()
+                        .map(|_| b"public".to_vec())
+                        .collect(),
                     operational,
                     unexpected_network_accesses: 0,
                     provenance_digest: [8; 32],
@@ -6323,25 +6334,33 @@ pub mod tests {
         .unwrap_or_default()
     }
 
-    fn test_raw_operational(fixture_id: &str) -> NonInterferenceRawOperationalV1 {
-        match fixture_id {
-            "NI-TOOL-001" => NonInterferenceRawOperationalV1::CategoryCountDigest {
-                category: 1,
-                count: 1,
-                digest: [7; 32],
-                excluded_sensitive: Vec::new(),
-            },
-            "NI-CACHE-002" => NonInterferenceRawOperationalV1::CountClass {
-                class: 1,
-                count: 1,
-                excluded_sensitive: Vec::new(),
-            },
-            "NI-STATE-003" | "NI-NET-010" => NonInterferenceRawOperationalV1::CategoryCount {
-                category: 1,
-                count: 1,
-                excluded_sensitive: Vec::new(),
-            },
-            "NI-OBS-004" | "NI-CRASH-012" => {
+    fn test_raw_operational(
+        normalization: NonInterferenceNormalizationV1,
+    ) -> NonInterferenceRawOperationalV1 {
+        match normalization {
+            NonInterferenceNormalizationV1::CategoryCountDigest => {
+                NonInterferenceRawOperationalV1::CategoryCountDigest {
+                    category: 1,
+                    count: 1,
+                    digest: [7; 32],
+                    excluded_sensitive: Vec::new(),
+                }
+            }
+            NonInterferenceNormalizationV1::CountClass => {
+                NonInterferenceRawOperationalV1::CountClass {
+                    class: 1,
+                    count: 1,
+                    excluded_sensitive: Vec::new(),
+                }
+            }
+            NonInterferenceNormalizationV1::CategoryCount => {
+                NonInterferenceRawOperationalV1::CategoryCount {
+                    category: 1,
+                    count: 1,
+                    excluded_sensitive: Vec::new(),
+                }
+            }
+            NonInterferenceNormalizationV1::CategoryCountPaddedLength => {
                 NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
                     category: 1,
                     count: 1,
@@ -6349,10 +6368,14 @@ pub mod tests {
                     excluded_sensitive: Vec::new(),
                 }
             }
-            "NI-TIME-005" => NonInterferenceRawOperationalV1::OmitOperational {
-                excluded_sensitive: Vec::new(),
-            },
-            _ => NonInterferenceRawOperationalV1::ByteExact(b"operational".to_vec()),
+            NonInterferenceNormalizationV1::OmitOperational => {
+                NonInterferenceRawOperationalV1::OmitOperational {
+                    excluded_sensitive: Vec::new(),
+                }
+            }
+            NonInterferenceNormalizationV1::ByteExact => {
+                NonInterferenceRawOperationalV1::ByteExact(b"operational".to_vec())
+            }
         }
     }
 

@@ -95,10 +95,25 @@ fn execution_artifacts(outcomes: &mut [NonInterferenceReportOutcomeV1]) -> Vec<V
                     fixture_id: outcome.fixture_id.clone(),
                     variant: outcome.variant,
                     mode: reference.mode,
+                    fixture_digest: outcome.fixture_digest,
                     profile_digest: outcome.profile_digest,
                     normalization_digest: outcome.normalization_digest,
                     result_digest: reference.result_digest,
                     execution_provenance_digest: reference.execution_provenance_digest,
+                    equal: reference.equal,
+                    divergence: (!reference.equal).then(|| {
+                        outcome
+                            .first_divergence
+                            .clone()
+                            .filter(|coordinate| coordinate.mode == reference.mode)
+                            .unwrap_or_else(|| NonInterferenceDivergenceCoordinateV1 {
+                                fixture_id: outcome.fixture_id.clone(),
+                                variant: outcome.variant,
+                                mode: reference.mode,
+                                surface_ordinal: 0,
+                                byte_offset: 0,
+                            })
+                    }),
                 },
                 &SigningKey::from_bytes(&[8; 32]),
             ));
@@ -206,7 +221,16 @@ fn report_rejects_missing_or_mismatched_divergence_coordinates() {
         surface_ordinal: u16::MAX,
         byte_offset: 0,
     });
-    for invalid in [missing, unexpected, impossible_surface] {
+    let mut impossible_offset = outcomes();
+    impossible_offset[0].modes[0].equal = false;
+    impossible_offset[0].first_divergence = Some(NonInterferenceDivergenceCoordinateV1 {
+        fixture_id: "NI-TOOL-001".to_owned(),
+        variant: NonInterferenceVariantV1::Success,
+        mode: ExecutionModeV1::Local,
+        surface_ordinal: 0,
+        byte_offset: u64::MAX,
+    });
+    for invalid in [missing, unexpected, impossible_surface, impossible_offset] {
         assert_eq!(
             NonInterferenceReportV1::sign(invalid, &SigningKey::from_bytes(&[7; 32]), &[]),
             Err(NonInterferenceReportErrorV1::InvalidShape)
@@ -383,10 +407,13 @@ fn report_rejects_an_artifact_bound_to_the_wrong_execution_coordinate() {
             fixture_id: original.fixture_id,
             variant: original.variant,
             mode: ExecutionModeV1::AirGapped,
+            fixture_digest: original.fixture_digest,
             profile_digest: original.profile_digest,
             normalization_digest: original.normalization_digest,
             result_digest: original.result_digest,
             execution_provenance_digest: original.execution_provenance_digest,
+            equal: original.equal,
+            divergence: original.divergence,
         },
         &SigningKey::from_bytes(&[8; 32]),
     ));
@@ -399,6 +426,81 @@ fn report_rejects_an_artifact_bound_to_the_wrong_execution_coordinate() {
     ));
     assert_both_verifiers_reject_artifacts(
         &report,
+        &artifacts,
+        &[trusted_executor()],
+        NonInterferenceReportErrorV1::InvalidShape,
+    );
+}
+
+#[test]
+fn report_cannot_rebind_executor_artifacts_to_a_different_fixture_digest() {
+    let (original, artifacts) = report_bundle();
+    let mut values = original.outcomes;
+    values[0].fixture_digest[0] ^= 1;
+    let rebound = test_ok(NonInterferenceReportV1::sign(
+        values,
+        &SigningKey::from_bytes(&[7; 32]),
+        &[],
+    ));
+    assert_both_verifiers_reject_artifacts(
+        &rebound,
+        &artifacts,
+        &[trusted_executor()],
+        NonInterferenceReportErrorV1::InvalidShape,
+    );
+}
+
+#[test]
+fn report_cannot_reclassify_an_executor_equal_result_as_divergent() {
+    let (original, artifacts) = report_bundle();
+    let mut values = original.outcomes;
+    values[0].modes[0].equal = false;
+    values[0].first_divergence = Some(NonInterferenceDivergenceCoordinateV1 {
+        fixture_id: "NI-TOOL-001".to_owned(),
+        variant: NonInterferenceVariantV1::Success,
+        mode: ExecutionModeV1::Local,
+        surface_ordinal: 0,
+        byte_offset: 0,
+    });
+    let reclassified = test_ok(NonInterferenceReportV1::sign(
+        values,
+        &SigningKey::from_bytes(&[7; 32]),
+        &[],
+    ));
+    assert_both_verifiers_reject_artifacts(
+        &reclassified,
+        &artifacts,
+        &[trusted_executor()],
+        NonInterferenceReportErrorV1::InvalidShape,
+    );
+}
+
+#[test]
+fn report_cannot_move_an_executor_signed_divergence_coordinate() {
+    let mut values = outcomes();
+    values[0].modes[0].equal = false;
+    values[0].first_divergence = Some(NonInterferenceDivergenceCoordinateV1 {
+        fixture_id: "NI-TOOL-001".to_owned(),
+        variant: NonInterferenceVariantV1::Success,
+        mode: ExecutionModeV1::Local,
+        surface_ordinal: 0,
+        byte_offset: 0,
+    });
+    let artifacts = execution_artifacts(&mut values);
+    values[0].first_divergence = Some(NonInterferenceDivergenceCoordinateV1 {
+        fixture_id: "NI-TOOL-001".to_owned(),
+        variant: NonInterferenceVariantV1::Success,
+        mode: ExecutionModeV1::Local,
+        surface_ordinal: 1,
+        byte_offset: 0,
+    });
+    let moved = test_ok(NonInterferenceReportV1::sign(
+        values,
+        &SigningKey::from_bytes(&[7; 32]),
+        &[],
+    ));
+    assert_both_verifiers_reject_artifacts(
+        &moved,
         &artifacts,
         &[trusted_executor()],
         NonInterferenceReportErrorV1::InvalidShape,
