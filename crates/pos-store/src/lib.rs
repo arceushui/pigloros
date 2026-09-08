@@ -54,10 +54,11 @@ pub use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,
-    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event, EventDraft, EventId,
-    GeographicAdmissionAdmin, GeographicAdmissionOutcome, GeographicAdmissionStore,
-    GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind, OwnTracksEnrollmentStore,
-    PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1, WallTime,
+    ErasureFreezeAuthorizationVerifierV1, ErasureHostStoreV1, ErasurePersistencePortV1, Event,
+    EventDraft, EventId, GeographicAdmissionAdmin, GeographicAdmissionOutcome,
+    GeographicAdmissionStore, GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind,
+    OwnTracksEnrollmentStore, PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1,
+    WallTime,
 };
 
 #[cfg(test)]
@@ -393,6 +394,28 @@ pub enum StoreConfig {
 /// ```
 pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
     open_store_with_hasher(config, Box::new(pos_crypto::chain::Blake3Hasher))
+}
+
+/// Construct the host-exclusive EventStore and complete-inventory adapter.
+///
+/// Unlike [`open_store`], the returned interface can enter
+/// `ErasureExecutionHostV1` recovery. It still exposes no raw erasure evidence
+/// or gate-publication capability to application callers.
+///
+/// # Errors
+/// Returns [`CoreError::Storage`] when the selected adapter cannot be opened.
+pub fn open_erasure_host_store(
+    config: StoreConfig,
+) -> Result<Box<dyn ErasureHostStoreV1>, CoreError> {
+    match config {
+        StoreConfig::Memory => Ok(Box::new(memory::MemoryStore::new())),
+        #[cfg(feature = "sqlite")]
+        StoreConfig::Sqlite { path } => sqlite::SqliteStore::open(&path)
+            .map(|store| Box::new(store) as Box<dyn ErasureHostStoreV1>),
+        #[cfg(feature = "sqlite")]
+        StoreConfig::SqliteInMemory => sqlite::SqliteStore::open_in_memory()
+            .map(|store| Box::new(store) as Box<dyn ErasureHostStoreV1>),
+    }
 }
 
 /// Open an existing `SQLite` store for read-only consumers.

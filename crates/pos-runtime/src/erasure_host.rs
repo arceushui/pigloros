@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use pos_core::{
     store::{EventReadBounds, EventStore, SeqRange},
-    CoreError, ErasureContainmentGateV1, ErasureGate, ErasureHostErrorV1,
-    ErasureInventoryPersistencePortV1, ErasureReferenceV1, ErasureVerifiedInventoryQueryV1,
-    ErasureVerifiedInventoryV1, Event, EventDraft, Seq, Timeline, TimelineId,
+    CoreError, ErasureContainmentGateV1, ErasureGate, ErasureHostErrorV1, ErasureHostStoreV1,
+    ErasureReferenceV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event,
+    EventDraft, Seq, Timeline, TimelineId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,19 +35,19 @@ impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
 /// read-only [`ErasureReadSenderV1`]. Both borrow the one host mutably, which
 /// gives synchronous callers one logical command order. Async composition
 /// roots place this host behind their existing single-consumer command queue.
-pub struct ErasureExecutionHostV1<S> {
-    store: S,
+pub struct ErasureExecutionHostV1 {
+    store: Box<dyn ErasureHostStoreV1>,
     gate: Arc<ErasureContainmentGateV1>,
     state: HostStateV1,
 }
 
-impl<S: EventStore> ErasureExecutionHostV1<S> {
+impl ErasureExecutionHostV1 {
     /// Bind an owned store to one fail-closed gate.
     ///
     /// # Errors
     /// Returns [`ErasureHostErrorV1::AdapterFailure`] when the adapter refuses
     /// the unique host gate binding.
-    pub fn new_closed(mut store: S) -> Result<Self, ErasureHostErrorV1> {
+    pub fn new_closed(mut store: Box<dyn ErasureHostStoreV1>) -> Result<Self, ErasureHostErrorV1> {
         let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let store_gate: Arc<dyn ErasureGate> = gate.clone();
         store
@@ -93,7 +93,7 @@ impl<S: EventStore> ErasureExecutionHostV1<S> {
     ///
     /// # Errors
     /// Returns [`ErasureHostErrorV1::RecoveryUnavailable`] while closed.
-    pub fn command_sender(&mut self) -> Result<ErasureCommandSenderV1<'_, S>, ErasureHostErrorV1> {
+    pub fn command_sender(&mut self) -> Result<ErasureCommandSenderV1<'_>, ErasureHostErrorV1> {
         let generation = self.ready_generation()?;
         Ok(ErasureCommandSenderV1 {
             host: self,
@@ -105,7 +105,7 @@ impl<S: EventStore> ErasureExecutionHostV1<S> {
     ///
     /// # Errors
     /// Returns [`ErasureHostErrorV1::RecoveryUnavailable`] while closed.
-    pub fn read_sender(&mut self) -> Result<ErasureReadSenderV1<'_, S>, ErasureHostErrorV1> {
+    pub fn read_sender(&mut self) -> Result<ErasureReadSenderV1<'_>, ErasureHostErrorV1> {
         let generation = self.ready_generation()?;
         Ok(ErasureReadSenderV1 {
             host: self,
@@ -139,12 +139,6 @@ impl<S: EventStore> ErasureExecutionHostV1<S> {
             }
         }
     }
-}
-
-impl<S> ErasureExecutionHostV1<S>
-where
-    S: EventStore + ErasureInventoryPersistencePortV1,
-{
     /// Recover a new store only when its complete durable request set is empty.
     ///
     /// # Errors
@@ -152,7 +146,7 @@ where
     /// binding fails closed. Production recovery for a non-empty set must use
     /// [`Self::new_closed`] followed by [`Self::install_inventory`].
     pub fn recover_verified_empty(
-        mut store: S,
+        mut store: Box<dyn ErasureHostStoreV1>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         let snapshot = store
@@ -169,12 +163,12 @@ where
 }
 
 /// Mutation-capable, generation-bound host sender.
-pub struct ErasureCommandSenderV1<'host, S> {
-    host: &'host mut ErasureExecutionHostV1<S>,
+pub struct ErasureCommandSenderV1<'host> {
+    host: &'host mut ErasureExecutionHostV1,
     generation: ErasureReferenceV1,
 }
 
-impl<S: EventStore> ErasureCommandSenderV1<'_, S> {
+impl ErasureCommandSenderV1<'_> {
     /// Append authoritative Events inside the installed erasure fence.
     ///
     /// # Errors
@@ -193,12 +187,12 @@ impl<S: EventStore> ErasureCommandSenderV1<'_, S> {
 }
 
 /// Read-only, generation-bound host sender used by Replay and query paths.
-pub struct ErasureReadSenderV1<'host, S> {
-    host: &'host mut ErasureExecutionHostV1<S>,
+pub struct ErasureReadSenderV1<'host> {
+    host: &'host mut ErasureExecutionHostV1,
     generation: ErasureReferenceV1,
 }
 
-impl<S: EventStore> ErasureReadSenderV1<'_, S> {
+impl ErasureReadSenderV1<'_> {
     /// Read a bounded Timeline range under the current inventory generation.
     ///
     /// # Errors
@@ -299,7 +293,7 @@ mod tests {
     #[test]
     fn host_stays_closed_until_positive_empty_inventory_is_installed() {
         let mut closed =
-            ErasureExecutionHostV1::new_closed(MemoryStore::new().without_erasure_gate())
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(matches!(
             closed.read_sender(),
@@ -307,7 +301,7 @@ mod tests {
         ));
 
         let mut ready = ErasureExecutionHostV1::recover_verified_empty(
-            MemoryStore::new().without_erasure_gate(),
+            Box::new(MemoryStore::new().without_erasure_gate()),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -318,7 +312,7 @@ mod tests {
     #[test]
     fn failed_install_permanently_closes_the_host_instance() {
         let mut host =
-            ErasureExecutionHostV1::new_closed(MemoryStore::new().without_erasure_gate())
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             host.install_inventory(&mut FailingInventoryV1, 4),
@@ -374,9 +368,11 @@ mod tests {
                 std::panic::resume_unwind(Box::new(format!("fixture append failed: {error:?}")))
             });
 
-        let mut host =
-            ErasureExecutionHostV1::recover_verified_empty(store.without_erasure_gate(), 4)
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(store.without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         host.command_sender()
             .and_then(|mut sender| {
                 sender.append(
