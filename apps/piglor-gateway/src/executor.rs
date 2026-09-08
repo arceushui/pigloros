@@ -372,6 +372,14 @@ enum ExecutorStore {
 }
 
 impl ExecutorStore {
+    #[cfg(test)]
+    fn bind_test_erasure_gate(&mut self) {
+        drop(
+            self.event_store()
+                .bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())),
+        );
+    }
+
     fn event_store(&mut self) -> &mut dyn EventStore {
         match self {
             Self::Generic(store) => store.as_mut(),
@@ -662,18 +670,20 @@ impl StoreExecutor {
 
     #[cfg(test)]
     fn spawn_with_deadlines_for_test(
-        store: ExecutorStore,
+        mut store: ExecutorStore,
         command_deadline: Duration,
         shutdown_deadline: Duration,
     ) -> Self {
+        store.bind_test_erasure_gate();
         Self::spawn_with_deadlines(store, None, command_deadline, shutdown_deadline, None)
     }
 
     #[cfg(test)]
     fn spawn_with_observer_for_test(
-        store: ExecutorStore,
+        mut store: ExecutorStore,
         observer: Arc<SchedulerObserver>,
     ) -> Self {
+        store.bind_test_erasure_gate();
         Self::spawn_with_deadlines(
             store,
             None,
