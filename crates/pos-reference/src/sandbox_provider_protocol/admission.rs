@@ -2,6 +2,8 @@
 
 use ciborium::value::Value;
 
+use crate::evaluator_protocol::RequiredProviderCapability;
+
 use super::codec::{
     array, bounded_array, bytes_value, decode_document, encode, identifier, key_id,
     require_canonical_order, require_signature, signed, text, text_value, uint, uint_value,
@@ -839,6 +841,17 @@ impl AdmittedSandboxProvider {
                 .capabilities
                 .iter()
                 .any(|available| available.capability_id == *required)
+        })
+    }
+
+    /// Decide whether SPM1 exposes the exact requested capability version at
+    /// no less than the requested minimum strength.
+    #[must_use]
+    pub fn supports_required_capability(&self, required: &RequiredProviderCapability) -> bool {
+        self.manifest.capabilities.iter().any(|available| {
+            available.capability_id == required.capability_id
+                && available.capability_version == required.capability_version
+                && available.minimum_strength >= required.minimum_strength
         })
     }
 

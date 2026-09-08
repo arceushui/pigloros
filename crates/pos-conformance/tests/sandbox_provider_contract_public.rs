@@ -771,7 +771,7 @@ fn terminal_contracts_enforce_closed_unions_and_receipt_evidence() -> TestResult
         request_id: Some([1; 16]),
         request_digest: Some(digest(2)),
         attempt_id: Some([3; 16]),
-        code: SandboxProviderErrorCodeV1::AttemptInProgress,
+        code: SandboxProviderErrorCodeV1::PayloadTransferTimeout,
         safe_detail: None,
         runtime_attestation_key_id: "runtime-key".to_owned(),
         error_digest: [0; 32],
@@ -1040,8 +1040,8 @@ fn signed_provider_error_round_trips_safe_detail() -> TestResult {
         request_id: Some([1; 16]),
         request_digest: Some(digest(2)),
         attempt_id: Some([3; 16]),
-        code: SandboxProviderErrorCodeV1::AttemptInProgress,
-        safe_detail: Some("attempt remains active".to_owned()),
+        code: SandboxProviderErrorCodeV1::AdmissionBusy,
+        safe_detail: Some("admission capacity is unavailable".to_owned()),
         runtime_attestation_key_id: "runtime-key".to_owned(),
         error_digest: [0; 32],
         signature: [0; 64],
@@ -1310,7 +1310,6 @@ fn provider_errors_round_trip_every_closed_code_and_nullable_identity() -> TestR
         SandboxProviderErrorCodeV1::CleanupFailed,
         SandboxProviderErrorCodeV1::UnknownAttempt,
         SandboxProviderErrorCodeV1::RequestIdentityConflict,
-        SandboxProviderErrorCodeV1::AttemptInProgress,
         SandboxProviderErrorCodeV1::PayloadTransferTimeout,
     ] {
         let error = error_for_code(code).sign(&key)?;
@@ -1365,7 +1364,6 @@ fn post_authentication_provider_errors_bind_available_identities() -> TestResult
         SandboxProviderErrorCodeV1::CleanupFailed,
         SandboxProviderErrorCodeV1::UnknownAttempt,
         SandboxProviderErrorCodeV1::RequestIdentityConflict,
-        SandboxProviderErrorCodeV1::AttemptInProgress,
         SandboxProviderErrorCodeV1::PayloadTransferTimeout,
     ] {
         assert_post_authentication_identities_required(code, &key)?;
