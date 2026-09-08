@@ -160,9 +160,10 @@ fn require_backtest_erasure_gate(
 fn start_backtest_train(
     store: &mut dyn pos_core::store::EventStore,
     registry: &mut PluginRegistry,
-    gate: Arc<dyn ErasureGate>,
+    gate: Option<Arc<dyn ErasureGate>>,
     name: &str,
 ) -> Result<(Arc<dyn ErasureGate>, Timeline), pos_core::CoreError> {
+    let gate = require_backtest_erasure_gate(gate)?;
     let gate = bind_backtest_erasure_gate(store, registry, gate)?;
     let timeline = store.create_timeline(name)?;
     Ok((gate, timeline))
@@ -2370,13 +2371,16 @@ impl BacktestRunner {
         store: &mut dyn pos_core::store::EventStore,
     ) -> Result<BacktestResult, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let erasure_gate = require_backtest_erasure_gate(self.erasure_gate.clone())?;
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
         let mut train_registry = (self.registry_factory)();
-        let (erasure_gate, train_tl) =
-            start_backtest_train(store, &mut train_registry, erasure_gate, &train_name)?;
+        let (erasure_gate, train_tl) = start_backtest_train(
+            store,
+            &mut train_registry,
+            self.erasure_gate.clone(),
+            &train_name,
+        )?;
         let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
