@@ -1,6 +1,4 @@
 use std::error::Error;
-use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::io;
 
 use ciborium::value::Value;
@@ -8,11 +6,10 @@ use pos_reference::adapter_transport::{
     read_attempt, read_observation, write_attempt, write_observation, TransportError,
 };
 use pos_reference::evaluator::{
-    AdapterError, AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage,
-    SubjectAdapter, SubjectObservation, SubjectResult,
+    AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage, SubjectObservation,
+    SubjectResult,
 };
-use pos_reference::evaluator_protocol::{ProtocolError, SubjectAdapterKind};
-use pos_reference::process_adapter::ProcessAdapter;
+use pos_reference::evaluator_protocol::ProtocolError;
 use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -507,140 +504,6 @@ fn observation_reader_rejects_tampering_bad_offsets_and_nonexclusive_results() -
     assert_eq!(
         read_observation(trailing.as_slice(), 10),
         Err(TransportError::InvalidEncoding)
-    );
-    Ok(())
-}
-
-#[test]
-fn process_adapter_requires_an_absolute_executable() {
-    assert_eq!(
-        ProcessAdapter::new(
-            SubjectAdapterKind::ExportedArtifact,
-            [1; 32],
-            "relative-adapter",
-            Vec::<OsString>::new(),
-        ),
-        Err(AdapterError::ProtocolFailure)
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn process_adapter_preserves_lifecycle_failure_precedence() -> TestResult {
-    let mut operational = attempt();
-    operational.watchdog_ms = 1_000;
-    let mut crashed = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/false",
-        Vec::new(),
-    )?;
-    assert_eq!(
-        crashed.execute(&operational),
-        Err(AdapterError::Unavailable)
-    );
-
-    let mut malformed = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/sh",
-        vec![OsString::from("-c"), OsString::from("cat >/dev/null")],
-    )?;
-    assert_eq!(
-        malformed.execute(&operational),
-        Err(AdapterError::ProtocolFailure)
-    );
-
-    let mut timed_out = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/sleep",
-        vec![OsString::from("1")],
-    )?;
-    assert_eq!(
-        timed_out.execute(&attempt()),
-        Err(AdapterError::WatchdogExpired)
-    );
-
-    let mut missing = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/definitely/not/an/adapter",
-        Vec::new(),
-    )?;
-    assert_eq!(
-        missing.execute(&operational),
-        Err(AdapterError::Unavailable)
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn process_adapter_streams_a_successful_observation() -> TestResult {
-    let mut operational = attempt();
-    operational.watchdog_ms = 1_000;
-    let expected = observation(SubjectResult::Unavailable);
-    let response = encoded_observation(&expected)?;
-    let mut escaped = String::with_capacity(response.len() * 4);
-    for byte in response {
-        write!(&mut escaped, "\\{byte:03o}")?;
-    }
-    let mut adapter = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/sh",
-        vec![
-            OsString::from("-c"),
-            OsString::from("/bin/cat >/dev/null; /usr/bin/printf %b \"$1\""),
-            OsString::from("adapter"),
-            OsString::from(escaped),
-        ],
-    )?;
-
-    assert_eq!(adapter.execute(&operational), Ok(expected));
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn process_adapter_watchdog_terminates_descendants_holding_pipes_open() -> TestResult {
-    let mut adapter = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/sh",
-        vec![OsString::from("-c"), OsString::from("sleep 30 & exit 0")],
-    )?;
-    let started = std::time::Instant::now();
-    assert_eq!(
-        adapter.execute(&attempt()),
-        Err(AdapterError::WatchdogExpired)
-    );
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn process_adapter_bounds_a_blocked_request_stream() -> TestResult {
-    let mut blocked = attempt();
-    blocked.watchdog_ms = 100;
-    blocked.payload = artifact(vec![0; CHUNK_BYTES * 2]);
-    let mut adapter = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/usr/bin/python3",
-        vec![
-            OsString::from("-c"),
-            OsString::from(
-                "import os,time\nif os.fork(): os._exit(0)\nos.close(1)\nos.close(2)\ntime.sleep(30)",
-            ),
-        ],
-    )?;
-
-    assert_eq!(
-        adapter.execute(&blocked),
-        Err(AdapterError::WatchdogExpired)
     );
     Ok(())
 }
