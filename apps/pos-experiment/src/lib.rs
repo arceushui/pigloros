@@ -1078,9 +1078,9 @@ impl Experiment {
             bind_test_erasure_gate(&mut registry);
             registry
         };
-        bind_registry_erasure_gate(store.as_mut(), &registry)?;
         let parent_composition = registry.composition();
-        let timeline = store.create_timeline(&self.config.name)?;
+        let timeline = bind_registry_erasure_gate(store.as_mut(), &registry)
+            .and_then(|()| store.create_timeline(&self.config.name))?;
         Ok(ExperimentSession {
             config: self.config,
             registry,
@@ -1155,11 +1155,12 @@ impl Experiment {
     ) -> Result<ExperimentSession, ExperimentError> {
         #[cfg(test)]
         bind_test_erasure_gate(&mut self.registry);
-        bind_registry_erasure_gate(store.as_mut(), &self.registry)?;
         let parent_composition = self.registry.composition();
-        let timeline = store
-            .get_timeline(timeline_id)?
-            .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
+        let timeline = bind_registry_erasure_gate(store.as_mut(), &self.registry)
+            .and_then(|()| store.get_timeline(timeline_id))
+            .and_then(|timeline| {
+                timeline.ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))
+            })?;
         if timeline.id() != timeline_id {
             return Err(pos_core::CoreError::Storage(
                 "EventStore returned mismatched resume Timeline metadata".to_owned(),
@@ -1971,8 +1972,11 @@ impl ExperimentSession {
             .fork_registry_factory
             .as_ref()
             .ok_or(ExperimentError::MissingForkRegistryFactory)?;
-        let mut registry = factory()?;
-        bind_fork_registry_erasure_gate(&mut registry, &self.registry)?;
+        let mut registry = factory()
+            .map_err(ExperimentError::from)
+            .and_then(|mut registry| {
+                bind_fork_registry_erasure_gate(&mut registry, &self.registry).map(|()| registry)
+            })?;
         if let Some(gate) = self.registry.clone_consent_gate() {
             registry = registry.with_consent_gate(gate);
         }
@@ -2306,10 +2310,14 @@ impl BacktestRunner {
         let store_config = self.config.store_config.clone();
 
         // --- Train phase ---
-        let mut train_registry = (self.registry_factory)();
-        let erasure_gate = bind_backtest_erasure_gate(store, &mut train_registry)?;
         let train_name = format!("{}-train", self.config.experiment_name);
-        let train_tl = store.create_timeline(&train_name)?;
+        let mut train_registry = (self.registry_factory)();
+        let (erasure_gate, train_tl) = bind_backtest_erasure_gate(store, &mut train_registry)
+            .and_then(|gate| {
+                store
+                    .create_timeline(&train_name)
+                    .map(|timeline| (gate, timeline))
+            })?;
         let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
