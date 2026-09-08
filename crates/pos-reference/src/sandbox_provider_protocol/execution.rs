@@ -823,7 +823,6 @@ impl SandboxProviderError {
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
-        require_signature(&self.signature)?;
         if (self.request_digest.is_some() && self.request_id.is_none())
             || (self.attempt_id.is_some()
                 && (self.operation.is_none() || self.request_id.is_none()))
@@ -857,6 +856,7 @@ impl SandboxProviderError {
         {
             return Err(SandboxProviderProtocolError::InconsistentFields);
         }
+        require_signature(&self.signature)?;
         verify_digest("SPE1", unsigned, self.error_digest)
     }
 
