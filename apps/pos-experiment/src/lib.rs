@@ -14,7 +14,7 @@ use pos_core::{
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ReproManifest, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ErasureGate, ReproManifest, Timeline,
 };
 use pos_runtime::PluginRegistry;
 use pos_store::{open_store, StoreConfig};
@@ -871,6 +871,14 @@ impl Experiment {
         self
     }
 
+    /// Bind the host-owned erasure gate used by every EventStore and runtime
+    /// Tick Boundary created by this experiment.
+    #[must_use]
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
+        self.registry = self.registry.with_erasure_gate(gate);
+        self
+    }
+
     /// Run without a host-owned consent gate; protected operations fail closed.
     #[must_use]
     pub fn without_consent_gate(mut self) -> Self {
@@ -947,6 +955,9 @@ impl Experiment {
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
+        if let Some(gate) = self.registry.clone_erasure_gate() {
+            store.bind_erasure_gate(gate)?;
+        }
         let parent_composition = self.registry.composition();
         let timeline = store.create_timeline(&self.config.name)?;
         Ok(ExperimentSession {
@@ -1018,9 +1029,12 @@ impl Experiment {
     fn resume_with_store_and_recipe(
         mut self,
         timeline_id: pos_core::ids::TimelineId,
-        store: Box<dyn pos_core::store::EventStore>,
+        mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
+        if let Some(gate) = self.registry.clone_erasure_gate() {
+            store.bind_erasure_gate(gate)?;
+        }
         let parent_composition = self.registry.composition();
         let timeline = store
             .get_timeline(timeline_id)?
@@ -1838,6 +1852,9 @@ impl ExperimentSession {
             .as_ref()
             .ok_or(ExperimentError::MissingForkRegistryFactory)?;
         let mut registry = factory()?;
+        if let Some(gate) = self.registry.clone_erasure_gate() {
+            registry.bind_erasure_gate(gate);
+        }
         if let Some(gate) = self.registry.clone_consent_gate() {
             registry = registry.with_consent_gate(gate);
         }

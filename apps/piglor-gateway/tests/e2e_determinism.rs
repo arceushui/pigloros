@@ -553,7 +553,8 @@ fn register_experiment(
         store_config: StoreConfig::Sqlite {
             path: scenario.path.clone(),
         },
-    });
+    })
+    .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
     experiment
         .register(&observation, Some(Box::new(EntityStateProjection)), None)
         .test_ok()?;
