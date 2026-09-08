@@ -1097,39 +1097,47 @@ fn report_rejects_an_execution_artifact_with_a_tampered_signature() {
 
 #[test]
 fn report_rejects_an_artifact_bound_to_the_wrong_execution_coordinate() {
-    let mut values = outcomes();
-    let mut artifacts = execution_artifacts(&mut values);
-    let original = test_ok(NonInterferenceExecutionArtifactV1::from_canonical_cbor(
-        &artifacts[0],
-    ));
-    let mismatched = test_ok(NonInterferenceExecutionArtifactV1::sign(
-        NonInterferenceExecutionArtifactBodyV1 {
-            fixture_id: original.fixture_id,
-            variant: original.variant,
-            mode: ExecutionModeV1::AirGapped,
-            fixture_digest: original.fixture_digest,
-            profile_digest: original.profile_digest,
-            normalization_digest: original.normalization_digest,
-            result_digest: original.result_digest,
-            execution_provenance_digest: original.execution_provenance_digest,
-            equal: original.equal,
-            divergence: original.divergence,
-        },
-        &SigningKey::from_bytes(&[8; 32]),
-    ));
-    values[0].modes[0].artifact_digest = test_ok(mismatched.content_digest());
-    artifacts[0] = test_ok(mismatched.to_canonical_cbor());
-    let report = test_ok(NonInterferenceReportV1::sign(
-        values,
-        &SigningKey::from_bytes(&[7; 32]),
-        &[],
-    ));
-    assert_both_verifiers_reject_artifacts(
-        &report,
-        &artifacts,
-        &[trusted_executor()],
-        NonInterferenceReportErrorV1::InvalidShape,
-    );
+    for (variant, mode) in [
+        (NonInterferenceVariantV1::Denial, ExecutionModeV1::Local),
+        (
+            NonInterferenceVariantV1::Success,
+            ExecutionModeV1::AirGapped,
+        ),
+    ] {
+        let mut values = outcomes();
+        let mut artifacts = execution_artifacts(&mut values);
+        let original = test_ok(NonInterferenceExecutionArtifactV1::from_canonical_cbor(
+            &artifacts[0],
+        ));
+        let mismatched = test_ok(NonInterferenceExecutionArtifactV1::sign(
+            NonInterferenceExecutionArtifactBodyV1 {
+                fixture_id: original.fixture_id,
+                variant,
+                mode,
+                fixture_digest: original.fixture_digest,
+                profile_digest: original.profile_digest,
+                normalization_digest: original.normalization_digest,
+                result_digest: original.result_digest,
+                execution_provenance_digest: original.execution_provenance_digest,
+                equal: original.equal,
+                divergence: original.divergence,
+            },
+            &SigningKey::from_bytes(&[8; 32]),
+        ));
+        values[0].modes[0].artifact_digest = test_ok(mismatched.content_digest());
+        artifacts[0] = test_ok(mismatched.to_canonical_cbor());
+        let report = test_ok(NonInterferenceReportV1::sign(
+            values,
+            &SigningKey::from_bytes(&[7; 32]),
+            &[],
+        ));
+        assert_both_verifiers_reject_artifacts(
+            &report,
+            &artifacts,
+            &[trusted_executor()],
+            NonInterferenceReportErrorV1::InvalidShape,
+        );
+    }
 }
 
 #[test]

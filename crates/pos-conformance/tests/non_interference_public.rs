@@ -1028,34 +1028,31 @@ fn strict_outcome_wire_round_trips_every_variant_and_mode() {
     let outcome = test_ok(execute_non_interference_pair(&fixture(), |_| {
         Ok(capture(b"same"))
     }));
+    let mut encodings = std::collections::BTreeSet::new();
     for variant in [
         NonInterferenceVariantV1::Success,
         NonInterferenceVariantV1::Denial,
         NonInterferenceVariantV1::WarmCache,
         NonInterferenceVariantV1::ColdCache,
     ] {
-        let mut expected = outcome.clone();
-        expected.variant = variant;
-        let encoded = test_ok(expected.to_canonical_cbor());
-        assert_eq!(
-            test_ok(NonInterferenceCaseV1::from_canonical_cbor(&encoded)),
-            expected
-        );
+        for mode in [
+            ExecutionModeV1::Local,
+            ExecutionModeV1::AirGapped,
+            ExecutionModeV1::Replay,
+            ExecutionModeV1::Fork,
+        ] {
+            let mut expected = outcome.clone();
+            expected.variant = variant;
+            expected.mode = mode;
+            let encoded = test_ok(expected.to_canonical_cbor());
+            assert_eq!(
+                test_ok(NonInterferenceCaseV1::from_canonical_cbor(&encoded)),
+                expected
+            );
+            assert!(encodings.insert(encoded));
+        }
     }
-    for mode in [
-        ExecutionModeV1::Local,
-        ExecutionModeV1::AirGapped,
-        ExecutionModeV1::Replay,
-        ExecutionModeV1::Fork,
-    ] {
-        let mut expected = outcome.clone();
-        expected.mode = mode;
-        let encoded = test_ok(expected.to_canonical_cbor());
-        assert_eq!(
-            test_ok(NonInterferenceCaseV1::from_canonical_cbor(&encoded)),
-            expected
-        );
-    }
+    assert_eq!(encodings.len(), 16);
 }
 
 #[test]

@@ -7,10 +7,15 @@ use ed25519_dalek::{Signer, Verifier};
 use pos_core::{CanonicalBytes, Signature};
 use serde::{Deserialize, Serialize};
 
+/// Magic marker for a version-one signed non-interference report.
 pub const NON_INTERFERENCE_REPORT_MAGIC_V1: &str = "NIR1";
+/// Maximum accepted canonical encoding size for a report.
 pub const MAX_NON_INTERFERENCE_REPORT_BYTES_V1: usize = 64 * 1024;
+/// Required number of fixture/variant outcomes in a complete report.
 pub const NON_INTERFERENCE_REPORT_OUTCOME_COUNT_V1: usize = 48;
+/// Magic marker for a version-one signed execution artifact.
 pub const NON_INTERFERENCE_EXECUTION_ARTIFACT_MAGIC_V1: &str = "NIA1";
+/// Maximum accepted canonical encoding size for one execution artifact.
 pub const MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1: usize = 4 * 1024;
 
 /// Return the canonical executable-normalization digest for one ADR-059 row.
@@ -489,6 +494,7 @@ impl NonInterferenceReportV1 {
             .map(|()| report)
     }
 
+    /// Return whether every mode result in the complete report is equal.
     #[must_use]
     pub fn is_conformant(&self) -> bool {
         self.outcomes
