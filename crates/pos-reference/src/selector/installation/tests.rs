@@ -192,7 +192,7 @@ fn manifest_rejects_socket_aliases_and_unsafe_components() -> TestResult {
         "/run/pigloros/a\0.sock",
         super::super::SANDBOX_SELECTOR_SOCKET,
         SANDBOX_ADMIN_SOCKET,
-        &format!("/run/pigloros/{}", "x".repeat(95)),
+        &format!("/run/pigloros/{}", "x".repeat(108 - "/run/pigloros/".len())),
     ] {
         for index in [7, 8] {
             let mut fields = unsigned();
@@ -207,7 +207,9 @@ fn manifest_rejects_socket_aliases_and_unsafe_components() -> TestResult {
     fields[8] = fields[7].clone();
     assert!(InstallationManifest::from_cbor(&manifest_bytes(fields)?).is_err());
     let mut fields = unsigned();
-    fields[7] = Value::Text(format!("/run/pigloros/{}", "x".repeat(94)));
+    let longest_socket = format!("/run/pigloros/{}", "x".repeat(107 - "/run/pigloros/".len()));
+    assert_eq!(longest_socket.len(), 107);
+    fields[7] = Value::Text(longest_socket);
     assert!(InstallationManifest::from_cbor(&manifest_bytes(fields)?).is_ok());
     Ok(())
 }
