@@ -228,7 +228,7 @@ struct RetainedGrant {
     digest: [u8; 32],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReceiveFailure {
     Incomplete,
     Invalid,
@@ -593,4 +593,108 @@ fn root_owned_ancestors(path: &Path) -> bool {
             })
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completed(descriptor: PayloadDescriptor) -> SandboxProviderResult {
+        SandboxProviderResult {
+            request_id: [2; 16],
+            attempt_id: [3; 16],
+            outcome: SandboxTerminalOutcome::Completed,
+            output: Some(descriptor),
+            agr1_digest: Some([4; 32]),
+            spr1_digest: Some([5; 32]),
+            operational_events: vec![11, 12],
+            runtime_attestation_key_id: "runtime".to_owned(),
+            result_digest: [6; 32],
+            signature: [7; 64],
+        }
+    }
+
+    fn request() -> SandboxExecuteRequest {
+        SandboxExecuteRequest::for_selector(
+            crate::sandbox_provider_protocol::RequestAuthority {
+                request_id: [2; 16],
+                apt1_digest: [8; 32],
+                policy_epoch: 1,
+                nonce: [9; 16],
+            },
+            [3; 16],
+            crate::sandbox_provider_protocol::ExecuteAuthority {
+                evr1_digest: [1; 32],
+                cpf1_digest: [1; 32],
+                cfb1_digest: [1; 32],
+                fixture_contract_digest: [1; 32],
+                fixture_digest: [1; 32],
+                execution_profile_digest: [1; 32],
+                lps1_digest: [1; 32],
+                sim1_digest: [1; 32],
+                apt1_digest: [8; 32],
+                trs1_digest: [1; 32],
+                rvs1_digest: [1; 32],
+                spm1_digest: [1; 32],
+                pcf1_digest: [1; 32],
+                pcr1_digest: [1; 32],
+                hcp1_digest: [1; 32],
+            },
+            vec![],
+            PayloadDescriptor {
+                byte_length: 0,
+                digest: output_digest_with(b"PiglorOS.SandboxInputBytes.v1\0", b""),
+            },
+            vec![],
+        )
+        .expect("closed test request")
+    }
+
+    #[test]
+    fn staged_output_requires_the_full_parent_bound_payload() {
+        let bytes = b"complete";
+        let descriptor = PayloadDescriptor {
+            byte_length: bytes.len() as u64,
+            digest: output_digest(bytes),
+        };
+        let result = completed(descriptor.clone());
+        let encoded =
+            encode_chunk(result.result_digest, [2; 16], [3; 16], 1, 0, bytes).expect("chunk");
+        let chunk = SandboxPayloadChunk::from_canonical_cbor(&encoded).expect("canonical chunk");
+        let mut file = tempfile::NamedTempFile::new().expect("stage");
+        file.write_all(bytes).expect("stage bytes");
+        let staged = stage_output(file, vec![ChunkMeta::from(&chunk)], &request(), &result)
+            .expect("validated payload")
+            .expect("completed output");
+        assert_eq!(staged.descriptor(), &descriptor);
+    }
+
+    #[test]
+    fn staged_output_rejects_forged_parent_and_missing_completion() {
+        let bytes = b"complete";
+        let result = completed(PayloadDescriptor {
+            byte_length: bytes.len() as u64,
+            digest: output_digest(bytes),
+        });
+        let encoded = encode_chunk([7; 32], [2; 16], [3; 16], 1, 0, bytes).expect("chunk");
+        let chunk = SandboxPayloadChunk::from_canonical_cbor(&encoded).expect("canonical chunk");
+        let mut file = tempfile::NamedTempFile::new().expect("stage");
+        file.write_all(bytes).expect("stage bytes");
+        assert!(stage_output(file, vec![ChunkMeta::from(&chunk)], &request(), &result).is_err());
+    }
+
+    #[test]
+    fn deadline_and_frame_limits_fail_closed() {
+        let expired = Deadline {
+            expires_at: Instant::now(),
+        };
+        assert_eq!(expired.remaining(), Err(ReceiveFailure::Incomplete));
+        let (mut sender, _) = UnixStream::pair().expect("stream pair");
+        assert!(write_frame(
+            &mut sender,
+            &vec![0; CONTROL_LIMIT + 1],
+            &Deadline::new(Duration::from_secs(1)).expect("deadline")
+        )
+        .is_err());
+    }
 }
