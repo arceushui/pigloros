@@ -17,7 +17,7 @@ use ciborium::value::Value;
 use super::update::ValidatedInstallationUpdate;
 use super::InstalledSelectorAuthority;
 use crate::evaluator_protocol::{
-    array, decode_canonical_with_limit, encode, fixed_bytes, text, uint,
+    array, decode_canonical_with_limit, encode_with_limit, fixed_bytes, text, uint,
 };
 #[cfg(test)]
 use crate::sandbox_provider_protocol::SelectorRevocationState;
@@ -29,6 +29,7 @@ use crate::selector::SelectorBoundaryError;
 
 const RECOVERY_NAME: &str = "installation-update.cbor";
 const RECOVERY_LIMIT: u64 = 48 * 1024 * 1024;
+const RECOVERY_ENCODING_LIMIT: usize = 48 * 1024 * 1024;
 
 /// A sealed, authenticated SIR1 transaction awaiting mandatory termination and replay.
 ///
@@ -272,7 +273,7 @@ struct RecoveryRecords {
 }
 
 fn decode_recovery(bytes: &[u8]) -> Result<RecoveryRecords, SelectorBoundaryError> {
-    let document = decode_canonical_with_limit(bytes, 48 * 1024 * 1024)
+    let document = decode_canonical_with_limit(bytes, RECOVERY_ENCODING_LIMIT)
         .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     let wrapper = array(&document, 2).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     let fields = array(&wrapper[0], 9).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
@@ -297,7 +298,8 @@ fn decode_recovery(bytes: &[u8]) -> Result<RecoveryRecords, SelectorBoundaryErro
         InstallationRecoverySnapshot::from_values(&fields[5], &fields[6], &fields[7], &fields[8])?;
     let sir1_digest =
         fixed_bytes(&wrapper[1]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let unsigned = encode(&wrapper[0]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let unsigned = encode_with_limit(&wrapper[0], RECOVERY_ENCODING_LIMIT)
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.SIR1.v1\0");
     hasher.update(&unsigned);
