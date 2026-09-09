@@ -143,5 +143,21 @@ fn verified_query_constructors_accept_public_trait_objects(
         ERASURE_MAX_INVENTORY_REQUESTS,
     )?;
     assert!(gateway.command_sender().is_ok());
+
+    let mut unavailable_generic = OneInventory(None);
+    assert!(ErasureExecutionHostV1::recover_from_verified_query(
+        Box::new(MemoryStore::new().without_erasure_gate()),
+        &mut unavailable_generic,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .is_err());
+
+    let mut unavailable_gateway = OneInventory(None);
+    assert!(ErasureExecutionHostV1::recover_gateway_from_verified_query(
+        Box::new(MemoryStore::new().without_erasure_gate()),
+        &mut unavailable_gateway,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .is_err());
     Ok(())
 }
