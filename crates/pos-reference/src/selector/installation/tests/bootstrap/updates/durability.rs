@@ -219,6 +219,73 @@ fn recovery_floor_rejects_replaced_or_modified_records() -> TestResult {
 }
 
 #[test]
+fn durable_commit_rejects_successor_descriptor_replacement_after_validation() -> TestResult {
+    for code in [1, 2] {
+        let fixture = UpdateFixture::new()?;
+        let update = validated(&fixture)?;
+        let identity = update.next_manifest().authority_digests()[usize::from(code)];
+        let object = update
+            .next_manifest()
+            .object(InstallationObjectKind::from_code(code)?, identity)?;
+        let path = fixture
+            .installation
+            .directory
+            .path()
+            .join("authority")
+            .join(digest_name(object.content_digest()));
+        let bytes = std::fs::read(&path)?;
+        std::fs::remove_file(&path)?;
+        std::fs::write(&path, bytes)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+        let UpdateFixture {
+            installation,
+            authority,
+        } = fixture;
+        assert!(matches!(
+            authority.commit_update(update),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert!(!installation
+            .directory
+            .path()
+            .join("installation-update.cbor")
+            .exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_floor_rejects_missing_recovery_and_unsafe_current_manifest() -> TestResult {
+    for missing_recovery in [false, true] {
+        let fixture = UpdateFixture::new()?;
+        let update = validated(&fixture)?;
+        let UpdateFixture {
+            installation,
+            authority,
+        } = fixture;
+        let committed = authority.commit_update(update)?;
+        let recovery = installation
+            .directory
+            .path()
+            .join("installation-update.cbor");
+        if missing_recovery {
+            std::fs::remove_file(&recovery)?;
+        } else {
+            std::fs::set_permissions(
+                installation.directory.path().join(MANIFEST_NAME),
+                std::fs::Permissions::from_mode(0o600),
+            )?;
+        }
+        assert_eq!(
+            committed.verify_recovery_floor(),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(recovery.exists(), !missing_recovery);
+    }
+    Ok(())
+}
+
+#[test]
 fn durable_commit_rejects_unsafe_staging_without_publishing_recovery() -> TestResult {
     for mode in [0o755, 0o777, 0o1700] {
         let fixture = UpdateFixture::new()?;
