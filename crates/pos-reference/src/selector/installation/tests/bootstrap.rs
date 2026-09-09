@@ -68,6 +68,58 @@ fn install_manifest(fixture: &InstallationFixture, fields: Vec<Value>) -> TestRe
     Ok(())
 }
 
+fn install_provider(
+    fixture: &InstallationFixture,
+    manifest: &mut [Value],
+    release: &SigningKey,
+) -> Result<([u8; 32], [u8; 32]), Box<dyn std::error::Error>> {
+    let provider_binary = [11; 32];
+    let provider_binary_digest = *blake3::hash(&provider_binary).as_bytes();
+    let (provider_manifest, provider_manifest_digest) = sign_record(
+        "SPM1",
+        vec![
+            Value::Text("SPM1".to_owned()),
+            integer(1),
+            Value::Text("provider".to_owned()),
+            bytes([10; 32]),
+            bytes([11; 32]),
+            bytes(provider_binary_digest),
+            bytes([12; 32]),
+            Value::Text("runtime".to_owned()),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("execute".to_owned()),
+                integer(1),
+                integer(1),
+            ])]),
+            Value::Array(vec![integer(0)]),
+            bytes([13; 32]),
+            bytes([14; 32]),
+            bytes([15; 32]),
+            bytes([16; 32]),
+            integer(1),
+            bytes([17; 32]),
+            bytes([18; 32]),
+            Value::Text("release".to_owned()),
+        ],
+        release,
+    )?;
+    install_record(
+        fixture,
+        manifest,
+        3,
+        &provider_manifest,
+        provider_manifest_digest,
+    )?;
+    install_record(
+        fixture,
+        manifest,
+        11,
+        &provider_binary,
+        provider_binary_digest,
+    )?;
+    Ok((provider_manifest_digest, provider_binary_digest))
+}
+
 pub(super) fn authenticated_fixture(
     change_policy: impl FnOnce(&mut Vec<Value>),
 ) -> Result<InstallationFixture, Box<dyn std::error::Error>> {
@@ -124,50 +176,8 @@ pub(super) fn authenticated_fixture(
         &administrator,
     )?;
     install_record(&fixture, &mut manifest, 1, &revocation, revocation_digest)?;
-    let provider_binary = [11; 32];
-    let provider_binary_digest = *blake3::hash(&provider_binary).as_bytes();
-    let (provider_manifest, provider_manifest_digest) = sign_record(
-        "SPM1",
-        vec![
-            Value::Text("SPM1".to_owned()),
-            integer(1),
-            Value::Text("provider".to_owned()),
-            bytes([10; 32]),
-            bytes([11; 32]),
-            bytes(provider_binary_digest),
-            bytes([12; 32]),
-            Value::Text("runtime".to_owned()),
-            Value::Array(vec![Value::Array(vec![
-                Value::Text("execute".to_owned()),
-                integer(1),
-                integer(1),
-            ])]),
-            Value::Array(vec![integer(0)]),
-            bytes([13; 32]),
-            bytes([14; 32]),
-            bytes([15; 32]),
-            bytes([16; 32]),
-            integer(1),
-            bytes([17; 32]),
-            bytes([18; 32]),
-            Value::Text("release".to_owned()),
-        ],
-        &release,
-    )?;
-    install_record(
-        &fixture,
-        &mut manifest,
-        3,
-        &provider_manifest,
-        provider_manifest_digest,
-    )?;
-    install_record(
-        &fixture,
-        &mut manifest,
-        11,
-        &provider_binary,
-        provider_binary_digest,
-    )?;
+    let (provider_manifest_digest, provider_binary_digest) =
+        install_provider(&fixture, &mut manifest, &release)?;
     let mut policy = vec![
         Value::Text("APT1".to_owned()),
         integer(1),
