@@ -1664,7 +1664,7 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         assert_eq!(
-            escaped_gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::TimelineRead),
+            escaped_gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::Read),
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         let mut effect_ran = false;
