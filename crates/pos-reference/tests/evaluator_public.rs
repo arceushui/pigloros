@@ -1,5 +1,8 @@
 pub mod support;
 
+#[path = "evaluator_public/fixture_export.rs"]
+mod fixture_export;
+
 use std::error::Error;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::sync::OnceLock;
