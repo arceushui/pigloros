@@ -3420,7 +3420,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             missing,
-            GatewayError::Store(CoreError::TimelineNotFound(_))
+            GatewayError::Store(CoreError::ErasureAccessFrozen)
         ));
         assert_eq!(audit_host.audits().await.len(), 1);
 
@@ -3533,12 +3533,14 @@ mod tests {
             .test_err();
         assert!(matches!(error, GatewayError::AuthorizationUnavailable));
         assert!(audit_host.audits().await.is_empty());
-        assert!(gateway
-            .read_events_page(&timeline.id().to_string(), 0, 1)
-            .await
-            .test_ok()
-            .events
-            .is_empty());
+        assert_eq!(
+            gateway
+                .store
+                .protected_logical_head(timeline.id())
+                .await
+                .test_ok(),
+            Seq::ZERO
+        );
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
