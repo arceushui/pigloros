@@ -128,9 +128,7 @@ impl ErasureExecutionHostV1 {
                     .map(|_| generation)
                     .ok_or(ErasureHostErrorV1::RecoveryUnavailable)
             }
-            HostStateV1::Closed | HostStateV1::Ready { .. } | HostStateV1::Poisoned => {
-                Err(ErasureHostErrorV1::RecoveryUnavailable)
-            }
+            _ => Err(ErasureHostErrorV1::RecoveryUnavailable),
         }
     }
 
@@ -194,9 +192,7 @@ impl ErasureExecutionHostV1 {
                 request_count: 0,
                 ..
             } => maximum_requests,
-            HostStateV1::Closed | HostStateV1::Ready { .. } | HostStateV1::Poisoned => {
-                return Err(ErasureHostErrorV1::RecoveryUnavailable)
-            }
+            _ => return Err(ErasureHostErrorV1::RecoveryUnavailable),
         };
         let timeline = change(self.store.as_mut()).map_err(|error| map_store_error(&error))?;
         let Ok(inventory) = self
@@ -249,9 +245,7 @@ impl ErasureExecutionHostV1 {
             HostStateV1::Ready {
                 maximum_requests, ..
             } => Ok(maximum_requests),
-            HostStateV1::Closed | HostStateV1::Poisoned => {
-                Err(ErasureHostErrorV1::RecoveryUnavailable)
-            }
+            _ => Err(ErasureHostErrorV1::RecoveryUnavailable),
         }
     }
     /// Recover a new store only when its complete durable request set is empty.

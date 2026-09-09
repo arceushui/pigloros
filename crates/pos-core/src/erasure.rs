@@ -719,9 +719,12 @@ impl ErasureContainmentGateV1 {
         };
         let mut matched = false;
         for state in authority.states.values() {
-            if state.scope_contains(scope) {
-                matched = true;
-                state.permit_protected_operation(scope)?;
+            if !state.scope_contains(scope) {
+                continue;
+            }
+            matched = true;
+            if let Err(error) = state.permit_protected_operation(scope) {
+                return Err(error);
             }
         }
         if matched {
