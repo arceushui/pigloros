@@ -11,9 +11,10 @@ use crate::evaluator_protocol::{
     EvaluationRequest,
 };
 use crate::sandbox_provider_protocol::{
-    AdmissionGrant, SandboxAuditRecord, SandboxExecuteRequest, SandboxLocalError,
-    SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderOperation,
-    SandboxProviderReceipt, SandboxProviderResult, SandboxTerminalOutcome,
+    AdmissionGrant, PayloadDescriptor, SandboxAuditRecord, SandboxExecuteRequest,
+    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderError,
+    SandboxProviderOperation, SandboxProviderReceipt, SandboxProviderResult,
+    SandboxTerminalOutcome,
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
@@ -131,87 +132,86 @@ fn decoded_nonzero_id(bytes: &[u8]) -> Option<[u8; 16]> {
         .filter(|id| *id != [0; 16])
 }
 
+/// A canonical, digest-checked control whose payload has not yet been received.
+pub(crate) struct ValidatedSelectorControl {
+    bytes: Vec<u8>,
+    evaluation: EvaluationRequest,
+    provider_request_id: [u8; 16],
+    attempt_id: [u8; 16],
+    payload: PayloadDescriptor,
+    digest: [u8; 32],
+}
+
 /// Validate the complete control record before receiving its declared payload.
-pub(crate) fn request_payload_length(control: &[u8]) -> Result<u64, SandboxLocalErrorCode> {
+pub(crate) fn decode_request_control(
+    control: Vec<u8>,
+) -> Result<ValidatedSelectorControl, SandboxLocalErrorCode> {
     let invalid = SandboxLocalErrorCode::InvalidSelectorRequest;
-    let value = decode_canonical_with_limit(control, CONTROL_LIMIT).map_err(|_| invalid)?;
+    let value = decode_canonical_with_limit(&control, CONTROL_LIMIT).map_err(|_| invalid)?;
     let wrapper = array(&value, 2).map_err(|_| invalid)?;
     let fields = array(&wrapper[0], 6).map_err(|_| invalid)?;
     if text(&fields[0]).map_err(|_| invalid)? != "SLX1"
         || uint(&fields[1]).map_err(|_| invalid)? != 1
-        || fixed_bytes::<16>(&fields[2]).map_err(|_| invalid)? == [0; 16]
-        || fixed_bytes::<16>(&fields[3]).map_err(|_| invalid)? == [0; 16]
     {
+        return Err(invalid);
+    }
+    let provider_request_id = fixed_bytes::<16>(&fields[2]).map_err(|_| invalid)?;
+    let attempt_id = fixed_bytes::<16>(&fields[3]).map_err(|_| invalid)?;
+    if provider_request_id == [0; 16] || attempt_id == [0; 16] {
         return Err(invalid);
     }
     let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| invalid)?;
-    if fixed_bytes::<32>(&wrapper[1]).map_err(|_| invalid)? != domain_digest(SLX1_DOMAIN, &unsigned)
-    {
+    let digest = fixed_bytes::<32>(&wrapper[1]).map_err(|_| invalid)?;
+    if digest != domain_digest(SLX1_DOMAIN, &unsigned) {
         return Err(invalid);
     }
-    EvaluationRequest::from_canonical_cbor(bytes(&fields[4]).map_err(|_| invalid)?)
-        .map_err(|_| invalid)?;
+    let evaluation =
+        EvaluationRequest::from_canonical_cbor(bytes(&fields[4]).map_err(|_| invalid)?)
+            .map_err(|_| invalid)?;
     let descriptor = array(&fields[5], 2).map_err(|_| invalid)?;
     let length = uint(&descriptor[0]).map_err(|_| invalid)?;
-    fixed_bytes::<32>(&descriptor[1]).map_err(|_| invalid)?;
+    let payload_digest = fixed_bytes::<32>(&descriptor[1]).map_err(|_| invalid)?;
     if length > SANDBOX_PAYLOAD_LIMIT {
         return Err(SandboxLocalErrorCode::PayloadLimitExceeded);
     }
-    Ok(length)
+    Ok(ValidatedSelectorControl {
+        bytes: control,
+        evaluation,
+        provider_request_id,
+        attempt_id,
+        payload: PayloadDescriptor {
+            byte_length: length,
+            digest: payload_digest,
+        },
+        digest,
+    })
 }
 
 pub(crate) fn decode_request(
-    control: &[u8],
-    attempt_stream: &[u8],
+    control: ValidatedSelectorControl,
+    attempt_stream: Vec<u8>,
 ) -> Result<DecodedSelectorRequest, AdapterError> {
-    if attempt_stream.len() as u64 > SANDBOX_PAYLOAD_LIMIT {
-        return Err(AdapterError::ProtocolFailure);
-    }
-    let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
-    let wrapper = array(&value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
-    let fields = array(&wrapper[0], 6).map_err(|_| AdapterError::ProtocolFailure)?;
-    if text(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != "SLX1"
-        || uint(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)? != 1
+    if control.payload.byte_length != attempt_stream.len() as u64
+        || control.payload.digest != domain_digest(INPUT_DOMAIN, &attempt_stream)
     {
         return Err(AdapterError::ProtocolFailure);
     }
-    let provider_request_id =
-        fixed_bytes::<16>(&fields[2]).map_err(|_| AdapterError::ProtocolFailure)?;
-    let attempt_id = fixed_bytes::<16>(&fields[3]).map_err(|_| AdapterError::ProtocolFailure)?;
-    let request_bytes = bytes(&fields[4])?;
-    let evaluation = EvaluationRequest::from_canonical_cbor(request_bytes)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
-    let ordinal = u16::from_be_bytes(
-        provider_request_id[14..]
-            .try_into()
-            .map_err(|_| AdapterError::ProtocolFailure)?,
-    );
-    let descriptor = array(&fields[5], 2).map_err(|_| AdapterError::ProtocolFailure)?;
-    if uint(&descriptor[0]).map_err(|_| AdapterError::ProtocolFailure)?
-        != attempt_stream.len() as u64
-        || fixed_bytes::<32>(&descriptor[1]).map_err(|_| AdapterError::ProtocolFailure)?
-            != domain_digest(INPUT_DOMAIN, attempt_stream)
-    {
-        return Err(AdapterError::ProtocolFailure);
-    }
-    let unsigned =
-        encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
-    let digest = fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?;
-    if digest != domain_digest(SLX1_DOMAIN, &unsigned) {
-        return Err(AdapterError::ProtocolFailure);
-    }
-    let attempt = read_attempt(attempt_stream).map_err(|_| AdapterError::ProtocolFailure)?;
+    let attempt =
+        read_attempt(attempt_stream.as_slice()).map_err(|_| AdapterError::ProtocolFailure)?;
+    let ordinal = u16::from_be_bytes([
+        control.provider_request_id[14],
+        control.provider_request_id[15],
+    ]);
     Ok(DecodedSelectorRequest {
-        evaluation,
+        evaluation: control.evaluation,
         attempt,
         ordinal,
         encoded: EncodedSelectorRequest {
-            control: control.to_vec(),
-            attempt_stream: attempt_stream.to_vec(),
-            provider_request_id,
-            attempt_id,
-            digest,
+            control: control.bytes,
+            attempt_stream,
+            provider_request_id: control.provider_request_id,
+            attempt_id: control.attempt_id,
+            digest: control.digest,
         },
     })
 }
@@ -689,7 +689,9 @@ mod tests {
             fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?,
             encoded.digest
         );
-        let decoded = decode_request(&encoded.control, &encoded.attempt_stream)?;
+        let control =
+            decode_request_control(encoded.control).map_err(|_| AdapterError::ProtocolFailure)?;
+        let decoded = decode_request(control, encoded.attempt_stream)?;
         assert_eq!(decoded.evaluation, expected_request);
         assert_eq!(decoded.attempt, attempt());
         assert_eq!(decoded.ordinal, 7);

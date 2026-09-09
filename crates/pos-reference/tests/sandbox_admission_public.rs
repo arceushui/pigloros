@@ -2705,6 +2705,32 @@ fn root_selector_classifies_valid_but_wrong_derived_ids_as_authority_mismatch() 
 }
 
 #[test]
+fn root_selector_rejects_missing_sandbox_requirement_before_authority_resolution() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut request = selector_evaluation_request(&fixture)?;
+    request.sandbox_requirement = None;
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let (server_result, control, trailing) = exercise_root_selector(
+        FailingSelectorAuthority(RootSelectorServiceError::Io),
+        ScenarioSelectorProvider {
+            signed: SignedSelectorProvider { fixture, launch },
+            mode: SelectorProviderMode::Unavailable,
+        },
+        &request,
+        &selector_case_attempt(),
+        0,
+    )?;
+    assert_eq!(server_result, Ok(()));
+    assert!(trailing.is_empty());
+    let local = SandboxLocalError::from_canonical_cbor(&control)?;
+    assert_eq!(local.phase, SandboxLocalErrorPhase::BeforeSpx1);
+    assert_eq!(local.code, SandboxLocalErrorCode::RequestAuthorityMismatch);
+    Ok(())
+}
+
+#[test]
 fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> TestResult {
     for drift in 0_u8..14 {
         let fixture = Fixture::new()?;
