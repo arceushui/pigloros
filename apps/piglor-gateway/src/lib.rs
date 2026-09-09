@@ -1167,10 +1167,10 @@ impl Gateway {
     }
 
     /// Construct a Gateway whose executor exclusively owns the recovered
-    /// erasure host and its EventStore adapter.
+    /// erasure host and its `EventStore` adapter.
     ///
     /// The Gateway receives only the host's read-only containment view for
-    /// Plugin/action checks. All EventStore effects remain in the host-owned
+    /// Plugin/action checks. All `EventStore` effects remain in the host-owned
     /// single-consumer command stream.
     ///
     /// # Errors
@@ -6266,8 +6266,9 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
-    use pos_core::ErasureContainmentGateV1;
-    use pos_store::{open_store, StoreConfig};
+    use pos_core::{ErasureContainmentGateV1, ERASURE_MAX_INVENTORY_REQUESTS};
+    use pos_runtime::ErasureExecutionHostV1;
+    use pos_store::{open_erasure_host_store, open_store, StoreConfig};
     use std::error::Error;
     use std::sync::Arc;
 
@@ -6291,6 +6292,85 @@ mod coverage_entrypoints {
             gate,
         )?;
         drop(owntracks);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn host_owned_gateway_sequences_the_complete_generic_store_surface(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let host = ErasureExecutionHostV1::recover_verified_empty(
+            open_erasure_host_store(StoreConfig::Memory)?,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        let gateway = Gateway::new_with_erasure_host(host)?;
+        let timeline = gateway.create_timeline("host-owned-gateway").await?;
+        let entity = EntityId::new();
+        gateway
+            .append_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 1}),
+            )
+            .await?;
+        let ingress_id = Ulid::new().to_string();
+        gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 2}),
+                &ingress_id,
+            )
+            .await?;
+        let duplicate = gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 2}),
+                &ingress_id,
+            )
+            .await?;
+        assert!(duplicate.duplicate);
+        let grant = ConsentGrantedV1 {
+            subject_id: entity,
+            grantee_id: EntityId::new(),
+            purpose: "host-owned-gateway".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 3,
+        };
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), grant.clone())
+            .await?;
+        gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: grant.subject_id,
+                    grantee_id: grant.grantee_id,
+                    grant_seq: grant.grant_seq,
+                    fence_seq: 4,
+                },
+            )
+            .await?;
+        assert_eq!(
+            gateway
+                .read_events_page(&timeline.id().to_string(), 0, 8)
+                .await?
+                .events
+                .len(),
+            4
+        );
+        gateway
+            .purge_expired_ingress_identities(NonZeroUsize::MIN)
+            .await?;
+        gateway.shutdown().await?;
         Ok(())
     }
 }
