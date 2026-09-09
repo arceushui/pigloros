@@ -7,7 +7,10 @@ use std::{
     cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        Arc, RwLock,
+    },
 };
 
 use crate::{clock::Seq, ids::TimelineId};
@@ -302,6 +305,7 @@ pub struct ErasureContainmentGateV1 {
     authority: RwLock<Arc<ErasureGateStateV1>>,
     fence_lock: std::sync::Mutex<()>,
     fail_closed_unbound: bool,
+    poisoned: AtomicBool,
 }
 
 #[derive(Clone, Default)]
@@ -349,6 +353,7 @@ impl ErasureContainmentGateV1 {
             })),
             fence_lock: std::sync::Mutex::new(()),
             fail_closed_unbound: false,
+            poisoned: AtomicBool::new(false),
         }
     }
 
@@ -366,6 +371,23 @@ impl ErasureContainmentGateV1 {
             })),
             fence_lock: std::sync::Mutex::new(()),
             fail_closed_unbound: true,
+            poisoned: AtomicBool::new(false),
+        }
+    }
+
+    /// Permanently close this gate after its host loses verified authority.
+    ///
+    /// Existing clones observe the same irreversible closure. This operation
+    /// can only remove access; it cannot install or grant authority.
+    pub fn poison(&self) {
+        self.poisoned.store(true, AtomicOrdering::Release);
+    }
+
+    fn ensure_available(&self) -> Result<(), ErasureContainmentErrorV1> {
+        if self.poisoned.load(AtomicOrdering::Acquire) {
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        } else {
+            Ok(())
         }
     }
 
@@ -623,6 +645,7 @@ impl ErasureContainmentGateV1 {
         query: &mut Q,
         maximum_requests: usize,
     ) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        self.ensure_available()?;
         let candidate = query
             .verified_inventory(maximum_requests)
             .map_err(containment_recovery_failure)?;
@@ -631,6 +654,7 @@ impl ErasureContainmentGateV1 {
             .fence_lock
             .lock()
             .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(candidate),
             ..ErasureGateStateV1::default()
@@ -648,6 +672,7 @@ impl ErasureContainmentGateV1 {
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] before a
     /// complete inventory is installed or after lock poisoning.
     pub fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        self.ensure_available()?;
         self.authority
             .read()
             .map_err(containment_recovery_failure)?
@@ -743,6 +768,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
             .fence_lock
             .lock()
             .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
         let authority = self
             .authority
             .read()
@@ -759,6 +785,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
     ) -> Result<(), ErasureContainmentErrorV1> {
         let identity = std::ptr::from_ref(self) as usize;
         if ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity)) {
+            self.ensure_available()?;
             let authority = self
                 .authority
                 .read()
@@ -772,6 +799,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
             .fence_lock
             .lock()
             .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
         let authority = self
             .authority
             .read()

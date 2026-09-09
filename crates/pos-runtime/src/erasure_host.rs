@@ -128,6 +128,12 @@ pub struct ErasureExecutionHostV1 {
 }
 
 impl ErasureExecutionHostV1 {
+    fn poison(&mut self) {
+        self.gate.poison();
+        self.state = HostStateV1::Poisoned;
+        self.inventory = None;
+    }
+
     /// Bind an owned store to one fail-closed gate.
     ///
     /// # Errors
@@ -283,7 +289,7 @@ impl ErasureExecutionHostV1 {
             .verified_inventory(maximum_requests)
             .and_then(|inventory| self.verify_current_inventory(inventory, maximum_requests))
         else {
-            self.state = HostStateV1::Poisoned;
+            self.poison();
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         self.publish_inventory(inventory, maximum_requests)
@@ -351,8 +357,7 @@ impl ErasureExecutionHostV1 {
             Ok(current) if current == expected => Ok(()),
             Ok(_) => Err(ErasureHostErrorV1::StaleGeneration),
             Err(error) => {
-                self.state = HostStateV1::Poisoned;
-                self.inventory = None;
+                self.poison();
                 Err(error)
             }
         }
@@ -401,8 +406,7 @@ impl ErasureExecutionHostV1 {
         let generation = match publication {
             Ok(generation) => generation,
             Err(error) => {
-                self.state = HostStateV1::Poisoned;
-                self.inventory = None;
+                self.poison();
                 return Err(error);
             }
         };
@@ -436,8 +440,7 @@ impl ErasureExecutionHostV1 {
                 ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
             })
         else {
-            self.state = HostStateV1::Poisoned;
-            self.inventory = None;
+            self.poison();
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         self.publish_inventory(inventory, maximum_requests)
@@ -468,8 +471,7 @@ impl ErasureExecutionHostV1 {
                 .map(|generation| (child, generation)),
             (false, ErasureCasOutcomeV1::ExactRetry) => Ok((child, current_generation)),
             (true, ErasureCasOutcomeV1::ExactRetry) | (false, ErasureCasOutcomeV1::Applied) => {
-                self.state = HostStateV1::Poisoned;
-                self.inventory = None;
+                self.poison();
                 Err(ErasureHostErrorV1::RecoveryUnavailable)
             }
         }
@@ -730,8 +732,7 @@ impl ErasureCommandSenderV1<'_> {
         {
             Ok(result) => Ok(result),
             Err(error) => {
-                self.host.state = HostStateV1::Poisoned;
-                self.host.inventory = None;
+                self.host.poison();
                 Err(map_erasure_error(error))
             }
         }
@@ -1647,6 +1648,7 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let escaped_gate = host.containment_gate();
         assert_eq!(
             host.ensure_generation(ErasureReferenceV1::from_digest([9; 32])),
             Err(ErasureHostErrorV1::StaleGeneration)
@@ -1661,6 +1663,20 @@ mod tests {
             host.maximum_requests(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
+        assert_eq!(
+            escaped_gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::TimelineRead),
+            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        let mut effect_ran = false;
+        assert_eq!(
+            escaped_gate.with_fence(
+                TimelineId::new(),
+                ErasureProtectedOperationV1::Append,
+                &mut || effect_ran = true,
+            ),
+            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert!(!effect_ran);
     }
 
     #[test]
