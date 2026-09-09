@@ -9,13 +9,13 @@ use std::sync::{Arc, Mutex};
 /// The concrete `MemoryStore` or `SQLite` adapter remains exclusively owned by
 /// `ErasureExecutionHostV1`; experiment code cannot recover raw store or gate
 /// publication authority through this wrapper.
-pub struct HostedExperimentStore {
+pub(crate) struct HostedExperimentStore {
     host: Mutex<pos_runtime::ErasureExecutionHostV1>,
     gate: Arc<dyn ErasureGate>,
 }
 
 impl HostedExperimentStore {
-    pub fn open(config: pos_store::StoreConfig) -> Result<Self, ErasureHostErrorV1> {
+    pub(crate) fn open(config: pos_store::StoreConfig) -> Result<Self, ErasureHostErrorV1> {
         let host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             config,
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
@@ -27,7 +27,7 @@ impl HostedExperimentStore {
         })
     }
 
-    pub fn containment_gate(&self) -> Arc<dyn ErasureGate> {
+    pub(crate) fn containment_gate(&self) -> Arc<dyn ErasureGate> {
         Arc::clone(&self.gate)
     }
 

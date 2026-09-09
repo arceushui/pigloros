@@ -9,7 +9,7 @@
 //! projections on each tick until a [`StopCondition`] is met.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-mod host_store;
+pub(crate) mod host_store;
 
 #[cfg(test)]
 use pos_core::ErasureContainmentGateV1;
