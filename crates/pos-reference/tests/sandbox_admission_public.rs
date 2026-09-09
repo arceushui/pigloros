@@ -18,7 +18,7 @@ use pos_reference::evaluator_protocol::{
     SandboxRequirement, SubjectAdapterKind,
 };
 use pos_reference::profile::DeterministicBudget;
-use pos_reference::provider_transport::StagedOutput;
+use pos_reference::provider_transport::{ProviderConnector, ProviderTransport, StagedOutput};
 use pos_reference::root_selector::{
     RootSelectorAdmissionArtifacts, RootSelectorAuthoritySource, RootSelectorCasePlan,
     RootSelectorProvider, RootSelectorProviderReply, RootSelectorServer, RootSelectorServiceError,
@@ -533,6 +533,122 @@ fn staged_output(bytes: &[u8]) -> TestResult<StagedOutput> {
             digest: payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", bytes),
         },
     )?)
+}
+
+struct PairConnector(Vec<UnixStream>);
+
+impl ProviderConnector for PairConnector {
+    fn connect(&mut self) -> Result<UnixStream, RootSelectorServiceError> {
+        self.0
+            .pop()
+            .ok_or(RootSelectorServiceError::ProviderUnavailable)
+    }
+}
+
+fn provider_frame(stream: &mut UnixStream, record: &[u8]) -> TestResult {
+    stream.write_all(&u32::try_from(record.len())?.to_be_bytes())?;
+    stream.write_all(record)?;
+    Ok(())
+}
+
+fn transport_admission(fixture: &Fixture) -> TestResult<RootSelectorAdmission> {
+    Ok(RootSelectorAdmission::establish(
+        &fixture.policy,
+        &fixture.trust,
+        &fixture.revocation,
+        RootSelectorAdmissionInputs {
+            provider: fixture.inputs(),
+            image_manifest: &fixture.sim1,
+            root_image: &fixture.root_image,
+            executable: &fixture.executable,
+            subject_artifact_digest: fixture.subject_digest(),
+            launch_policy: &fixture.lps1,
+            grant_expectations: Fixture::grant_expectations(),
+        },
+    )?)
+}
+
+fn transport_request(
+    fixture: &Fixture,
+    admission: &RootSelectorAdmission,
+) -> TestResult<SandboxExecuteRequest> {
+    Ok(SandboxExecuteRequest::from_canonical_cbor(
+        &execute_request(fixture, admission.launch_policy(), &["execute"])?,
+    )?)
+}
+
+fn provider_chunk(request: &SandboxExecuteRequest, parent: [u8; 32]) -> TestResult<Vec<u8>> {
+    self_digested_record(
+        "SBC1",
+        Value::Array(vec![
+            Value::Text("SBC1".to_owned()),
+            integer(1),
+            bytes(parent),
+            Value::Bytes(request.request.request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
+            integer(1),
+            integer(0),
+            integer(0),
+            Value::Bytes(b"output".to_vec()),
+        ]),
+    )
+}
+
+#[test]
+fn provider_transport_accepts_complete_framed_transcript_and_stages_output() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+    let grant = admission_grant(&fixture, &request, admission.launch_policy())?;
+    let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
+    let audit = audit_chain(&fixture, &grant_record)?;
+    let receipt = provider_receipt(
+        &fixture,
+        &grant_record,
+        wrapped_digest(audit.last().ok_or("audit")?)?,
+    )?;
+    let receipt_record = SandboxProviderReceipt::from_canonical_cbor(&receipt)?;
+    let result = terminal_result_with_output(
+        &fixture,
+        &request,
+        &grant_record,
+        &receipt_record,
+        b"output",
+    )?;
+    let result_record =
+        pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+            &result,
+        )?;
+    let (client, mut peer) = UnixStream::pair()?;
+    let request_for_provider = request.clone();
+    let server = thread::spawn(move || -> TestResult {
+        let mut input = Vec::new();
+        peer.read_to_end(&mut input)?;
+        for record in [
+            grant,
+            audit[0].clone(),
+            audit[1].clone(),
+            receipt,
+            provider_chunk(&request_for_provider, result_record.result_digest)?,
+            result,
+        ] {
+            provider_frame(&mut peer, &record)?;
+        }
+        Ok(())
+    });
+    let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+    let reply = transport.execute(&request, b"input", Duration::from_secs(1), &admission)?;
+    server.join().map_err(|_| "provider panicked")??;
+    let RootSelectorProviderReply::Admitted { mut output, .. } = reply else {
+        return Err("expected admitted stream".into());
+    };
+    let mut bytes = Vec::new();
+    output
+        .as_mut()
+        .ok_or("missing output")?
+        .copy_to(&mut bytes)?;
+    assert_eq!(bytes, b"output");
+    Ok(())
 }
 
 fn execute_request(
