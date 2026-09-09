@@ -2303,11 +2303,15 @@ fn execute_submit_action_command(
         ExecutorStore::Host(host) => execute_host_action(host, context, reply),
         #[cfg(test)]
         ExecutorStore::Generic(store) => {
-            drop(reply.send(execute_test_store_action(store.as_mut(), context)));
+            let result = execute_test_store_action(store.as_mut(), context);
+            retain_action_release(context, &result);
+            drop(reply.send(result));
         }
         #[cfg(test)]
         ExecutorStore::Gateway(store) => {
-            drop(reply.send(execute_test_store_action(store.event_store(), context)));
+            let result = execute_test_store_action(store.event_store(), context);
+            retain_action_release(context, &result);
+            drop(reply.send(result));
         }
     }
 }
@@ -2324,19 +2328,16 @@ fn execute_submit_identified_action_command(
         ExecutorStore::Host(host) => execute_host_identified_action(host, context, identity, reply),
         #[cfg(test)]
         ExecutorStore::Generic(store) => {
-            drop(reply.send(execute_test_store_identified_action(
-                store.as_mut(),
-                context,
-                identity,
-            )));
+            let result = execute_test_store_identified_action(store.as_mut(), context, identity);
+            retain_identified_action_release(context, &result);
+            drop(reply.send(result));
         }
         #[cfg(test)]
         ExecutorStore::Gateway(store) => {
-            drop(reply.send(execute_test_store_identified_action(
-                store.event_store(),
-                context,
-                identity,
-            )));
+            let result =
+                execute_test_store_identified_action(store.event_store(), context, identity);
+            retain_identified_action_release(context, &result);
+            drop(reply.send(result));
         }
     }
 }
@@ -2369,12 +2370,7 @@ fn execute_host_action(
                     context.authorization,
                     context.decision,
                 );
-                if let Ok((event, decision)) = &result {
-                    context
-                        .authorization
-                        .record_audit_blocking(decision.audit().with_event_id(event.id));
-                    publish_action_notice(context.bus, context.timeline, event);
-                }
+                retain_action_release(context, &result);
                 let release = reply.take();
                 if let Some(reply) = release {
                     drop(reply.send(result));
@@ -2437,14 +2433,7 @@ fn execute_host_identified_action(
                             )
                         })
                 });
-                if let Ok((result, decision)) = &result {
-                    context
-                        .authorization
-                        .record_audit_blocking(decision.audit().with_event_id(result.event.id));
-                    if !result.duplicate {
-                        publish_action_notice(context.bus, context.timeline, &result.event);
-                    }
-                }
+                retain_identified_action_release(context, &result);
                 let release = reply.take();
                 if let Some(reply) = release {
                     drop(reply.send(result));
@@ -2475,6 +2464,32 @@ fn publish_action_notice(
         event_type: event.event_type.as_str().to_owned(),
         seq: event.seq.as_u64(),
     }));
+}
+
+fn retain_action_release(
+    context: &ActionCommandContext<'_>,
+    result: &Result<(Event, GatewayAuthorizationDecision), ActionCommandError>,
+) {
+    if let Ok((event, decision)) = result {
+        context
+            .authorization
+            .record_audit_synchronously(decision.audit().with_event_id(event.id));
+        publish_action_notice(context.bus, context.timeline, event);
+    }
+}
+
+fn retain_identified_action_release(
+    context: &ActionCommandContext<'_>,
+    result: &Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+) {
+    if let Ok((result, decision)) = result {
+        context
+            .authorization
+            .record_audit_synchronously(decision.audit().with_event_id(result.event.id));
+        if !result.duplicate {
+            publish_action_notice(context.bus, context.timeline, &result.event);
+        }
+    }
 }
 
 #[cfg(test)]

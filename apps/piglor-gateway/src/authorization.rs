@@ -16,10 +16,10 @@ use pos_core::{
 };
 use std::{
     collections::VecDeque,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock};
 
 const MAX_AUTHORIZATION_AUDITS: usize = 1_024;
 
@@ -536,14 +536,20 @@ impl GatewayAuthorization {
     /// Retain one accepted action's minimized authorization audit.
     #[cfg(test)]
     pub(crate) async fn record_audit(&self, audit: GatewayAuthorizationAudit) {
-        let mut audits = self.audits.lock().await;
+        let mut audits = self
+            .audits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::retain_audit(&mut audits, audit);
     }
 
     /// Retain an accepted action audit from the dedicated synchronous host
     /// command thread before that command releases its result.
-    pub(crate) fn record_audit_blocking(&self, audit: GatewayAuthorizationAudit) {
-        let mut audits = self.audits.blocking_lock();
+    pub(crate) fn record_audit_synchronously(&self, audit: GatewayAuthorizationAudit) {
+        let mut audits = self
+            .audits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::retain_audit(&mut audits, audit);
     }
 
@@ -560,7 +566,12 @@ impl GatewayAuthorization {
     /// Return the minimized authorization audits retained by this Gateway host.
     #[must_use]
     pub async fn audits(&self) -> Vec<GatewayAuthorizationAudit> {
-        self.audits.lock().await.iter().cloned().collect()
+        self.audits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Acquire the append fence used by the Gateway before a final recheck.
