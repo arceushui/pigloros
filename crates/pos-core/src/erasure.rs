@@ -723,9 +723,7 @@ impl ErasureContainmentGateV1 {
                 continue;
             }
             matched = true;
-            if let Err(error) = state.permit_protected_operation(scope) {
-                return Err(error);
-            }
+            state.permit_protected_operation(scope)?;
         }
         if matched {
             Ok(())
@@ -6582,6 +6580,26 @@ mod coverage_paths {
     fn authorized_scope_calls_the_verified_state_permission_check() {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let timeline = TimelineId::new();
+        let unrelated_timeline = TimelineId::new();
+        let unrelated_state = inventory_state(
+            reference(71),
+            reference(72),
+            reference(73),
+            ErasureLifecycleV1::Authorized,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unrelated authorized state failed: {error:?}"
+            )))
+        });
+        let unrelated_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            unrelated_state.manifest_digest(),
+            vec![(unrelated_timeline, reference(73))],
+            Vec::new(),
+        );
+        assert!(gate
+            .install_verified_state_with_topology(&unrelated_state, &unrelated_proof)
+            .is_ok());
         let state = inventory_state(
             reference(81),
             reference(82),

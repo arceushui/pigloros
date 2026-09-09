@@ -4865,11 +4865,10 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             }
 
             for prepared in admission.admissions() {
-                if apply_sqlite_erasure_cas(&self.conn, prepared.mutation())?
-                    != ErasureCasOutcomeV1::Applied
-                {
-                    return Err(ErasureErrorV1::PolicyConflict);
-                }
+                require_fresh_erasure_cas(apply_sqlite_erasure_cas(
+                    &self.conn,
+                    prepared.mutation(),
+                )?)?;
             }
             Self::insert_timeline_with_meta_on(&self.conn, child, chain_head)?;
             let recovery = admission.recovery_result()?;
@@ -5385,6 +5384,13 @@ fn apply_sqlite_erasure_cas(
         params![mutation.request().digest().as_slice(), mutation.next_manifest().digest().digest().as_slice(), mutation.next_manifest().canonical_cbor()],
     ).map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
     Ok(ErasureCasOutcomeV1::Applied)
+}
+
+fn require_fresh_erasure_cas(outcome: ErasureCasOutcomeV1) -> Result<(), ErasureErrorV1> {
+    match outcome {
+        ErasureCasOutcomeV1::Applied => Ok(()),
+        ErasureCasOutcomeV1::ExactRetry => Err(ErasureErrorV1::PolicyConflict),
+    }
 }
 
 fn insert_sqlite_exact(
@@ -6055,6 +6061,18 @@ mod tests {
                 Err(error) => error,
             }
         }
+    }
+
+    #[test]
+    fn fork_transaction_requires_each_erasure_cas_to_be_fresh() {
+        assert_eq!(
+            require_fresh_erasure_cas(ErasureCasOutcomeV1::Applied),
+            Ok(())
+        );
+        assert_eq!(
+            require_fresh_erasure_cas(ErasureCasOutcomeV1::ExactRetry),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
     }
 
     #[cfg(unix)]

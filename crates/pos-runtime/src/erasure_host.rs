@@ -118,18 +118,17 @@ impl ErasureExecutionHostV1 {
     }
 
     fn ready_generation(&self) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
-        match self.state {
-            HostStateV1::Ready { generation, .. }
-                if self.gate.inventory_generation() == Ok(generation) =>
-            {
-                self.inventory
-                    .as_ref()
-                    .filter(|inventory| inventory.generation() == generation)
-                    .map(|_| generation)
-                    .ok_or(ErasureHostErrorV1::RecoveryUnavailable)
-            }
-            _ => Err(ErasureHostErrorV1::RecoveryUnavailable),
+        let HostStateV1::Ready { generation, .. } = self.state else {
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
+        };
+        if self.gate.inventory_generation() != Ok(generation) {
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
         }
+        self.inventory
+            .as_ref()
+            .filter(|inventory| inventory.generation() == generation)
+            .map(|_| generation)
+            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)
     }
 
     fn ensure_generation(
