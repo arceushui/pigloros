@@ -185,13 +185,13 @@ impl ErasureExecutionHostV1 {
         &mut self,
         change: impl FnOnce(&mut dyn ErasureHostStoreV1) -> Result<Timeline, CoreError>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
-        let maximum_requests = match self.state {
-            HostStateV1::Ready {
-                maximum_requests,
-                request_count: 0,
-                ..
-            } => maximum_requests,
-            _ => return Err(ErasureHostErrorV1::RecoveryUnavailable),
+        let HostStateV1::Ready {
+            maximum_requests,
+            request_count: 0,
+            ..
+        } = self.state
+        else {
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         let timeline = change(self.store.as_mut()).map_err(|error| map_store_error(&error))?;
         let Ok(inventory) = self

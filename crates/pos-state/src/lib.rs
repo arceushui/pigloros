@@ -1044,6 +1044,7 @@ impl RelationshipIndex {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pos_core::PluginId;
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
