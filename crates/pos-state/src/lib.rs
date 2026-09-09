@@ -128,13 +128,11 @@ impl AuthorizationCacheV1 {
         };
         let authentication_expiry = request.authenticated().expires_at();
         let expires_at = match request.consent() {
-            ConsentEvidenceV1::Resolved { grants } => grants
-                .iter()
-                .map(pos_core::ConsentGrantRefV1::valid_until)
-                .min()
-                .map_or(authentication_expiry, |consent_expiry| {
-                    consent_expiry.min(authentication_expiry)
-                }),
+            ConsentEvidenceV1::Resolved { grants } => {
+                grants.iter().fold(authentication_expiry, |expiry, grant| {
+                    expiry.min(grant.valid_until())
+                })
+            }
             _ => authentication_expiry,
         };
         let digest_matches = decision.request_digest() == request.binding_digest();
@@ -1056,7 +1054,8 @@ mod tests {
         AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
         AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1,
         CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
-        DelegateClassV1, DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
+        ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1,
+        DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
     };
     use proptest::prelude::*;
 
@@ -1197,6 +1196,7 @@ mod tests {
         subject_id: Option<EntityId>,
         participant_id: Option<EntityId>,
         plugin_context: Option<(PluginId, [u8; 16])>,
+        consent: ConsentEvidenceV1,
     ) -> AuthorizationRequestV1 {
         let (plugin_id, installation_id) = plugin_context.unzip();
         test_ok(AuthorizationRequestV1::try_from_draft(
@@ -1225,10 +1225,33 @@ mod tests {
                 revocation_epoch: base.revocation_epoch(),
                 revocation_state_current: base.revocation_state_current(),
                 authority_registry_digest: base.authority_registry_digest(),
-                consent: base.consent().clone(),
+                consent,
                 environment_constraints: base.environment_constraints().to_vec(),
             },
         ))
+    }
+
+    fn cache_consent_grant(valid_until: u64) -> ConsentGrantRefV1 {
+        test_ok(ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+            consent_id: test_hash(61),
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            data_categories: vec!["private".to_owned()],
+            purposes: vec!["planning".to_owned()],
+            audiences: vec!["local-host".to_owned()],
+            action_classes: vec!["read".to_owned()],
+            valid_from: WallTime::from_micros(1),
+            valid_until: WallTime::from_micros(valid_until),
+            withdrawal_retention_policy: "erase".to_owned(),
+            policy_revision: test_hash(62),
+            issuer: test_ok(PrincipalRefV1::try_new([63; 16], "local.test")),
+            issuer_evidence: test_hash(64),
+            consent_timeline: TimelineId::new(),
+            grant_position: Seq::from_u64(1),
+            status: ConsentGrantStatusV1::Active,
+            revocation_fence: None,
+            authority_registry_digest: test_hash(65),
+        }))
     }
 
     fn decision_with_capability_trust(
@@ -1511,6 +1534,24 @@ mod tests {
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
         assert!(by_position
             .get(&key, WallTime::from_micros(99), Seq::from_u64(80))
+            .is_none());
+    }
+
+    #[test]
+    fn authorization_cache_uses_resolved_consent_expiry() {
+        let fixture = active_decision(TimelineId::new());
+        let request = projection_request(
+            &fixture.request,
+            Some(EntityId::new()),
+            Some(EntityId::new()),
+            None,
+            ConsentEvidenceV1::Resolved {
+                grants: vec![cache_consent_grant(50)],
+            },
+        );
+        let mut cache = AuthorizationCacheV1::new();
+        assert!(cache
+            .insert_active(fixture.decision, &request, &fixture.authority)
             .is_none());
     }
 
@@ -1908,6 +1949,7 @@ mod tests {
             None,
             Some(participant),
             Some((plugin, [1; 16])),
+            fixture.request.consent().clone(),
         );
         assert_eq!(
             registry.materialize_authorized_projection(
@@ -1923,6 +1965,7 @@ mod tests {
             Some(subject),
             None,
             Some((plugin, [1; 16])),
+            fixture.request.consent().clone(),
         );
         assert_eq!(
             registry.materialize_authorized_projection(
@@ -1933,8 +1976,13 @@ mod tests {
             Err(AuthorityErrorV1::UnauthorizedSource)
         );
 
-        let missing_plugin =
-            projection_request(&fixture.request, Some(subject), Some(participant), None);
+        let missing_plugin = projection_request(
+            &fixture.request,
+            Some(subject),
+            Some(participant),
+            None,
+            fixture.request.consent().clone(),
+        );
         assert_eq!(
             registry.materialize_authorized_projection(
                 &missing_plugin,

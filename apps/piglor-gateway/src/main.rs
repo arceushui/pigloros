@@ -200,15 +200,15 @@ fn gateway_for_startup(
     erasure_gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
     match (owntracks_owner_key, sqlite_path) {
-        (Some(owner_key), Some(path)) => Ok(Gateway::new_with_owntracks_ingress_and_erasure_gate(
+        (Some(owner_key), Some(path)) => Gateway::new_with_owntracks_ingress_and_erasure_gate(
             pos_store::sqlite::SqliteStore::open(path)?,
             owner_key,
             erasure_gate,
-        )?),
-        (None, _) => Ok(Gateway::new_with_erasure_gate(
-            open_store(config)?,
-            erasure_gate,
-        )?),
+        )
+        .map_err(Into::into),
+        (None, _) => {
+            Gateway::new_with_erasure_gate(open_store(config)?, erasure_gate).map_err(Into::into)
+        }
         (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
     }
 }

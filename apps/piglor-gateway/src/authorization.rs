@@ -778,7 +778,8 @@ mod tests {
         AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthorityGranteeV1,
         AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, CapabilityGrantDraftV1,
         CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-        CapabilityScopeDraftV1, CapabilityScopeV1, PrincipalRefV1,
+        CapabilityScopeDraftV1, CapabilityScopeV1, ConsentGrantRefDraftV1, ConsentGrantRefV1,
+        ConsentGrantStatusV1, PrincipalRefV1,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -796,6 +797,30 @@ mod tests {
 
     const fn hash(byte: u8) -> Hash {
         Hash::from_bytes([byte; 32])
+    }
+
+    fn consent_grant() -> ConsentGrantRefV1 {
+        ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+            consent_id: hash(61),
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            data_categories: vec!["private".to_owned()],
+            purposes: vec!["action".to_owned()],
+            audiences: vec!["gateway".to_owned()],
+            action_classes: vec!["world.action.submit".to_owned()],
+            valid_from: WallTime::from_micros(1),
+            valid_until: WallTime::from_micros(100),
+            withdrawal_retention_policy: "erase".to_owned(),
+            policy_revision: hash(62),
+            issuer: PrincipalRefV1::try_new([63; 16], "gateway.test").test_ok(),
+            issuer_evidence: hash(64),
+            consent_timeline: TimelineId::new(),
+            grant_position: Seq::from_u64(1),
+            status: ConsentGrantStatusV1::Active,
+            revocation_fence: None,
+            authority_registry_digest: hash(65),
+        })
+        .test_ok()
     }
 
     struct Fixture {
@@ -1186,7 +1211,9 @@ mod tests {
         variants.push(request);
 
         let mut request = action(&fixture);
-        request.consent = ConsentEvidenceV1::Resolved { grants: Vec::new() };
+        request.consent = ConsentEvidenceV1::Resolved {
+            grants: vec![consent_grant()],
+        };
         variants.push(request);
 
         let mut request = action(&fixture);
