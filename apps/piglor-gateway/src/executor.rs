@@ -2872,10 +2872,12 @@ mod tests {
 
     use super::{
         empty_action_append, event_limit_reached, execute_append_command,
-        execute_append_consent_revocation_command, execute_submit_action_command_from_command,
+        execute_append_consent_revocation_command, execute_submit_action_command,
+        execute_submit_action_command_from_command, execute_submit_identified_action_command,
         execute_submit_identified_action_command_from_command, missing_duplicate_event,
-        prepare_owntracks_ingress, resolve_identified_outcome, ActionCommandError, Command,
-        ExecutorState, ExecutorStore, GatewayExecutorStore, OwnTracksRateLimiter,
+        prepare_owntracks_ingress, resolve_identified_outcome, ActionCommandContext,
+        ActionCommandError, Command, ExecutorState, ExecutorStore, GatewayExecutorStore,
+        OwnTracksRateLimiter,
     };
     use crate::authorization::{
         test_authorization_for, GatewayAuthorizationDecision, GatewayAuthorizationRequest,
@@ -2934,6 +2936,48 @@ mod tests {
                 reply,
             },
         );
+    }
+
+    #[test]
+    fn gateway_store_dispatches_both_action_command_shapes(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let timeline = TimelineId::new();
+        let (authorization, decision, proposal) = action_fixture(timeline)?;
+        let registry = PluginRegistry::new();
+        let context = ActionCommandContext {
+            timeline,
+            registry: &registry,
+            proposal: &proposal,
+            authorization: &authorization,
+            decision: &decision,
+            maximum: 1,
+        };
+        let mut state = ExecutorState {
+            store: ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(
+                MemoryStore::new(),
+            ))),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_submit_action_command(&mut state, &context, reply);
+        assert!(result.blocking_recv().test_ok()?.is_err());
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_submit_identified_action_command(
+            &mut state,
+            &context,
+            AppendIdentity::new(
+                AppendDedupKey::from_keyed_hash([11; 32]),
+                AppendDedupScope::from_keyed_hash([12; 32]),
+            ),
+            reply,
+        );
+        assert!(result.blocking_recv().test_ok()?.is_err());
+        Ok(())
     }
 
     impl EventStore for RecordingBoundedStore {
