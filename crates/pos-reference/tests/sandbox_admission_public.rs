@@ -969,6 +969,8 @@ enum SelectorProviderMode {
     InvalidGrant,
     InvalidReceipt,
     MismatchedOutput,
+    MissingOutput,
+    MismatchedOutputDigest,
 }
 
 struct ScenarioSelectorProvider {
@@ -1027,6 +1029,10 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                 SelectorProviderMode::InvalidReceipt => *receipt = b"not-cbor".to_vec(),
                 SelectorProviderMode::MismatchedOutput => {
                     *output_stream = Some(b"substituted".to_vec());
+                }
+                SelectorProviderMode::MissingOutput => *output_stream = None,
+                SelectorProviderMode::MismatchedOutputDigest => {
+                    *output_stream = output_stream.as_ref().map(|bytes| vec![0; bytes.len()]);
                 }
                 SelectorProviderMode::Valid
                 | SelectorProviderMode::Unavailable
@@ -2216,6 +2222,18 @@ fn root_selector_server_reports_provider_failure_phases_as_sle1() -> TestResult 
             SandboxLocalErrorCode::ProviderEvidenceInvalid,
             true,
         ),
+        (
+            SelectorProviderMode::MissingOutput,
+            SandboxLocalErrorPhase::AfterAdmission,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+            true,
+        ),
+        (
+            SelectorProviderMode::MismatchedOutputDigest,
+            SandboxLocalErrorPhase::AfterAdmission,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+            true,
+        ),
     ] {
         let (server_result, control, trailing) = exercise_selector_provider_mode(mode)?;
         assert_eq!(server_result, Ok(()));
@@ -2688,9 +2706,18 @@ fn root_selector_classifies_valid_but_wrong_derived_ids_as_authority_mismatch() 
 
 #[test]
 fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> TestResult {
-    for drift in 0_u8..4 {
+    for drift in 0_u8..14 {
         let fixture = Fixture::new()?;
-        let request = selector_evaluation_request(&fixture)?;
+        let mut request = selector_evaluation_request(&fixture)?;
+        if drift == 13 {
+            request
+                .sandbox_requirement
+                .iter_mut()
+                .for_each(|requirement| requirement.policy_epoch += 1);
+            request.output_capability.capability_digest =
+                request.expected_output_capability_digest()?;
+            request.request_digest = request.digest()?;
+        }
         let attempt = selector_case_attempt();
         let mut plan = selector_case_plan(&fixture, &request, attempt.clone())?;
         match drift {
@@ -2707,7 +2734,21 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
                 retention_policy_digest: [0; 32],
                 plan_digest: [0; 32],
             }),
-            _ => plan.admission.provider_manifest = corrupt_signed_digest(&fixture.spm1)?,
+            3 => plan.admission.provider_manifest = corrupt_signed_digest(&fixture.spm1)?,
+            4 => plan.request_nonce = [0; 16],
+            5 => plan.execute_authority.evr1_digest = [99; 32],
+            6 => plan.execute_authority.cfb1_digest = [99; 32],
+            7 => plan.execute_authority.fixture_digest = [99; 32],
+            8 => plan.execute_authority.execution_profile_digest = [99; 32],
+            9 => plan.execute_authority.lps1_digest = [99; 32],
+            10 => plan.execute_authority.sim1_digest = [99; 32],
+            11 => plan.execute_authority.apt1_digest = [99; 32],
+            12 => {
+                let different_launch = launch_policy([99; 32])?;
+                plan.admission.policy =
+                    fixture.policy_for_image(&fixture.sim1, &different_launch)?;
+            }
+            _ => {}
         }
         let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
         let (server_result, control, trailing) = exercise_root_selector(
