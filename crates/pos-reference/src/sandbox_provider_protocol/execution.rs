@@ -1252,7 +1252,7 @@ fn validate_network_plan(
     )
 }
 
-fn validate_network_plans(
+pub(super) fn validate_network_plans(
     values: &[NetworkExchangePlan],
 ) -> Result<(), SandboxProviderProtocolError> {
     for (index, value) in values.iter().enumerate() {

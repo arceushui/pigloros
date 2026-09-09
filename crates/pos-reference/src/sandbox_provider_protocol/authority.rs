@@ -95,6 +95,15 @@ pub enum SandboxExecutionMode {
 }
 
 impl SandboxExecutionMode {
+    pub(super) const fn code(self) -> u64 {
+        match self {
+            Self::Local => 0,
+            Self::AirGapped => 1,
+            Self::Replay => 2,
+            Self::Fork => 3,
+        }
+    }
+
     const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
             0 => Ok(Self::Local),

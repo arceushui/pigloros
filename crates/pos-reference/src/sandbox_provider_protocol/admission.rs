@@ -2,24 +2,32 @@
 
 use ciborium::value::Value;
 
+use crate::evaluator::CaseAttempt;
+use crate::evaluator_protocol::EvaluationRequest;
 use crate::evaluator_protocol::RequiredProviderCapability;
 
 use super::codec::{
-    array, bounded_array, bytes_value, decode_document, encode, identifier, key_id,
+    array, bounded_array, bytes_value, decode_document, encode, identifier, key_id, record_digest,
     require_canonical_order, require_signature, signed, text, text_value, uint, uint_value,
     valid_identifier, valid_key_id, verify_digest, verify_signature,
 };
 use super::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, LaunchPolicy, ProviderCapability,
     ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxExecuteRequest,
-    SandboxProviderManifest, SandboxProviderProtocolError, SandboxProviderReceipt,
-    SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome,
-    SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot, SelectorRevocationState,
-    SignedImageManifest,
+    SandboxExecutionMode, SandboxLimit, SandboxProviderManifest, SandboxProviderProtocolError,
+    SandboxProviderReceipt, SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet,
+    SandboxTerminalOutcome, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    SelectorRevocationState, SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
 const REQUIRED_FEATURE_SET_DOMAIN: &[u8] = b"PiglorOS.RequiredHostFeatureSet.v1\0";
+const READBACK_SET_DOMAIN: &[u8] = b"PiglorOS.SandboxReadbackSet.v1\0";
+const MAX_BROKER_HARD_CAP_BYTES: usize = 1024;
+const LIMIT_COUNT: usize = 17;
+const MAX_NETWORK_PLANS: usize = 256;
+const CONCURRENT_ATTEMPTS_LIMIT_ID: u8 = 13;
+const MAX_CONCURRENT_ATTEMPTS: u64 = 256;
 const REQUIRED_HCP1_FEATURE_IDS: [&str; 16] = [
     "cgroup-v2-cpu",
     "cgroup-v2-memory",
@@ -69,6 +77,20 @@ struct GrantBinding {
     launch_policy: [u8; 32],
     effective_limits: [u8; 32],
     readback_set: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectorGrantCommitment {
+    required_provider_capability: RequiredProviderCapability,
+    evr1_digest: [u8; 32],
+    execution_profile_digest: [u8; 32],
+    fixture_digest: [u8; 32],
+    capability_ids: Vec<String>,
+    network_plan_digests: Vec<[u8; 32]>,
+    effective_limits: Vec<SandboxLimit>,
+    effective_limits_digest: [u8; 32],
+    readback_set: Vec<u8>,
+    expected_readback_set_digest: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -377,19 +399,6 @@ pub struct SandboxProviderAdmissionInputs<'a> {
     pub host_profile: &'a [u8],
     /// Canonical selected SCS1 bytes.
     pub syscall_set: &'a [u8],
-    /// Canonically ordered installed host-feature identifiers.
-    pub required_features: &'a [String],
-}
-
-/// Selector-derived authority that an AGR1 must reproduce exactly.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SandboxGrantExpectations {
-    /// Exact provider capability selected by EVR1.
-    pub required_provider_capability: RequiredProviderCapability,
-    /// Exact selector-derived ELM1 digest.
-    pub effective_limits_digest: [u8; 32],
-    /// Exact selector-derived readback-set digest.
-    pub expected_readback_set_digest: [u8; 32],
 }
 
 /// Exact root-owned inputs used to establish one executable selector session.
@@ -403,12 +412,14 @@ pub struct RootSelectorAdmissionInputs<'a> {
     pub root_image: &'a [u8],
     /// Exact immutable subject executable bytes selected by SIM1 and EVR1.
     pub executable: &'a [u8],
-    /// EVR1 subject artifact digest that must identify `executable`.
-    pub subject_artifact_digest: [u8; 32],
     /// Canonical selected LPS1 bytes.
     pub launch_policy: &'a [u8],
-    /// Selector-derived capability and effective-limit bindings for AGR1.
-    pub grant_expectations: SandboxGrantExpectations,
+    /// Authenticated EVR1 from which selector authority is derived.
+    pub evaluation: &'a EvaluationRequest,
+    /// Independently reconstructed EAI1 attempt selected by EVR1.
+    pub attempt: &'a CaseAttempt,
+    /// Selector-built ordered NXP1 plans for the SPX1 request.
+    pub network_plans: &'a [super::NetworkExchangePlan],
 }
 
 /// Root-selector authority after provider, image, launch, and host admission.
@@ -420,7 +431,7 @@ pub struct RootSelectorAdmission {
     provider: AdmittedSandboxProvider,
     image: AdmittedSandboxImage,
     launch: LaunchPolicy,
-    grant_expectations: SandboxGrantExpectations,
+    grant_commitment: SelectorGrantCommitment,
 }
 
 /// Complete provider lifecycle evidence released by root-selector admission.
@@ -477,19 +488,24 @@ impl RootSelectorAdmission {
         revocation: &SandboxRevocationSnapshot,
         inputs: RootSelectorAdmissionInputs<'_>,
     ) -> Result<Self, SandboxAdmissionError> {
+        if inputs.evaluation.to_canonical_cbor().is_err() {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
         let provider = AdmittedSandboxProvider::admit(policy, trust, revocation, inputs.provider)?;
         let image = provider.admit_image(
             inputs.image_manifest,
             inputs.root_image,
             inputs.executable,
-            inputs.subject_artifact_digest,
+            inputs.evaluation.subject_artifact_digest,
         )?;
         let launch = provider.admit_launch_policy(inputs.launch_policy, &image)?;
+        let grant_commitment =
+            SelectorGrantCommitment::derive(&provider, &image, &launch, policy, &inputs)?;
         Ok(Self {
             provider,
             image,
             launch,
-            grant_expectations: inputs.grant_expectations,
+            grant_commitment,
         })
     }
 
@@ -524,7 +540,7 @@ impl RootSelectorAdmission {
             request,
             &self.image,
             &self.launch,
-            &self.grant_expectations,
+            &self.grant_commitment,
         )
     }
 
@@ -614,6 +630,30 @@ impl RootSelectorAdmission {
         &self.launch
     }
 
+    /// Selector-derived ELM1 controls retained for provider-independent audit.
+    #[must_use]
+    pub fn effective_limits(&self) -> &[SandboxLimit] {
+        &self.grant_commitment.effective_limits
+    }
+
+    /// Selector-derived ELM1 self-digest that AGR1 must reproduce.
+    #[must_use]
+    pub const fn effective_limits_digest(&self) -> [u8; 32] {
+        self.grant_commitment.effective_limits_digest
+    }
+
+    /// Exact selector-derived RBS1 bytes retained for audit and golden vectors.
+    #[must_use]
+    pub fn expected_readback_set(&self) -> &[u8] {
+        &self.grant_commitment.readback_set
+    }
+
+    /// Selector-derived RBS1 self-digest that AGR1 must reproduce.
+    #[must_use]
+    pub const fn expected_readback_set_digest(&self) -> [u8; 32] {
+        self.grant_commitment.expected_readback_set_digest
+    }
+
     /// Create revocation state bound to this admitted provider's authenticated
     /// runtime key, rather than to a key supplied at acknowledgement time.
     ///
@@ -689,7 +729,7 @@ impl AdmittedSandboxProvider {
             &decoded,
         )?;
         let runtime_key = Self::authenticate_provider_signers(trust, revocation, &decoded)?;
-        Self::validate_conformance(inputs.required_features, &decoded)?;
+        Self::validate_conformance(&decoded)?;
         Ok(Self {
             policy: policy.clone(),
             manifest: decoded.manifest,
@@ -786,7 +826,6 @@ impl AdmittedSandboxProvider {
     }
 
     fn validate_conformance(
-        required_features: &[String],
         decoded: &DecodedProviderAdmission,
     ) -> Result<(), SandboxAdmissionError> {
         let DecodedProviderAdmission {
@@ -796,7 +835,8 @@ impl AdmittedSandboxProvider {
             conformance_report,
         } = decoded;
         let capability_digest = capability_set_digest(&manifest.capabilities)?;
-        let feature_digest = required_feature_set_digest(required_features)?;
+        let required_features = required_feature_ids();
+        let feature_digest = required_feature_set_digest(&required_features)?;
         let reported_subject = ConformanceSubjectBinding {
             profile: conformance_report.pcf1_digest,
             binary: conformance_report.provider_binary_digest,
@@ -917,13 +957,13 @@ impl AdmittedSandboxProvider {
     /// # Errors
     /// Rejects a forged grant or any request, attempt, artifact, epoch, input,
     /// exchange-plan, launch-policy, or runtime-key substitution.
-    pub fn authenticate_grant(
+    fn authenticate_grant(
         &self,
         bytes: &[u8],
         request: &SandboxExecuteRequest,
         image: &AdmittedSandboxImage,
         launch: &LaunchPolicy,
-        expectations: &SandboxGrantExpectations,
+        commitment: &SelectorGrantCommitment,
     ) -> Result<AdmissionGrant, SandboxAdmissionError> {
         self.validate_execute_authority(request, image, launch)?;
         let grant = AdmissionGrant::from_canonical_cbor(bytes)?;
@@ -979,15 +1019,20 @@ impl AdmittedSandboxProvider {
             input: request.adapter_input.digest,
             exchange_plans: expected_plans,
             launch_policy: launch.policy_digest,
-            effective_limits: expectations.effective_limits_digest,
-            readback_set: expectations.expected_readback_set_digest,
+            effective_limits: commitment.effective_limits_digest,
+            readback_set: commitment.expected_readback_set_digest,
         };
         if actual != expected
+            || request_authority.evr1_digest != commitment.evr1_digest
+            || request_authority.execution_profile_digest != commitment.execution_profile_digest
+            || request_authority.fixture_digest != commitment.fixture_digest
+            || request.capability_ids != commitment.capability_ids
+            || expected_plans != commitment.network_plan_digests
             || !request
                 .capability_ids
-                .contains(&expectations.required_provider_capability.capability_id)
+                .contains(&commitment.required_provider_capability.capability_id)
             || !self.supports_capabilities(&request.capability_ids)
-            || !self.supports_required_capability(&expectations.required_provider_capability)
+            || !self.supports_required_capability(&commitment.required_provider_capability)
         {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
@@ -1216,6 +1261,265 @@ fn feature_proof_value(proof: &HostFeatureProof) -> Value {
     ])
 }
 
+impl SelectorGrantCommitment {
+    fn derive(
+        provider: &AdmittedSandboxProvider,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+        policy: &SandboxAdministratorPolicy,
+        inputs: &RootSelectorAdmissionInputs<'_>,
+    ) -> Result<Self, SandboxAdmissionError> {
+        let evaluation = inputs.evaluation;
+        let attempt = inputs.attempt;
+        let network_plans = inputs.network_plans;
+        let requirement = evaluation
+            .sandbox_requirement
+            .as_ref()
+            .ok_or(SandboxAdmissionError::ConformanceMismatch)?;
+        if requirement.lps1_digest != launch.policy_digest
+            || requirement.sim1_digest != image.manifest.manifest_digest
+            || requirement.apt1_digest != policy.policy_digest()
+            || requirement.policy_epoch != policy.policy_epoch()
+            || u64::from(attempt.mode) != launch.execution_mode.code()
+            || attempt.fixture_digest == [0; 32]
+            || evaluation.execution_profile_digest == [0; 32]
+            || !attempt
+                .capability_ids
+                .contains(&requirement.required_provider_capability.capability_id)
+            || !provider.supports_required_capability(&requirement.required_provider_capability)
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        if network_plans.len() > MAX_NETWORK_PLANS {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds.into());
+        }
+        super::execution::validate_network_plans(network_plans)?;
+        let broker_limits = decode_broker_hard_caps(inputs.provider.broker_hard_caps)?;
+        let effective_limits = derive_effective_limits(&broker_limits, launch, attempt)?;
+        let effective_limits_digest = effective_limits_digest(
+            &effective_limits,
+            digest_bytes(inputs.provider.broker_hard_caps),
+            policy.policy_digest(),
+            launch.policy_digest,
+            evaluation.execution_profile_digest,
+            attempt.fixture_digest,
+            &provider.manifest.runtime_attestation_key_id,
+        )?;
+        let expected_fdl1_digest = expected_fdl1_digest(launch.execution_mode)?;
+        let network_plan_digests = network_plans
+            .iter()
+            .map(|plan| plan.plan_digest)
+            .collect::<Vec<_>>();
+        let (readback_set, expected_readback_set_digest) = readback_set(
+            provider,
+            image,
+            launch,
+            &requirement.required_provider_capability,
+            effective_limits_digest,
+            expected_fdl1_digest,
+            &network_plan_digests,
+        )?;
+        Ok(Self {
+            required_provider_capability: requirement.required_provider_capability.clone(),
+            evr1_digest: evaluation.request_digest,
+            execution_profile_digest: evaluation.execution_profile_digest,
+            fixture_digest: attempt.fixture_digest,
+            capability_ids: attempt.capability_ids.clone(),
+            network_plan_digests,
+            effective_limits,
+            effective_limits_digest,
+            readback_set,
+            expected_readback_set_digest,
+        })
+    }
+}
+
+fn decode_broker_hard_caps(
+    bytes: &[u8],
+) -> Result<Vec<SandboxLimit>, SandboxProviderProtocolError> {
+    if bytes.is_empty() || bytes.len() > MAX_BROKER_HARD_CAP_BYTES {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    let document = decode_document(bytes)?;
+    let fields = array::<3>(&document)?;
+    if text(&fields[0])? != "BHC1" || uint(&fields[1])? != 1 {
+        return Err(SandboxProviderProtocolError::UnsupportedVersion);
+    }
+    decode_exact_limits(&fields[2])
+}
+
+fn decode_exact_limits(value: &Value) -> Result<Vec<SandboxLimit>, SandboxProviderProtocolError> {
+    let Value::Array(values) = value else {
+        return Err(SandboxProviderProtocolError::InvalidEncoding);
+    };
+    if values.len() != LIMIT_COUNT {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(expected_id, value)| {
+            let fields = array::<2>(value)?;
+            let limit_id = u8::try_from(uint(&fields[0])?)
+                .map_err(|_| SandboxProviderProtocolError::FieldOutOfBounds)?;
+            if usize::from(limit_id) != expected_id {
+                return Err(SandboxProviderProtocolError::NonCanonicalOrder);
+            }
+            Ok(SandboxLimit {
+                limit_id,
+                value: uint(&fields[1])?,
+            })
+        })
+        .collect()
+}
+
+fn derive_effective_limits(
+    broker: &[SandboxLimit],
+    launch: &LaunchPolicy,
+    attempt: &CaseAttempt,
+) -> Result<Vec<SandboxLimit>, SandboxProviderProtocolError> {
+    let limits = broker
+        .iter()
+        .zip(&launch.effective_limits)
+        .map(|(broker, policy)| SandboxLimit {
+            limit_id: broker.limit_id,
+            value: broker.value.min(policy.value).min(match broker.limit_id {
+                0 => attempt.budget.memory_bytes,
+                4 => attempt.watchdog_ms,
+                8 => attempt.budget.output_bytes,
+                9 => attempt.budget.storage_bytes,
+                _ => u64::MAX,
+            }),
+        })
+        .collect::<Vec<_>>();
+    if limits[4].value == 0
+        || limits[usize::from(CONCURRENT_ATTEMPTS_LIMIT_ID)].value > MAX_CONCURRENT_ATTEMPTS
+    {
+        return Err(SandboxProviderProtocolError::InconsistentFields);
+    }
+    Ok(limits)
+}
+
+fn effective_limits_digest(
+    limits: &[SandboxLimit],
+    broker_caps_digest: [u8; 32],
+    apt1_digest: [u8; 32],
+    lps1_digest: [u8; 32],
+    execution_profile_digest: [u8; 32],
+    fixture_digest: [u8; 32],
+    runtime_attestation_key_id: &str,
+) -> Result<[u8; 32], SandboxProviderProtocolError> {
+    record_digest(
+        "ELM1",
+        &Value::Array(vec![
+            text_value("ELM1"),
+            uint_value(1),
+            limit_values(limits),
+            bytes_value(&broker_caps_digest),
+            bytes_value(&apt1_digest),
+            bytes_value(&lps1_digest),
+            bytes_value(&execution_profile_digest),
+            bytes_value(&fixture_digest),
+            text_value(runtime_attestation_key_id),
+        ]),
+    )
+}
+
+fn expected_fdl1_digest(
+    mode: SandboxExecutionMode,
+) -> Result<[u8; 32], SandboxProviderProtocolError> {
+    let entries = match mode {
+        SandboxExecutionMode::Local => vec![fd_layout_entry(3, 0), fd_layout_entry(4, 1)],
+        SandboxExecutionMode::AirGapped
+        | SandboxExecutionMode::Replay
+        | SandboxExecutionMode::Fork => vec![fd_layout_entry(3, 1)],
+    };
+    record_digest(
+        "FDL1",
+        &Value::Array(vec![
+            text_value("FDL1"),
+            uint_value(1),
+            uint_value(mode.code()),
+            Value::Array(entries),
+        ]),
+    )
+}
+
+fn readback_set(
+    provider: &AdmittedSandboxProvider,
+    image: &AdmittedSandboxImage,
+    launch: &LaunchPolicy,
+    required_capability: &RequiredProviderCapability,
+    effective_limits_digest: [u8; 32],
+    expected_fdl1_digest: [u8; 32],
+    network_plan_digests: &[[u8; 32]],
+) -> Result<(Vec<u8>, [u8; 32]), SandboxProviderProtocolError> {
+    let unsigned = Value::Array(vec![
+        text_value("RBS1"),
+        uint_value(1),
+        uint_value(0),
+        text_value(&provider.manifest.provider_id),
+        bytes_value(&provider.manifest.manifest_digest),
+        bytes_value(&provider.manifest.binary_digest),
+        bytes_value(&provider.manifest.public_contract_digest),
+        bytes_value(&provider.host_profile.profile_digest),
+        uint_value(provider.syscall_set.architecture.code()),
+        text_value(&provider.manifest.runtime_attestation_key_id),
+        Value::Array(vec![
+            text_value(&required_capability.capability_id),
+            uint_value(required_capability.capability_version),
+            uint_value(required_capability.minimum_strength),
+        ]),
+        uint_value(launch.execution_mode.code()),
+        bytes_value(&launch.policy_digest),
+        bytes_value(&image.manifest.manifest_digest),
+        bytes_value(&provider.syscall_set.syscall_set_digest),
+        bytes_value(&effective_limits_digest),
+        bytes_value(&expected_fdl1_digest),
+        Value::Array(
+            required_feature_ids()
+                .iter()
+                .map(|feature| text_value(feature))
+                .collect(),
+        ),
+        Value::Array(
+            network_plan_digests
+                .iter()
+                .map(|digest| bytes_value(digest))
+                .collect(),
+        ),
+    ]);
+    let digest = digest_value(READBACK_SET_DOMAIN, &unsigned)?;
+    let bytes = encode(&Value::Array(vec![unsigned, bytes_value(&digest)]))?;
+    Ok((bytes, digest))
+}
+
+fn limit_values(limits: &[SandboxLimit]) -> Value {
+    Value::Array(
+        limits
+            .iter()
+            .map(|limit| {
+                Value::Array(vec![
+                    uint_value(u64::from(limit.limit_id)),
+                    uint_value(limit.value),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn fd_layout_entry(fd: u64, role: u64) -> Value {
+    Value::Array(vec![uint_value(fd), uint_value(role)])
+}
+
+fn required_feature_ids() -> Vec<String> {
+    let mut features = REQUIRED_HCP1_FEATURE_IDS.map(str::to_owned).to_vec();
+    features.sort_unstable_by(|left, right| {
+        (left.len(), left.as_bytes()).cmp(&(right.len(), right.as_bytes()))
+    });
+    features
+}
+
 fn capability_set_digest(
     capabilities: &[ProviderCapability],
 ) -> Result<[u8; 32], SandboxProviderProtocolError> {
@@ -1235,17 +1539,6 @@ fn capability_set_digest(
 fn required_feature_set_digest(
     required_features: &[String],
 ) -> Result<[u8; 32], SandboxAdmissionError> {
-    if required_features.is_empty()
-        || required_features.len() > 256
-        || required_features
-            .iter()
-            .any(|feature| !valid_identifier(feature))
-        || !required_features
-            .windows(2)
-            .all(|pair| (pair[0].len(), pair[0].as_bytes()) < (pair[1].len(), pair[1].as_bytes()))
-    {
-        return Err(SandboxAdmissionError::HostCapabilityMismatch);
-    }
     let value = Value::Array(
         required_features
             .iter()
