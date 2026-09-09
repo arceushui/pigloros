@@ -538,6 +538,70 @@ fn staged_output(bytes: &[u8]) -> Result<StagedOutput, RootSelectorServiceError>
     )
 }
 
+struct FailingIo;
+
+impl Read for FailingIo {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("injected read failure"))
+    }
+}
+
+impl Write for FailingIo {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("injected write failure"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn staged_output_enforces_public_payload_and_io_contracts() -> TestResult {
+    let payload = b"complete";
+    let output_digest = payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", payload);
+    for (byte_length, digest, mut input) in [
+        (128 * 1024 * 1024 + 1, output_digest, payload.as_slice()),
+        (9, output_digest, payload.as_slice()),
+        (7, output_digest, payload.as_slice()),
+        (
+            payload.len() as u64,
+            payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", b"different"),
+            payload.as_slice(),
+        ),
+    ] {
+        assert!(matches!(
+            StagedOutput::stage_verified(
+                &mut input,
+                PayloadDescriptor {
+                    byte_length,
+                    digest,
+                },
+            ),
+            Err(RootSelectorServiceError::ProviderEvidence)
+        ));
+    }
+
+    assert!(matches!(
+        StagedOutput::stage_verified(
+            &mut FailingIo,
+            PayloadDescriptor {
+                byte_length: 1,
+                digest: output_digest,
+            },
+        ),
+        Err(RootSelectorServiceError::Io)
+    ));
+
+    let mut staged = staged_output(payload)?;
+    assert_eq!(staged.descriptor().byte_length, payload.len() as u64);
+    assert!(matches!(
+        staged.copy_to(&mut FailingIo),
+        Err(RootSelectorServiceError::Io)
+    ));
+    Ok(())
+}
+
 struct PairConnector(Vec<UnixStream>);
 
 impl ProviderConnector for PairConnector {
