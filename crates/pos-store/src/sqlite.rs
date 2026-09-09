@@ -5111,10 +5111,11 @@ fn sqlite_fork_admission_is_exact(
             )
             .optional()
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let expected_digest = mutation.next_manifest().digest().digest();
         let exact_manifest = manifest.is_some_and(|(digest, bytes)| {
             (digest.as_slice(), bytes.as_slice())
                 == (
-                    mutation.next_manifest().digest().digest(),
+                    expected_digest.as_slice(),
                     mutation.next_manifest().canonical_cbor(),
                 )
         });
