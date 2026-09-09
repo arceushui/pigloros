@@ -3533,7 +3533,7 @@ mod tests {
         assert!(matches!(error, GatewayError::AuthorizationUnavailable));
         assert!(audit_host.audits().await.is_empty());
         assert!(gateway
-            .poll_events(&timeline.id().to_string(), 0, 1)
+            .read_events_page(&timeline.id().to_string(), 0, 1)
             .await
             .test_ok()
             .events
