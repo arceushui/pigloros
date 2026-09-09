@@ -2081,6 +2081,39 @@ fn local_errors_round_trip_every_legal_phase_and_failure_code() -> TestResult {
 }
 
 #[test]
+fn payload_ceiling_errors_preserve_only_decoded_identities() -> TestResult {
+    for (operation, request_id, attempt_id) in [
+        (None, None, None),
+        (
+            Some(SandboxProviderOperationV1::Execute),
+            Some([1; 16]),
+            None,
+        ),
+        (
+            Some(SandboxProviderOperationV1::Execute),
+            Some([1; 16]),
+            Some([2; 16]),
+        ),
+    ] {
+        let error = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
+            operation,
+            request_id,
+            attempt_id,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::PayloadLimitExceeded,
+            safe_detail: None,
+        };
+        let bytes = error.to_canonical_cbor()?;
+        assert_eq!(SandboxLocalErrorV1::from_canonical_cbor(&bytes)?, error);
+        let decoded = independent::SandboxLocalError::from_canonical_cbor(&bytes)?;
+        assert_eq!(decoded.request_id, request_id);
+        assert_eq!(decoded.attempt_id, attempt_id);
+    }
+    Ok(())
+}
+
+#[test]
 fn local_errors_reject_codes_from_another_phase() {
     for (phase, code, admitted) in [
         (
