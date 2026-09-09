@@ -2316,6 +2316,7 @@ impl Gateway {
             .await
     }
 
+    #[cfg(test)]
     async fn ensure_timeline_exists(&self, timeline: TimelineId) -> Result<(), GatewayError> {
         match self.store.timeline(timeline).await {
             Ok(Some(_)) => Ok(()),
