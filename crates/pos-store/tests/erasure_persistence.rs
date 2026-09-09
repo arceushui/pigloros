@@ -1485,11 +1485,14 @@ fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_fork_retry_rejects_invalid_receipt_values() -> Result<(), Box<dyn std::error::Error>> {
-    for assignment in [
-        "binding_digest=X'00'",
-        "successor_generation=X'00'",
-        "receipt_digest=X'00'",
-        "fork_seq=-1",
+    for (assignment, expected) in [
+        ("binding_digest=X'00'", ErasureErrorV1::ProvenanceMissing),
+        (
+            "successor_generation=X'00'",
+            ErasureErrorV1::ProvenanceMissing,
+        ),
+        ("receipt_digest=X'00'", ErasureErrorV1::ProvenanceMissing),
+        ("fork_seq=-1", ErasureErrorV1::PolicyConflict),
     ] {
         assert_sqlite_fork_retry_corruption_error(
             |connection, prepared| {
@@ -1502,7 +1505,7 @@ fn sqlite_fork_retry_rejects_invalid_receipt_values() -> Result<(), Box<dyn std:
                     rusqlite::params![prepared.operation().digest().as_slice()],
                 )
             },
-            ErasureErrorV1::PolicyConflict,
+            expected,
         )?;
     }
     Ok(())
