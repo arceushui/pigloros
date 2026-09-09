@@ -311,6 +311,22 @@ mod tests {
     #[test]
     fn poisoned_host_denies_every_ledger_adapter_operation(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let request = KeyDestructionRequestV1::new(
+            identity,
+            Hash::from_bytes([1; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        let registry = KeyRegistryStateV1::new();
+        let mut missing_timeline = HostedLedgerStore::open(pos_store::StoreConfig::Memory)?;
+        assert!(missing_timeline.save_key_registry(&registry).is_err());
+        assert!(missing_timeline
+            .begin_key_registry_destruction(request)
+            .is_err());
+        assert!(missing_timeline
+            .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request),)
+            .is_err());
+
         let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             pos_store::StoreConfig::Memory,
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
@@ -327,17 +343,15 @@ mod tests {
             Kind::new("ledger.adapter.denied"),
             CanonicalBytes::from_vec(Vec::new()),
         );
-        let registry = KeyRegistryStateV1::new();
-        let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
-        let request = KeyDestructionRequestV1::new(
-            identity,
-            Hash::from_bytes([1; 32]),
-            Hash::from_bytes([2; 32]),
-        );
         let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
             Err(CoreError::Storage("callback must not run".to_owned()))
         };
         let mut store = HostedLedgerStore::from_host(host);
+        assert!(store.save_key_registry(&registry).is_err());
+        assert!(store.begin_key_registry_destruction(request).is_err());
+        assert!(store
+            .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request),)
+            .is_err());
         store.ledger_timeline = Some(timeline);
 
         assert!(store.create_timeline("denied").is_err());
