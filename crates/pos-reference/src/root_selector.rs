@@ -11,6 +11,7 @@ use rustix::net::sockopt::socket_peercred;
 
 use crate::evaluator::CaseAttempt;
 use crate::evaluator_protocol::{EvaluationRequest, SandboxRequirement};
+use crate::provider_transport::StagedOutput;
 use crate::sandbox_provider_protocol::{
     ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor, RequestAuthority,
     RootSelectorAdmission, RootSelectorAdmissionInputs, SandboxAdministratorPolicy,
@@ -132,7 +133,7 @@ pub trait RootSelectorAuthoritySource {
 }
 
 /// Exact provider evidence returned to the root selector.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum RootSelectorProviderReply {
     /// AGR1 admission followed by complete authenticated lifecycle evidence.
     Admitted {
@@ -144,8 +145,8 @@ pub enum RootSelectorProviderReply {
         result: Vec<u8>,
         /// Exact ordered signed SAU1 records.
         audit: Vec<Vec<u8>>,
-        /// Exact framed EAO1 stream, present only for Completed.
-        output_stream: Option<Vec<u8>>,
+        /// Incrementally staged exact framed EAO1 stream, present only for Completed.
+        output: Option<StagedOutput>,
     },
     /// Authenticated Rejected or `UnavailableBeforeAdmission` SPY1.
     BeforeAdmission {
@@ -156,6 +157,16 @@ pub enum RootSelectorProviderReply {
     Error {
         /// Exact signed SPE1 bytes.
         error: Vec<u8>,
+    },
+    /// Both the original and sole exact recovery stream ended before a terminal.
+    Incomplete {
+        /// Authenticated AGR1 digest retained across the replay, when admission occurred.
+        agr1_digest: Option<[u8; 32]>,
+    },
+    /// Provider framing or evidence was invalid; a retained AGR1 fixes its phase.
+    EvidenceInvalid {
+        /// Authenticated AGR1 digest retained across the failed stream, when present.
+        agr1_digest: Option<[u8; 32]>,
     },
 }
 
@@ -170,6 +181,7 @@ pub trait RootSelectorProvider {
         request: &crate::sandbox_provider_protocol::SandboxExecuteRequest,
         input_stream: &[u8],
         watchdog: Duration,
+        admission: &RootSelectorAdmission,
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError>;
 }
 
@@ -213,7 +225,7 @@ struct AdmittedProviderReply {
     receipt: Vec<u8>,
     result: Vec<u8>,
     audit: Vec<Vec<u8>>,
-    output_stream: Option<Vec<u8>>,
+    output: Option<StagedOutput>,
 }
 
 impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer<A, P> {
@@ -280,7 +292,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 let control = error
                     .to_canonical_cbor()
                     .map_err(|_| RootSelectorServiceError::Io)?;
-                return write_selector_response(stream, &control, &[]);
+                return write_selector_response(stream, &control, None);
             }
         };
         let Some(requirement) = decoded.evaluation.sandbox_requirement.as_ref() else {
@@ -327,6 +339,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             &execute_request,
             &decoded.encoded.attempt_stream,
             Duration::from_millis(decoded.attempt.watchdog_ms),
+            &admission,
         );
         Self::write_provider_reply(
             stream,
@@ -458,16 +471,16 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 receipt,
                 result,
                 audit,
-                output_stream,
+                output,
             } => Self::write_admitted_reply(
                 stream,
                 &context,
-                &AdmittedProviderReply {
+                AdmittedProviderReply {
                     grant,
                     receipt,
                     result,
                     audit,
-                    output_stream,
+                    output,
                 },
             ),
             RootSelectorProviderReply::BeforeAdmission { result } => {
@@ -495,8 +508,9 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                             receipt: None,
                             audit: &[],
                         },
-                        output_stream: None,
+                        output: None,
                     },
+                    None,
                 )
             }
             RootSelectorProviderReply::Error { error } => {
@@ -519,17 +533,40 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                     &AuthenticatedSelectorReply {
                         execute_request: context.request_bytes,
                         terminal: AuthenticatedSelectorTerminal::ProviderError(&error),
-                        output_stream: None,
+                        output: None,
                     },
+                    None,
                 )
             }
+            RootSelectorProviderReply::Incomplete { agr1_digest } => Self::write_local_error(
+                stream,
+                context.decoded,
+                agr1_digest.map_or(SandboxLocalErrorPhase::AfterSpx1BeforeAdmission, |_| {
+                    SandboxLocalErrorPhase::AfterAdmission
+                }),
+                if agr1_digest.is_some() {
+                    SandboxLocalErrorCode::ProviderTerminalUnavailable
+                } else {
+                    SandboxLocalErrorCode::ProviderUnavailable
+                },
+                agr1_digest,
+            ),
+            RootSelectorProviderReply::EvidenceInvalid { agr1_digest } => Self::write_local_error(
+                stream,
+                context.decoded,
+                agr1_digest.map_or(SandboxLocalErrorPhase::AfterSpx1BeforeAdmission, |_| {
+                    SandboxLocalErrorPhase::AfterAdmission
+                }),
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                agr1_digest,
+            ),
         }
     }
 
     fn write_admitted_reply(
         stream: &mut UnixStream,
         context: &ProviderResponseContext<'_>,
-        reply: &AdmittedProviderReply,
+        mut reply: AdmittedProviderReply,
     ) -> Result<(), RootSelectorServiceError> {
         let Ok(grant_record) = context
             .admission
@@ -560,7 +597,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 Some(grant_digest),
             );
         };
-        if !output_matches(authenticated.result(), reply.output_stream.as_deref()) {
+        if !output_matches(authenticated.result(), reply.output.as_ref()) {
             return Self::write_local_error(
                 stream,
                 context.decoded,
@@ -569,6 +606,10 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 Some(grant_digest),
             );
         }
+        let output_descriptor = reply
+            .output
+            .as_ref()
+            .map(|output| output.descriptor().clone());
         Self::write_authenticated_reply(
             stream,
             context.decoded,
@@ -580,8 +621,9 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                     receipt: Some(&reply.receipt),
                     audit: &reply.audit,
                 },
-                output_stream: reply.output_stream.as_deref(),
+                output: output_descriptor.as_ref(),
             },
+            reply.output.as_mut(),
         )
     }
 
@@ -589,10 +631,11 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         stream: &mut UnixStream,
         decoded: &DecodedSelectorRequest,
         reply: &AuthenticatedSelectorReply<'_>,
+        output: Option<&mut StagedOutput>,
     ) -> Result<(), RootSelectorServiceError> {
-        let (control, trailing) = encode_authenticated_reply(&decoded.encoded, reply)
+        let control = encode_authenticated_reply(&decoded.encoded, reply)
             .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
-        write_selector_response(stream, &control, &trailing)
+        write_selector_response(stream, &control, output)
     }
 
     fn write_local_error(
@@ -614,7 +657,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         let control = error
             .to_canonical_cbor()
             .map_err(|_| RootSelectorServiceError::Io)?;
-        write_selector_response(stream, &control, &[])
+        write_selector_response(stream, &control, None)
     }
 }
 
@@ -690,12 +733,11 @@ fn validate_execute_authority(
 
 fn output_matches(
     result: &crate::sandbox_provider_protocol::SandboxProviderResult,
-    output: Option<&[u8]>,
+    output: Option<&StagedOutput>,
 ) -> bool {
     match (result.outcome, result.output.as_ref(), output) {
-        (SandboxTerminalOutcome::Completed, Some(descriptor), Some(bytes)) => {
-            descriptor.byte_length == bytes.len() as u64
-                && descriptor.digest == sandbox_output_digest(bytes)
+        (SandboxTerminalOutcome::Completed, Some(descriptor), Some(output)) => {
+            descriptor == output.descriptor()
         }
         (
             SandboxTerminalOutcome::Cancelled | SandboxTerminalOutcome::UnavailableAfterAdmission,
@@ -709,22 +751,18 @@ fn output_matches(
 fn write_selector_response(
     stream: &mut UnixStream,
     control: &[u8],
-    trailing: &[u8],
+    output: Option<&mut StagedOutput>,
 ) -> Result<(), RootSelectorServiceError> {
     let length = u32::try_from(control.len()).map_err(|_| RootSelectorServiceError::Io)?;
     stream
         .write_all(&length.to_be_bytes())
         .and_then(|()| stream.write_all(control))
-        .and_then(|()| stream.write_all(trailing))
         .map_err(|_| RootSelectorServiceError::Io)
+        .and_then(|()| output.map_or(Ok(()), |output| output.copy_to(stream)))
 }
 
 fn sandbox_input_digest(bytes: &[u8]) -> [u8; 32] {
     domain_digest(b"PiglorOS.SandboxInputBytes.v1\0", bytes)
-}
-
-fn sandbox_output_digest(bytes: &[u8]) -> [u8; 32] {
-    domain_digest(b"PiglorOS.SandboxOutputBytes.v1\0", bytes)
 }
 
 fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
