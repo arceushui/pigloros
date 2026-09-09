@@ -2299,15 +2299,12 @@ impl Gateway {
         match self.action_registry.submit_action(timeline, proposal) {
             Ok(draft) => Ok(draft),
             Err(pos_runtime::ActionSubmissionError::Rejected(error)) => Err(error.into()),
-            Err(pos_runtime::ActionSubmissionError::ErasureContainment(
-                pos_core::ErasureContainmentErrorV1::AccessFrozen,
-            )) => Err(CoreError::ErasureAccessFrozen.into()),
-            Err(
-                pos_runtime::ActionSubmissionError::ErasureOperationUnavailable
-                | pos_runtime::ActionSubmissionError::ErasureContainment(
-                    pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
-                ),
-            ) => Err(CoreError::ErasureContainmentUnavailable.into()),
+            Err(pos_runtime::ActionSubmissionError::ErasureOperationUnavailable) => {
+                Err(CoreError::ErasureContainmentUnavailable.into())
+            }
+            Err(pos_runtime::ActionSubmissionError::ErasureContainment(error)) => {
+                Err(pos_core::store::erasure_containment_error(error).into())
+            }
         }
     }
 
