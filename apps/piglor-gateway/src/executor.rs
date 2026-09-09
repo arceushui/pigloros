@@ -365,7 +365,7 @@ enum Command {
         maximum: Option<u64>,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
-    Action(ActionCommand),
+    Action(Box<ActionCommand>),
     AppendConsentGrant {
         timeline: TimelineId,
         grant: ConsentGrantedV1,
@@ -1476,7 +1476,7 @@ impl StoreExecutor {
         let lifecycle = Arc::new(CommandLifecycle::new());
         let (reply, result) = oneshot::channel();
         let submission = self.try_submit(
-            Command::Action(ActionCommand::Submit {
+            Command::Action(Box::new(ActionCommand::Submit {
                 timeline,
                 registry,
                 proposal,
@@ -1484,7 +1484,7 @@ impl StoreExecutor {
                 decision,
                 maximum,
                 reply,
-            }),
+            })),
             deadline,
             Arc::clone(&lifecycle),
         );
@@ -1507,7 +1507,7 @@ impl StoreExecutor {
         let lifecycle = Arc::new(CommandLifecycle::new());
         let (reply, result) = oneshot::channel();
         let submission = self.try_submit(
-            Command::Action(ActionCommand::SubmitIdentified {
+            Command::Action(Box::new(ActionCommand::SubmitIdentified {
                 timeline,
                 registry,
                 proposal,
@@ -1516,7 +1516,7 @@ impl StoreExecutor {
                 identity,
                 maximum,
                 reply,
-            }),
+            })),
             deadline,
             Arc::clone(&lifecycle),
         );
@@ -1914,7 +1914,7 @@ fn expire_command(command: Command) {
         Command::Append { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::Action(command) => command.expire(),
+        Command::Action(command) => (*command).expire(),
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -2081,7 +2081,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             maximum,
             reply,
         } => execute_append_command(state, timeline, &drafts, maximum, reply),
-        Command::Action(command) => command.execute(state),
+        Command::Action(command) => (*command).execute(state),
         Command::AppendConsentGrant {
             timeline,
             grant,
@@ -3766,7 +3766,7 @@ mod tests {
         let registry = Arc::new(PluginRegistry::new());
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired_action(
-            Command::Action(ActionCommand::Submit {
+            Command::Action(Box::new(ActionCommand::Submit {
                 timeline,
                 registry: Arc::clone(&registry),
                 proposal: proposal.clone(),
@@ -3774,13 +3774,13 @@ mod tests {
                 decision: decision.clone(),
                 maximum: 1,
                 reply,
-            }),
+            })),
             receiver,
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired_action(
-            Command::Action(ActionCommand::SubmitIdentified {
+            Command::Action(Box::new(ActionCommand::SubmitIdentified {
                 timeline,
                 registry,
                 proposal,
@@ -3792,7 +3792,7 @@ mod tests {
                 ),
                 maximum: 1,
                 reply,
-            }),
+            })),
             receiver,
         );
         Ok(())
