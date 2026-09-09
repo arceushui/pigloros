@@ -3283,6 +3283,7 @@ fn root_selector_rejects_an_actual_payload_stream_over_the_hard_limit() -> TestR
     let server_thread = thread::spawn(move || server.serve_once(&listener));
     let mut client = UnixStream::connect(&socket)?;
     client.set_write_timeout(Some(Duration::from_secs(15)))?;
+    client.set_read_timeout(Some(Duration::from_secs(15)))?;
     client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
     client.write_all(&control)?;
     for _ in 0..(128 * 1024 * 1024 / CHUNK.len()) {
