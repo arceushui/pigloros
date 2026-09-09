@@ -78,16 +78,15 @@ fn rewrite_recovery_fields(
     let mut fields = array(&wrapper[0], 9)?.to_vec();
     mutate(&mut fields)?;
     let unsigned = Value::Array(fields);
+    let mut unsigned_bytes = Vec::new();
+    ciborium::into_writer(&unsigned, &mut unsigned_bytes)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.SIR1.v1\0");
-    hasher.update(&encode(&unsigned)?);
-    replace_recovery(
-        fixture,
-        &encode(&Value::Array(vec![
-            unsigned,
-            bytes(*hasher.finalize().as_bytes()),
-        ]))?,
-    )
+    hasher.update(&unsigned_bytes);
+    let wrapper = Value::Array(vec![unsigned, bytes(*hasher.finalize().as_bytes())]);
+    let mut envelope = Vec::new();
+    ciborium::into_writer(&wrapper, &mut envelope)?;
+    replace_recovery(fixture, &envelope)
 }
 
 fn mutable_array(value: &mut Value) -> Result<&mut Vec<Value>, ProtocolError> {
