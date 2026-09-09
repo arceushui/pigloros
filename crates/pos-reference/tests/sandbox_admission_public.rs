@@ -1231,10 +1231,12 @@ where
     let server_thread = thread::spawn(move || server.serve_once(&listener));
     let (control, attempt_stream) = selector_client_request(request, attempt, 0)?;
     let mut client = UnixStream::connect(&socket)?;
-    client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
-    client.write_all(&control)?;
-    client.write_all(&attempt_stream)?;
-    client.shutdown(std::net::Shutdown::Write)?;
+    if evaluator_uid_offset == 0 {
+        client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
+        client.write_all(&control)?;
+        client.write_all(&attempt_stream)?;
+        client.shutdown(std::net::Shutdown::Write)?;
+    }
     let mut response = Vec::new();
     if let Err(error) = client.read_to_end(&mut response) {
         if error.kind() != std::io::ErrorKind::ConnectionReset {
