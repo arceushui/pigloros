@@ -9,14 +9,16 @@ struct HostedCliStore {
 
 impl HostedCliStore {
     fn open(config: pos_store::StoreConfig) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        let host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+        pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             config,
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
-        )?;
-        let gate = host.containment_gate();
-        Ok(Self {
-            host: std::sync::Mutex::new(host),
-            gate,
+        )
+        .map(|host| {
+            let gate = host.containment_gate();
+            Self {
+                host: std::sync::Mutex::new(host),
+                gate,
+            }
         })
     }
 
@@ -26,11 +28,10 @@ impl HostedCliStore {
             &mut pos_runtime::ErasureExecutionHostV1,
         ) -> Result<T, pos_core::ErasureHostErrorV1>,
     ) -> Result<T, pos_core::CoreError> {
-        let mut host = self
-            .host
+        self.host
             .lock()
-            .map_err(|_| pos_core::CoreError::ErasureContainmentUnavailable)?;
-        operation(&mut host).map_err(hosted_cli_store_error)
+            .map_err(|_| pos_core::CoreError::ErasureContainmentUnavailable)
+            .and_then(|mut host| operation(&mut host).map_err(hosted_cli_store_error))
     }
 }
 
@@ -47,7 +48,10 @@ impl pos_core::store::EventStore for HostedCliStore {
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<pos_core::Timeline, pos_core::CoreError> {
-        self.with_host(|host| host.command_sender()?.create_timeline(name))
+        self.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline(name))
+        })
     }
 
     fn append(
@@ -55,7 +59,10 @@ impl pos_core::store::EventStore for HostedCliStore {
         timeline: pos_core::TimelineId,
         drafts: &[pos_core::EventDraft],
     ) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
-        self.with_host(|host| host.command_sender()?.append(timeline, drafts))
+        self.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.append(timeline, drafts))
+        })
     }
 
     fn read(
@@ -76,7 +83,10 @@ impl pos_core::store::EventStore for HostedCliStore {
         range: pos_core::store::SeqRange,
         bounds: pos_core::store::EventReadBounds,
     ) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
-        self.with_host(|host| host.read_sender()?.read_bounded(timeline, range, bounds))
+        self.with_host(|host| {
+            host.read_sender()
+                .and_then(|mut sender| sender.read_bounded(timeline, range, bounds))
+        })
     }
 
     fn fork(
@@ -85,29 +95,41 @@ impl pos_core::store::EventStore for HostedCliStore {
         at_seq: pos_core::Seq,
         name: &str,
     ) -> Result<pos_core::Timeline, pos_core::CoreError> {
-        self.with_host(|host| host.command_sender()?.fork_timeline(parent, at_seq, name))
+        self.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.fork_timeline(parent, at_seq, name))
+        })
     }
 
     fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, pos_core::CoreError> {
-        self.with_host(|host| host.read_sender()?.timelines())
+        self.with_host(|host| host.read_sender().and_then(|mut sender| sender.timelines()))
     }
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, pos_core::CoreError> {
-        self.with_host(|host| host.read_sender()?.root_timeline_count_bounded(maximum))
+        self.with_host(|host| {
+            host.read_sender()
+                .and_then(|mut sender| sender.root_timeline_count_bounded(maximum))
+        })
     }
 
     fn get_timeline(
         &self,
         timeline: pos_core::TimelineId,
     ) -> Result<Option<pos_core::Timeline>, pos_core::CoreError> {
-        self.with_host(|host| host.read_sender()?.timeline(timeline))
+        self.with_host(|host| {
+            host.read_sender()
+                .and_then(|mut sender| sender.timeline(timeline))
+        })
     }
 
     fn logical_head(
         &self,
         timeline: pos_core::TimelineId,
     ) -> Result<pos_core::Seq, pos_core::CoreError> {
-        self.with_host(|host| host.read_sender()?.logical_head(timeline))
+        self.with_host(|host| {
+            host.read_sender()
+                .and_then(|mut sender| sender.logical_head(timeline))
+        })
     }
 }
 

@@ -10,14 +10,16 @@ struct HostedExperimentStore {
 
 impl HostedExperimentStore {
     fn open(config: pos_store::StoreConfig) -> Result<Self, ErasureHostErrorV1> {
-        let host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+        pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             config,
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
-        )?;
-        let gate = host.containment_gate();
-        Ok(Self {
-            host: Mutex::new(host),
-            gate,
+        )
+        .map(|host| {
+            let gate = host.containment_gate();
+            Self {
+                host: Mutex::new(host),
+                gate,
+            }
         })
     }
 
@@ -31,11 +33,10 @@ impl HostedExperimentStore {
             &mut pos_runtime::ErasureExecutionHostV1,
         ) -> Result<T, ErasureHostErrorV1>,
     ) -> Result<T, CoreError> {
-        let mut host = self
-            .host
+        self.host
             .lock()
-            .map_err(|_| CoreError::ErasureContainmentUnavailable)?;
-        operation(&mut host).map_err(host_error)
+            .map_err(|_| CoreError::ErasureContainmentUnavailable)
+            .and_then(|mut host| operation(&mut host).map_err(host_error))
     }
 }
 
@@ -49,7 +50,10 @@ impl EventStore for HostedExperimentStore {
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
-        self.with_host(|host| host.command_sender()?.create_timeline(name))
+        self.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline(name))
+        })
     }
 
     fn append(
@@ -57,7 +61,10 @@ impl EventStore for HostedExperimentStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
-        self.with_host(|host| host.command_sender()?.append(timeline, drafts))
+        self.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.append(timeline, drafts))
+        })
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -74,23 +81,35 @@ impl EventStore for HostedExperimentStore {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        self.with_host(|host| host.read_sender()?.read_bounded(timeline, range, bounds))
+        self.with_host(|host| {
+            host.read_sender()
+                .and_then(|mut sender| sender.read_bounded(timeline, range, bounds))
+        })
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
-        self.with_host(|host| host.command_sender()?.fork_timeline(parent, at_seq, name))
+        self.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.fork_timeline(parent, at_seq, name))
+        })
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-        self.with_host(|host| host.read_sender()?.timelines())
+        self.with_host(|host| host.read_sender().and_then(|mut sender| sender.timelines()))
     }
 
     fn get_timeline(&self, timeline: TimelineId) -> Result<Option<Timeline>, CoreError> {
-        self.with_host(|host| host.read_sender()?.timeline(timeline))
+        self.with_host(|host| {
+            host.read_sender()
+                .and_then(|mut sender| sender.timeline(timeline))
+        })
     }
 
     fn logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
-        self.with_host(|host| host.read_sender()?.logical_head(timeline))
+        self.with_host(|host| {
+            host.read_sender()
+                .and_then(|mut sender| sender.logical_head(timeline))
+        })
     }
 }
 
