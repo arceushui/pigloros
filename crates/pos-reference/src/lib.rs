@@ -26,7 +26,10 @@ pub mod root_selector;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
-mod selector_protocol;
+// Keep the namespace reachable to satisfy both `unreachable_pub` and
+// `redundant_pub_crate`; its items remain crate-only, not a public wire API.
+#[doc(hidden)]
+pub mod selector_protocol;
 pub mod signed_bundle;
 
 /// Divergence classes emitted by the independent JSON evaluator.

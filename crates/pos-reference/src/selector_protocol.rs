@@ -23,28 +23,28 @@ const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
 const SLY1_DOMAIN: &[u8] = b"PiglorOS.SLY1.v1\0";
 
-pub(super) struct EncodedSelectorRequest {
-    pub(super) control: Vec<u8>,
-    pub(super) attempt_stream: Vec<u8>,
-    pub(super) provider_request_id: [u8; 16],
-    pub(super) attempt_id: [u8; 16],
-    pub(super) digest: [u8; 32],
+pub(crate) struct EncodedSelectorRequest {
+    pub(crate) control: Vec<u8>,
+    pub(crate) attempt_stream: Vec<u8>,
+    pub(crate) provider_request_id: [u8; 16],
+    pub(crate) attempt_id: [u8; 16],
+    pub(crate) digest: [u8; 32],
 }
 
-pub(super) struct DecodedSelectorRequest {
-    pub(super) evaluation: EvaluationRequest,
-    pub(super) attempt: CaseAttempt,
-    pub(super) ordinal: u16,
-    pub(super) encoded: EncodedSelectorRequest,
+pub(crate) struct DecodedSelectorRequest {
+    pub(crate) evaluation: EvaluationRequest,
+    pub(crate) attempt: CaseAttempt,
+    pub(crate) ordinal: u16,
+    pub(crate) encoded: EncodedSelectorRequest,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct DecodedSelectorReply {
-    pub(super) observation: Result<SubjectObservation, AdapterError>,
-    pub(super) provenance: Option<[u8; 32]>,
+pub(crate) struct DecodedSelectorReply {
+    pub(crate) observation: Result<SubjectObservation, AdapterError>,
+    pub(crate) provenance: Option<[u8; 32]>,
 }
 
-pub(super) enum AuthenticatedSelectorTerminal<'a> {
+pub(crate) enum AuthenticatedSelectorTerminal<'a> {
     ProviderResult {
         result: &'a [u8],
         grant: Option<&'a [u8]>,
@@ -54,13 +54,13 @@ pub(super) enum AuthenticatedSelectorTerminal<'a> {
     ProviderError(&'a [u8]),
 }
 
-pub(super) struct AuthenticatedSelectorReply<'a> {
-    pub(super) execute_request: &'a [u8],
-    pub(super) terminal: AuthenticatedSelectorTerminal<'a>,
-    pub(super) output_stream: Option<&'a [u8]>,
+pub(crate) struct AuthenticatedSelectorReply<'a> {
+    pub(crate) execute_request: &'a [u8],
+    pub(crate) terminal: AuthenticatedSelectorTerminal<'a>,
+    pub(crate) output_stream: Option<&'a [u8]>,
 }
 
-pub(super) fn encode_request(
+pub(crate) fn encode_request(
     request: &EvaluationRequest,
     request_bytes: &[u8],
     attempt: &CaseAttempt,
@@ -103,7 +103,7 @@ pub(super) fn encode_request(
 }
 
 /// Retain only preferred-encoded identity fields, even if later bytes are invalid.
-pub(super) fn request_identities(control: &[u8], failure: &mut SandboxLocalError) {
+pub(crate) fn request_identities(control: &[u8], failure: &mut SandboxLocalError) {
     let Some(fields) = control.strip_prefix(b"\x82\x86\x64SLX1") else {
         return;
     };
@@ -132,7 +132,7 @@ fn decoded_nonzero_id(bytes: &[u8]) -> Option<[u8; 16]> {
 }
 
 /// Validate the complete control record before receiving its declared payload.
-pub(super) fn request_payload_length(control: &[u8]) -> Result<u64, SandboxLocalErrorCode> {
+pub(crate) fn request_payload_length(control: &[u8]) -> Result<u64, SandboxLocalErrorCode> {
     let invalid = SandboxLocalErrorCode::InvalidSelectorRequest;
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT).map_err(|_| invalid)?;
     let wrapper = array(&value, 2).map_err(|_| invalid)?;
@@ -160,7 +160,7 @@ pub(super) fn request_payload_length(control: &[u8]) -> Result<u64, SandboxLocal
     Ok(length)
 }
 
-pub(super) fn decode_request(
+pub(crate) fn decode_request(
     control: &[u8],
     attempt_stream: &[u8],
 ) -> Result<DecodedSelectorRequest, AdapterError> {
@@ -216,7 +216,7 @@ pub(super) fn decode_request(
     })
 }
 
-pub(super) fn decode_reply(
+pub(crate) fn decode_reply(
     control: &[u8],
     trailing: &[u8],
     request: &EncodedSelectorRequest,
@@ -231,7 +231,7 @@ pub(super) fn decode_reply(
     decode_selector_reply(&value, trailing, request, evr1_digest, output_limit)
 }
 
-pub(super) fn encode_authenticated_reply(
+pub(crate) fn encode_authenticated_reply(
     request: &EncodedSelectorRequest,
     reply: &AuthenticatedSelectorReply<'_>,
 ) -> Result<(Vec<u8>, Vec<u8>), AdapterError> {
@@ -531,7 +531,7 @@ fn require_absent_evidence(fields: &[Value], trailing: &[u8]) -> Result<(), Adap
     }
 }
 
-pub(super) fn derived_id(mut namespace: [u8; 16], ordinal: u16) -> [u8; 16] {
+pub(crate) fn derived_id(mut namespace: [u8; 16], ordinal: u16) -> [u8; 16] {
     namespace[14..].copy_from_slice(&ordinal.to_be_bytes());
     namespace
 }
