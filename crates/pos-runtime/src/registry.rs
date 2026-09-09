@@ -2396,7 +2396,7 @@ impl PluginRegistry {
         Self::validate_approver_payload(&draft).map(|()| draft)
     }
 
-    fn validate_approver_payload(draft: &EventDraft) -> Result<(), ActionRejected> {
+    const fn validate_approver_payload(draft: &EventDraft) -> Result<(), ActionRejected> {
         if draft.payload.len() > MAX_PROPOSED_ACTION_PAYLOAD_BYTES {
             Err(ActionRejected::PayloadTooLarge {
                 size: draft.payload.len(),
