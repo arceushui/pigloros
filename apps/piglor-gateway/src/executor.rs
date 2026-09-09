@@ -59,9 +59,11 @@ macro_rules! submit {
 mod lifecycle_coverage_tests {
     use super::{
         host_error_to_core, worker_loop, worker_loop_with_runtime, Command, CommandClass,
-        CommandEnvelope, CommandLifecycle, ExecutorStore, LifecycleState,
+        CommandEnvelope, CommandLifecycle, ExecutorStore, LifecycleState, StoreExecutor,
     };
-    use pos_core::{CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
+    use pos_core::{
+        ConsentAuthority, CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS,
+    };
     use pos_runtime::ErasureExecutionHostV1;
     use pos_store::memory::MemoryStore;
     use std::sync::{Arc, Mutex};
@@ -145,6 +147,26 @@ mod lifecycle_coverage_tests {
         ] {
             assert!(matches!(host_error_to_core(error), CoreError::Storage(_)));
         }
+
+        let closed =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(StoreExecutor::new_with_erasure_host(
+            closed,
+            ConsentAuthority::new().append_permit(),
+        )
+        .is_err());
+
+        let closed_gateway = ErasureExecutionHostV1::new_gateway_closed(Box::new(
+            MemoryStore::new().without_erasure_gate(),
+        ))
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(StoreExecutor::new_with_owntracks_erasure_host(
+            closed_gateway,
+            [0; 32],
+            ConsentAuthority::new().append_permit(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -2350,6 +2372,39 @@ mod tests {
                 if message == "event limit reached"
         ));
         assert_eq!(*rejected_calls.lock().test_ok()?, vec![(timeline, 1, 23)]);
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_append_command(&mut rejected_state, timeline, &drafts[..1], None, reply);
+        assert!(matches!(
+            result.blocking_recv().test_ok()?,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "ordinary append must not be called when a ceiling is supplied"
+        ));
+
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        let hosted_timeline = host
+            .command_sender()?
+            .create_timeline("unbounded-host-append")?
+            .id();
+        let mut hosted_state = ExecutorState {
+            store: ExecutorStore::Host(host),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_append_command(
+            &mut hosted_state,
+            hosted_timeline,
+            &drafts[..1],
+            None,
+            reply,
+        );
+        assert_eq!(result.blocking_recv().test_ok()?.test_ok()?.len(), 1);
 
         Ok(())
     }
@@ -5409,6 +5464,16 @@ mod tests {
                 buckets: HashMap::new(),
             },
         };
+        let error = prepare_owntracks_ingress(
+            &mut state,
+            [1; 32],
+            [2; 32],
+            CanonicalBytes::from_static(b"payload"),
+        )
+        .test_err()?;
+        assert!(matches!(error, CoreError::GeographicAdmissionUnavailable));
+
+        state.owntracks_owner_key = Some([3; 32]);
         let error = prepare_owntracks_ingress(
             &mut state,
             [1; 32],

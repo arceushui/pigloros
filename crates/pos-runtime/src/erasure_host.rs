@@ -1128,6 +1128,20 @@ mod tests {
             ErasureExecutionHostV1::new_closed(Box::new(fault_store(FaultModeV1::BindGate))),
             Err(ErasureHostErrorV1::AdapterFailure)
         ));
+        assert!(ErasureExecutionHostV1::new_gateway_closed(Box::new(
+            MemoryStore::new().without_erasure_gate(),
+        ))
+        .is_ok());
+        let mut prebound_gateway = MemoryStore::new().without_erasure_gate();
+        assert!(pos_core::store::EventStore::bind_erasure_gate(
+            &mut prebound_gateway,
+            Arc::new(ErasureContainmentGateV1::new()),
+        )
+        .is_ok());
+        assert!(matches!(
+            ErasureExecutionHostV1::new_gateway_closed(Box::new(prebound_gateway)),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        ));
     }
 
     #[test]
@@ -1312,6 +1326,18 @@ mod tests {
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let stale = ErasureReferenceV1::from_digest([32; 32]);
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("stale.sender"),
+            CanonicalBytes::from_static(b"stale"),
+        );
+        let identity = AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([41; 32]),
+            AppendDedupScope::from_keyed_hash([42; 32]),
+        );
+        let intent = AppendIntent::new(&draft);
+        let cleanup_scope = AppendDedupScope::from_keyed_hash([43; 32]);
+        let authority = ConsentAuthority::new();
 
         {
             let mut sender = host
@@ -1338,6 +1364,48 @@ mod tests {
                 sender.append(root.id(), &[]),
                 Err(ErasureHostErrorV1::StaleGeneration)
             );
+            assert_eq!(
+                sender.append_bounded(root.id(), &[], 1),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.append_consent_bounded(root.id(), &[], authority.append_permit(), 1),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.append_consent_revocation_bounded(
+                    root.id(),
+                    &[],
+                    authority.append_permit(),
+                    1,
+                    cleanup_scope,
+                ),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.append_intent_or_duplicate_bounded(root.id(), identity, intent, 1),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.purge_expired_append_identities_bounded(NonZeroUsize::MIN),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.remove_append_identities_bounded(cleanup_scope, NonZeroUsize::MIN),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.pending_append_identity_cleanup(),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.prepare_owntracks_ingress(owntracks_input()),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.admit_geo_location(geo_request(root.id())),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
         }
 
         let mut reader = host
@@ -1359,6 +1427,14 @@ mod tests {
         );
         assert_eq!(
             reader.logical_head(root.id()),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            reader.event_by_id(root.id(), EventId::new()),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            reader.protected_logical_head(root.id()),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
     }

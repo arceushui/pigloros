@@ -5,6 +5,7 @@ use pos_core::{
     CoreError, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
     ErasureProtectedOperationV1, TimelineId,
 };
+use pos_runtime::ErasureExecutionHostV1;
 use pos_store::{open_store, StoreConfig};
 use std::sync::{Arc, Mutex};
 
@@ -134,6 +135,17 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
         std::fs::set_permissions(&owner_key_path, std::fs::Permissions::from_mode(0o600))?;
     }
     let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
+
+    let closed_host = ErasureExecutionHostV1::new_closed(Box::new(
+        pos_store::memory::MemoryStore::new().without_erasure_gate(),
+    ))?;
+    assert!(Gateway::new_with_erasure_host(closed_host).is_err());
+
+    let closed_owntracks_host = ErasureExecutionHostV1::new_gateway_closed(Box::new(
+        pos_store::sqlite::SqliteStore::open_in_memory()?.without_erasure_gate(),
+    ))?;
+    assert!(Gateway::new_with_owntracks_erasure_host(closed_owntracks_host, &owner_key).is_err());
+
     let owntracks_gateway = Gateway::new_with_owntracks_ingress_and_erasure_gate(
         pos_store::sqlite::SqliteStore::open_in_memory()?,
         &owner_key,
