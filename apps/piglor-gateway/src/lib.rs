@@ -43,7 +43,7 @@ use pos_core::{
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
-use pos_runtime::{ErasureExecutionHostV1, PluginRegistry};
+use pos_runtime::{ActionSubmissionError, ErasureExecutionHostV1, PluginRegistry};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::hash_map::DefaultHasher,
@@ -927,6 +927,20 @@ impl From<executor::StoreExecutorError> for GatewayError {
             executor::StoreExecutorError::DeadlineExceeded => Self::StoreExecutorDeadlineExceeded,
             executor::StoreExecutorError::Unhealthy => Self::StoreExecutorUnhealthy,
             executor::StoreExecutorError::Store(error) => Self::Store(error),
+        }
+    }
+}
+
+impl From<ActionSubmissionError> for GatewayError {
+    fn from(error: ActionSubmissionError) -> Self {
+        match error {
+            ActionSubmissionError::Rejected(error) => error.into(),
+            ActionSubmissionError::ErasureOperationUnavailable => {
+                CoreError::ErasureContainmentUnavailable.into()
+            }
+            ActionSubmissionError::ErasureContainment(error) => {
+                pos_core::store::erasure_containment_error(error).into()
+            }
         }
     }
 }
@@ -2296,16 +2310,9 @@ impl Gateway {
         timeline: TimelineId,
         proposal: &ProposedAction,
     ) -> Result<EventDraft, GatewayError> {
-        match self.action_registry.submit_action(timeline, proposal) {
-            Ok(draft) => Ok(draft),
-            Err(pos_runtime::ActionSubmissionError::Rejected(error)) => Err(error.into()),
-            Err(pos_runtime::ActionSubmissionError::ErasureOperationUnavailable) => {
-                Err(CoreError::ErasureContainmentUnavailable.into())
-            }
-            Err(pos_runtime::ActionSubmissionError::ErasureContainment(error)) => {
-                Err(pos_core::store::erasure_containment_error(error).into())
-            }
-        }
+        self.action_registry
+            .submit_action(timeline, proposal)
+            .map_err(GatewayError::from)
     }
 
     /// Append an action using an opaque external ingress identity.
