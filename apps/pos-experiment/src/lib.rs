@@ -1229,12 +1229,21 @@ impl Experiment {
     /// history contains a host-owned consent-closure marker but this
     /// experiment has no bound consent authority.
     pub fn resume(
-        mut self,
+        self,
         timeline_id: pos_core::ids::TimelineId,
     ) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let store =
-            HostedExperimentStore::open(store_config.clone()).map_err(hosted_store_error)?;
+        HostedExperimentStore::open(store_config.clone())
+            .map_err(hosted_store_error)
+            .and_then(|store| self.resume_with_hosted_store(timeline_id, store, store_config))
+    }
+
+    fn resume_with_hosted_store(
+        mut self,
+        timeline_id: pos_core::ids::TimelineId,
+        store: HostedExperimentStore,
+        store_config: StoreConfig,
+    ) -> Result<ExperimentSession, ExperimentError> {
         bind_registry_to_host_gate(&mut self.registry, store.containment_gate())?;
         self.resume_with_store_and_recipe(timeline_id, Box::new(store), Some(store_config))
     }
@@ -2432,8 +2441,15 @@ impl BacktestRunner {
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] or [`ExperimentError::Store`] on failure.
     pub fn run(self) -> Result<BacktestResult, ExperimentError> {
-        let mut store = HostedExperimentStore::open(self.config.store_config.clone())
-            .map_err(hosted_store_error)?;
+        HostedExperimentStore::open(self.config.store_config.clone())
+            .map_err(hosted_store_error)
+            .and_then(|store| self.run_with_hosted_store(store))
+    }
+
+    fn run_with_hosted_store(
+        mut self,
+        mut store: HostedExperimentStore,
+    ) -> Result<BacktestResult, ExperimentError> {
         let host_gate = store.containment_gate();
         if self
             .erasure_gate
@@ -2444,9 +2460,8 @@ impl BacktestRunner {
                 pos_core::CoreError::ErasureContainmentUnavailable,
             ));
         }
-        let mut runner = self;
-        runner.erasure_gate = Some(host_gate);
-        runner.run_on_store(&mut store)
+        self.erasure_gate = Some(host_gate);
+        self.run_on_store(&mut store)
     }
 
     /// Run backtest phases on an already-opened store (test seam for fault injection).

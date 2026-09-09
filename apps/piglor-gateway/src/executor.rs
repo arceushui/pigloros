@@ -228,6 +228,94 @@ mod lifecycle_coverage_tests {
     }
 }
 
+enum ActionCommand {
+    Submit {
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        authorization: Arc<GatewayAuthorization>,
+        decision: GatewayAuthorizationDecision,
+        maximum: u64,
+        reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
+    },
+    SubmitIdentified {
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        authorization: Arc<GatewayAuthorization>,
+        decision: GatewayAuthorizationDecision,
+        identity: AppendIdentity,
+        maximum: u64,
+        reply: oneshot::Sender<
+            Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+        >,
+    },
+}
+
+impl ActionCommand {
+    fn expire(self) {
+        match self {
+            Self::Submit { reply, .. } => {
+                drop(reply.send(Err(ActionCommandError::Executor(
+                    StoreExecutorError::DeadlineExceeded,
+                ))));
+            }
+            Self::SubmitIdentified { reply, .. } => {
+                drop(reply.send(Err(ActionCommandError::Executor(
+                    StoreExecutorError::DeadlineExceeded,
+                ))));
+            }
+        }
+    }
+
+    fn execute(self, state: &mut ExecutorState) {
+        match self {
+            Self::Submit {
+                timeline,
+                registry,
+                proposal,
+                authorization,
+                decision,
+                maximum,
+                reply,
+            } => execute_submit_action_command(
+                state,
+                &ActionCommandContext {
+                    timeline,
+                    registry: registry.as_ref(),
+                    proposal: &proposal,
+                    authorization: authorization.as_ref(),
+                    decision: &decision,
+                    maximum,
+                },
+                reply,
+            ),
+            Self::SubmitIdentified {
+                timeline,
+                registry,
+                proposal,
+                authorization,
+                decision,
+                identity,
+                maximum,
+                reply,
+            } => execute_submit_identified_action_command(
+                state,
+                &ActionCommandContext {
+                    timeline,
+                    registry: registry.as_ref(),
+                    proposal: &proposal,
+                    authorization: authorization.as_ref(),
+                    decision: &decision,
+                    maximum,
+                },
+                identity,
+                reply,
+            ),
+        }
+    }
+}
+
 enum Command {
     PrepareOwnTracksIngress {
         basic_handle: [u8; 32],
@@ -277,27 +365,7 @@ enum Command {
         maximum: Option<u64>,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
-    SubmitAction {
-        timeline: TimelineId,
-        registry: Arc<PluginRegistry>,
-        proposal: ProposedAction,
-        authorization: Arc<GatewayAuthorization>,
-        decision: GatewayAuthorizationDecision,
-        maximum: u64,
-        reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
-    },
-    SubmitIdentifiedAction {
-        timeline: TimelineId,
-        registry: Arc<PluginRegistry>,
-        proposal: ProposedAction,
-        authorization: Arc<GatewayAuthorization>,
-        decision: GatewayAuthorizationDecision,
-        identity: AppendIdentity,
-        maximum: u64,
-        reply: oneshot::Sender<
-            Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
-        >,
-    },
+    Action(ActionCommand),
     AppendConsentGrant {
         timeline: TimelineId,
         grant: ConsentGrantedV1,
@@ -349,29 +417,19 @@ enum CommandClass {
 
 impl Command {
     const fn class(&self) -> CommandClass {
+        if self.is_read() {
+            CommandClass::Read
+        } else {
+            CommandClass::Write
+        }
+    }
+
+    const fn is_read(&self) -> bool {
         match self {
-            Self::RootCount { .. } | Self::Read { .. } | Self::ProtectedLogicalHead { .. } => {
-                CommandClass::Read
-            }
+            Self::RootCount { .. } | Self::Read { .. } | Self::ProtectedLogicalHead { .. } => true,
             #[cfg(test)]
-            Self::ReadOne { .. } | Self::GetTimeline { .. } => CommandClass::Read,
-            Self::PrepareOwnTracksIngress { .. }
-            | Self::AdmitGeoLocation { .. }
-            | Self::Purge { .. }
-            | Self::RemoveAppendIdentitiesBounded { .. }
-            | Self::PendingAppendIdentityCleanup { .. }
-            | Self::Create { .. }
-            | Self::Append { .. }
-            | Self::SubmitAction { .. }
-            | Self::SubmitIdentifiedAction { .. }
-            | Self::AppendConsentGrant { .. }
-            | Self::AppendConsentRevocation { .. } => CommandClass::Write,
-            #[cfg(test)]
-            Self::AppendIdentified { .. } => CommandClass::Write,
-            #[cfg(test)]
-            Self::Panic { .. } => CommandClass::Write,
-            #[cfg(test)]
-            Self::PanicRead { .. } => CommandClass::Read,
+            Self::ReadOne { .. } | Self::GetTimeline { .. } | Self::PanicRead { .. } => true,
+            _ => false,
         }
     }
 }
@@ -1418,7 +1476,7 @@ impl StoreExecutor {
         let lifecycle = Arc::new(CommandLifecycle::new());
         let (reply, result) = oneshot::channel();
         let submission = self.try_submit(
-            Command::SubmitAction {
+            Command::Action(ActionCommand::Submit {
                 timeline,
                 registry,
                 proposal,
@@ -1426,7 +1484,7 @@ impl StoreExecutor {
                 decision,
                 maximum,
                 reply,
-            },
+            }),
             deadline,
             Arc::clone(&lifecycle),
         );
@@ -1449,7 +1507,7 @@ impl StoreExecutor {
         let lifecycle = Arc::new(CommandLifecycle::new());
         let (reply, result) = oneshot::channel();
         let submission = self.try_submit(
-            Command::SubmitIdentifiedAction {
+            Command::Action(ActionCommand::SubmitIdentified {
                 timeline,
                 registry,
                 proposal,
@@ -1458,7 +1516,7 @@ impl StoreExecutor {
                 identity,
                 maximum,
                 reply,
-            },
+            }),
             deadline,
             Arc::clone(&lifecycle),
         );
@@ -1834,10 +1892,7 @@ fn expire_command(command: Command) {
         Command::AdmitGeoLocation { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::Purge { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::RemoveAppendIdentitiesBounded { reply, .. } => {
+        Command::Purge { reply, .. } | Command::RemoveAppendIdentitiesBounded { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::PendingAppendIdentityCleanup { reply } => {
@@ -1859,16 +1914,7 @@ fn expire_command(command: Command) {
         Command::Append { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::SubmitAction { reply, .. } => {
-            drop(reply.send(Err(ActionCommandError::Executor(
-                StoreExecutorError::DeadlineExceeded,
-            ))));
-        }
-        Command::SubmitIdentifiedAction { reply, .. } => {
-            drop(reply.send(Err(ActionCommandError::Executor(
-                StoreExecutorError::DeadlineExceeded,
-            ))));
-        }
+        Command::Action(command) => command.expire(),
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -2035,12 +2081,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             maximum,
             reply,
         } => execute_append_command(state, timeline, &drafts, maximum, reply),
-        command @ Command::SubmitAction { .. } => {
-            execute_submit_action_command_from_command(state, command);
-        }
-        command @ Command::SubmitIdentifiedAction { .. } => {
-            execute_submit_identified_action_command_from_command(state, command);
-        }
+        Command::Action(command) => command.execute(state),
         Command::AppendConsentGrant {
             timeline,
             grant,
@@ -2067,14 +2108,9 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             send_store_result(reply, state.store.protected_logical_head(timeline));
         }
         #[cfg(test)]
-        Command::Panic { reply } => {
+        Command::Panic { reply } | Command::PanicRead { reply } => {
             drop(reply.send(Err(StoreExecutorError::Unhealthy)));
             std::panic::resume_unwind(Box::new("test store executor worker panic"));
-        }
-        #[cfg(test)]
-        Command::PanicRead { reply } => {
-            drop(reply.send(Err(StoreExecutorError::Unhealthy)));
-            std::panic::resume_unwind(Box::new("test store executor read worker panic"));
         }
     }
     CommandExecution::Completed
@@ -2258,33 +2294,6 @@ fn execute_submit_action_command(
     drop(reply.send(result));
 }
 
-fn execute_submit_action_command_from_command(state: &mut ExecutorState, command: Command) {
-    let Command::SubmitAction {
-        timeline,
-        registry,
-        proposal,
-        authorization,
-        decision,
-        maximum,
-        reply,
-    } = command
-    else {
-        return;
-    };
-    execute_submit_action_command(
-        state,
-        &ActionCommandContext {
-            timeline,
-            registry: registry.as_ref(),
-            proposal: &proposal,
-            authorization: authorization.as_ref(),
-            decision: &decision,
-            maximum,
-        },
-        reply,
-    );
-}
-
 fn execute_submit_identified_action_command(
     state: &mut ExecutorState,
     context: &ActionCommandContext<'_>,
@@ -2305,38 +2314,6 @@ fn execute_submit_identified_action_command(
         }
     };
     drop(reply.send(result));
-}
-
-fn execute_submit_identified_action_command_from_command(
-    state: &mut ExecutorState,
-    command: Command,
-) {
-    let Command::SubmitIdentifiedAction {
-        timeline,
-        registry,
-        proposal,
-        authorization,
-        decision,
-        identity,
-        maximum,
-        reply,
-    } = command
-    else {
-        return;
-    };
-    execute_submit_identified_action_command(
-        state,
-        &ActionCommandContext {
-            timeline,
-            registry: registry.as_ref(),
-            proposal: &proposal,
-            authorization: authorization.as_ref(),
-            decision: &decision,
-            maximum,
-        },
-        identity,
-        reply,
-    );
 }
 
 fn execute_host_action(
@@ -3819,7 +3796,7 @@ mod tests {
         let registry = Arc::new(PluginRegistry::new());
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired_action(
-            Command::SubmitAction {
+            Command::Action(ActionCommand::Submit {
                 timeline,
                 registry: Arc::clone(&registry),
                 proposal: proposal.clone(),
@@ -3827,13 +3804,13 @@ mod tests {
                 decision: decision.clone(),
                 maximum: 1,
                 reply,
-            },
+            }),
             receiver,
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired_action(
-            Command::SubmitIdentifiedAction {
+            Command::Action(ActionCommand::SubmitIdentified {
                 timeline,
                 registry,
                 proposal,
@@ -3845,7 +3822,7 @@ mod tests {
                 ),
                 maximum: 1,
                 reply,
-            },
+            }),
             receiver,
         );
         Ok(())
