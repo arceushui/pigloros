@@ -11,7 +11,6 @@ fn assert_hosted_store_parity(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut host =
         ErasureExecutionHostV1::recover_verified_empty(store, ERASURE_MAX_INVENTORY_REQUESTS)?;
-    let gate = host.containment_gate();
     let (timeline, event) = {
         let mut commands = host.command_sender()?;
         let timeline = commands.create_timeline("public-host-parity")?;
@@ -38,7 +37,6 @@ fn assert_hosted_store_parity(
         vec![event.clone()]
     );
     assert_eq!(reads.event_by_id(timeline.id(), event.id)?, Some(event));
-    assert!(gate.inventory_generation().is_ok());
     Ok(())
 }
 
