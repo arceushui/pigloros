@@ -154,11 +154,30 @@ impl ErasureExecutionHostV1 {
         }
         self.state = HostStateV1::Closed;
         self.inventory = None;
-        let Ok(inventory) = query.verified_inventory(maximum_requests) else {
+        let Ok(inventory) = query
+            .verified_inventory(maximum_requests)
+            .and_then(|inventory| self.verify_current_inventory(inventory, maximum_requests))
+        else {
             self.state = HostStateV1::Poisoned;
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         self.publish_inventory(inventory, maximum_requests)
+    }
+
+    fn verify_current_inventory(
+        &mut self,
+        inventory: ErasureVerifiedInventoryV1,
+        maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        let snapshot = self
+            .store
+            .host_store()
+            .complete_erasure_inventory_snapshot(maximum_requests)?;
+        if snapshot.generation() == inventory.generation() {
+            Ok(inventory)
+        } else {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
     }
 
     /// Borrow the mutation-capable sender for the installed generation.
@@ -322,12 +341,39 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// A non-empty request set, failed adapter snapshot, or rejected gate
     /// binding fails closed. Production recovery for a non-empty set must use
-    /// [`Self::new_closed`] followed by [`Self::install_inventory`].
+    /// [`Self::recover_from_verified_query`].
     pub fn recover_verified_empty(
-        store: Box<dyn ErasureHostStoreV1>,
+        mut store: Box<dyn ErasureHostStoreV1>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::recover_owned_verified_empty(OwnedErasureStoreV1::Standard(store), maximum_requests)
+        let inventory = store
+            .complete_erasure_inventory_snapshot(maximum_requests)
+            .and_then(|snapshot| {
+                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+            })
+            .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
+        let mut query = OneShotInventoryV1(Some(inventory));
+        Self::recover_from_verified_query(store, &mut query, maximum_requests)
+    }
+
+    /// Recover a store from one complete, independently verified inventory.
+    ///
+    /// The host compares the opaque inventory generation with a fresh complete
+    /// snapshot from the exact store it owns before publishing the gate or
+    /// granting a sender. A stale, omitted, or cross-store query therefore
+    /// leaves the host permanently closed.
+    ///
+    /// # Errors
+    /// Returns a closed recovery or adapter error when gate binding, inventory
+    /// verification, current-store matching, or publication fails.
+    pub fn recover_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+        store: Box<dyn ErasureHostStoreV1>,
+        query: &mut Q,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let mut host = Self::new_closed(store)?;
+        host.install_inventory(query, maximum_requests)?;
+        Ok(host)
     }
 
     /// Recover a Gateway-capable store only when its durable request set is empty.
@@ -336,26 +382,31 @@ impl ErasureExecutionHostV1 {
     /// A non-empty request set, failed adapter snapshot, or rejected gate
     /// binding fails closed.
     pub fn recover_verified_empty_gateway(
-        store: Box<dyn ErasureGatewayHostStoreV1>,
+        mut store: Box<dyn ErasureGatewayHostStoreV1>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::recover_owned_verified_empty(OwnedErasureStoreV1::Gateway(store), maximum_requests)
+        let inventory = store
+            .complete_erasure_inventory_snapshot(maximum_requests)
+            .and_then(|snapshot| {
+                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+            })
+            .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
+        let mut query = OneShotInventoryV1(Some(inventory));
+        Self::recover_gateway_from_verified_query(store, &mut query, maximum_requests)
     }
 
-    fn recover_owned_verified_empty(
-        mut store: OwnedErasureStoreV1,
+    /// Recover a Gateway-capable store from one complete verified inventory.
+    ///
+    /// # Errors
+    /// Returns a closed recovery or adapter error under the same current-store
+    /// generation checks as [`Self::recover_from_verified_query`].
+    pub fn recover_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+        store: Box<dyn ErasureGatewayHostStoreV1>,
+        query: &mut Q,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let snapshot = store
-            .host_store()
-            .complete_erasure_inventory_snapshot(maximum_requests)
-            .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
-        let inventory =
-            ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
-                .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
-        let mut host = Self::new_closed_store(store)?;
-        let mut query = OneShotInventoryV1(Some(inventory));
-        host.install_inventory(&mut query, maximum_requests)?;
+        let mut host = Self::new_gateway_closed(store)?;
+        host.install_inventory(query, maximum_requests)?;
         Ok(host)
     }
 }
