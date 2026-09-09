@@ -717,3 +717,151 @@ fn validate_response_identity(
         Err(SandboxProviderProtocolError::InconsistentFields)
     }
 }
+
+#[cfg(test)]
+mod local_error_tests {
+    use super::*;
+
+    fn identified(
+        phase: SandboxLocalErrorPhase,
+        code: SandboxLocalErrorCode,
+        grant: Option<[u8; 32]>,
+    ) -> SandboxLocalError {
+        SandboxLocalError {
+            phase,
+            operation: Some(SandboxProviderOperation::Execute),
+            request_id: Some([1; 16]),
+            attempt_id: Some([2; 16]),
+            agr1_digest: grant,
+            code,
+            safe_detail: Some("closed failure".to_owned()),
+        }
+    }
+
+    #[test]
+    fn sle1_round_trips_every_legal_phase_and_code() {
+        let cases = [
+            identified(
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::InvalidSelectorRequest,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::RequestAuthorityMismatch,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::PayloadLimitExceeded,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderUnavailable,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderIdentityInvalid,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ControlChannelUnavailable,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ControlChannelUnavailable,
+                Some([3; 32]),
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ProviderTerminalUnavailable,
+                Some([3; 32]),
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                Some([3; 32]),
+            ),
+        ];
+        for error in cases {
+            let encoded = error.to_canonical_cbor();
+            assert!(encoded.is_ok());
+            if let Ok(encoded) = encoded {
+                assert_eq!(SandboxLocalError::from_canonical_cbor(&encoded), Ok(error));
+            }
+        }
+
+        for operation in [
+            None,
+            Some(SandboxProviderOperation::Describe),
+            Some(SandboxProviderOperation::Cancel),
+            Some(SandboxProviderOperation::Reconcile),
+        ] {
+            let error = SandboxLocalError {
+                phase: SandboxLocalErrorPhase::BeforeSpx1,
+                operation,
+                request_id: None,
+                attempt_id: None,
+                agr1_digest: None,
+                code: SandboxLocalErrorCode::PolicyUnavailable,
+                safe_detail: None,
+            };
+            let encoded = error.to_canonical_cbor();
+            assert!(encoded.is_ok());
+            if let Ok(encoded) = encoded {
+                assert_eq!(SandboxLocalError::from_canonical_cbor(&encoded), Ok(error));
+            }
+        }
+    }
+
+    #[test]
+    fn sle1_encoder_rejects_invalid_identity_and_phase_algebra() {
+        for error in [
+            identified(
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::RequestAuthorityMismatch,
+                Some([3; 32]),
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                None,
+            ),
+            SandboxLocalError {
+                request_id: Some([0; 16]),
+                ..identified(
+                    SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                    SandboxLocalErrorCode::ProviderUnavailable,
+                    None,
+                )
+            },
+            SandboxLocalError {
+                attempt_id: Some([0; 16]),
+                ..identified(
+                    SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                    SandboxLocalErrorCode::ProviderUnavailable,
+                    None,
+                )
+            },
+            SandboxLocalError {
+                agr1_digest: Some([0; 32]),
+                ..identified(
+                    SandboxLocalErrorPhase::AfterAdmission,
+                    SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                    Some([3; 32]),
+                )
+            },
+        ] {
+            assert!(error.to_canonical_cbor().is_err());
+        }
+    }
+}
