@@ -2132,9 +2132,11 @@ impl Gateway {
                 timeline,
                 Arc::clone(&self.action_registry),
                 proposal,
-                Arc::clone(&authorization),
-                decision,
-                self.bus.clone(),
+                executor::AuthorizedActionContext::new(
+                    Arc::clone(&authorization),
+                    decision,
+                    self.bus.clone(),
+                ),
                 self.limits.max_events_per_timeline,
             )
             .await
@@ -2276,9 +2278,11 @@ impl Gateway {
                 timeline,
                 Arc::clone(&self.action_registry),
                 proposal,
-                Arc::clone(&authorization),
-                decision,
-                self.bus.clone(),
+                executor::AuthorizedActionContext::new(
+                    Arc::clone(&authorization),
+                    decision,
+                    self.bus.clone(),
+                ),
                 identity,
                 self.limits.max_events_per_timeline,
             )

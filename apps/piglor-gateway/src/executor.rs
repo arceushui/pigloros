@@ -228,14 +228,32 @@ mod lifecycle_coverage_tests {
     }
 }
 
+pub(crate) struct AuthorizedActionContext {
+    authorization: Arc<GatewayAuthorization>,
+    decision: GatewayAuthorizationDecision,
+    bus: broadcast::Sender<EventNotice>,
+}
+
+impl AuthorizedActionContext {
+    pub(crate) const fn new(
+        authorization: Arc<GatewayAuthorization>,
+        decision: GatewayAuthorizationDecision,
+        bus: broadcast::Sender<EventNotice>,
+    ) -> Self {
+        Self {
+            authorization,
+            decision,
+            bus,
+        }
+    }
+}
+
 enum ActionCommand {
     Submit {
         timeline: TimelineId,
         registry: Arc<PluginRegistry>,
         proposal: ProposedAction,
-        authorization: Arc<GatewayAuthorization>,
-        decision: GatewayAuthorizationDecision,
-        bus: broadcast::Sender<EventNotice>,
+        authorized: AuthorizedActionContext,
         maximum: u64,
         reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
     },
@@ -243,9 +261,7 @@ enum ActionCommand {
         timeline: TimelineId,
         registry: Arc<PluginRegistry>,
         proposal: ProposedAction,
-        authorization: Arc<GatewayAuthorization>,
-        decision: GatewayAuthorizationDecision,
-        bus: broadcast::Sender<EventNotice>,
+        authorized: AuthorizedActionContext,
         identity: AppendIdentity,
         maximum: u64,
         reply: oneshot::Sender<
@@ -276,9 +292,7 @@ impl ActionCommand {
                 timeline,
                 registry,
                 proposal,
-                authorization,
-                decision,
-                bus,
+                authorized,
                 maximum,
                 reply,
             } => execute_submit_action_command(
@@ -287,9 +301,9 @@ impl ActionCommand {
                     timeline,
                     registry: registry.as_ref(),
                     proposal: &proposal,
-                    authorization: authorization.as_ref(),
-                    decision: &decision,
-                    bus: &bus,
+                    authorization: authorized.authorization.as_ref(),
+                    decision: &authorized.decision,
+                    bus: &authorized.bus,
                     maximum,
                 },
                 reply,
@@ -298,9 +312,7 @@ impl ActionCommand {
                 timeline,
                 registry,
                 proposal,
-                authorization,
-                decision,
-                bus,
+                authorized,
                 identity,
                 maximum,
                 reply,
@@ -310,9 +322,9 @@ impl ActionCommand {
                     timeline,
                     registry: registry.as_ref(),
                     proposal: &proposal,
-                    authorization: authorization.as_ref(),
-                    decision: &decision,
-                    bus: &bus,
+                    authorization: authorized.authorization.as_ref(),
+                    decision: &authorized.decision,
+                    bus: &authorized.bus,
                     maximum,
                 },
                 identity,
@@ -1475,9 +1487,7 @@ impl StoreExecutor {
         timeline: TimelineId,
         registry: Arc<PluginRegistry>,
         proposal: ProposedAction,
-        authorization: Arc<GatewayAuthorization>,
-        decision: GatewayAuthorizationDecision,
-        bus: broadcast::Sender<EventNotice>,
+        authorized: AuthorizedActionContext,
         maximum: u64,
     ) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
         let deadline = Instant::now() + self.command_deadline();
@@ -1488,9 +1498,7 @@ impl StoreExecutor {
                 timeline,
                 registry,
                 proposal,
-                authorization,
-                decision,
-                bus,
+                authorized,
                 maximum,
                 reply,
             })),
@@ -1507,9 +1515,7 @@ impl StoreExecutor {
         timeline: TimelineId,
         registry: Arc<PluginRegistry>,
         proposal: ProposedAction,
-        authorization: Arc<GatewayAuthorization>,
-        decision: GatewayAuthorizationDecision,
-        bus: broadcast::Sender<EventNotice>,
+        authorized: AuthorizedActionContext,
         identity: AppendIdentity,
         maximum: u64,
     ) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
@@ -1521,9 +1527,7 @@ impl StoreExecutor {
                 timeline,
                 registry,
                 proposal,
-                authorization,
-                decision,
-                bus,
+                authorized,
                 identity,
                 maximum,
                 reply,
@@ -3827,9 +3831,11 @@ mod tests {
                 timeline,
                 registry: Arc::clone(&registry),
                 proposal: proposal.clone(),
-                authorization: Arc::clone(&authorization),
-                decision: decision.clone(),
-                bus: broadcast::channel(1).0,
+                authorized: AuthorizedActionContext::new(
+                    Arc::clone(&authorization),
+                    decision.clone(),
+                    broadcast::channel(1).0,
+                ),
                 maximum: 1,
                 reply,
             })),
@@ -3842,9 +3848,11 @@ mod tests {
                 timeline,
                 registry,
                 proposal,
-                authorization,
-                decision,
-                bus: broadcast::channel(1).0,
+                authorized: AuthorizedActionContext::new(
+                    authorization,
+                    decision,
+                    broadcast::channel(1).0,
+                ),
                 identity: AppendIdentity::new(
                     AppendDedupKey::from_keyed_hash([7; 32]),
                     AppendDedupScope::from_keyed_hash([8; 32]),
@@ -3933,9 +3941,11 @@ mod tests {
                 timeline,
                 Arc::clone(&registry),
                 proposal.clone(),
-                Arc::clone(&authorization),
-                decision.clone(),
-                broadcast::channel(1).0,
+                AuthorizedActionContext::new(
+                    Arc::clone(&authorization),
+                    decision.clone(),
+                    broadcast::channel(1).0,
+                ),
                 1,
             )
             .await;
@@ -3946,9 +3956,7 @@ mod tests {
                 timeline,
                 registry,
                 proposal,
-                authorization,
-                decision,
-                broadcast::channel(1).0,
+                AuthorizedActionContext::new(authorization, decision, broadcast::channel(1).0),
                 AppendIdentity::new(
                     AppendDedupKey::from_keyed_hash([9; 32]),
                     AppendDedupScope::from_keyed_hash([10; 32]),
