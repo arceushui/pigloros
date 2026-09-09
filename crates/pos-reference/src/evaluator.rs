@@ -464,7 +464,7 @@ const fn enforce_observed_coordinate_limit(
     Ok(())
 }
 
-fn case_attempt(
+pub(crate) fn case_attempt(
     bundle: &VerifiedBundle,
     fixture: &Fixture,
     mode: u8,
