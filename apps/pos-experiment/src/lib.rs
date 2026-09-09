@@ -101,6 +101,7 @@ fn open_store(
     open_store_with_gate(config, Some(Arc::new(ErasureContainmentGateV1::new())))
 }
 
+#[cfg(test)]
 fn open_store_with_gate(
     config: StoreConfig,
     gate: Option<Arc<dyn ErasureGate>>,
@@ -391,10 +392,7 @@ impl RunResult {
         self.store_config
             .clone()
             .ok_or(ExperimentError::MissingStoreRecoveryRecipe)
-            .and_then(|config| {
-                open_store_with_gate(config, self.projections.clone_erasure_gate())
-                    .map_err(ExperimentError::from)
-            })
+            .and_then(|config| HostedExperimentStore::open(config).map_err(hosted_store_error))
             .and_then(|store| {
                 store
                     .logical_head(self.timeline_id)
@@ -433,7 +431,7 @@ impl RunResult {
             .store_config
             .clone()
             .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
-        let mut store = open_store_with_gate(store_config, self.projections.clone_erasure_gate())?;
+        let mut store = HostedExperimentStore::open(store_config).map_err(hosted_store_error)?;
         let timelines = store.list_timelines()?;
         let timeline = timelines
             .iter()
@@ -500,7 +498,7 @@ impl RunResult {
                 .store_config
                 .clone()
                 .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
-            let store = open_store_with_gate(config, self.projections.clone_erasure_gate())?;
+            let store = HostedExperimentStore::open(config).map_err(hosted_store_error)?;
             Some(store.logical_head(self.timeline_id)?.as_u64())
         } else {
             None
@@ -2558,15 +2556,13 @@ mod tests {
 
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
-            self.unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
-            })
+            self.unwrap_or_else(|error| panic!("unexpected test error: {error:?}"))
         }
     }
 
     impl<T> TestValueExt<T> for Option<T> {
         fn test_ok(self) -> T {
-            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+            self.unwrap_or_else(|| panic!("expected test value"))
         }
     }
 
@@ -7799,9 +7795,9 @@ mod coverage_entrypoints {
 
     #[test]
     fn host_gate_binding_and_startup_errors_are_closed() {
-        let mut unbound_store = ok(open_store_with_gate(StoreConfig::Memory, None));
+        let unbound_store = ok(open_store_with_gate(StoreConfig::Memory, None));
         assert!(matches!(
-            unbound_store.create_timeline("unbound-store"),
+            unbound_store.get_timeline(TimelineId::new()),
             Err(pos_core::CoreError::ErasureContainmentUnavailable)
         ));
         assert!(matches!(
