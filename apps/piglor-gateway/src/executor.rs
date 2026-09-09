@@ -2371,7 +2371,8 @@ fn execute_host_action(
                         .record_audit_blocking(decision.audit().with_event_id(event.id));
                     publish_action_notice(context.bus, context.timeline, event);
                 }
-                if let Some(reply) = reply.take() {
+                let release = reply.take();
+                if let Some(reply) = release {
                     drop(reply.send(result));
                 }
             };
@@ -2440,7 +2441,8 @@ fn execute_host_identified_action(
                         publish_action_notice(context.bus, context.timeline, &result.event);
                     }
                 }
-                if let Some(reply) = reply.take() {
+                let release = reply.take();
+                if let Some(reply) = release {
                     drop(reply.send(result));
                 }
             };

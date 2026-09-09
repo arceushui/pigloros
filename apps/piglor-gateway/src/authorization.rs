@@ -534,6 +534,7 @@ impl GatewayAuthorization {
     }
 
     /// Retain one accepted action's minimized authorization audit.
+    #[cfg(test)]
     pub(crate) async fn record_audit(&self, audit: GatewayAuthorizationAudit) {
         let mut audits = self.audits.lock().await;
         Self::retain_audit(&mut audits, audit);
