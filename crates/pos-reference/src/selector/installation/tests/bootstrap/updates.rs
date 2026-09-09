@@ -3,6 +3,7 @@ use crate::selector::installation::authority::update::InstallationChallenge;
 use crate::selector::installation::authority::InstalledSelectorAuthority;
 
 mod durability;
+mod recovery;
 
 fn appended_record(
     fixture: &InstallationFixture,

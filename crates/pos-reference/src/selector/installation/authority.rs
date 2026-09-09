@@ -1,5 +1,6 @@
 //! Offline-pinned bootstrap authority, separate from provider admission.
 
+pub mod recovery;
 pub mod update;
 
 use super::{InstallationObjectKind, InstalledSelectorObjects, MANIFEST_LIMIT};
@@ -33,10 +34,18 @@ impl InstalledSelectorObjects {
         self,
     ) -> Result<InstalledSelectorAuthority, SelectorBoundaryError> {
         self.require_no_pending_recovery()?;
-        let (root_id, root_bytes) = self.manifest.offline_root();
+        let manifest = self.manifest.clone();
+        self.authenticate_manifest(&manifest)
+    }
+
+    fn authenticate_manifest(
+        self,
+        manifest: &super::InstallationManifest,
+    ) -> Result<InstalledSelectorAuthority, SelectorBoundaryError> {
+        let (root_id, root_bytes) = manifest.offline_root();
         let root_key = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let [trust_digest, revocation_digest, policy_digest] = self.manifest.authority_digests();
+        let [trust_digest, revocation_digest, policy_digest] = manifest.authority_digests();
         let trust = SandboxTrustSnapshot::authenticate(
             &self.control_bytes(0, trust_digest)?,
             root_id,
