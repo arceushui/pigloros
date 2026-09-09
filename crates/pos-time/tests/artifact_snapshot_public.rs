@@ -55,7 +55,7 @@ fn evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
     .test_ok()
 }
 
-fn registry(gate: &Arc<ErasureContainmentGateV1>) -> ProjectionRegistry {
+fn registry(gate: &Arc<dyn pos_core::ErasureGate>) -> ProjectionRegistry {
     let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(gate));
     registry.register("noop", Box::new(NoopReducer));
     registry
@@ -64,7 +64,7 @@ fn registry(gate: &Arc<ErasureContainmentGateV1>) -> ProjectionRegistry {
 #[test]
 fn snapshot_verification_requires_authoritative_artifact_evidence() {
     let mut store = open_store(StoreConfig::Memory).test_ok();
-    let gate = Arc::new(ErasureContainmentGateV1::new());
+    let gate: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
     store.bind_erasure_gate(Arc::clone(&gate)).test_ok();
     let timeline = store.create_timeline("artifact-snapshot").test_ok();
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
