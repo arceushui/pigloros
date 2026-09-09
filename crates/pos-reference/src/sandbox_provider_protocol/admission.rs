@@ -1242,7 +1242,7 @@ fn required_feature_set_digest(
             .any(|feature| !valid_identifier(feature))
         || !required_features
             .windows(2)
-            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+            .all(|pair| (pair[0].len(), pair[0].as_bytes()) < (pair[1].len(), pair[1].as_bytes()))
     {
         return Err(SandboxAdmissionError::HostCapabilityMismatch);
     }

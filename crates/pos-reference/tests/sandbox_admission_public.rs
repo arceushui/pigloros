@@ -295,7 +295,9 @@ fn required_feature_ids() -> Vec<String> {
     .into_iter()
     .map(str::to_owned)
     .collect::<Vec<_>>();
-    values.sort_unstable();
+    values.sort_unstable_by(|left, right| {
+        (left.len(), left.as_bytes()).cmp(&(right.len(), right.as_bytes()))
+    });
     values
 }
 
@@ -3773,6 +3775,35 @@ fn provider_admission_rejects_invalid_required_feature_sets() -> TestResult {
             Err(SandboxAdmissionError::HostCapabilityMismatch)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn provider_admission_requires_canonical_not_lexical_feature_order() -> TestResult {
+    let fixture = Fixture::new()?;
+    assert!(AdmittedSandboxProvider::admit(
+        &fixture.policy,
+        &fixture.trust,
+        &fixture.revocation,
+        fixture.inputs(),
+    )
+    .is_ok());
+    let mut lexical = fixture.required_features.clone();
+    lexical.sort_unstable();
+    assert_ne!(lexical, fixture.required_features);
+    let inputs = SandboxProviderAdmissionInputs {
+        required_features: &lexical,
+        ..fixture.inputs()
+    };
+    assert_eq!(
+        AdmittedSandboxProvider::admit(
+            &fixture.policy,
+            &fixture.trust,
+            &fixture.revocation,
+            inputs
+        ),
+        Err(SandboxAdmissionError::HostCapabilityMismatch)
+    );
     Ok(())
 }
 
