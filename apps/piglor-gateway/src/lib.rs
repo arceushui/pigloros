@@ -3420,7 +3420,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             missing,
-            GatewayError::Store(CoreError::ErasureAccessFrozen)
+            GatewayError::Store(CoreError::ErasureContainmentUnavailable)
         ));
         assert_eq!(audit_host.audits().await.len(), 1);
 
