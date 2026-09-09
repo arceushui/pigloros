@@ -24,10 +24,10 @@ use pos_reference::root_selector::{
 };
 use pos_reference::sandbox_provider_protocol::{
     AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, ExecuteAuthority,
-    HostCapabilityProfile, LaunchPolicy, ProviderConformanceReport, RootSelectorAdmission,
-    RootSelectorAdmissionInputs, SandboxAdministratorPolicy, SandboxAdmissionError,
-    SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest, SandboxGrantExpectations,
-    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase,
+    HostCapabilityProfile, LaunchPolicy, NetworkExchangePlan, ProviderConformanceReport,
+    RootSelectorAdmission, RootSelectorAdmissionInputs, SandboxAdministratorPolicy,
+    SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest,
+    SandboxGrantExpectations, SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase,
     SandboxProviderAdmissionInputs, SandboxProviderProtocolError, SandboxProviderReceipt,
     SandboxRevocationSnapshot, SandboxTrustSnapshot,
 };
@@ -2317,15 +2317,25 @@ fn root_selector_server_rejects_an_empty_control_frame() -> TestResult {
 
 #[test]
 fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> TestResult {
-    for drift_authority in [false, true] {
+    for drift in 0_u8..3 {
         let fixture = Fixture::new()?;
         let request = selector_evaluation_request(&fixture)?;
         let attempt = selector_case_attempt();
         let mut plan = selector_case_plan(&fixture, &request, attempt.clone())?;
-        if drift_authority {
-            plan.execute_authority.cpf1_digest = [99; 32];
-        } else {
-            plan.expected_attempt.watchdog_ms += 1;
+        match drift {
+            0 => plan.expected_attempt.watchdog_ms += 1,
+            1 => plan.execute_authority.cpf1_digest = [99; 32],
+            _ => plan.network_plans.push(NetworkExchangePlan {
+                exchange_id: [0; 16],
+                occurrence: 0,
+                capability_id: String::new(),
+                request_length: 0,
+                request_digest: [0; 32],
+                response_maximum: 0,
+                expected_response_digest: [0; 32],
+                retention_policy_digest: [0; 32],
+                plan_digest: [0; 32],
+            }),
         }
         let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
         let (server_result, control, trailing) = exercise_root_selector(
