@@ -65,7 +65,7 @@ fn install_manifest(fixture: &InstallationFixture, fields: Vec<Value>) -> TestRe
     Ok(())
 }
 
-fn authenticated_fixture(
+pub(super) fn authenticated_fixture(
     change_policy: impl FnOnce(&mut Vec<Value>),
 ) -> Result<InstallationFixture, Box<dyn std::error::Error>> {
     let fixture = InstallationFixture::new()?;

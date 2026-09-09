@@ -1,4 +1,3 @@
-mod installed_cases;
 pub mod support;
 
 use std::error::Error;
