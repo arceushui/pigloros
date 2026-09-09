@@ -118,10 +118,30 @@ impl InstalledSelectorAuthority {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         let (next_bytes, update_bytes) = decode_update(bytes, installation)?;
-        let next_manifest = InstallationManifest::from_cbor(&next_bytes)
+        let previous_manifest = self.installed.manifest().clone();
+        let previous_bytes = self.installed.manifest_bytes().to_vec();
+        let validated = self.validate_recovery_update(
+            &previous_manifest,
+            previous_bytes,
+            next_bytes,
+            update_bytes,
+        )?;
+        if validated.revocation_update.selector_nonce != nonce || Instant::now() >= expires_at {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        Ok(validated)
+    }
+
+    pub(super) fn validate_recovery_update(
+        &self,
+        previous_manifest: &InstallationManifest,
+        previous_manifest_bytes: Vec<u8>,
+        next_manifest_bytes: Vec<u8>,
+        revocation_update_bytes: Vec<u8>,
+    ) -> Result<ValidatedInstallationUpdate, SelectorBoundaryError> {
+        let next_manifest = InstallationManifest::from_cbor(&next_manifest_bytes)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        self.installed
-            .manifest()
+        previous_manifest
             .validate_revocation_successor(&next_manifest)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
         let next_revocation_file = self.open_updated_record(&next_manifest, 1)?;
@@ -132,16 +152,13 @@ impl InstalledSelectorAuthority {
             &next_manifest,
             &next_policy_bytes,
             &next_revocation_bytes,
-            &update_bytes,
+            &revocation_update_bytes,
         )?;
-        if update.selector_nonce != nonce || Instant::now() >= expires_at {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
         Ok(ValidatedInstallationUpdate {
-            previous_manifest: self.installed.manifest_bytes().to_vec(),
-            next_manifest_bytes: next_bytes,
+            previous_manifest: previous_manifest_bytes,
+            next_manifest_bytes,
             next_manifest,
-            revocation_update_bytes: update_bytes,
+            revocation_update_bytes,
             revocation_update: update,
             next_policy_file,
             next_revocation_file,
