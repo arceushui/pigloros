@@ -288,36 +288,58 @@ const fn freeze_transition() -> ErasureStateTransitionV1 {
     }
 }
 
+fn test_stage<T, E: std::fmt::Debug>(
+    stage: &str,
+    result: Result<T, E>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    result.map_err(|error| std::io::Error::other(format!("{stage}: {error:?}")).into())
+}
+
 fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-    let mut host = ErasureExecutionHostV1::open_with_coordinator_authority(
-        config,
-        authority_plugin,
-        reference(30),
-        ERASURE_MAX_INVENTORY_REQUESTS,
+    let mut host = test_stage(
+        "open coordinator host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            config,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
     )?;
-    let mut commands = host.command_sender()?;
-    let timeline = commands.create_timeline("host-coordinator-freeze")?;
-    authority.set_timeline(timeline.id())?;
-    let request = persistence_request()?;
+    let mut commands = test_stage("open command sender", host.command_sender())?;
+    let timeline = test_stage(
+        "create parent timeline",
+        commands.create_timeline("host-coordinator-freeze"),
+    )?;
+    test_stage(
+        "publish authority topology",
+        authority.set_timeline(timeline.id()),
+    )?;
+    let request = test_stage("construct erasure request", persistence_request())?;
     let request_reference = request.reference();
     assert_eq!(
-        commands
-            .submit_erasure_request(request, reference(31))?
-            .lifecycle(),
+        test_stage(
+            "submit erasure request",
+            commands.submit_erasure_request(request, reference(31)),
+        )?
+        .lifecycle(),
         ErasureLifecycleV1::Submitted
     );
     assert_eq!(
-        commands
-            .authorize_erasure_request(request_reference, reference(32))?
-            .lifecycle(),
+        test_stage(
+            "authorize erasure request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?
+        .lifecycle(),
         ErasureLifecycleV1::Authorized
     );
     assert_eq!(
-        commands
-            .freeze_access(request_reference, &freeze_transition())?
-            .lifecycle(),
+        test_stage(
+            "freeze erasure access",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?
+        .lifecycle(),
         ErasureLifecycleV1::AccessFrozen
     );
     assert_eq!(
@@ -325,25 +347,30 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         Err(ErasureHostErrorV1::AccessFrozen)
     );
     let operation = reference(40);
-    let child = commands.fork_timeline_identified(
-        operation,
-        timeline.id(),
-        pos_core::Seq::ZERO,
-        "frozen-child",
+    let child = test_stage(
+        "fork frozen timeline",
+        commands.fork_timeline_identified(
+            operation,
+            timeline.id(),
+            pos_core::Seq::ZERO,
+            "frozen-child",
+        ),
     )?;
     assert_eq!(
         commands.timeline(child.id()),
         Err(ErasureHostErrorV1::AccessFrozen)
     );
     assert_eq!(
-        commands
-            .fork_timeline_identified(
+        test_stage(
+            "retry frozen timeline fork",
+            commands.fork_timeline_identified(
                 operation,
                 timeline.id(),
                 pos_core::Seq::ZERO,
-                "ignored-on-retry"
-            )?
-            .id(),
+                "ignored-on-retry",
+            ),
+        )?
+        .id(),
         child.id()
     );
     Ok(())
@@ -372,41 +399,65 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
     let authority = Arc::new(TestAuthority::default());
     let (parent, child) = {
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-        let mut host = ErasureExecutionHostV1::open_with_coordinator_authority(
-            StoreConfig::Sqlite {
-                path: path_text.clone(),
-            },
-            authority_plugin,
-            reference(30),
-            ERASURE_MAX_INVENTORY_REQUESTS,
+        let mut host = test_stage(
+            "open persistent coordinator host",
+            ErasureExecutionHostV1::open_with_coordinator_authority(
+                StoreConfig::Sqlite {
+                    path: path_text.clone(),
+                },
+                authority_plugin,
+                reference(30),
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            ),
         )?;
-        let mut commands = host.command_sender()?;
-        let parent = commands.create_timeline("restart-parent")?;
-        authority.set_timeline(parent.id())?;
-        let request = persistence_request()?;
+        let mut commands = test_stage("open persistent command sender", host.command_sender())?;
+        let parent = test_stage(
+            "create persistent parent",
+            commands.create_timeline("restart-parent"),
+        )?;
+        test_stage(
+            "publish persistent authority topology",
+            authority.set_timeline(parent.id()),
+        )?;
+        let request = test_stage("construct persistent request", persistence_request())?;
         let request_reference = request.reference();
-        commands.submit_erasure_request(request, reference(31))?;
-        commands.authorize_erasure_request(request_reference, reference(32))?;
-        commands.freeze_access(request_reference, &freeze_transition())?;
-        let child = commands.fork_timeline_identified(
-            reference(41),
-            parent.id(),
-            pos_core::Seq::ZERO,
-            "restart-child",
+        test_stage(
+            "submit persistent request",
+            commands.submit_erasure_request(request, reference(31)),
+        )?;
+        test_stage(
+            "authorize persistent request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze persistent request",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+        let child = test_stage(
+            "fork persistent frozen timeline",
+            commands.fork_timeline_identified(
+                reference(41),
+                parent.id(),
+                pos_core::Seq::ZERO,
+                "restart-child",
+            ),
         )?;
         (parent.id(), child.id())
     };
     {
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
-        let mut recovered = ErasureExecutionHostV1::open_with_coordinator_authority(
-            StoreConfig::Sqlite {
-                path: path_text.clone(),
-            },
-            authority_plugin,
-            reference(30),
-            ERASURE_MAX_INVENTORY_REQUESTS,
+        let mut recovered = test_stage(
+            "reopen persistent coordinator host",
+            ErasureExecutionHostV1::open_with_coordinator_authority(
+                StoreConfig::Sqlite {
+                    path: path_text.clone(),
+                },
+                authority_plugin,
+                reference(30),
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            ),
         )?;
-        let mut reads = recovered.read_sender()?;
+        let mut reads = test_stage("open recovered read sender", recovered.read_sender())?;
         assert_eq!(
             reads.timeline(parent),
             Err(ErasureHostErrorV1::AccessFrozen)
