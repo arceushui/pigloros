@@ -2393,6 +2393,12 @@ impl PluginRegistry {
                 "approver returned an event for a different event type".to_owned(),
             ));
         }
+        if draft.payload.len() > MAX_PROPOSED_ACTION_PAYLOAD_BYTES {
+            return Err(ActionRejected::PayloadTooLarge {
+                size: draft.payload.len(),
+                max: MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+            });
+        }
         Ok(draft)
     }
 

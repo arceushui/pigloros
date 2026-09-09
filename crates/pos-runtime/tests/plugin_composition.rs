@@ -116,6 +116,18 @@ impl ActionApprover for AcceptingApprover {
     }
 }
 
+struct OversizedDraftApprover;
+
+impl ActionApprover for OversizedDraftApprover {
+    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+        Ok(EventDraft::new(
+            proposal.actor_entity_id,
+            proposal.event_type.clone(),
+            CanonicalBytes::from_vec(vec![0; 4097]),
+        ))
+    }
+}
+
 #[test]
 fn exact_native_plugin_and_governed_public_adapter_resolve_in_required_order() {
     let world = plugin(PluginId::new(), "first-party-world");
@@ -640,6 +652,56 @@ fn pinned_action_policy_retains_the_single_approver_route() {
         .test_ok();
     assert_eq!(draft.entity, actor);
     assert_eq!(draft.event_type.as_str(), "world.action");
+}
+
+#[test]
+fn pinned_action_policy_rejects_an_oversized_approver_draft() {
+    let action = TestPlugin {
+        id: PluginId::new(),
+        name: "oversized-action-policy",
+        version: "1.2.3",
+        has_driver: false,
+        event_type: Some("world.action"),
+    };
+    let mut registry =
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    registry
+        .register_pinned_with_approver(
+            &action,
+            PluginRegistrationV1::new(
+                pin(
+                    16,
+                    DomainImplementationKindV1::Plugin,
+                    PluginIsolationV1::OperatorTrustedNative,
+                    &["domain-action-policy"],
+                ),
+                PluginAvailabilityV1::Available,
+            ),
+            None,
+            None,
+            Some(Box::new(OversizedDraftApprover)),
+            [Kind::new("world.action")],
+        )
+        .test_ok();
+
+    let error = registry
+        .submit_action(
+            TimelineId::new(),
+            &ProposedAction::new(
+                Kind::new("world.action"),
+                EntityId::new(),
+                CanonicalBytes::from_static(b"walk"),
+                Kind::new("world.action.submit"),
+            ),
+        )
+        .test_err();
+    assert!(matches!(
+        error,
+        pos_runtime::ActionSubmissionError::Rejected(ActionRejected::PayloadTooLarge {
+            size: 4097,
+            max: 4096
+        })
+    ));
 }
 
 trait TestErrorExt<T, E> {

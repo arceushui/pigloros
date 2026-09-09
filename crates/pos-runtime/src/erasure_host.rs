@@ -571,6 +571,25 @@ impl ErasureCommandSenderV1<'_> {
             .map_store_error()
     }
 
+    /// Read one Event by durable identifier inside a larger host command
+    /// fence.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn event_by_id(
+        &mut self,
+        timeline: TimelineId,
+        event: EventId,
+    ) -> Result<Option<Event>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation).and_then(|()| {
+            self.host
+                .store
+                .host_store()
+                .read_event_by_id(timeline, event)
+                .map_store_error()
+        })
+    }
+
     /// Create a root Timeline and publish its successor inventory generation.
     ///
     /// Topology changes are admitted only for a positively verified empty

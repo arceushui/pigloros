@@ -3,7 +3,14 @@
 //! The gateway never holds a synchronous store lock on an async executor
 //! worker.  Commands are linearised by one bounded FIFO and executed by one
 //! dedicated OS thread.
+use crate::{
+    authorization::{
+        GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
+    },
+    IdentifiedAppend,
+};
 use pos_core::{
+    clock::WallTime,
     event::{Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EventId, TimelineId},
@@ -273,8 +280,22 @@ enum Command {
         timeline: TimelineId,
         registry: Arc<PluginRegistry>,
         proposal: ProposedAction,
+        authorization: Arc<GatewayAuthorization>,
+        decision: GatewayAuthorizationDecision,
         maximum: u64,
-        reply: oneshot::Sender<Result<Event, ActionCommandError>>,
+        reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
+    },
+    SubmitIdentifiedAction {
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        authorization: Arc<GatewayAuthorization>,
+        decision: GatewayAuthorizationDecision,
+        identity: AppendIdentity,
+        maximum: u64,
+        reply: oneshot::Sender<
+            Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+        >,
     },
     AppendConsentGrant {
         timeline: TimelineId,
@@ -339,6 +360,7 @@ impl Command {
             | Self::Create { .. }
             | Self::Append { .. }
             | Self::SubmitAction { .. }
+            | Self::SubmitIdentifiedAction { .. }
             | Self::AppendConsentGrant { .. }
             | Self::AppendConsentRevocation { .. }
             | Self::AppendIdentified { .. } => CommandClass::Write,
@@ -668,6 +690,17 @@ pub(crate) enum StoreExecutorError {
 pub(crate) enum ActionCommandError {
     Executor(StoreExecutorError),
     Submission(ActionSubmissionError),
+    Authorization(GatewayAuthorizationError),
+    IngressConflict,
+}
+
+struct ActionCommandContext<'a> {
+    timeline: TimelineId,
+    registry: &'a PluginRegistry,
+    proposal: &'a ProposedAction,
+    authorization: &'a GatewayAuthorization,
+    decision: &'a GatewayAuthorizationDecision,
+    maximum: u64,
 }
 
 impl From<StoreExecutorError> for ActionCommandError {
@@ -1372,8 +1405,10 @@ impl StoreExecutor {
         timeline: TimelineId,
         registry: Arc<PluginRegistry>,
         proposal: ProposedAction,
+        authorization: Arc<GatewayAuthorization>,
+        decision: GatewayAuthorizationDecision,
         maximum: u64,
-    ) -> Result<Event, ActionCommandError> {
+    ) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
         let deadline = Instant::now() + self.command_deadline();
         let lifecycle = Arc::new(CommandLifecycle::new());
         let (reply, result) = oneshot::channel();
@@ -1382,6 +1417,40 @@ impl StoreExecutor {
                 timeline,
                 registry,
                 proposal,
+                authorization,
+                decision,
+                maximum,
+                reply,
+            },
+            deadline,
+            Arc::clone(&lifecycle),
+        );
+        if let Err(error) = submission {
+            return Err(ActionCommandError::Executor(error));
+        }
+        await_command_result(self, result, lifecycle, deadline).await
+    }
+    pub(crate) async fn submit_identified_action(
+        &self,
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        authorization: Arc<GatewayAuthorization>,
+        decision: GatewayAuthorizationDecision,
+        identity: AppendIdentity,
+        maximum: u64,
+    ) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
+        let deadline = Instant::now() + self.command_deadline();
+        let lifecycle = Arc::new(CommandLifecycle::new());
+        let (reply, result) = oneshot::channel();
+        let submission = self.try_submit(
+            Command::SubmitIdentifiedAction {
+                timeline,
+                registry,
+                proposal,
+                authorization,
+                decision,
+                identity,
                 maximum,
                 reply,
             },
@@ -1787,6 +1856,11 @@ fn expire_command(command: Command) {
                 StoreExecutorError::DeadlineExceeded,
             ))));
         }
+        Command::SubmitIdentifiedAction { reply, .. } => {
+            drop(reply.send(Err(ActionCommandError::Executor(
+                StoreExecutorError::DeadlineExceeded,
+            ))));
+        }
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1975,14 +2049,42 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             timeline,
             registry,
             proposal,
+            authorization,
+            decision,
             maximum,
             reply,
         } => execute_submit_action_command(
             state,
+            ActionCommandContext {
+                timeline,
+                registry: registry.as_ref(),
+                proposal: &proposal,
+                authorization: authorization.as_ref(),
+                decision: &decision,
+                maximum,
+            },
+            reply,
+        ),
+        Command::SubmitIdentifiedAction {
             timeline,
-            registry.as_ref(),
-            &proposal,
+            registry,
+            proposal,
+            authorization,
+            decision,
+            identity,
             maximum,
+            reply,
+        } => execute_submit_identified_action_command(
+            state,
+            ActionCommandContext {
+                timeline,
+                registry: registry.as_ref(),
+                proposal: &proposal,
+                authorization: authorization.as_ref(),
+                decision: &decision,
+                maximum,
+            },
+            identity,
             reply,
         ),
         Command::AppendConsentGrant {
@@ -2152,23 +2254,36 @@ fn execute_append_command(
 
 fn execute_submit_action_command(
     state: &mut ExecutorState,
-    timeline: TimelineId,
-    registry: &PluginRegistry,
-    proposal: &ProposedAction,
-    maximum: u64,
-    reply: oneshot::Sender<Result<Event, ActionCommandError>>,
+    context: ActionCommandContext<'_>,
+    reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
 ) {
     let result = match &mut state.store {
-        ExecutorStore::Host(host) => {
-            execute_host_action(host, timeline, registry, proposal, maximum)
-        }
+        ExecutorStore::Host(host) => execute_host_action(host, &context),
+        #[cfg(test)]
+        ExecutorStore::Generic(store) => execute_test_store_action(store.as_mut(), &context),
+        #[cfg(test)]
+        ExecutorStore::Gateway(store) => execute_test_store_action(store.event_store(), &context),
+    };
+    drop(reply.send(result));
+}
+
+fn execute_submit_identified_action_command(
+    state: &mut ExecutorState,
+    context: ActionCommandContext<'_>,
+    identity: AppendIdentity,
+    reply: oneshot::Sender<
+        Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+    >,
+) {
+    let result = match &mut state.store {
+        ExecutorStore::Host(host) => execute_host_identified_action(host, &context, identity),
         #[cfg(test)]
         ExecutorStore::Generic(store) => {
-            execute_test_store_action(store.as_mut(), timeline, registry, proposal, maximum)
+            execute_test_store_identified_action(store.as_mut(), &context, identity)
         }
         #[cfg(test)]
         ExecutorStore::Gateway(store) => {
-            execute_test_store_action(store.event_store(), timeline, registry, proposal, maximum)
+            execute_test_store_identified_action(store.event_store(), &context, identity)
         }
     };
     drop(reply.send(result));
@@ -2176,31 +2291,92 @@ fn execute_submit_action_command(
 
 fn execute_host_action(
     host: &mut ErasureExecutionHostV1,
-    timeline: TimelineId,
-    registry: &PluginRegistry,
-    proposal: &ProposedAction,
-    maximum: u64,
-) -> Result<Event, ActionCommandError> {
+    context: &ActionCommandContext<'_>,
+) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
     host.command_sender()
         .map_err(host_action_error)
         .and_then(|mut sender| {
             let mut result = None;
             let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
                 result = Some(prepare_and_append_action(
-                    sender.timeline(timeline).map_err(host_action_error),
+                    sender.timeline(context.timeline).map_err(host_action_error),
                     |draft| {
                         sender
-                            .append_bounded(timeline, std::slice::from_ref(draft), maximum)
+                            .append_bounded(
+                                context.timeline,
+                                std::slice::from_ref(draft),
+                                context.maximum,
+                            )
                             .map_err(host_action_error)
                     },
-                    timeline,
-                    registry,
-                    proposal,
+                    context.timeline,
+                    context.registry,
+                    context.proposal,
+                    context.authorization,
+                    context.decision,
                 ));
             };
             sender
                 .with_protected_effect_fence(
-                    timeline,
+                    context.timeline,
+                    ErasureProtectedOperationV1::ProposedAction,
+                    &mut effect,
+                )
+                .map_err(host_action_error)
+                .and_then(|()| {
+                    result.unwrap_or_else(|| {
+                        Err(ActionCommandError::Executor(StoreExecutorError::Unhealthy))
+                    })
+                })
+        })
+}
+
+fn execute_host_identified_action(
+    host: &mut ErasureExecutionHostV1,
+    context: &ActionCommandContext<'_>,
+    identity: AppendIdentity,
+) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
+    host.command_sender()
+        .map_err(host_action_error)
+        .and_then(|mut sender| {
+            let mut result = None;
+            let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
+                result = Some(
+                    prepare_action(
+                        sender.timeline(context.timeline).map_err(host_action_error),
+                        context.timeline,
+                        context.registry,
+                        context.proposal,
+                        context.authorization,
+                        context.decision,
+                    )
+                    .and_then(|(decision, draft)| {
+                        sender
+                            .append_intent_or_duplicate_bounded(
+                                context.timeline,
+                                identity,
+                                AppendIntent::new(&draft),
+                                context.maximum,
+                            )
+                            .map_err(host_action_error)
+                            .and_then(|outcome| outcome.ok_or_else(event_limit_reached))
+                            .and_then(|outcome| {
+                                resolve_identified_outcome(
+                                    outcome,
+                                    |event| {
+                                        sender
+                                            .event_by_id(context.timeline, event)
+                                            .map_err(host_action_error)
+                                    },
+                                    decision,
+                                )
+                            })
+                    }),
+                );
+            };
+            sender
+                .with_protected_effect_fence(
+                    context.timeline,
                     ErasureProtectedOperationV1::ProposedAction,
                     &mut effect,
                 )
@@ -2216,26 +2392,72 @@ fn execute_host_action(
 #[cfg(test)]
 fn execute_test_store_action(
     store: &mut dyn EventStore,
-    timeline: TimelineId,
-    registry: &PluginRegistry,
-    proposal: &ProposedAction,
-    maximum: u64,
-) -> Result<Event, ActionCommandError> {
+    context: &ActionCommandContext<'_>,
+) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
     prepare_and_append_action(
         store
-            .get_timeline(timeline)
+            .get_timeline(context.timeline)
             .map_err(StoreExecutorError::Store)
             .map_err(ActionCommandError::Executor),
         |draft| {
             store
-                .append_bounded(timeline, std::slice::from_ref(draft), maximum)
+                .append_bounded(
+                    context.timeline,
+                    std::slice::from_ref(draft),
+                    context.maximum,
+                )
                 .map_err(StoreExecutorError::Store)
                 .map_err(ActionCommandError::Executor)
         },
-        timeline,
-        registry,
-        proposal,
+        context.timeline,
+        context.registry,
+        context.proposal,
+        context.authorization,
+        context.decision,
     )
+}
+
+#[cfg(test)]
+fn execute_test_store_identified_action(
+    store: &mut dyn EventStore,
+    context: &ActionCommandContext<'_>,
+    identity: AppendIdentity,
+) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
+    prepare_action(
+        store
+            .get_timeline(context.timeline)
+            .map_err(StoreExecutorError::Store)
+            .map_err(ActionCommandError::Executor),
+        context.timeline,
+        context.registry,
+        context.proposal,
+        context.authorization,
+        context.decision,
+    )
+    .and_then(|(decision, draft)| {
+        store
+            .append_intent_or_duplicate_bounded(
+                context.timeline,
+                identity,
+                AppendIntent::new(&draft),
+                context.maximum,
+            )
+            .map_err(StoreExecutorError::Store)
+            .map_err(ActionCommandError::Executor)
+            .and_then(|outcome| outcome.ok_or_else(event_limit_reached))
+            .and_then(|outcome| {
+                resolve_identified_outcome(
+                    outcome,
+                    |event| {
+                        store
+                            .read_event_by_id(context.timeline, event)
+                            .map_err(StoreExecutorError::Store)
+                            .map_err(ActionCommandError::Executor)
+                    },
+                    decision,
+                )
+            })
+    })
 }
 
 fn prepare_and_append_action(
@@ -2244,23 +2466,98 @@ fn prepare_and_append_action(
     timeline: TimelineId,
     registry: &PluginRegistry,
     proposal: &ProposedAction,
-) -> Result<Event, ActionCommandError> {
-    timeline_result
-        .and_then(|metadata| {
-            metadata.ok_or_else(|| {
-                ActionCommandError::Executor(StoreExecutorError::Store(
-                    CoreError::TimelineNotFound(timeline),
-                ))
+    authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
+) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
+    prepare_action(
+        timeline_result,
+        timeline,
+        registry,
+        proposal,
+        authorization,
+        decision,
+    )
+    .and_then(|(decision, draft)| append(&draft).map(|events| (decision, events)))
+    .and_then(|(decision, events)| {
+        events
+            .ok_or_else(event_limit_reached)
+            .map(|events| (decision, events))
+    })
+    .and_then(|(decision, mut events)| {
+        events
+            .pop()
+            .ok_or_else(empty_action_append)
+            .map(|event| (event, decision))
+    })
+}
+
+fn resolve_identified_outcome(
+    outcome: AppendOrDuplicateOutcome,
+    read_duplicate: impl FnOnce(EventId) -> Result<Option<Event>, ActionCommandError>,
+    decision: GatewayAuthorizationDecision,
+) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
+    match outcome {
+        AppendOrDuplicateOutcome::Appended(event) => Ok((
+            IdentifiedAppend {
+                event: *event,
+                duplicate: false,
+            },
+            decision,
+        )),
+        AppendOrDuplicateOutcome::Duplicate { event_id } => {
+            read_duplicate(event_id).and_then(|event| {
+                event.ok_or_else(missing_duplicate_event).map(|event| {
+                    (
+                        IdentifiedAppend {
+                            event,
+                            duplicate: true,
+                        },
+                        decision,
+                    )
+                })
             })
+        }
+        AppendOrDuplicateOutcome::Conflict => Err(ActionCommandError::IngressConflict),
+    }
+}
+
+fn prepare_action(
+    timeline_result: Result<Option<Timeline>, ActionCommandError>,
+    timeline: TimelineId,
+    registry: &PluginRegistry,
+    proposal: &ProposedAction,
+    authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
+) -> Result<(GatewayAuthorizationDecision, EventDraft), ActionCommandError> {
+    reauthorize_action(authorization, decision)
+        .and_then(|decision| timeline_result.map(|metadata| (decision, metadata)))
+        .and_then(|metadata| {
+            metadata.1.map_or_else(
+                || {
+                    Err(ActionCommandError::Executor(StoreExecutorError::Store(
+                        CoreError::TimelineNotFound(timeline),
+                    )))
+                },
+                |_| Ok(metadata.0),
+            )
         })
-        .and_then(|_| {
+        .and_then(|decision| {
             registry
                 .submit_action(timeline, proposal)
                 .map_err(ActionCommandError::Submission)
+                .map(|draft| (decision, draft))
         })
-        .and_then(|draft| append(&draft))
-        .and_then(|events| events.ok_or_else(event_limit_reached))
-        .and_then(|mut events| events.pop().ok_or_else(empty_action_append))
+}
+
+fn reauthorize_action(
+    authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
+) -> Result<GatewayAuthorizationDecision, ActionCommandError> {
+    let mut request = decision.request().clone();
+    request.at_time = WallTime::now();
+    authorization
+        .authorize(request)
+        .map_err(ActionCommandError::Authorization)
 }
 
 fn host_action_error(error: ErasureHostErrorV1) -> ActionCommandError {
@@ -2276,6 +2573,12 @@ fn event_limit_reached() -> ActionCommandError {
 fn empty_action_append() -> ActionCommandError {
     ActionCommandError::Executor(StoreExecutorError::Store(CoreError::Storage(
         "empty append".to_owned(),
+    )))
+}
+
+fn missing_duplicate_event() -> ActionCommandError {
+    ActionCommandError::Executor(StoreExecutorError::Store(CoreError::Storage(
+        "duplicate identity points to a missing Event".to_owned(),
     )))
 }
 

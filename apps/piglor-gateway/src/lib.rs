@@ -936,6 +936,8 @@ impl From<executor::ActionCommandError> for GatewayError {
         match error {
             executor::ActionCommandError::Executor(error) => error.into(),
             executor::ActionCommandError::Submission(error) => error.into(),
+            executor::ActionCommandError::Authorization(error) => map_authorization_error(error),
+            executor::ActionCommandError::IngressConflict => Self::IngressConflict,
         }
     }
 }
@@ -2123,13 +2125,14 @@ impl Gateway {
             Ok(decision) => decision,
             Err(error) => return Err(error),
         };
-        let decision = reauthorize_at_commit_fence(&authorization, &decision)?;
-        let event = match self
+        let (event, decision) = match self
             .store
             .submit_action(
                 timeline,
                 Arc::clone(&self.action_registry),
                 proposal,
+                Arc::clone(&authorization),
+                decision,
                 self.limits.max_events_per_timeline,
             )
             .await
@@ -2268,19 +2271,33 @@ impl Gateway {
             Ok(proposal) => proposal,
             Err(error) => return Err(error.into()),
         };
-        let draft = match self.submit_action_draft(timeline, &proposal) {
-            Ok(draft) => draft,
-            Err(error) => return Err(error),
-        };
-        drop(proposal);
-        let decision = reauthorize_at_commit_fence(&authorization, &decision)?;
-        let result = match self
-            .append_identified_draft(timeline, draft, ingress_id)
+        let identity = ingress_identity(timeline, entity, ingress_id);
+        let (result, decision) = match self
+            .store
+            .submit_identified_action(
+                timeline,
+                Arc::clone(&self.action_registry),
+                proposal,
+                Arc::clone(&authorization),
+                decision,
+                identity,
+                self.limits.max_events_per_timeline,
+            )
             .await
         {
             Ok(result) => result,
-            Err(error) => return Err(error),
+            Err(executor::ActionCommandError::Executor(executor::StoreExecutorError::Store(
+                CoreError::Storage(message),
+            ))) if message == "event limit reached" => {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                });
+            }
+            Err(error) => return Err(error.into()),
         };
+        if !result.duplicate {
+            self.publish_event_notice(timeline, &result.event);
+        }
         drop(fence);
         authorization
             .record_audit(decision.audit().with_event_id(result.event.id))
@@ -2325,6 +2342,7 @@ impl Gateway {
         }
     }
 
+    #[cfg(test)]
     fn submit_action_draft(
         &self,
         timeline: TimelineId,
@@ -2362,6 +2380,7 @@ impl Gateway {
             .await
     }
 
+    #[cfg(test)]
     async fn append_identified_draft(
         &self,
         timeline: TimelineId,
@@ -2619,17 +2638,6 @@ const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayErr
         GatewayAuthorizationError::RequestUnavailable => GatewayError::InvalidAuthorizationRequest,
         GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
     }
-}
-
-fn reauthorize_at_commit_fence(
-    authorization: &GatewayAuthorization,
-    decision: &GatewayAuthorizationDecision,
-) -> Result<GatewayAuthorizationDecision, GatewayError> {
-    let mut request = decision.request().clone();
-    request.at_time = WallTime::now();
-    authorization
-        .authorize(request)
-        .map_err(map_authorization_error)
 }
 
 fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
@@ -3413,6 +3421,33 @@ mod tests {
             GatewayError::Store(CoreError::TimelineNotFound(_))
         ));
         assert_eq!(audit_host.audits().await.len(), 1);
+
+        let first = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "host-owned-action-1",
+            )
+            .await
+            .test_ok();
+        let duplicate = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "host-owned-action-1",
+            )
+            .await
+            .test_ok();
+        assert!(!first.duplicate);
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.event.id, first.event.id);
+        assert_eq!(audit_host.audits().await.len(), 3);
         gateway.shutdown().await.test_ok();
     }
 
@@ -3454,6 +3489,54 @@ mod tests {
         assert!(audit_host.audits().await.is_empty());
         gateway.shutdown().await.test_ok();
         drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn host_owned_action_rechecks_authentication_inside_the_erasure_fence() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_reject_after_first_for(actor);
+        let audit_host = authorization.clone();
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gateway =
+            Gateway::new_with_erasure_host_and_authorization(host, [body], authorization).test_ok();
+        let timeline = gateway
+            .create_timeline("host-authority-commit-recheck")
+            .await
+            .test_ok();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+
+        let error = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(error, GatewayError::AuthorizationUnavailable));
+        assert!(audit_host.audits().await.is_empty());
+        assert!(gateway
+            .poll_events(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_ok()
+            .events
+            .is_empty());
+        gateway.shutdown().await.test_ok();
     }
 
     async fn assert_authority_proposed_action_boundaries(
