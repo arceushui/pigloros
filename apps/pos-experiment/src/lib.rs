@@ -116,6 +116,9 @@ fn bind_registry_erasure_gate(
     store: &mut dyn pos_core::store::EventStore,
     registry: &PluginRegistry,
 ) -> Result<(), pos_core::CoreError> {
+    if !registry.erasure_gate_is_bound() {
+        return Err(pos_core::CoreError::ErasureContainmentUnavailable);
+    }
     let gate = registry
         .clone_erasure_gate()
         .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
