@@ -1,15 +1,34 @@
 //! Public selector-owned provider and image admission tests.
 
+use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::thread;
+use std::time::Duration;
+
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
-use pos_reference::evaluator_protocol::RequiredProviderCapability;
+use pos_reference::adapter_transport::{write_attempt, write_observation};
+use pos_reference::evaluator::{
+    AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage, SubjectObservation,
+    SubjectResult,
+};
+use pos_reference::evaluator_protocol::{
+    EvaluationRequest, ImplementationIdentity, OutputCapability, RequiredProviderCapability,
+    SandboxRequirement, SubjectAdapterKind,
+};
+use pos_reference::profile::DeterministicBudget;
+use pos_reference::root_selector::{
+    RootSelectorAdmissionArtifacts, RootSelectorAuthoritySource, RootSelectorCasePlan,
+    RootSelectorProvider, RootSelectorProviderReply, RootSelectorServer, RootSelectorServiceError,
+};
 use pos_reference::sandbox_provider_protocol::{
-    AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, HostCapabilityProfile,
-    LaunchPolicy, ProviderConformanceReport, RootSelectorAdmission, RootSelectorAdmissionInputs,
-    SandboxAdministratorPolicy, SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord,
-    SandboxExecuteRequest, SandboxGrantExpectations, SandboxProviderAdmissionInputs,
-    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxRevocationSnapshot,
-    SandboxTrustSnapshot,
+    AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, ExecuteAuthority,
+    HostCapabilityProfile, LaunchPolicy, ProviderConformanceReport, RootSelectorAdmission,
+    RootSelectorAdmissionInputs, SandboxAdministratorPolicy, SandboxAdmissionError,
+    SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest, SandboxGrantExpectations,
+    SandboxProviderAdmissionInputs, SandboxProviderProtocolError, SandboxProviderReceipt,
+    SandboxRevocationSnapshot, SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -696,6 +715,34 @@ fn terminal_result(
     terminal_result_for_outcome(fixture, request, grant, receipt, 0, &[11, 12])
 }
 
+fn terminal_result_with_output(
+    fixture: &Fixture,
+    request: &SandboxExecuteRequest,
+    grant: &AdmissionGrant,
+    receipt: &SandboxProviderReceipt,
+    output: &[u8],
+) -> TestResult<Vec<u8>> {
+    sign_record(
+        "SPY1",
+        Value::Array(vec![
+            Value::Text("SPY1".to_owned()),
+            integer(1),
+            Value::Bytes(request.request.request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
+            integer(0),
+            Value::Array(vec![
+                integer(u64::try_from(output.len())?),
+                bytes(payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", output)),
+            ]),
+            bytes(grant.grant_digest),
+            bytes(receipt.receipt_digest),
+            Value::Array(vec![integer(11), integer(12)]),
+            Value::Text("runtime".to_owned()),
+        ]),
+        &fixture.authority.runtime,
+    )
+}
+
 fn terminal_result_for_outcome(
     fixture: &Fixture,
     request: &SandboxExecuteRequest,
@@ -885,6 +932,219 @@ impl Fixture {
             },
         )
     }
+}
+
+#[derive(Clone)]
+struct FixedSelectorAuthority {
+    plan: RootSelectorCasePlan,
+}
+
+impl RootSelectorAuthoritySource for FixedSelectorAuthority {
+    fn resolve_case(
+        &mut self,
+        _: &EvaluationRequest,
+        _: u16,
+    ) -> Result<RootSelectorCasePlan, RootSelectorServiceError> {
+        Ok(self.plan.clone())
+    }
+}
+
+struct SignedSelectorProvider {
+    fixture: Fixture,
+    launch: LaunchPolicy,
+}
+
+impl RootSelectorProvider for SignedSelectorProvider {
+    fn execute(
+        &mut self,
+        request: &SandboxExecuteRequest,
+        _: &[u8],
+        _: Duration,
+    ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
+        self.reply(request)
+            .map_err(|_| RootSelectorServiceError::ProviderEvidence)
+    }
+}
+
+impl SignedSelectorProvider {
+    fn reply(&self, request: &SandboxExecuteRequest) -> TestResult<RootSelectorProviderReply> {
+        let mut output_stream = Vec::new();
+        write_observation(
+            &mut output_stream,
+            &SubjectObservation {
+                result: SubjectResult::Output(b"selected".to_vec()),
+                usage: ResourceUsage::default(),
+            },
+        )?;
+        let grant = admission_grant(&self.fixture, request, &self.launch)?;
+        let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
+        let audit = audit_chain(&self.fixture, &grant_record)?;
+        let receipt = provider_receipt(&self.fixture, &grant_record, wrapped_digest(&audit[1])?)?;
+        let receipt_record = SandboxProviderReceipt::from_canonical_cbor(&receipt)?;
+        let result = terminal_result_with_output(
+            &self.fixture,
+            request,
+            &grant_record,
+            &receipt_record,
+            &output_stream,
+        )?;
+        Ok(RootSelectorProviderReply::Admitted {
+            grant,
+            receipt,
+            result,
+            audit,
+            output_stream: Some(output_stream),
+        })
+    }
+}
+
+fn selector_evaluation_request(fixture: &Fixture) -> TestResult<EvaluationRequest> {
+    let mut request = EvaluationRequest {
+        request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+        profile_digest: [35; 32],
+        fixture_bundle_digest: [36; 32],
+        subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+        subject_artifact_digest: fixture.subject_digest(),
+        implementation: ImplementationIdentity {
+            implementation_id: "subject".to_owned(),
+            source_digest: [47; 32],
+            build_digest: [48; 32],
+            binary_digest: fixture.subject_digest(),
+            public_contract_digest: [49; 32],
+            organization_id: None,
+        },
+        execution_profile_digest: [38; 32],
+        trust_policy_snapshot_digest: [50; 32],
+        output_capability: OutputCapability {
+            capability_digest: [1; 32],
+            report_bytes_limit: 1024,
+            diagnostic_bytes_limit: 0,
+        },
+        evaluator_protocol_digest: [51; 32],
+        evaluator_hard_caps_digest: [52; 32],
+        sandbox_requirement: Some(SandboxRequirement {
+            lps1_digest: wrapped_digest(&fixture.lps1)?,
+            sim1_digest: wrapped_digest(&fixture.sim1)?,
+            required_provider_capability: Fixture::grant_expectations()
+                .required_provider_capability,
+            apt1_digest: fixture.policy.policy_digest(),
+            policy_epoch: fixture.policy.policy_epoch(),
+        }),
+        request_digest: [1; 32],
+    };
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    Ok(request)
+}
+
+fn selector_case_attempt() -> CaseAttempt {
+    let artifact = |contents: &[u8]| AttemptArtifact {
+        digest: *blake3::hash(contents).as_bytes(),
+        bytes: contents.to_vec(),
+    };
+    CaseAttempt {
+        case_id: "sandbox-case".to_owned(),
+        claim_layer: 1,
+        family: 1,
+        mode: 1,
+        fixture_digest: [37; 32],
+        schema: artifact(b"schema"),
+        payload: artifact(b"payload"),
+        auxiliary: Vec::new(),
+        budget: DeterministicBudget {
+            memory_bytes: 1,
+            cpu_fuel: 1,
+            host_calls: 1,
+            event_count: 1,
+            output_bytes: 1024,
+            storage_bytes: 1,
+            execution_steps: 1,
+            simulation_time_ns: 1,
+        },
+        watchdog_ms: 1_000,
+        network_allowed: false,
+        capability_ids: vec!["execute".to_owned()],
+        transport_caps: AttemptTransportCaps {
+            max_member_bytes: 1024,
+            max_attempt_bytes: 128 * 1024 * 1024,
+        },
+    }
+}
+
+fn selector_case_plan(
+    fixture: &Fixture,
+    request: &EvaluationRequest,
+    attempt: CaseAttempt,
+) -> TestResult<RootSelectorCasePlan> {
+    Ok(RootSelectorCasePlan {
+        expected_attempt: attempt,
+        execute_authority: ExecuteAuthority {
+            evr1_digest: request.request_digest,
+            cpf1_digest: request.profile_digest,
+            cfb1_digest: request.fixture_bundle_digest,
+            fixture_contract_digest: [53; 32],
+            fixture_digest: [37; 32],
+            execution_profile_digest: request.execution_profile_digest,
+            lps1_digest: wrapped_digest(&fixture.lps1)?,
+            sim1_digest: wrapped_digest(&fixture.sim1)?,
+            apt1_digest: fixture.policy.policy_digest(),
+            trs1_digest: fixture.trust.snapshot_digest(),
+            rvs1_digest: fixture.revocation.snapshot_digest(),
+            spm1_digest: wrapped_digest(&fixture.spm1)?,
+            pcf1_digest: [17; 32],
+            pcr1_digest: wrapped_digest(&fixture.pcr1)?,
+            hcp1_digest: wrapped_digest(&fixture.hcp1)?,
+        },
+        network_plans: Vec::new(),
+        request_nonce: [54; 16],
+        admission: RootSelectorAdmissionArtifacts {
+            policy: fixture.policy.clone(),
+            trust: fixture.trust.clone(),
+            revocation: fixture.revocation.clone(),
+            provider_manifest: fixture.spm1.clone(),
+            provider_binary: fixture.provider_binary.clone(),
+            broker_hard_caps: fixture.broker_hard_caps.clone(),
+            conformance_report: fixture.pcr1.clone(),
+            host_profile: fixture.hcp1.clone(),
+            syscall_set: fixture.scs1.clone(),
+            required_features: fixture.required_features.clone(),
+            image_manifest: fixture.sim1.clone(),
+            root_image: fixture.root_image.clone(),
+            executable: fixture.executable.clone(),
+            launch_policy: fixture.lps1.clone(),
+            grant_expectations: Fixture::grant_expectations(),
+        },
+    })
+}
+
+fn selector_client_request(
+    request: &EvaluationRequest,
+    attempt: &CaseAttempt,
+    ordinal: u16,
+) -> TestResult<(Vec<u8>, Vec<u8>)> {
+    let mut attempt_stream = Vec::new();
+    write_attempt(&mut attempt_stream, attempt)?;
+    let mut provider_request_id = request.request_id;
+    provider_request_id[14..].copy_from_slice(&ordinal.to_be_bytes());
+    let mut attempt_id = request.request_id;
+    attempt_id[14..].copy_from_slice(&(ordinal ^ 0x8000).to_be_bytes());
+    let input_digest = payload_digest(b"PiglorOS.SandboxInputBytes.v1\0", &attempt_stream);
+    let unsigned = Value::Array(vec![
+        Value::Text("SLX1".to_owned()),
+        integer(1),
+        Value::Bytes(provider_request_id.to_vec()),
+        Value::Bytes(attempt_id.to_vec()),
+        Value::Bytes(request.to_canonical_cbor()?),
+        Value::Array(vec![
+            integer(u64::try_from(attempt_stream.len())?),
+            bytes(input_digest),
+        ]),
+    ]);
+    let digest = digest_value(b"PiglorOS.SLX1.v1\0", &unsigned)?;
+    Ok((
+        encode(&Value::Array(vec![unsigned, bytes(digest)]))?,
+        attempt_stream,
+    ))
 }
 
 fn assert_unsupported_host_feature_rejected(fixture: &Fixture) -> TestResult {
@@ -1648,6 +1908,51 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         ),
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn root_selector_server_wires_request_admission_provider_and_authenticated_reply() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let attempt = selector_case_attempt();
+    let plan = selector_case_plan(&fixture, &request, attempt.clone())?;
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let provider = SignedSelectorProvider { fixture, launch };
+    let authority = FixedSelectorAuthority { plan };
+    let temporary = tempfile::tempdir()?;
+    let socket = temporary.path().join("root-selector.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let evaluator_uid = std::fs::metadata(temporary.path())?.uid();
+    let mut server =
+        RootSelectorServer::new(authority, provider, evaluator_uid, Duration::from_secs(2));
+    let server_thread = thread::spawn(move || server.serve_once(&listener));
+
+    let (control, attempt_stream) = selector_client_request(&request, &attempt, 0)?;
+    let mut client = UnixStream::connect(&socket)?;
+    client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
+    client.write_all(&control)?;
+    client.write_all(&attempt_stream)?;
+    client.shutdown(std::net::Shutdown::Write)?;
+
+    let mut prefix = [0_u8; 4];
+    client.read_exact(&mut prefix)?;
+    let mut response_control = vec![0_u8; usize::try_from(u32::from_be_bytes(prefix))?];
+    client.read_exact(&mut response_control)?;
+    let mut output_stream = Vec::new();
+    client.read_to_end(&mut output_stream)?;
+    server_thread
+        .join()
+        .map_err(|_| "root selector thread panicked")??;
+
+    let Value::Array(wrapper) = ciborium::from_reader(response_control.as_slice())? else {
+        return Err("SLY1 wrapper must be an array".into());
+    };
+    let Value::Array(fields) = wrapper.first().ok_or("SLY1 prefix missing")? else {
+        return Err("SLY1 prefix must be an array".into());
+    };
+    assert_eq!(fields.first(), Some(&Value::Text("SLY1".to_owned())));
+    assert!(!output_stream.is_empty());
     Ok(())
 }
 
