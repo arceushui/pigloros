@@ -14,19 +14,19 @@ use pos_store::StoreConfig;
 /// The concrete store never escapes the execution host. Every implemented
 /// `EventStore` operation delegates to a generation-bound host sender; all
 /// other trait operations retain their fail-closed defaults.
-pub(crate) struct HostedLedgerStore {
+pub struct HostedLedgerStore {
     host: Mutex<ErasureExecutionHostV1>,
     ledger_timeline: Option<TimelineId>,
 }
 
 impl HostedLedgerStore {
-    pub(crate) fn open(config: StoreConfig) -> Result<Self, CoreError> {
+    pub fn open(config: StoreConfig) -> Result<Self, CoreError> {
         ErasureExecutionHostV1::open_verified_empty(config, ERASURE_MAX_INVENTORY_REQUESTS)
             .map(Self::from_host)
             .map_err(host_error)
     }
 
-    pub(crate) fn open_read_only(path: &str) -> Result<Self, CoreError> {
+    pub fn open_read_only(path: &str) -> Result<Self, CoreError> {
         ErasureExecutionHostV1::open_read_only_verified_empty(path, ERASURE_MAX_INVENTORY_REQUESTS)
             .map(Self::from_host)
             .map_err(host_error)
@@ -116,10 +116,7 @@ impl EventStore for HostedLedgerStore {
     }
 
     fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
-        let Some(timeline) = self.known_ledger_timeline()? else {
-            return Ok(None);
-        };
-        self.with_host(|host| host.read_sender()?.key_registry(timeline))
+        self.with_host(|host| host.read_sender()?.key_registry())
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {

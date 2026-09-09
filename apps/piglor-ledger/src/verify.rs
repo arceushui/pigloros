@@ -975,7 +975,12 @@ mod tests {
 
         let trust_anchor = ledger_trust_anchor(&"aa".repeat(32));
         let error = run(&Source::Store(db), Some(&trust_anchor), None).test_err()?;
-        assert!(error.to_string().contains("serialization error"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("erasure host rejected ledger operation"),
+            "{error}"
+        );
         Ok(())
     }
 
@@ -1314,7 +1319,9 @@ mod tests {
             true,
         )?
         .test_err()?;
-        assert!(wrong_role.to_string().contains("signed event"));
+        assert!(wrong_role
+            .to_string()
+            .contains("erasure host rejected ledger operation"));
 
         let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
         let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);

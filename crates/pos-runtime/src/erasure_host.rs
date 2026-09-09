@@ -1049,21 +1049,24 @@ impl ErasureReadSenderV1<'_> {
             .map_store_error()
     }
 
-    /// Load the durable signing registry only while the associated Timeline
-    /// remains readable under the installed inventory generation.
+    /// Load the durable signing registry under the installed inventory
+    /// generation.
+    ///
+    /// The registry may exist before its first associated Timeline is created,
+    /// so this operation is generation-bound rather than Timeline-bound.
     ///
     /// # Errors
     /// Returns only payload-free host errors.
-    pub fn key_registry(
-        &mut self,
-        timeline: TimelineId,
-    ) -> Result<Option<KeyRegistryStateV1>, ErasureHostErrorV1> {
-        self.host.with_store_fence(
-            self.generation,
-            timeline,
-            ErasureProtectedOperationV1::Read,
-            |store| store.load_key_registry(),
-        )
+    pub fn key_registry(&mut self) -> Result<Option<KeyRegistryStateV1>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let result = self
+            .host
+            .store
+            .host_store()
+            .load_key_registry()
+            .map_store_error();
+        self.host.ensure_generation(self.generation)?;
+        result
     }
 
     /// List only Timelines classified by the installed inventory generation.

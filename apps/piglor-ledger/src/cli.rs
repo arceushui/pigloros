@@ -2503,7 +2503,12 @@ mod tests {
         drop(connection);
 
         let error = open_store(&Source::Store(db), Some(&key_path)).test_err()?;
-        assert!(error.to_string().contains("state_cbor"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("erasure host rejected ledger operation"),
+            "{error}"
+        );
         Ok(())
     }
 
