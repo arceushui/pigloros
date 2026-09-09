@@ -34,7 +34,7 @@ pub struct StagedOutput {
 }
 
 impl StagedOutput {
-    fn new(file: tempfile::NamedTempFile, descriptor: PayloadDescriptor) -> Self {
+    const fn new(file: tempfile::NamedTempFile, descriptor: PayloadDescriptor) -> Self {
         Self { file, descriptor }
     }
 
@@ -219,7 +219,7 @@ impl<C: ProviderConnector> RootSelectorProvider for ProviderTransport<C> {
                         agr1_digest: retained_grant.as_ref().map(|grant| grant.digest),
                     });
                 }
-                Err(ReceiveFailure::Incomplete) if replay == 0 => continue,
+                Err(ReceiveFailure::Incomplete) if replay == 0 => {}
                 Err(ReceiveFailure::Incomplete) => {
                     return Ok(RootSelectorProviderReply::Incomplete {
                         agr1_digest: retained_grant.as_ref().map(|grant| grant.digest),
@@ -503,8 +503,9 @@ fn write_frame(
         return Err(ReceiveFailure::Invalid);
     }
     deadline.set_write(stream)?;
+    let length = u32::try_from(bytes.len()).map_err(|_| ReceiveFailure::Invalid)?;
     stream
-        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .write_all(&length.to_be_bytes())
         .map_err(|_| ReceiveFailure::Incomplete)?;
     deadline.set_write(stream)?;
     stream
