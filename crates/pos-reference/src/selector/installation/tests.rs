@@ -5,6 +5,7 @@ use ed25519_dalek::SigningKey;
 use super::*;
 
 mod bootstrap;
+mod transition;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
