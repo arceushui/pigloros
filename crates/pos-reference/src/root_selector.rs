@@ -10,7 +10,7 @@ use std::time::Duration;
 use rustix::net::sockopt::socket_peercred;
 
 use crate::evaluator::CaseAttempt;
-use crate::evaluator_protocol::EvaluationRequest;
+use crate::evaluator_protocol::{EvaluationRequest, SandboxRequirement};
 use crate::sandbox_provider_protocol::{
     ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor, RequestAuthority,
     RootSelectorAdmission, RootSelectorAdmissionInputs, SandboxAdministratorPolicy,
@@ -66,11 +66,8 @@ impl RootSelectorAdmissionArtifacts {
     fn admit(
         &self,
         request: &EvaluationRequest,
+        requirement: &SandboxRequirement,
     ) -> Result<RootSelectorAdmission, RootSelectorServiceError> {
-        let requirement = request
-            .sandbox_requirement
-            .as_ref()
-            .ok_or(RootSelectorServiceError::AuthorityMismatch)?;
         if self.grant_expectations.required_provider_capability
             != requirement.required_provider_capability
         {
@@ -286,9 +283,6 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 return write_selector_response(stream, &control, &[]);
             }
         };
-        let Some((plan, admission)) = self.resolve_admission(stream, &decoded)? else {
-            return Ok(());
-        };
         let Some(requirement) = decoded.evaluation.sandbox_requirement.as_ref() else {
             return Self::write_local_error(
                 stream,
@@ -297,6 +291,9 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 SandboxLocalErrorCode::RequestAuthorityMismatch,
                 None,
             );
+        };
+        let Some((plan, admission)) = self.resolve_admission(stream, &decoded, requirement)? else {
+            return Ok(());
         };
         let execute_request = crate::sandbox_provider_protocol::SandboxExecuteRequest::for_selector(
             RequestAuthority {
@@ -347,6 +344,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         &mut self,
         stream: &mut UnixStream,
         decoded: &DecodedSelectorRequest,
+        requirement: &SandboxRequirement,
     ) -> Result<Option<(RootSelectorCasePlan, RootSelectorAdmission)>, RootSelectorServiceError>
     {
         let expected_request = derived_id(decoded.evaluation.request_id, decoded.ordinal);
@@ -403,7 +401,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             )?;
             return Ok(None);
         }
-        if validate_execute_authority(decoded, &plan).is_err() {
+        if validate_execute_authority(decoded, &plan, requirement).is_err() {
             Self::write_local_error(
                 stream,
                 decoded,
@@ -413,7 +411,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             )?;
             return Ok(None);
         }
-        let admission = match plan.admission.admit(&decoded.evaluation) {
+        let admission = match plan.admission.admit(&decoded.evaluation, requirement) {
             Ok(admission) => admission,
             Err(error) => {
                 Self::write_local_error(
@@ -650,7 +648,7 @@ fn read_selector_request(
     if received.is_err() || control.len() != length {
         return Err(failure);
     }
-    crate::selector_protocol::request_payload_length(&control).map_err(|code| {
+    let control = crate::selector_protocol::decode_request_control(control).map_err(|code| {
         failure.code = code;
         failure.clone()
     })?;
@@ -663,18 +661,15 @@ fn read_selector_request(
         failure.code = SandboxLocalErrorCode::PayloadLimitExceeded;
         return Err(failure);
     }
-    decode_request(&control, &attempt_stream).map_err(|_| failure)
+    decode_request(control, attempt_stream).map_err(|_| failure)
 }
 
 fn validate_execute_authority(
     decoded: &DecodedSelectorRequest,
     plan: &RootSelectorCasePlan,
+    requirement: &SandboxRequirement,
 ) -> Result<(), RootSelectorServiceError> {
     let request = &decoded.evaluation;
-    let requirement = request
-        .sandbox_requirement
-        .as_ref()
-        .ok_or(RootSelectorServiceError::AuthorityMismatch)?;
     let authority = &plan.execute_authority;
     if plan.request_nonce == [0; 16]
         || authority.evr1_digest != request.request_digest
