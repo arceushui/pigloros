@@ -20,8 +20,8 @@ use std::{
 use pos_core::{
     AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
     CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
-    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, Event, Hash,
-    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
+    Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
     Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
@@ -40,11 +40,16 @@ pub struct AuthorizationCacheKeyV1 {
     consent_policy_revision: Hash,
     capability_policy_revision: Hash,
     revocation_epoch: u64,
+    inventory_generation: ErasureReferenceV1,
 }
 
 impl AuthorizationCacheKeyV1 {
     #[must_use]
-    pub fn from_decision(decision: &AuthorizationDecisionV1, revocation_epoch: u64) -> Self {
+    pub fn from_decision(
+        decision: &AuthorizationDecisionV1,
+        revocation_epoch: u64,
+        inventory_generation: ErasureReferenceV1,
+    ) -> Self {
         Self {
             request_digest: decision.request_digest(),
             authority_timeline: decision.authority_timeline(),
@@ -52,6 +57,7 @@ impl AuthorizationCacheKeyV1 {
             consent_policy_revision: decision.consent_policy_revision(),
             capability_policy_revision: decision.capability_policy_revision(),
             revocation_epoch,
+            inventory_generation,
         }
     }
 
@@ -64,6 +70,11 @@ impl AuthorizationCacheKeyV1 {
     pub const fn revocation_epoch(&self) -> u64 {
         self.revocation_epoch
     }
+
+    #[must_use]
+    pub const fn inventory_generation(&self) -> ErasureReferenceV1 {
+        self.inventory_generation
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +84,20 @@ struct AuthorizationCacheEntryV1 {
     valid_until_position: Seq,
     grant_ids: BTreeSet<Hash>,
     consent_references: BTreeSet<Hash>,
+    inventory_generation: ErasureReferenceV1,
+}
+
+impl AuthorizationCacheEntryV1 {
+    fn is_current(
+        &self,
+        at_time: WallTime,
+        at_position: Seq,
+        inventory_generation: ErasureReferenceV1,
+    ) -> bool {
+        at_time < self.expires_at
+            && at_position < self.valid_until_position
+            && self.inventory_generation == inventory_generation
+    }
 }
 
 /// Current authorized-decision projection with explicit expiry and revocation indexes.
@@ -92,7 +117,8 @@ impl AuthorizationCacheV1 {
         Self::default()
     }
 
-    /// Cache an active decision until its derived shortest expiry.
+    /// Cache an active decision until its derived shortest expiry, bound to
+    /// the exact installed erasure inventory generation.
     ///
     /// Returns the exact cache key, or `None` when the decision is denied, the
     /// request does not match the persisted authority state, an expiry is not in
@@ -102,6 +128,7 @@ impl AuthorizationCacheV1 {
         decision: AuthorizationDecisionV1,
         request: &AuthorizationRequestV1,
         authority: &PersistedAuthorityV1,
+        inventory_generation: ErasureReferenceV1,
     ) -> Option<AuthorizationCacheKeyV1> {
         let grants = authority.chain().grants();
         let grant_ids = grants
@@ -151,7 +178,11 @@ impl AuthorizationCacheV1 {
         {
             return None;
         }
-        let key = AuthorizationCacheKeyV1::from_decision(&decision, authority.revocation_epoch());
+        let key = AuthorizationCacheKeyV1::from_decision(
+            &decision,
+            authority.revocation_epoch(),
+            inventory_generation,
+        );
         self.entries.insert(
             key.clone(),
             AuthorizationCacheEntryV1 {
@@ -160,20 +191,24 @@ impl AuthorizationCacheV1 {
                 valid_until_position,
                 grant_ids,
                 consent_references,
+                inventory_generation,
             },
         );
         Some(key)
     }
 
-    /// Read an unexpired decision through its complete invalidation identity.
+    /// Read an unexpired decision only for the exact installed erasure
+    /// inventory generation. A generation mismatch evicts the stale entry.
     pub fn get(
         &mut self,
         key: &AuthorizationCacheKeyV1,
         at_time: WallTime,
         at_position: Seq,
+        inventory_generation: ErasureReferenceV1,
     ) -> Option<&AuthorizationDecisionV1> {
         let expired = self.entries.get(key).is_some_and(|entry| {
-            at_time >= entry.expires_at || at_position >= entry.valid_until_position
+            key.inventory_generation() != inventory_generation
+                || !entry.is_current(at_time, at_position, inventory_generation)
         });
         if expired {
             self.entries.remove(key);
@@ -1094,6 +1129,10 @@ mod tests {
         Hash::from_bytes([value; 32])
     }
 
+    const fn cache_generation(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
     struct CacheFixture {
         decision: AuthorizationDecisionV1,
         request: AuthorizationRequestV1,
@@ -1518,22 +1557,43 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                cache_generation(1),
             )
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
         assert!(by_time
-            .get(&key, WallTime::from_micros(99), Seq::from_u64(79))
+            .get(
+                &key,
+                WallTime::from_micros(99),
+                Seq::from_u64(79),
+                cache_generation(1),
+            )
             .is_some());
         assert!(by_time
-            .get(&key, WallTime::from_micros(100), Seq::from_u64(79))
+            .get(
+                &key,
+                WallTime::from_micros(100),
+                Seq::from_u64(79),
+                cache_generation(1),
+            )
             .is_none());
         assert!(by_time.is_empty());
 
         let mut by_position = AuthorizationCacheV1::new();
         let key = by_position
-            .insert_active(fixture.decision, &fixture.request, &fixture.authority)
+            .insert_active(
+                fixture.decision,
+                &fixture.request,
+                &fixture.authority,
+                cache_generation(1),
+            )
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
         assert!(by_position
-            .get(&key, WallTime::from_micros(99), Seq::from_u64(80))
+            .get(
+                &key,
+                WallTime::from_micros(99),
+                Seq::from_u64(80),
+                cache_generation(1),
+            )
             .is_none());
     }
 
@@ -1551,8 +1611,40 @@ mod tests {
         );
         let mut cache = AuthorizationCacheV1::new();
         assert!(cache
-            .insert_active(fixture.decision, &request, &fixture.authority)
+            .insert_active(
+                fixture.decision,
+                &request,
+                &fixture.authority,
+                cache_generation(1),
+            )
             .is_none());
+    }
+
+    #[test]
+    fn authorization_cache_rejects_a_pre_freeze_generation_hit() {
+        let fixture = active_decision(TimelineId::new());
+        let installed = cache_generation(1);
+        let successor = cache_generation(2);
+        let mut cache = AuthorizationCacheV1::new();
+        let key = cache
+            .insert_active(
+                fixture.decision,
+                &fixture.request,
+                &fixture.authority,
+                installed,
+            )
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+
+        assert_eq!(key.inventory_generation(), installed);
+        assert!(cache
+            .get(
+                &key,
+                WallTime::from_micros(99),
+                Seq::from_u64(79),
+                successor,
+            )
+            .is_none());
+        assert!(cache.is_empty());
     }
 
     #[test]
@@ -1569,6 +1661,7 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                cache_generation(1),
             )
             .is_some());
         assert_eq!(grant_cache.invalidate_grant(fixture.parent_grant_id), 1);
@@ -1580,6 +1673,7 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                cache_generation(1),
             )
             .is_some());
         assert_eq!(
@@ -1589,10 +1683,20 @@ mod tests {
 
         let mut epoch_cache = AuthorizationCacheV1::new();
         assert!(epoch_cache
-            .insert_active(fixture.decision, &fixture.request, &fixture.authority,)
+            .insert_active(
+                fixture.decision,
+                &fixture.request,
+                &fixture.authority,
+                cache_generation(1),
+            )
             .is_some());
         assert!(epoch_cache
-            .insert_active(other.decision, &other.request, &other.authority,)
+            .insert_active(
+                other.decision,
+                &other.request,
+                &other.authority,
+                cache_generation(1),
+            )
             .is_some());
         assert_eq!(epoch_cache.len(), 2);
         assert_eq!(epoch_cache.retain_revocation_epoch(timeline, 1), 1);
@@ -1612,6 +1716,7 @@ mod tests {
                 fixture.decision.clone(),
                 &mismatched.request,
                 &fixture.authority,
+                cache_generation(1),
             )
             .is_none());
         assert!(cache
@@ -1619,13 +1724,19 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &mismatched_chain.authority,
+                cache_generation(1),
             )
             .is_none());
 
         let denied = decision_with_capability_trust(timeline, test_hash(5), false);
         assert!(!denied.decision.is_allowed());
         assert!(cache
-            .insert_active(denied.decision, &denied.request, &denied.authority,)
+            .insert_active(
+                denied.decision,
+                &denied.request,
+                &denied.authority,
+                cache_generation(1),
+            )
             .is_none());
     }
 
