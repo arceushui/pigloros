@@ -435,7 +435,7 @@ impl Profile {
             .collect()
     }
 
-    /// Digest of the verified FixtureContract member selected by CPF1.
+    /// Digest of the verified `FixtureContract` member selected by CPF1.
     #[must_use]
     pub const fn fixture_contract_digest(&self) -> [u8; 32] {
         self.fixture_contract_digest

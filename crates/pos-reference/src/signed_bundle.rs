@@ -346,7 +346,11 @@ pub(crate) fn verify_signed_bundle_reader<R: Read + Seek>(
     archive
         .seek(SeekFrom::Start(0))
         .map_err(snapshot_unavailable)?;
-    let (members, signer_key, signature) = read_verified_members(archive, archive_length)?;
+    let VerifiedArchiveMembers {
+        members,
+        signer_key,
+        signature,
+    } = read_verified_members(archive, archive_length)?;
     if signer_key != scanned.signer_key || signature != scanned.signature {
         return Err(BundleError::InvalidEncoding);
     }
@@ -582,10 +586,16 @@ fn drain_exact<R: Read + ?Sized>(archive: &mut R, mut length: u64) -> Result<(),
     Ok(())
 }
 
+struct VerifiedArchiveMembers {
+    members: BTreeMap<String, VerifiedMember>,
+    signer_key: [u8; 32],
+    signature: [u8; 64],
+}
+
 fn read_verified_members<R: Read + ?Sized>(
     archive: &mut R,
     archive_length: u64,
-) -> Result<(BTreeMap<String, VerifiedMember>, [u8; 32], [u8; 64]), BundleError> {
+) -> Result<VerifiedArchiveMembers, BundleError> {
     let mut decoder = Decoder::from(&mut *archive);
     expect_array(&mut decoder, 4)?;
     skip_cbor_value(&mut decoder, 0)?;
@@ -627,7 +637,11 @@ fn read_verified_members<R: Read + ?Sized>(
     if decoder.offset() as u64 != archive_length {
         return Err(BundleError::InvalidEncoding);
     }
-    Ok((members, signer_key, signature))
+    Ok(VerifiedArchiveMembers {
+        members,
+        signer_key,
+        signature,
+    })
 }
 
 fn copy_authenticated_snapshot<R: Read + ?Sized>(
