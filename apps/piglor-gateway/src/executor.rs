@@ -1723,7 +1723,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
                         host.command_sender()
                             .and_then(|mut sender| sender.pending_append_identity_cleanup())
                     },
-                    EventStore::pending_append_identity_cleanup,
+                    |store| store.pending_append_identity_cleanup(),
                 ),
             );
         }
