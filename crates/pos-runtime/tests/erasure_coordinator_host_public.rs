@@ -434,10 +434,8 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
         let mut recovered = test_stage(
             "reopen persistent coordinator host",
-            ErasureExecutionHostV1::open_with_coordinator_authority(
-                StoreConfig::Sqlite {
-                    path: path_text.clone(),
-                },
+            ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+                &path_text,
                 authority_plugin,
                 reference(30),
                 ERASURE_MAX_INVENTORY_REQUESTS,
@@ -459,5 +457,26 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
             std::fs::remove_file(candidate)?;
         }
     }
+    Ok(())
+}
+
+#[test]
+fn gateway_host_uses_the_same_coordinator_authority_boundary(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
+    let mut host = test_stage(
+        "open gateway coordinator host",
+        ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage("open gateway command sender", host.command_sender())?;
+    test_stage(
+        "create gateway timeline",
+        commands.create_timeline("gateway-coordinator-authority"),
+    )?;
     Ok(())
 }

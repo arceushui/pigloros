@@ -2224,6 +2224,168 @@ mod tests {
         }
     }
 
+    struct UnusedCoordinatorAuthorityV1;
+
+    impl ErasureFreezeAuthorizationVerifierV1 for UnusedCoordinatorAuthorityV1 {
+        fn validate_freeze_authorization(
+            &self,
+            _admission: &ErasureFreezeAdmissionEvidenceV1,
+            _authorization: &ErasureFreezeAuthorizationEvidenceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test has no freeze evidence")
+        }
+    }
+
+    impl ErasureRecoveryAuthorizationVerifierV1 for UnusedCoordinatorAuthorityV1 {
+        fn validate_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test has no scope extension")
+        }
+
+        fn validate_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test has no resolution")
+        }
+    }
+
+    impl ErasureCoordinatorAuthorityV1 for UnusedCoordinatorAuthorityV1 {
+        fn verified_topology_observation(
+            &self,
+            _request: ErasureReferenceV1,
+            _manifest_digest: ErasureReferenceV1,
+        ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            unreachable!("the empty-store delegation test has no request")
+        }
+
+        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test submits no request")
+        }
+
+        fn admit_authorization(
+            &self,
+            _request: ErasureReferenceV1,
+            _provenance: ErasureReferenceV1,
+            _decision: ErasureAuthorizationDecisionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test authorizes no request")
+        }
+
+        fn admit_corrected_submission(
+            &self,
+            _request: &ErasureRequestV1,
+            _correction: &ErasureCorrectionProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test submits no correction")
+        }
+
+        fn admit_atomic_freeze(
+            &self,
+            _request: ErasureReferenceV1,
+            _requested: &ErasureStateTransitionV1,
+        ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+            unreachable!("the empty-store delegation test admits no freeze")
+        }
+
+        fn admit_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test admits no extension")
+        }
+
+        fn admit_fork_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+            _input: &ErasureForkAdmissionInputV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test admits no fork")
+        }
+
+        fn resolve_fork_child_scope(
+            &self,
+            _parent: TimelineId,
+            _child: &TimelineMeta,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            unreachable!("the empty-store delegation test resolves no fork")
+        }
+
+        fn resolve_fork_scope_extension(
+            &self,
+            _requirement: ErasureForkScopeRequirementV1,
+            _input: &ErasureForkAdmissionInputV1,
+        ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+            unreachable!("the empty-store delegation test resolves no extension")
+        }
+
+        fn admit_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test admits no resolution")
+        }
+
+        fn dispatch_destruction(
+            &self,
+            _request: ErasureReferenceV1,
+            _commands: &[ErasureDestructionCommandV1],
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test dispatches nothing")
+        }
+
+        fn admit_attempt(
+            &self,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+            unreachable!("the empty-store delegation test admits no attempt")
+        }
+
+        fn admit_acknowledgement(
+            &self,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test admits no acknowledgement")
+        }
+
+        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+            unreachable!("the empty-store delegation test admits no receipt")
+        }
+    }
+
+    #[test]
+    fn hosted_coordinator_port_delegates_empty_persistence_reads() -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let request = ErasureReferenceV1::from_digest([71; 32]);
+        assert_eq!(port.resolve_state(request)?, None);
+        assert_eq!(port.read_manifest(request)?, None);
+        assert_eq!(
+            port.read_object(request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            port.read_effect(request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(port.effect_manifest(request)?, None);
+        assert_eq!(port.attempt_page_ref(request, 0)?, None);
+        assert_eq!(port.attempt_index_count(request)?, 0);
+        assert_eq!(port.scope_node_ref(request, 0)?, None);
+        assert_eq!(port.scope_index_count(request)?, 0);
+        assert_eq!(port.administrative_resolution_ref(request, 0)?, None);
+        assert_eq!(port.administrative_resolution_index_count(request)?, 0);
+        assert!(port.recovery_error_refs(request)?.is_empty());
+        let observation = port.complete_erasure_inventory_observation(1)?;
+        assert_eq!(
+            observation,
+            ErasureInventoryObservationV1::new(Vec::new(), Vec::new(), Vec::new())
+        );
+        Ok(())
+    }
+
     fn fault_store(fault: FaultModeV1) -> FaultStoreV1 {
         FaultStoreV1 {
             inner: MemoryStore::new().without_erasure_gate(),
