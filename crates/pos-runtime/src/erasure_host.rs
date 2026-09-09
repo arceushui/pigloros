@@ -946,7 +946,7 @@ mod tests {
         assert!(host
             .command_sender()
             .and_then(|mut sender| sender.append_consent_bounded(
-                timeline.id(),
+                timeline,
                 &[grant_draft],
                 authority.append_permit(),
                 8,
@@ -969,7 +969,7 @@ mod tests {
         assert!(host
             .command_sender()
             .and_then(|mut sender| sender.append_consent_revocation_bounded(
-                timeline.id(),
+                timeline,
                 &[revocation_draft],
                 authority.append_permit(),
                 8,
