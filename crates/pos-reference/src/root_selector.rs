@@ -105,7 +105,7 @@ impl RootSelectorAdmissionArtifacts {
 /// Independently reconstructed authority for one canonical selected case.
 #[derive(Clone, Debug)]
 pub struct RootSelectorCasePlan {
-    /// CaseAttempt independently reconstructed from installed CFB1/CPF1 state.
+    /// `CaseAttempt` independently reconstructed from installed CFB1/CPF1 state.
     pub expected_attempt: CaseAttempt,
     /// Exact fifteen-digest SPX1 authority block.
     pub execute_authority: ExecuteAuthority,
@@ -150,7 +150,7 @@ pub enum RootSelectorProviderReply {
         /// Exact framed EAO1 stream, present only for Completed.
         output_stream: Option<Vec<u8>>,
     },
-    /// Authenticated Rejected or UnavailableBeforeAdmission SPY1.
+    /// Authenticated Rejected or `UnavailableBeforeAdmission` SPY1.
     BeforeAdmission {
         /// Exact signed SPY1 bytes.
         result: Vec<u8>,
@@ -203,6 +203,7 @@ pub struct RootSelectorServer<A, P> {
     initial_io_timeout: Duration,
 }
 
+#[derive(Clone, Copy)]
 struct ProviderResponseContext<'a> {
     decoded: &'a DecodedSelectorRequest,
     admission: &'a RootSelectorAdmission,
@@ -277,63 +278,11 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         stream: &mut UnixStream,
     ) -> Result<(), RootSelectorServiceError> {
         let decoded = read_selector_request(stream)?;
-        let plan = match self
-            .authority
-            .resolve_case(&decoded.evaluation, decoded.ordinal)
-        {
-            Ok(plan) => plan,
-            Err(RootSelectorServiceError::AuthorityUnavailable) => {
-                return self.write_local_error(
-                    stream,
-                    &decoded,
-                    SandboxLocalErrorPhase::BeforeSpx1,
-                    SandboxLocalErrorCode::PolicyUnavailable,
-                    None,
-                );
-            }
-            Err(RootSelectorServiceError::AuthorityMismatch) => {
-                return self.write_local_error(
-                    stream,
-                    &decoded,
-                    SandboxLocalErrorPhase::BeforeSpx1,
-                    SandboxLocalErrorCode::RequestAuthorityMismatch,
-                    None,
-                );
-            }
-            Err(error) => return Err(error),
-        };
-        if plan.expected_attempt != decoded.attempt {
-            return self.write_local_error(
-                stream,
-                &decoded,
-                SandboxLocalErrorPhase::BeforeSpx1,
-                SandboxLocalErrorCode::RequestAuthorityMismatch,
-                None,
-            );
-        }
-        if validate_execute_authority(&decoded, &plan).is_err() {
-            return self.write_local_error(
-                stream,
-                &decoded,
-                SandboxLocalErrorPhase::BeforeSpx1,
-                SandboxLocalErrorCode::RequestAuthorityMismatch,
-                None,
-            );
-        }
-        let admission = match plan.admission.admit(&decoded.evaluation) {
-            Ok(admission) => admission,
-            Err(_) => {
-                return self.write_local_error(
-                    stream,
-                    &decoded,
-                    SandboxLocalErrorPhase::BeforeSpx1,
-                    SandboxLocalErrorCode::PolicyUnavailable,
-                    None,
-                );
-            }
+        let Some((plan, admission)) = self.resolve_admission(stream, &decoded)? else {
+            return Ok(());
         };
         let Some(requirement) = decoded.evaluation.sandbox_requirement.as_ref() else {
-            return self.write_local_error(
+            return Self::write_local_error(
                 stream,
                 &decoded,
                 SandboxLocalErrorPhase::BeforeSpx1,
@@ -357,17 +306,14 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             },
             plan.network_plans,
         );
-        let execute_request = match execute_request {
-            Ok(request) => request,
-            Err(_) => {
-                return self.write_local_error(
-                    stream,
-                    &decoded,
-                    SandboxLocalErrorPhase::BeforeSpx1,
-                    SandboxLocalErrorCode::RequestAuthorityMismatch,
-                    None,
-                );
-            }
+        let Ok(execute_request) = execute_request else {
+            return Self::write_local_error(
+                stream,
+                &decoded,
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::RequestAuthorityMismatch,
+                None,
+            );
         };
         let execute_bytes = execute_request
             .to_canonical_cbor()
@@ -377,7 +323,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             &decoded.encoded.attempt_stream,
             Duration::from_millis(decoded.attempt.watchdog_ms),
         );
-        self.write_provider_reply(
+        Self::write_provider_reply(
             stream,
             ProviderResponseContext {
                 decoded: &decoded,
@@ -389,23 +335,85 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         )
     }
 
+    fn resolve_admission(
+        &mut self,
+        stream: &mut UnixStream,
+        decoded: &DecodedSelectorRequest,
+    ) -> Result<Option<(RootSelectorCasePlan, RootSelectorAdmission)>, RootSelectorServiceError>
+    {
+        let plan = match self
+            .authority
+            .resolve_case(&decoded.evaluation, decoded.ordinal)
+        {
+            Ok(plan) => plan,
+            Err(RootSelectorServiceError::AuthorityUnavailable) => {
+                Self::write_local_error(
+                    stream,
+                    decoded,
+                    SandboxLocalErrorPhase::BeforeSpx1,
+                    SandboxLocalErrorCode::PolicyUnavailable,
+                    None,
+                )?;
+                return Ok(None);
+            }
+            Err(RootSelectorServiceError::AuthorityMismatch) => {
+                Self::write_local_error(
+                    stream,
+                    decoded,
+                    SandboxLocalErrorPhase::BeforeSpx1,
+                    SandboxLocalErrorCode::RequestAuthorityMismatch,
+                    None,
+                )?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if plan.expected_attempt != decoded.attempt {
+            Self::write_local_error(
+                stream,
+                decoded,
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::RequestAuthorityMismatch,
+                None,
+            )?;
+            return Ok(None);
+        }
+        if validate_execute_authority(decoded, &plan).is_err() {
+            Self::write_local_error(
+                stream,
+                decoded,
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::RequestAuthorityMismatch,
+                None,
+            )?;
+            return Ok(None);
+        }
+        let Ok(admission) = plan.admission.admit(&decoded.evaluation) else {
+            Self::write_local_error(
+                stream,
+                decoded,
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::PolicyUnavailable,
+                None,
+            )?;
+            return Ok(None);
+        };
+        Ok(Some((plan, admission)))
+    }
+
     fn write_provider_reply(
-        &self,
         stream: &mut UnixStream,
         context: ProviderResponseContext<'_>,
         reply: Result<RootSelectorProviderReply, RootSelectorServiceError>,
     ) -> Result<(), RootSelectorServiceError> {
-        let reply = match reply {
-            Ok(reply) => reply,
-            Err(_) => {
-                return self.write_local_error(
-                    stream,
-                    context.decoded,
-                    SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
-                    SandboxLocalErrorCode::ProviderUnavailable,
-                    None,
-                );
-            }
+        let Ok(reply) = reply else {
+            return Self::write_local_error(
+                stream,
+                context.decoded,
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderUnavailable,
+                None,
+            );
         };
         match reply {
             RootSelectorProviderReply::Admitted {
@@ -414,10 +422,10 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 result,
                 audit,
                 output_stream,
-            } => self.write_admitted_reply(
+            } => Self::write_admitted_reply(
                 stream,
-                context,
-                AdmittedProviderReply {
+                &context,
+                &AdmittedProviderReply {
                     grant,
                     receipt,
                     result,
@@ -430,10 +438,10 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                     .admission
                     .authenticate_pre_admission_result(context.request, &result)
                     .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
-                self.write_authenticated_reply(
+                Self::write_authenticated_reply(
                     stream,
                     context.decoded,
-                    AuthenticatedSelectorReply {
+                    &AuthenticatedSelectorReply {
                         execute_request: context.request_bytes,
                         terminal: AuthenticatedSelectorTerminal::ProviderResult {
                             result: &result,
@@ -450,10 +458,10 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                     .admission
                     .authenticate_provider_error(context.request, &error)
                     .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
-                self.write_authenticated_reply(
+                Self::write_authenticated_reply(
                     stream,
                     context.decoded,
-                    AuthenticatedSelectorReply {
+                    &AuthenticatedSelectorReply {
                         execute_request: context.request_bytes,
                         terminal: AuthenticatedSelectorTerminal::ProviderError(&error),
                         output_stream: None,
@@ -464,25 +472,21 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
     }
 
     fn write_admitted_reply(
-        &self,
         stream: &mut UnixStream,
-        context: ProviderResponseContext<'_>,
-        reply: AdmittedProviderReply,
+        context: &ProviderResponseContext<'_>,
+        reply: &AdmittedProviderReply,
     ) -> Result<(), RootSelectorServiceError> {
-        let grant_record = match context
+        let Ok(grant_record) = context
             .admission
             .authenticate_grant(context.request, &reply.grant)
-        {
-            Ok(grant) => grant,
-            Err(_) => {
-                return self.write_local_error(
-                    stream,
-                    context.decoded,
-                    SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
-                    SandboxLocalErrorCode::ProviderEvidenceInvalid,
-                    None,
-                );
-            }
+        else {
+            return Self::write_local_error(
+                stream,
+                context.decoded,
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                None,
+            );
         };
         let grant_digest = grant_record.grant_digest;
         let authenticated = context.admission.authenticate_after_grant(
@@ -492,20 +496,17 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             &reply.result,
             &reply.audit,
         );
-        let authenticated = match authenticated {
-            Ok(value) => value,
-            Err(_) => {
-                return self.write_local_error(
-                    stream,
-                    context.decoded,
-                    SandboxLocalErrorPhase::AfterAdmission,
-                    SandboxLocalErrorCode::ProviderEvidenceInvalid,
-                    Some(grant_digest),
-                );
-            }
+        let Ok(authenticated) = authenticated else {
+            return Self::write_local_error(
+                stream,
+                context.decoded,
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                Some(grant_digest),
+            );
         };
         if !output_matches(authenticated.result(), reply.output_stream.as_deref()) {
-            return self.write_local_error(
+            return Self::write_local_error(
                 stream,
                 context.decoded,
                 SandboxLocalErrorPhase::AfterAdmission,
@@ -513,10 +514,10 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 Some(grant_digest),
             );
         }
-        self.write_authenticated_reply(
+        Self::write_authenticated_reply(
             stream,
             context.decoded,
-            AuthenticatedSelectorReply {
+            &AuthenticatedSelectorReply {
                 execute_request: context.request_bytes,
                 terminal: AuthenticatedSelectorTerminal::ProviderResult {
                     result: &reply.result,
@@ -530,10 +531,9 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
     }
 
     fn write_authenticated_reply(
-        &self,
         stream: &mut UnixStream,
         decoded: &DecodedSelectorRequest,
-        reply: AuthenticatedSelectorReply<'_>,
+        reply: &AuthenticatedSelectorReply<'_>,
     ) -> Result<(), RootSelectorServiceError> {
         let (control, trailing) = encode_authenticated_reply(&decoded.encoded, reply)
             .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
@@ -541,7 +541,6 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
     }
 
     fn write_local_error(
-        &self,
         stream: &mut UnixStream,
         decoded: &DecodedSelectorRequest,
         phase: SandboxLocalErrorPhase,

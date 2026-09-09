@@ -180,7 +180,7 @@ pub(crate) fn decode_reply(
 
 pub(crate) fn encode_authenticated_reply(
     request: &EncodedSelectorRequest,
-    reply: AuthenticatedSelectorReply<'_>,
+    reply: &AuthenticatedSelectorReply<'_>,
 ) -> Result<(Vec<u8>, Vec<u8>), AdapterError> {
     let (terminal_kind, terminal, grant, receipt, audit) = match reply.terminal {
         AuthenticatedSelectorTerminal::ProviderResult {
