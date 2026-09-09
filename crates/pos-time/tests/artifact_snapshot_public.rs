@@ -55,8 +55,8 @@ fn evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
     .test_ok()
 }
 
-fn registry() -> ProjectionRegistry {
-    let mut registry = ProjectionRegistry::new();
+fn registry(gate: &Arc<ErasureContainmentGateV1>) -> ProjectionRegistry {
+    let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(gate));
     registry.register("noop", Box::new(NoopReducer));
     registry
 }
@@ -64,12 +64,11 @@ fn registry() -> ProjectionRegistry {
 #[test]
 fn snapshot_verification_requires_authoritative_artifact_evidence() {
     let mut store = open_store(StoreConfig::Memory).test_ok();
-    store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
-        .test_ok();
+    let gate = Arc::new(ErasureContainmentGateV1::new());
+    store.bind_erasure_gate(Arc::clone(&gate)).test_ok();
     let timeline = store.create_timeline("artifact-snapshot").test_ok();
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
-        let mut rejected_registry = registry();
+        let mut rejected_registry = registry(&gate);
         let result = snapshot(
             store.as_ref(),
             timeline.id(),
@@ -84,7 +83,7 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
             ))),
         }
     }
-    let mut capture_registry = registry();
+    let mut capture_registry = registry(&gate);
     let snapshot = snapshot(
         store.as_ref(),
         timeline.id(),
@@ -94,7 +93,7 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
     )
     .test_ok();
 
-    let mut retained_registry = registry();
+    let mut retained_registry = registry(&gate);
     verify_snapshot_consistency(
         store.as_ref(),
         &snapshot,
@@ -105,7 +104,7 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
     .test_ok();
 
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
-        let mut rejected_registry = registry();
+        let mut rejected_registry = registry(&gate);
         let result = verify_snapshot_consistency(
             store.as_ref(),
             &snapshot,
