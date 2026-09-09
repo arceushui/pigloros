@@ -501,7 +501,7 @@ mod tests {
     use super::*;
     use pos_core::{
         CanonicalBytes, EntityId, ErasureForkAdmissionInputV1,
-        ErasurePersistenceInventorySnapshotV1, EventStore, Kind, TimelineMeta, TimelineMode,
+        ErasurePersistenceInventorySnapshotV1, Kind, TimelineMeta, TimelineMode,
     };
     use pos_store::memory::MemoryStore;
 
@@ -509,6 +509,7 @@ mod tests {
     enum FaultModeV1 {
         BindGate,
         InventorySnapshot,
+        NonemptyRequestInventory,
         NonemptyInventory,
         MisreportExactRetry,
         Recovery,
@@ -595,6 +596,15 @@ mod tests {
             if self.fault == FaultModeV1::InventorySnapshot {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
+            if self.fault == FaultModeV1::NonemptyRequestInventory {
+                let request = ErasureReferenceV1::from_digest([34; 32]);
+                let manifest = ErasureReferenceV1::from_digest([35; 32]);
+                return ErasurePersistenceInventorySnapshotV1::new(
+                    vec![(request, manifest)],
+                    Vec::new(),
+                    maximum_requests,
+                );
+            }
             let snapshot = self
                 .inner
                 .complete_erasure_inventory_snapshot(maximum_requests)?;
@@ -679,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_recovery_fails_closed_for_unavailable_or_nonempty_inventory() {
+    fn empty_recovery_fails_closed_for_unavailable_or_nonempty_request_inventory() {
         assert!(matches!(
             ErasureExecutionHostV1::recover_verified_empty(
                 Box::new(fault_store(FaultModeV1::InventorySnapshot)),
@@ -688,10 +698,11 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
 
-        let mut nonempty = MemoryStore::new().without_erasure_gate();
-        assert!(nonempty.create_timeline("durable-root").is_ok());
         assert!(matches!(
-            ErasureExecutionHostV1::recover_verified_empty(Box::new(nonempty), 4),
+            ErasureExecutionHostV1::recover_verified_empty(
+                Box::new(fault_store(FaultModeV1::NonemptyRequestInventory)),
+                4,
+            ),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
     }
