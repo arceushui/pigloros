@@ -14,19 +14,19 @@ use pos_store::StoreConfig;
 /// The concrete store never escapes the execution host. Every implemented
 /// `EventStore` operation delegates to a generation-bound host sender; all
 /// other trait operations retain their fail-closed defaults.
-pub struct HostedLedgerStore {
+pub(crate) struct HostedLedgerStore {
     host: Mutex<ErasureExecutionHostV1>,
     ledger_timeline: Option<TimelineId>,
 }
 
 impl HostedLedgerStore {
-    pub fn open(config: StoreConfig) -> Result<Self, CoreError> {
+    pub(crate) fn open(config: StoreConfig) -> Result<Self, CoreError> {
         ErasureExecutionHostV1::open_verified_empty(config, ERASURE_MAX_INVENTORY_REQUESTS)
             .map(Self::from_host)
             .map_err(host_error)
     }
 
-    pub fn open_read_only(path: &str) -> Result<Self, CoreError> {
+    pub(crate) fn open_read_only(path: &str) -> Result<Self, CoreError> {
         ErasureExecutionHostV1::open_read_only_verified_empty(path, ERASURE_MAX_INVENTORY_REQUESTS)
             .map(Self::from_host)
             .map_err(host_error)
