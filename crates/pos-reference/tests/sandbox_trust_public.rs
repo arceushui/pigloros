@@ -985,6 +985,17 @@ fn selector_revocation_state_rejects_pending_update_conflicts() -> TestResult {
     )?;
     let cancelled = vec![[23; 16], [24; 16]];
     let mut state = selector_revocation_state(fixture.current.clone(), &fixture.trust)?;
+    let mismatched_wire_context = RecoveryCancellationContext::for_committed_recovery(
+        [18; 32],
+        [19; 32],
+        &conflicting,
+        cancelled.clone(),
+        cancelled.clone(),
+    )?;
+    assert_eq!(
+        state.begin_update(&update, &fixture.trust, mismatched_wire_context, 1_000),
+        Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+    );
     begin_update(
         &mut state,
         &update,

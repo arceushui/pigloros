@@ -241,16 +241,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
     /// # Errors
     /// Refuses an existing endpoint, non-root parent, insecure parent mode, or bind failure.
     pub fn bind_fixed() -> Result<UnixListener, RootSelectorServiceError> {
-        let path = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
-        let parent = path.parent().ok_or(RootSelectorServiceError::Io)?;
-        let metadata = std::fs::metadata(parent).map_err(|_| RootSelectorServiceError::Io)?;
-        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-            return Err(RootSelectorServiceError::Io);
-        }
-        let listener = UnixListener::bind(path).map_err(|_| RootSelectorServiceError::Io)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))
-            .map_err(|_| RootSelectorServiceError::Io)?;
-        Ok(listener)
+        bind_selector_listener(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET), 0)
     }
 
     /// Accept and process one evaluator connection.
@@ -671,6 +662,45 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             .map_err(|_| RootSelectorServiceError::Io)?;
         write_selector_response(stream, &control, None)
     }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn selector_listener_requires_private_owned_parent_and_exact_socket_mode() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("selector.sock");
+        let owner_uid = std::fs::metadata(temporary.path())?.uid();
+        let listener = bind_selector_listener(&path, owner_uid)?;
+        assert_eq!(std::fs::metadata(&path)?.mode() & 0o7777, SOCKET_MODE);
+        assert!(bind_selector_listener(&path, owner_uid).is_err());
+        drop(listener);
+        std::fs::remove_file(&path)?;
+
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o777))?;
+        assert!(bind_selector_listener(&path, owner_uid).is_err());
+        Ok(())
+    }
+}
+
+fn bind_selector_listener(
+    path: &Path,
+    owner_uid: u32,
+) -> Result<UnixListener, RootSelectorServiceError> {
+    let parent = path.parent().ok_or(RootSelectorServiceError::Io)?;
+    let metadata = std::fs::metadata(parent).map_err(|_| RootSelectorServiceError::Io)?;
+    if metadata.uid() != owner_uid || metadata.mode() & 0o022 != 0 {
+        return Err(RootSelectorServiceError::Io);
+    }
+    let listener = UnixListener::bind(path).map_err(|_| RootSelectorServiceError::Io)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))
+        .map_err(|_| RootSelectorServiceError::Io)?;
+    Ok(listener)
 }
 
 fn read_selector_request(

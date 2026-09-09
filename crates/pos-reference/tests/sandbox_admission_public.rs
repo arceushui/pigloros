@@ -716,6 +716,30 @@ fn transport_admission(fixture: &Fixture) -> TestResult<RootSelectorAdmission> {
     )
 }
 
+#[test]
+fn selector_admission_allocates_and_seals_runtime_identity() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let slot = admission.allocate_runtime_slot();
+    assert_ne!(slot.runtime_instance_id(), [0; 16]);
+    assert_ne!(slot.lifecycle_scope_id(), [0; 16]);
+    assert_ne!(slot.runtime_instance_id(), slot.lifecycle_scope_id());
+    assert!(slot.clone().bind_observed_process(0, 1).is_err());
+
+    let runtime = slot.bind_observed_process(42, 0)?;
+    assert_ne!(runtime.runtime_instance_id(), [0; 16]);
+    assert_ne!(runtime.lifecycle_scope_id(), [0; 16]);
+    assert_eq!(runtime.main_pid(), 42);
+    assert_eq!(runtime.main_start_time_ticks(), 0);
+    assert!(admission
+        .seal_installation_recovery(&runtime, vec![[21; 16], [22; 16]], vec![[21; 16]],)
+        .is_ok());
+    assert!(admission
+        .seal_installation_recovery(&runtime, vec![[21; 16]], vec![[22; 16]])
+        .is_err());
+    Ok(())
+}
+
 fn establish_admission(
     fixture: &Fixture,
     policy: &SandboxAdministratorPolicy,
@@ -2695,9 +2719,18 @@ fn selector_rejects_every_malformed_broker_hard_cap_shape() -> TestResult {
     unknown[16] = Value::Array(vec![integer(17), integer(1)]);
     let mut malformed = valid_limits.clone();
     malformed[0] = Value::Null;
+    let mut oversized_id = valid_limits.clone();
+    oversized_id[0] = Value::Array(vec![integer(256), integer(1)]);
+    let mut malformed_value = valid_limits.clone();
+    malformed_value[0] = Value::Array(vec![integer(0), Value::Null]);
     for caps in [
         Vec::new(),
         vec![0; 1025],
+        encode(&Value::Array(vec![
+            Value::Text("BHC1".to_owned()),
+            integer(1),
+            Value::Null,
+        ]))?,
         record("BHC2", 1, valid_limits.clone())?,
         record("BHC1", 2, valid_limits.clone())?,
         record("BHC1", 1, valid_limits[..16].to_vec())?,
@@ -2705,6 +2738,8 @@ fn selector_rejects_every_malformed_broker_hard_cap_shape() -> TestResult {
         record("BHC1", 1, reordered)?,
         record("BHC1", 1, unknown)?,
         record("BHC1", 1, malformed)?,
+        record("BHC1", 1, oversized_id)?,
+        record("BHC1", 1, malformed_value)?,
     ] {
         let policy = fixture.policy_for_broker_and_launch(&caps, &fixture.lps1)?;
         let evaluation = evaluation_for_authority(&fixture, &policy, &fixture.lps1)?;

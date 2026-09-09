@@ -129,6 +129,7 @@ pub struct SelectedProviderEndpoint {
     path: PathBuf,
     device: u64,
     inode: u64,
+    owner_uid: u32,
 }
 
 impl SelectedProviderEndpoint {
@@ -152,13 +153,14 @@ impl SelectedProviderEndpoint {
             path: path.to_path_buf(),
             device: metadata.dev(),
             inode: metadata.ino(),
+            owner_uid: ROOT_UID,
         })
     }
 }
 
 impl ProviderConnector for SelectedProviderEndpoint {
     fn connect(&mut self, timeout: Duration) -> Result<UnixStream, RootSelectorServiceError> {
-        let before = endpoint_metadata(&self.path, self.device, self.inode)?;
+        let before = endpoint_metadata(&self.path, self.device, self.inode, self.owner_uid)?;
         let address = SocketAddrUnix::new(&self.path)
             .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
         let fd = socket_with(
@@ -190,13 +192,13 @@ impl ProviderConnector for SelectedProviderEndpoint {
         stream
             .set_nonblocking(false)
             .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
-        let after = endpoint_metadata(&self.path, self.device, self.inode)?;
+        let after = endpoint_metadata(&self.path, self.device, self.inode, self.owner_uid)?;
         if before.dev() != after.dev() || before.ino() != after.ino() {
             return Err(RootSelectorServiceError::ProviderUnavailable);
         }
         let peer = socket_peercred(stream.as_fd())
             .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
-        if peer.uid.as_raw() != ROOT_UID {
+        if peer.uid.as_raw() != self.owner_uid {
             return Err(RootSelectorServiceError::ProviderUnavailable);
         }
         Ok(stream)
@@ -642,11 +644,12 @@ fn endpoint_metadata(
     path: &Path,
     device: u64,
     inode: u64,
+    owner_uid: u32,
 ) -> Result<std::fs::Metadata, RootSelectorServiceError> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
     if !metadata.file_type().is_socket()
-        || metadata.uid() != ROOT_UID
+        || metadata.uid() != owner_uid
         || metadata.mode() & 0o7777 != 0o600
         || metadata.dev() != device
         || metadata.ino() != inode
@@ -701,6 +704,7 @@ mod tests {
             path: missing,
             device: 0,
             inode: 0,
+            owner_uid: ROOT_UID,
         };
         assert!(endpoint.connect(Duration::from_millis(100)).is_err());
         let mut transport = ProviderTransport::from_selected_endpoint(endpoint);
@@ -897,14 +901,35 @@ mod tests {
         let metadata = std::fs::metadata(&path)?;
         for mode in [0o400, 0o200, 0o000, 0o1600, 0o2600, 0o4600] {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
-            assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_err());
+            assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino(), ROOT_UID).is_err());
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         assert_eq!(
-            endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_ok(),
+            endpoint_metadata(&path, metadata.dev(), metadata.ino(), ROOT_UID).is_ok(),
             metadata.uid() == ROOT_UID,
             "private socket permissions must not bypass root ownership"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_endpoint_connects_to_the_exact_private_peer() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let mut endpoint = SelectedProviderEndpoint {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            owner_uid: metadata.uid(),
+        };
+        let server = std::thread::spawn(move || listener.accept().map(|_| ()));
+
+        let stream = endpoint.connect(Duration::from_secs(1))?;
+        drop(stream);
+        server.join().map_err(|_| "provider thread panicked")??;
         Ok(())
     }
 }
