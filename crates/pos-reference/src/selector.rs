@@ -375,10 +375,10 @@ fn open_under(
     {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let mut hasher = blake3::Hasher::new();
+    let observed_length = std::io::copy(&mut (&mut file).take(metadata.len() + 1), &mut hasher)
         .map_err(|_| SelectorBoundaryError::Io)?;
-    if blake3::hash(&bytes).as_bytes() != &digest {
+    if observed_length != metadata.len() || hasher.finalize().as_bytes() != &digest {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
     file.seek(SeekFrom::Start(0))
@@ -630,10 +630,10 @@ mod tests {
         let root = temporary.path();
         let provider_directory = root.join("providers");
         std::fs::create_dir(&provider_directory)?;
-        let payload = b"provider";
-        let digest = *blake3::hash(payload).as_bytes();
+        let payload = vec![0x5a; 128 * 1024 + 7];
+        let digest = *blake3::hash(&payload).as_bytes();
         let path = provider_directory.join(digest_name(digest));
-        std::fs::write(&path, payload)?;
+        std::fs::write(&path, &payload)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
         std::fs::set_permissions(&provider_directory, std::fs::Permissions::from_mode(0o500))?;
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
