@@ -1510,6 +1510,72 @@ fn coordinator_verifies_complete_nonempty_inventory() -> Result<(), ErasureError
 }
 
 #[test]
+fn coordinator_rejects_inventory_bound_and_order_violations() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let timeline = TimelineId::new();
+    let topology = |topology_request| {
+        (
+            topology_request,
+            ErasureVerifiedTopologyObservationV1::new(manifest, Vec::new(), vec![timeline]),
+        )
+    };
+    let verify = |observation, maximum_requests| {
+        ErasureCoordinatorStateMachineV1::new(
+            graph
+                .adapter
+                .clone()
+                .with_complete_inventory_observation(observation),
+            COORDINATOR,
+        )
+        .verified_inventory(maximum_requests)
+    };
+    let observations = [
+        (
+            ErasureInventoryObservationV1::new(Vec::new(), Vec::new(), Vec::new()),
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS + 1,
+        ),
+        (
+            ErasureInventoryObservationV1::new(
+                vec![(reference(1), manifest), (reference(2), manifest)],
+                vec![timeline],
+                vec![topology(reference(1)), topology(reference(2))],
+            ),
+            1,
+        ),
+        (
+            ErasureInventoryObservationV1::new(
+                vec![(reference(2), manifest), (reference(1), manifest)],
+                vec![timeline],
+                vec![topology(reference(1)), topology(reference(2))],
+            ),
+            4,
+        ),
+        (
+            ErasureInventoryObservationV1::new(
+                vec![(reference(1), manifest), (reference(2), manifest)],
+                vec![timeline],
+                vec![topology(reference(2)), topology(reference(1))],
+            ),
+            4,
+        ),
+    ];
+    for (observation, maximum_requests) in observations {
+        assert_eq!(
+            verify(observation, maximum_requests),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn coordinator_rejects_incomplete_or_stale_inventory_observations() -> Result<(), ErasureErrorV1> {
     let lineage_rule = reference(170);
     let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
@@ -1549,55 +1615,6 @@ fn coordinator_rejects_incomplete_or_stale_inventory_observations() -> Result<()
                 vec![topology(request, manifest)],
             ),
             0,
-        ),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-    assert_eq!(
-        verify(
-            ErasureInventoryObservationV1::new(Vec::new(), Vec::new(), Vec::new()),
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS + 1,
-        ),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-    assert_eq!(
-        verify(
-            ErasureInventoryObservationV1::new(
-                vec![(reference(1), manifest), (reference(2), manifest)],
-                vec![timeline],
-                vec![
-                    topology(reference(1), manifest),
-                    topology(reference(2), manifest)
-                ],
-            ),
-            1,
-        ),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-    assert_eq!(
-        verify(
-            ErasureInventoryObservationV1::new(
-                vec![(reference(2), manifest), (reference(1), manifest)],
-                vec![timeline],
-                vec![
-                    topology(reference(1), manifest),
-                    topology(reference(2), manifest)
-                ],
-            ),
-            4,
-        ),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-    assert_eq!(
-        verify(
-            ErasureInventoryObservationV1::new(
-                vec![(reference(1), manifest), (reference(2), manifest)],
-                vec![timeline],
-                vec![
-                    topology(reference(2), manifest),
-                    topology(reference(1), manifest)
-                ],
-            ),
-            4,
         ),
         Err(ErasureErrorV1::ScopeInvalid)
     );
