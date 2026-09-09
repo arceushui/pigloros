@@ -6333,6 +6333,14 @@ mod coverage_entrypoints {
             )
             .await?;
         assert!(duplicate.duplicate);
+        assert_eq!(
+            gateway
+                .read_events_page(&timeline.id().to_string(), 0, 8)
+                .await?
+                .events
+                .len(),
+            2
+        );
         let grant = ConsentGrantedV1 {
             subject_id: entity,
             grantee_id: EntityId::new(),
@@ -6359,14 +6367,12 @@ mod coverage_entrypoints {
                 },
             )
             .await?;
-        assert_eq!(
+        assert!(matches!(
             gateway
                 .read_events_page(&timeline.id().to_string(), 0, 8)
-                .await?
-                .events
-                .len(),
-            4
-        );
+                .await,
+            Err(GatewayError::ResourceUnavailable)
+        ));
         gateway
             .purge_expired_ingress_identities(NonZeroUsize::MIN)
             .await?;
