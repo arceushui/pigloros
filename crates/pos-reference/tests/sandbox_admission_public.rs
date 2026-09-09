@@ -4567,7 +4567,7 @@ fn root_selector_rejects_missing_sandbox_requirement_before_authority_resolution
 
 #[test]
 fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> TestResult {
-    for drift in 0_u8..14 {
+    for drift in 0_u8..15 {
         let fixture = Fixture::new()?;
         let mut request = selector_evaluation_request(&fixture)?;
         if drift == 13 {
@@ -4609,6 +4609,7 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
                 plan.admission.policy =
                     fixture.policy_for_image(&fixture.sim1, &different_launch)?;
             }
+            14 => plan.execute_authority.trs1_digest = [0; 32],
             _ => {}
         }
         let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;

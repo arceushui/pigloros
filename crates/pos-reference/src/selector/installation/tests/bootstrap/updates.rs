@@ -522,6 +522,25 @@ fn update_validation_rejects_each_frame_field_and_forged_update_signature() -> T
         .authority
         .validate_update(challenge, &encode(&Value::Array(fields))?)
         .is_err());
+
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.authority.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let document = decode_canonical(&request)?;
+    let mut fields = array(&document, 5)?.to_vec();
+    let Value::Bytes(update) = &fields[4] else {
+        return Err("missing RCU1".into());
+    };
+    let update_document = decode_canonical(update)?;
+    let mut update_wrapper = array(&update_document, 3)?.to_vec();
+    let mut update_fields = array(&update_wrapper[0], 8)?.to_vec();
+    update_fields[4] = Value::Null;
+    update_wrapper[0] = Value::Array(update_fields);
+    fields[4] = Value::Bytes(encode(&Value::Array(update_wrapper))?);
+    assert!(fixture
+        .authority
+        .validate_update(challenge, &encode(&Value::Array(fields))?)
+        .is_err());
     Ok(())
 }
 

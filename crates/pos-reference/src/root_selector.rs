@@ -413,16 +413,12 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             &plan.network_plans,
         ) {
             Ok(admission) => admission,
-            Err(error) => {
+            Err(_) => {
                 Self::write_local_error(
                     stream,
                     decoded,
                     SandboxLocalErrorPhase::BeforeSpx1,
-                    if error == RootSelectorServiceError::AuthorityMismatch {
-                        SandboxLocalErrorCode::RequestAuthorityMismatch
-                    } else {
-                        SandboxLocalErrorCode::PolicyUnavailable
-                    },
+                    SandboxLocalErrorCode::PolicyUnavailable,
                     None,
                 )?;
                 return Ok(None);
