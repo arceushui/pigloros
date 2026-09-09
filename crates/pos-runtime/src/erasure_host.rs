@@ -144,7 +144,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed recovery error and leaves the host closed when the
     /// query fails or the candidate inventory cannot be published.
-    pub fn install_inventory<Q: ErasureVerifiedInventoryQueryV1>(
+    pub fn install_inventory<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
         &mut self,
         query: &mut Q,
         maximum_requests: usize,
