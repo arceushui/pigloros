@@ -59,11 +59,8 @@ mod lifecycle_coverage_tests {
     use super::{
         host_error_to_core, worker_loop, worker_loop_with_runtime, Command, CommandClass,
         CommandEnvelope, CommandLifecycle, ExecutorStore, GatewayExecutorStore, LifecycleState,
-        StoreExecutor,
     };
-    use pos_core::{
-        ConsentAuthority, CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS,
-    };
+    use pos_core::{CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
     use pos_runtime::ErasureExecutionHostV1;
     use pos_store::memory::MemoryStore;
     use std::sync::{Arc, Mutex};
