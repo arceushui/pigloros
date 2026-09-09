@@ -308,7 +308,7 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
 /// # Errors
 /// Returns a closed failure when the archive identity, signed manifest, TPS1,
 /// CPF1, or indexed closure metadata is invalid.
-pub fn preflight_signed_bundle_reader<R: Read + Seek>(
+pub(crate) fn preflight_signed_bundle_reader<R: Read + Seek>(
     archive: &mut R,
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
@@ -327,7 +327,7 @@ pub fn preflight_signed_bundle_reader<R: Read + Seek>(
 /// # Errors
 /// Returns a closed failure when CFB1 encoding, signature, trust, member body,
 /// or closure validation fails.
-pub fn verify_signed_bundle_reader<R: Read + Seek>(
+pub(crate) fn verify_signed_bundle_reader<R: Read + Seek>(
     archive: &mut R,
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
