@@ -60,6 +60,10 @@ fn gated_experiment(config: ExperimentConfig) -> Experiment {
     Experiment::new(config).with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
 }
 
+fn hosted_experiment(config: ExperimentConfig) -> Experiment {
+    Experiment::new(config)
+}
+
 fn gated_memory_store() -> MemoryStore {
     let mut store = MemoryStore::new();
     store
@@ -73,7 +77,6 @@ fn backtest_runner(
     registry_factory: impl Fn() -> PluginRegistry + Send + 'static,
 ) -> BacktestRunner {
     BacktestRunner::new(config, registry_factory)
-        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
 }
 
 struct TickRecordingProvider {
@@ -161,7 +164,7 @@ impl HostFixture {
             committed_tick: committed_tick.clone(),
         };
         let plugin = AgentPlugin::new();
-        let mut experiment = gated_experiment(ExperimentConfig {
+        let mut experiment = hosted_experiment(ExperimentConfig {
             name: name.to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config,
@@ -232,7 +235,7 @@ impl HostFixture {
         let plugin = Arc::new(AgentPlugin::new());
         let child_plugin = Arc::clone(&plugin);
         let child_host = self.clone();
-        let mut experiment = gated_experiment(ExperimentConfig {
+        let mut experiment = hosted_experiment(ExperimentConfig {
             name: name.to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config,
@@ -658,7 +661,7 @@ fn assert_supplied_store_has_no_recovery_recipe(
 
 fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
     let plugin = AgentPlugin::new();
-    let mut experiment = gated_experiment(ExperimentConfig {
+    let mut experiment = hosted_experiment(ExperimentConfig {
         name: name.to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config: StoreConfig::Memory,
@@ -674,8 +677,8 @@ fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
 }
 
 #[test]
-fn backtest_runner_requires_one_host_owned_erasure_gate() {
-    let error = BacktestRunner::new(
+fn backtest_runner_creates_one_host_owned_erasure_gate() {
+    let result = BacktestRunner::new(
         BacktestConfig {
             experiment_name: "missing-erasure-host".to_owned(),
             train_ticks: 0,
@@ -685,19 +688,16 @@ fn backtest_runner_requires_one_host_owned_erasure_gate() {
         PluginRegistry::new,
     )
     .run()
-    .err()
     .test_ok();
-    assert!(matches!(
-        error,
-        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
-    ));
+    assert_eq!(result.train_events, 0);
+    assert_eq!(result.eval_events, 0);
 }
 
 #[test]
-fn backtest_runner_accepts_the_same_prebound_gate_for_both_phases() {
+fn backtest_runner_rejects_a_caller_supplied_gate() {
     let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
     let factory_gate = Arc::clone(&host);
-    let result = BacktestRunner::new(
+    let error = BacktestRunner::new(
         BacktestConfig {
             experiment_name: "shared-erasure-host".to_owned(),
             train_ticks: 0,
@@ -708,15 +708,17 @@ fn backtest_runner_accepts_the_same_prebound_gate_for_both_phases() {
     )
     .with_erasure_gate(host)
     .run()
+    .err()
     .test_ok();
-    assert_eq!(result.train_events, 0);
-    assert_eq!(result.eval_events, 0);
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
 }
 
 #[test]
 fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
     let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
-    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
     let error = BacktestRunner::new(
         BacktestConfig {
             experiment_name: "foreign-train-erasure-host".to_owned(),
@@ -726,7 +728,6 @@ fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
         },
         move || PluginRegistry::new().with_erasure_gate(Arc::clone(&foreign)),
     )
-    .with_erasure_gate(host)
     .run()
     .err()
     .test_ok();
@@ -739,7 +740,6 @@ fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
 #[test]
 fn backtest_runner_rejects_a_removed_bound_train_gate() {
     let removed: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
-    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
     let error = BacktestRunner::new(
         BacktestConfig {
             experiment_name: "removed-train-erasure-host".to_owned(),
@@ -753,7 +753,6 @@ fn backtest_runner_rejects_a_removed_bound_train_gate() {
                 .without_erasure_gate()
         },
     )
-    .with_erasure_gate(host)
     .run()
     .err()
     .test_ok();
@@ -767,7 +766,6 @@ fn backtest_runner_rejects_a_removed_bound_train_gate() {
 fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
     let calls = Arc::new(AtomicU64::new(0));
     let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
-    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
     let error = BacktestRunner::new(
         BacktestConfig {
             experiment_name: "foreign-eval-erasure-host".to_owned(),
@@ -786,7 +784,6 @@ fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
             }
         },
     )
-    .with_erasure_gate(host)
     .run()
     .err()
     .test_ok();
@@ -1034,7 +1031,7 @@ fn protected_result_export_and_faulted_projection_fail_closed() {
             .to_string_lossy()
             .into_owned(),
     };
-    let experiment = gated_experiment(ExperimentConfig {
+    let experiment = hosted_experiment(ExperimentConfig {
         name: "protected-result-export".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config,
@@ -1109,7 +1106,7 @@ fn protected_result_export_succeeds_with_a_durable_authority() {
             .into_owned(),
     };
     let authority = ConsentAuthority::new();
-    let experiment = gated_experiment(ExperimentConfig {
+    let experiment = hosted_experiment(ExperimentConfig {
         name: "protected-result-export-success".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config,
@@ -1203,7 +1200,7 @@ fn public_branch_with_token_and_durable_session_boundaries_are_reachable() {
             grant_seq: 1,
         },
     );
-    let experiment = gated_experiment(ExperimentConfig {
+    let experiment = hosted_experiment(ExperimentConfig {
         name: "public-branch-success".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config: StoreConfig::Memory,
@@ -1230,7 +1227,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
     };
     let authority = ConsentAuthority::new();
     let subject = EntityId::new();
-    let mut experiment = gated_experiment(ExperimentConfig {
+    let mut experiment = hosted_experiment(ExperimentConfig {
         name: "durable-session-boundaries".to_owned(),
         stop: StopCondition::MaxTicks(3),
         store_config,
