@@ -1219,7 +1219,7 @@ impl Experiment {
     /// history contains a host-owned consent-closure marker but this
     /// experiment has no bound consent authority.
     pub fn resume(
-        self,
+        mut self,
         timeline_id: pos_core::ids::TimelineId,
     ) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
