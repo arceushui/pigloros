@@ -6,7 +6,7 @@ mod policy_transition;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    RevocationUpdateRequest, SandboxAdministratorPolicy,
+    RecoveryCancellationContext, RevocationUpdateRequest, SandboxAdministratorPolicy,
     SandboxProviderProtocolError as ProtocolError, SandboxRevocationSnapshot,
     SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
     SelectorRevocationState,
@@ -19,6 +19,29 @@ fn selector_revocation_state(
     trust: &SandboxTrustSnapshot,
 ) -> Result<SelectorRevocationState, SandboxRevocationUpdateError> {
     SelectorRevocationState::new(current, trust, "runtime")
+}
+
+fn recovery_context(
+    update: &[u8],
+    cancelled: Vec<[u8; 16]>,
+) -> Result<RecoveryCancellationContext, SandboxRevocationUpdateError> {
+    RecoveryCancellationContext::for_committed_recovery(
+        [18; 32],
+        [19; 32],
+        update,
+        cancelled.clone(),
+        cancelled,
+    )
+}
+
+fn begin_update(
+    state: &mut SelectorRevocationState,
+    update: &[u8],
+    trust: &SandboxTrustSnapshot,
+    cancelled: Vec<[u8; 16]>,
+    now_ms: u64,
+) -> Result<(), SandboxRevocationUpdateError> {
+    state.begin_update(update, trust, recovery_context(update, cancelled)?, now_ms)
 }
 
 fn integer(value: u64) -> Value {
@@ -272,6 +295,8 @@ fn revocation_acknowledgement_fields(
             integer(1),
             Value::Bytes(request_id.to_vec()),
             Value::Bytes(revocation_digest.to_vec()),
+            Value::Bytes(vec![18; 32]),
+            Value::Bytes(vec![19; 32]),
             Value::Array(cancelled),
             integer(status),
             Value::Text(runtime_key_id.to_owned()),
@@ -816,8 +841,8 @@ fn selector_revocation_state_requires_exact_timely_cancellation_acknowledgement(
     let update = revocation_update(&current, &next_bytes, &next, &signer, update_id)?;
     let cancelled = vec![[23; 16], [24; 16]];
     let mut state = selector_revocation_state(current.clone(), &trust)?;
-    state.begin_update(&update, &trust, cancelled.clone(), 1_000)?;
-    state.begin_update(&update, &trust, cancelled.clone(), 1_001)?;
+    begin_update(&mut state, &update, &trust, cancelled.clone(), 1_000)?;
+    begin_update(&mut state, &update, &trust, cancelled.clone(), 1_001)?;
 
     let wrong_ack = revocation_acknowledgement(&next, &signer, vec![Value::Bytes(vec![23; 16])])?;
     assert_eq!(
@@ -834,38 +859,71 @@ fn selector_revocation_state_requires_exact_timely_cancellation_acknowledgement(
     )?;
     state.acknowledge(&acknowledgement, 1_100)?;
     assert_eq!(state.current().snapshot_digest(), next.snapshot_digest());
-    state.begin_update(&update, &trust, cancelled, 2_000)?;
+    begin_update(&mut state, &update, &trust, cancelled, 2_000)?;
     state.acknowledge(&acknowledgement, 2_000)?;
 
     let conflicting = revocation_update(&current, &next_bytes, &next, &signer, test_nonce())?;
     assert_eq!(
-        state.begin_update(&conflicting, &trust, vec![], 2_000),
+        begin_update(&mut state, &conflicting, &trust, vec![], 2_000),
         Err(SandboxRevocationUpdateError::RequestIdentityConflict)
     );
 
     let mut late = selector_revocation_state(current, &trust)?;
-    late.begin_update(&update, &trust, vec![[23; 16], [24; 16]], 1_000)?;
+    let recovery = recovery_context(&update, vec![[23; 16], [24; 16]])?;
+    late.begin_update(&update, &trust, recovery.clone(), 1_000)?;
     assert_eq!(
         late.acknowledge(&acknowledgement, 1_101,),
         Err(SandboxRevocationUpdateError::AcknowledgementDeadline)
     );
     assert_eq!(late.expire_overdue(1_100), None);
-    assert_eq!(late.expire_overdue(1_101), Some(vec![[23; 16], [24; 16]]));
-    assert_eq!(late.expire_overdue(1_102), Some(vec![[23; 16], [24; 16]]));
+    assert_eq!(late.expire_overdue(1_101), Some(recovery.clone()));
+    assert_eq!(late.expire_overdue(1_102), Some(recovery));
     assert_eq!(
-        late.begin_update(&update, &trust, Vec::new(), 2_000),
+        begin_update(&mut late, &update, &trust, Vec::new(), 2_000),
         Err(SandboxRevocationUpdateError::ProviderTerminationRequired)
     );
+    Ok(())
+}
+
+#[test]
+fn recovery_cancellation_context_round_trips_exact_committed_authority() -> TestResult {
+    let fixture = revocation_transition_fixture()?;
+    let update = revocation_update(
+        &fixture.current,
+        &fixture.next_bytes,
+        &fixture.next,
+        &fixture.signer,
+        test_nonce(),
+    )?;
+    let context = RecoveryCancellationContext::for_committed_recovery(
+        [18; 32],
+        [19; 32],
+        &update,
+        vec![[21; 16], [22; 16], [23; 16]],
+        vec![[21; 16], [23; 16]],
+    )?;
+    let encoded = context.to_canonical_cbor()?;
     assert_eq!(
-        late.complete_recovery(&[[23; 16]]),
-        Err(SandboxRevocationUpdateError::RecoveryMismatch)
+        RecoveryCancellationContext::from_canonical_cbor(&encoded)?,
+        context
     );
-    late.complete_recovery(&[[23; 16], [24; 16]])?;
-    assert_eq!(
-        late.complete_recovery(&[]),
-        Err(SandboxRevocationUpdateError::RecoveryMismatch)
-    );
-    late.begin_update(&update, &trust, Vec::new(), 2_000)?;
+    assert_ne!(context.context_digest, [0; 32]);
+
+    for (sir1, provider, live, cancelled) in [
+        ([0; 32], [19; 32], vec![], vec![]),
+        ([18; 32], [0; 32], vec![], vec![]),
+        ([18; 32], [19; 32], vec![[0; 16]], vec![]),
+        ([18; 32], [19; 32], vec![[22; 16], [21; 16]], vec![]),
+        ([18; 32], [19; 32], vec![[21; 16]], vec![[22; 16]]),
+    ] {
+        assert!(RecoveryCancellationContext::for_committed_recovery(
+            sir1, provider, &update, live, cancelled,
+        )
+        .is_err());
+    }
+    let mut altered = context;
+    altered.sir1_digest = [20; 32];
+    assert!(altered.to_canonical_cbor().is_err());
     Ok(())
 }
 
@@ -927,13 +985,36 @@ fn selector_revocation_state_rejects_pending_update_conflicts() -> TestResult {
     )?;
     let cancelled = vec![[23; 16], [24; 16]];
     let mut state = selector_revocation_state(fixture.current.clone(), &fixture.trust)?;
-    state.begin_update(&update, &fixture.trust, cancelled.clone(), 1_000)?;
+    begin_update(
+        &mut state,
+        &update,
+        &fixture.trust,
+        cancelled.clone(),
+        1_000,
+    )?;
+    let foreign_context = RecoveryCancellationContext::for_committed_recovery(
+        [20; 32],
+        [19; 32],
+        &update,
+        cancelled.clone(),
+        cancelled.clone(),
+    )?;
     assert_eq!(
-        state.begin_update(&conflicting, &fixture.trust, cancelled.clone(), 1_001),
+        state.begin_update(&update, &fixture.trust, foreign_context, 1_001),
         Err(SandboxRevocationUpdateError::RequestIdentityConflict)
     );
     assert_eq!(
-        state.begin_update(&other_request, &fixture.trust, cancelled, 1_001),
+        begin_update(
+            &mut state,
+            &conflicting,
+            &fixture.trust,
+            cancelled.clone(),
+            1_001,
+        ),
+        Err(SandboxRevocationUpdateError::RequestIdentityConflict)
+    );
+    assert_eq!(
+        begin_update(&mut state, &other_request, &fixture.trust, cancelled, 1_001),
         Err(SandboxRevocationUpdateError::UpdateInFlight)
     );
 
@@ -945,12 +1026,18 @@ fn selector_revocation_state_rejects_pending_update_conflicts() -> TestResult {
         vec![[1; 16]; 257],
     ] {
         assert!(matches!(
-            no_pending.begin_update(&update, &fixture.trust, invalid, 1_000),
+            recovery_context(&update, invalid),
             Err(SandboxRevocationUpdateError::Protocol(_))
         ));
     }
     assert_eq!(
-        no_pending.begin_update(&update, &fixture.trust, Vec::new(), u64::MAX),
+        begin_update(
+            &mut no_pending,
+            &update,
+            &fixture.trust,
+            Vec::new(),
+            u64::MAX,
+        ),
         Err(SandboxRevocationUpdateError::AcknowledgementDeadline)
     );
     Ok(())
@@ -986,7 +1073,7 @@ fn selector_revocation_state_rejects_update_authority_and_signer_substitution() 
         let changed = resign_unsigned_field(&update, "RCU1", field, replacement, &fixture.signer)?;
         let mut state = selector_revocation_state(fixture.current.clone(), &fixture.trust)?;
         assert_eq!(
-            state.begin_update(&changed, &fixture.trust, Vec::new(), 1_000),
+            begin_update(&mut state, &changed, &fixture.trust, Vec::new(), 1_000),
             Err(expected)
         );
     }
@@ -1064,11 +1151,14 @@ fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
     .is_err());
     let null_record = encode(&Value::Null)?;
     for malformed in [b"not-cbor".as_slice(), null_record.as_slice()] {
-        assert!(
-            selector_revocation_state(fixture.current.clone(), &fixture.trust)?
-                .begin_update(malformed, &fixture.trust, Vec::new(), 1_000)
-                .is_err()
-        );
+        assert!(RecoveryCancellationContext::for_committed_recovery(
+            [18; 32],
+            [19; 32],
+            malformed,
+            Vec::new(),
+            Vec::new(),
+        )
+        .is_err());
     }
     for field in 2..=7 {
         let changed = resign_unsigned_field(&update, "RCU1", field, Value::Null, &fixture.signer)?;
@@ -1078,17 +1168,18 @@ fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
         );
         let mut state = selector_revocation_state(fixture.current.clone(), &fixture.trust)?;
         assert!(matches!(
-            state.begin_update(&changed, &fixture.trust, Vec::new(), 1_000),
+            begin_update(&mut state, &changed, &fixture.trust, Vec::new(), 1_000),
             Err(SandboxRevocationUpdateError::Protocol(_)
                 | SandboxRevocationUpdateError::Trust(SandboxTrustError::Protocol(_)))
         ));
     }
     assert!(matches!(
-        selector_revocation_state(fixture.current.clone(), &fixture.trust)?.begin_update(
+        begin_update(
+            &mut selector_revocation_state(fixture.current.clone(), &fixture.trust)?,
             &corrupt_signed_digest(&update)?,
             &fixture.trust,
             Vec::new(),
-            1_000
+            1_000,
         ),
         Err(SandboxRevocationUpdateError::Protocol(
             ProtocolError::DigestMismatch
@@ -1146,7 +1237,7 @@ fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
         .map(|attempt| Value::Bytes(attempt.to_vec()))
         .collect::<Vec<_>>();
     let mut state = selector_revocation_state(fixture.current.clone(), &fixture.trust)?;
-    state.begin_update(&update, &fixture.trust, cancelled, 1_000)?;
+    begin_update(&mut state, &update, &fixture.trust, cancelled, 1_000)?;
     let wrong_request_ack = revocation_acknowledgement_fields(
         fixture.next.snapshot_digest(),
         &fixture.signer,
@@ -1171,6 +1262,19 @@ fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
         state.acknowledge(&wrong_snapshot_ack, 1_050),
         Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
     );
+    for field in [4, 5] {
+        let changed = resign_unsigned_field(
+            &revocation_acknowledgement(&fixture.next, &fixture.signer, cancelled_values.clone())?,
+            "RCA1",
+            field,
+            Value::Bytes(vec![99; 32]),
+            &fixture.signer,
+        )?;
+        assert_eq!(
+            state.acknowledge(&changed, 1_050),
+            Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+        );
+    }
     let wrong_status_ack = revocation_acknowledgement_fields(
         fixture.next.snapshot_digest(),
         &fixture.signer,
@@ -1199,7 +1303,7 @@ fn selector_revocation_state_rejects_acknowledgement_conflicts() -> TestResult {
     let wrong_runtime = resign_unsigned_field(
         &acknowledgement,
         "RCA1",
-        6,
+        8,
         Value::Text("other".to_owned()),
         &fixture.signer,
     )?;
@@ -1222,7 +1326,7 @@ fn selector_revocation_state_rejects_malformed_acknowledgement_fields() -> TestR
             Err(SandboxRevocationUpdateError::Protocol(_))
         ));
     }
-    for field in 2..=6 {
+    for field in 2..=8 {
         let changed = resign_unsigned_field(
             &acknowledgement,
             "RCA1",
@@ -1239,7 +1343,7 @@ fn selector_revocation_state_rejects_malformed_acknowledgement_fields() -> TestR
     let malformed_cancelled_attempt = resign_unsigned_field(
         &acknowledgement,
         "RCA1",
-        4,
+        6,
         Value::Array(vec![Value::Null]),
         &fixture.signer,
     )?;
@@ -1291,7 +1395,7 @@ fn selector_revocation_state_rejects_completed_acknowledgement_conflicts() -> Te
     let acknowledgement =
         revocation_acknowledgement(&fixture.next, &fixture.signer, cancelled_values)?;
     let mut state = selector_revocation_state(fixture.current.clone(), &fixture.trust)?;
-    state.begin_update(&update, &fixture.trust, cancelled, 1_000)?;
+    begin_update(&mut state, &update, &fixture.trust, cancelled, 1_000)?;
     state.acknowledge(&acknowledgement, 1_050)?;
 
     let conflicting_ack = revocation_acknowledgement_fields(
