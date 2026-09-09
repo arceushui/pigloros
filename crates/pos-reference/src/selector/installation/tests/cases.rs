@@ -1,5 +1,7 @@
 use std::os::unix::fs::PermissionsExt;
 
+use ed25519_dalek::{Signer, SigningKey};
+
 use super::*;
 use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
 use crate::selector::installation::authority::InstalledSelectorAuthority;
@@ -93,6 +95,28 @@ fn rebind(mut request: EvaluationRequest) -> CaseTestResult<EvaluationRequest> {
     Ok(request)
 }
 
+fn archive_with_disallowed_mode(archive: &[u8]) -> CaseTestResult<Vec<u8>> {
+    let mut document = crate::evaluator_protocol::decode_canonical(archive)?;
+    let Value::Array(root) = &mut document else {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    };
+    let Some(Value::Array(manifest)) = root.first_mut() else {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    };
+    if manifest.len() != 6 {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    }
+    manifest[2] = integer(1);
+    let signature = SigningKey::from_bytes(&[9; 32])
+        .sign(&encode(&root[0])?)
+        .to_bytes();
+    let Some(signature_value) = root.get_mut(3) else {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    };
+    *signature_value = Value::Bytes(signature.to_vec());
+    Ok(encode(&document)?)
+}
+
 #[test]
 fn installed_authority_reconstructs_the_signed_selected_case() -> CaseTestResult {
     let corpus = load_corpus("valid")?;
@@ -184,6 +208,37 @@ fn installed_authority_rejects_invalid_ordinal_mode_and_request_bindings() -> Ca
     let (_fixture, authority) =
         install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
     assert!(authority.resolve_installed_case(&request, 0).is_err());
+    Ok(())
+}
+
+#[test]
+fn installed_authority_rejects_signed_bundle_mode_outside_fixture_modes() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let archive = archive_with_disallowed_mode(&corpus.archive)?;
+    let mut request = corpus_request(&corpus)?;
+    request.fixture_bundle_digest = *blake3::hash(&archive).as_bytes();
+    let request = rebind(request)?;
+    let (_fixture, authority) = install_case_fixture(&archive, &corpus.trust_policy, |_| Ok(()))?;
+    assert_eq!(
+        authority.resolve_installed_case(&request, 0),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn installed_authority_bounds_large_installed_trust_policy_before_reading() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let oversized_policy = vec![0; 16 * 1024 * 1024 + 1];
+    let mut request = corpus_request(&corpus)?;
+    request.trust_policy_snapshot_digest = *blake3::hash(&oversized_policy).as_bytes();
+    let request = rebind(request)?;
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.archive, &oversized_policy, |_| Ok(()))?;
+    assert_eq!(
+        authority.resolve_installed_case(&request, 0),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    );
     Ok(())
 }
 
