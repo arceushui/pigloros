@@ -1,4 +1,6 @@
 use super::*;
+use crate::sandbox_provider_protocol::SandboxTrustRole;
+use crate::selector::installation::authority::recovery::InstallationRecoverySnapshot;
 use crate::selector::installation::authority::update::InstallationChallenge;
 use crate::selector::installation::authority::InstalledSelectorAuthority;
 
@@ -133,6 +135,27 @@ impl UpdateFixture {
             Value::Bytes(rcu),
         ]))?)
     }
+}
+
+fn recovery_snapshot(
+    authority: &InstalledSelectorAuthority,
+) -> Result<InstallationRecoverySnapshot, Box<dyn std::error::Error>> {
+    let selection = authority.policy().selection();
+    let runtime_key = authority
+        .trust()
+        .keys()
+        .iter()
+        .find(|key| key.role == SandboxTrustRole::ProviderRuntimeAttestation)
+        .ok_or("runtime key missing")?;
+    Ok(InstallationRecoverySnapshot::fixture(
+        "provider",
+        selection.provider_manifest,
+        selection.provider_binary,
+        [12; 32],
+        runtime_key,
+        vec![[21; 16], [22; 16]],
+        vec![[21; 16]],
+    )?)
 }
 
 #[test]

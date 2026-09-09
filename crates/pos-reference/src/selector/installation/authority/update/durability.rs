@@ -11,11 +11,16 @@ use std::path::Path;
 
 use ciborium::value::Value;
 use rustix::fs::{
-    fchmod, fsync, mkdirat, openat2, renameat_with, Mode, OFlags, RenameFlags, ResolveFlags,
+    fchmod, fsync, mkdirat, openat2, renameat_with, unlinkat, AtFlags, Mode, OFlags, RenameFlags,
+    ResolveFlags,
 };
 
 use super::{InstalledSelectorAuthority, ValidatedInstallationUpdate};
 use crate::evaluator_protocol::encode_with_limit;
+use crate::sandbox_provider_protocol::{
+    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext,
+};
+use crate::selector::installation::authority::recovery::InstallationRecoverySnapshot;
 use crate::selector::installation::{
     open_directory_chain, open_file, InstallationObjectKind, MANIFEST_LIMIT,
 };
@@ -38,6 +43,8 @@ const RECOVERY_MODE: Mode = Mode::RUSR;
 pub struct CommittedInstallationUpdate {
     authority: InstalledSelectorAuthority,
     update: ValidatedInstallationUpdate,
+    snapshot: InstallationRecoverySnapshot,
+    sir1_digest: [u8; 32],
     recovery_file: File,
     recovery_bytes: Vec<u8>,
 }
@@ -65,6 +72,29 @@ impl CommittedInstallationUpdate {
     #[must_use]
     pub fn revocation_update_bytes(&self) -> &[u8] {
         self.update.revocation_update_bytes()
+    }
+
+    /// Exact committed SIR1 self-digest.
+    #[must_use]
+    pub const fn sir1_digest(&self) -> [u8; 32] {
+        self.sir1_digest
+    }
+
+    /// Exact RCC1 paired with this transaction's retained RCU1.
+    ///
+    /// # Errors
+    /// Rejects any internally inconsistent retained recovery identity.
+    pub fn cancellation_context(
+        &self,
+    ) -> Result<RecoveryCancellationContext, SelectorBoundaryError> {
+        RecoveryCancellationContext::for_committed_recovery(
+            self.sir1_digest,
+            self.snapshot.previous_provider_digest()?,
+            self.update.revocation_update_bytes(),
+            self.snapshot.previous_live_attempt_ids().to_vec(),
+            self.snapshot.required_cancelled_attempt_ids().to_vec(),
+        )
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
     }
 
     /// Recheck the retained SIR1 descriptor and the on-disk SIC1 recovery floor.
@@ -119,6 +149,46 @@ impl CommittedInstallationUpdate {
         }
         Ok(())
     }
+
+    /// Complete a timely live update after exact RCA1 authentication.
+    ///
+    /// This atomically publishes and synchronizes next SIC1 before removing and
+    /// synchronizing SIR1. No previous-state admission object is returned.
+    ///
+    /// # Errors
+    /// Rejects a foreign acknowledgement or changed recovery floor. Every
+    /// failure after SIR1 commit leaves recovery mandatory.
+    pub fn complete_live_update(
+        self,
+        acknowledgement: AuthenticatedRevocationAcknowledgement,
+    ) -> Result<InstalledSelectorObjects, SelectorBoundaryError> {
+        self.verify_recovery_floor()?;
+        let context = self.cancellation_context()?;
+        if !acknowledgement.matches_context(
+            &context,
+            self.update
+                .revocation_update()
+                .next_revocation
+                .snapshot_digest(),
+        ) {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        let owner = self
+            .authority
+            .installed
+            .root
+            .metadata()
+            .map_err(|_| SelectorBoundaryError::Io)?
+            .uid();
+        publish_successor(
+            &self.authority.installed.root,
+            owner,
+            self.update.previous_manifest_bytes(),
+            self.update.next_manifest_bytes(),
+            &self.recovery_file,
+            &self.recovery_bytes,
+        )
+    }
 }
 
 impl InstalledSelectorAuthority {
@@ -137,6 +207,7 @@ impl InstalledSelectorAuthority {
     pub fn commit_update(
         self,
         update: ValidatedInstallationUpdate,
+        snapshot: InstallationRecoverySnapshot,
     ) -> Result<CommittedInstallationUpdate, SelectorBoundaryError> {
         if self.installed.manifest_bytes() != update.previous_manifest_bytes() {
             return Err(SelectorBoundaryError::ArtifactInvalid);
@@ -151,20 +222,26 @@ impl InstalledSelectorAuthority {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         self.installed.require_no_pending_recovery()?;
-        let recovery_bytes = recovery_bytes(&update)?;
+        snapshot.validate_against(&self)?;
+        let (recovery_bytes, sir1_digest) = recovery_bytes(&update, &snapshot)?;
         synchronize_successor_records(&self, &update, owner)?;
         let staging = open_staging_directory(&self.installed.root, owner)?;
         let recovery_file = write_recovery(&staging, &self.installed.root, owner, &recovery_bytes)?;
         Ok(CommittedInstallationUpdate {
             authority: self,
             update,
+            snapshot,
+            sir1_digest,
             recovery_file,
             recovery_bytes,
         })
     }
 }
 
-fn recovery_bytes(update: &ValidatedInstallationUpdate) -> Result<Vec<u8>, SelectorBoundaryError> {
+fn recovery_bytes(
+    update: &ValidatedInstallationUpdate,
+    snapshot: &InstallationRecoverySnapshot,
+) -> Result<(Vec<u8>, [u8; 32]), SelectorBoundaryError> {
     let records = [
         update.previous_manifest_bytes(),
         update.next_manifest_bytes(),
@@ -173,21 +250,41 @@ fn recovery_bytes(update: &ValidatedInstallationUpdate) -> Result<Vec<u8>, Selec
     if records.iter().any(|record| record.len() > CONTROL_LIMIT) {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
+    let unsigned = Value::Array(vec![
+        Value::Text("SIR1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Bytes(records[0].to_vec()),
+        Value::Bytes(records[1].to_vec()),
+        Value::Bytes(records[2].to_vec()),
+        snapshot.previous_provider_value(),
+        snapshot.recovery_slot_value(),
+        attempt_values(snapshot.previous_live_attempt_ids()),
+        attempt_values(snapshot.required_cancelled_attempt_ids()),
+    ]);
+    let unsigned_bytes = encode_with_limit(&unsigned, RECOVERY_LIMIT)
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.SIR1.v1\0");
+    hasher.update(&unsigned_bytes);
+    let sir1_digest = *hasher.finalize().as_bytes();
     let encoded = encode_with_limit(
-        &Value::Array(vec![
-            Value::Text("SIR1".to_owned()),
-            Value::Integer(1_u64.into()),
-            Value::Bytes(records[0].to_vec()),
-            Value::Bytes(records[1].to_vec()),
-            Value::Bytes(records[2].to_vec()),
-        ]),
+        &Value::Array(vec![unsigned, Value::Bytes(sir1_digest.to_vec())]),
         RECOVERY_LIMIT,
     )
     .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     if encoded.len() > RECOVERY_LIMIT {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    Ok(encoded)
+    Ok((encoded, sir1_digest))
+}
+
+fn attempt_values(attempts: &[[u8; 16]]) -> Value {
+    Value::Array(
+        attempts
+            .iter()
+            .map(|attempt| Value::Bytes(attempt.to_vec()))
+            .collect(),
+    )
 }
 
 fn read_current_manifest(
@@ -380,4 +477,72 @@ fn write_recovery(
 fn temporary_name() -> String {
     let nonce: u128 = rand::random();
     format!("sir1-{nonce:032x}.cbor")
+}
+
+pub(crate) fn publish_successor(
+    root: &File,
+    owner: u32,
+    previous: &[u8],
+    next: &[u8],
+    retained_recovery: &File,
+    recovery_bytes: &[u8],
+) -> Result<InstalledSelectorObjects, SelectorBoundaryError> {
+    let current = open_file(root, "installation.cbor", owner, 0o400, MANIFEST_LIMIT)?;
+    let current_bytes = read_bounded(
+        current.try_clone().map_err(|_| SelectorBoundaryError::Io)?,
+        MANIFEST_LIMIT,
+    )?;
+    if current_bytes != previous && current_bytes != next {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    verify_recovery_identity(root, owner, retained_recovery, recovery_bytes)?;
+    if current_bytes != next {
+        let staging = open_staging_directory(root, owner)?;
+        let temporary_name = format!("sic1-{:032x}.cbor", rand::random::<u128>());
+        let mut temporary = openat2(
+            &staging,
+            &temporary_name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            RECOVERY_MODE,
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        )
+        .map(File::from)
+        .map_err(|_| SelectorBoundaryError::Io)?;
+        fchmod(&temporary, RECOVERY_MODE).map_err(|_| SelectorBoundaryError::Io)?;
+        temporary
+            .write_all(next)
+            .map_err(|_| SelectorBoundaryError::Io)?;
+        fsync(&temporary).map_err(|_| SelectorBoundaryError::Io)?;
+        renameat_with(
+            &staging,
+            &temporary_name,
+            root,
+            "installation.cbor",
+            RenameFlags::empty(),
+        )
+        .map_err(|_| SelectorBoundaryError::Io)?;
+        fsync(root).map_err(|_| SelectorBoundaryError::Io)?;
+    }
+    verify_recovery_identity(root, owner, retained_recovery, recovery_bytes)?;
+    unlinkat(root, RECOVERY_NAME, AtFlags::empty()).map_err(|_| SelectorBoundaryError::Io)?;
+    fsync(root).map_err(|_| SelectorBoundaryError::Io)?;
+    InstalledSelectorObjects::open_at(root, owner)
+}
+
+fn verify_recovery_identity(
+    root: &File,
+    owner: u32,
+    retained: &File,
+    expected_bytes: &[u8],
+) -> Result<(), SelectorBoundaryError> {
+    let current = open_file(root, RECOVERY_NAME, owner, 0o400, RECOVERY_LIMIT_U64)?;
+    let current_metadata = current.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+    let retained_metadata = retained.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+    if current_metadata.dev() != retained_metadata.dev()
+        || current_metadata.ino() != retained_metadata.ino()
+        || read_bounded(current, RECOVERY_LIMIT_U64)? != expected_bytes
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(())
 }
