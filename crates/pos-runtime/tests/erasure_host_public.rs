@@ -1,8 +1,8 @@
 use pos_core::{
     CanonicalBytes, EntityId, ErasureErrorV1, ErasureHostErrorV1,
-    ErasurePersistenceInventorySnapshotV1, ErasureVerifiedInventoryQueryV1,
-    ErasureVerifiedInventoryV1, EventDraft, EventReadBounds, Kind, SeqRange,
-    ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasurePersistenceInventorySnapshotV1, ErasureProtectedOperationV1,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, EventDraft, EventReadBounds, Kind,
+    SeqRange, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::StoreConfig;
@@ -39,14 +39,25 @@ fn assert_hosted_store_parity(config: StoreConfig) -> Result<(), Box<dyn Error +
     let (timeline, event) = {
         let mut commands = host.command_sender()?;
         let timeline = commands.create_timeline("public-host-parity")?;
-        let mut events = commands.append(
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("public.host.parity"),
+            CanonicalBytes::from_static(b"payload"),
+        );
+        let mut fenced_append = Err(ErasureHostErrorV1::RecoveryUnavailable);
+        let mut effect = |commands: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
+            fenced_append = commands.timeline(timeline.id()).and_then(|metadata| {
+                metadata
+                    .ok_or(ErasureHostErrorV1::AdapterFailure)
+                    .and_then(|_| commands.append(timeline.id(), std::slice::from_ref(&draft)))
+            });
+        };
+        commands.with_protected_effect_fence(
             timeline.id(),
-            &[EventDraft::new(
-                EntityId::new(),
-                Kind::new("public.host.parity"),
-                CanonicalBytes::from_static(b"payload"),
-            )],
+            ErasureProtectedOperationV1::ProposedAction,
+            &mut effect,
         )?;
+        let mut events = fenced_append?;
         let event = events
             .pop()
             .ok_or_else(|| std::io::Error::other("host append returned no committed event"))?;

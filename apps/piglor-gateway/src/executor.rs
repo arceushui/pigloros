@@ -13,12 +13,13 @@ use pos_core::{
     },
     timeline::Timeline,
     ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
-    CoreError, ErasureHostErrorV1, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
-    PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, OwnTracksIngressInputV1,
+    OwnTracksIngressRateKeyV1, PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, OwnTracksIngressStore};
-use pos_runtime::ErasureExecutionHostV1;
+use pos_runtime::{ActionSubmissionError, ErasureExecutionHostV1, PluginRegistry, ProposedAction};
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -268,6 +269,13 @@ enum Command {
         maximum: Option<u64>,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
+    SubmitAction {
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        maximum: u64,
+        reply: oneshot::Sender<Result<Event, ActionCommandError>>,
+    },
     AppendConsentGrant {
         timeline: TimelineId,
         grant: ConsentGrantedV1,
@@ -330,6 +338,7 @@ impl Command {
             | Self::PendingAppendIdentityCleanup { .. }
             | Self::Create { .. }
             | Self::Append { .. }
+            | Self::SubmitAction { .. }
             | Self::AppendConsentGrant { .. }
             | Self::AppendConsentRevocation { .. }
             | Self::AppendIdentified { .. } => CommandClass::Write,
@@ -653,6 +662,18 @@ pub(crate) enum StoreExecutorError {
     DeadlineExceeded,
     Unhealthy,
     Store(CoreError),
+}
+
+#[derive(Debug)]
+pub(crate) enum ActionCommandError {
+    Executor(StoreExecutorError),
+    Submission(ActionSubmissionError),
+}
+
+impl From<StoreExecutorError> for ActionCommandError {
+    fn from(error: StoreExecutorError) -> Self {
+        Self::Executor(error)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1346,6 +1367,30 @@ impl StoreExecutor {
             reply,
         })
     }
+    pub(crate) async fn submit_action(
+        &self,
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        maximum: u64,
+    ) -> Result<Event, ActionCommandError> {
+        let deadline = Instant::now() + self.command_deadline();
+        let lifecycle = Arc::new(CommandLifecycle::new());
+        let (reply, result) = oneshot::channel();
+        self.try_submit(
+            Command::SubmitAction {
+                timeline,
+                registry,
+                proposal,
+                maximum,
+                reply,
+            },
+            deadline,
+            Arc::clone(&lifecycle),
+        )
+        .map_err(ActionCommandError::Executor)?;
+        await_command_result(self, result, lifecycle, deadline).await
+    }
     pub(crate) async fn append_consent_grant(
         &self,
         timeline: TimelineId,
@@ -1412,26 +1457,29 @@ impl StoreExecutor {
     }
 }
 
-async fn await_command_result<T>(
+async fn await_command_result<T, E>(
     executor: &StoreExecutor,
-    mut reply: oneshot::Receiver<Result<T, StoreExecutorError>>,
+    mut reply: oneshot::Receiver<Result<T, E>>,
     lifecycle: Arc<CommandLifecycle>,
     deadline: Instant,
-) -> Result<T, StoreExecutorError> {
+) -> Result<T, E>
+where
+    E: From<StoreExecutorError>,
+{
     let timeout_result =
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut reply).await;
     let result = if let Ok(result) = timeout_result {
         result
     } else {
         if lifecycle.expire_if_queued() {
-            return Err(StoreExecutorError::DeadlineExceeded);
+            return Err(StoreExecutorError::DeadlineExceeded.into());
         }
         reply.await
     };
     match result {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(error),
-        Err(_) => Err(executor.reply_closed_error()),
+        Err(_) => Err(executor.reply_closed_error().into()),
     }
 }
 
@@ -1732,6 +1780,11 @@ fn expire_command(command: Command) {
         Command::Append { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::SubmitAction { reply, .. } => {
+            drop(reply.send(Err(ActionCommandError::Executor(
+                StoreExecutorError::DeadlineExceeded,
+            ))));
+        }
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1916,6 +1969,20 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             maximum,
             reply,
         } => execute_append_command(state, timeline, &drafts, maximum, reply),
+        Command::SubmitAction {
+            timeline,
+            registry,
+            proposal,
+            maximum,
+            reply,
+        } => execute_submit_action_command(
+            state,
+            timeline,
+            registry.as_ref(),
+            &proposal,
+            maximum,
+            reply,
+        ),
         Command::AppendConsentGrant {
             timeline,
             grant,
@@ -2079,6 +2146,122 @@ fn execute_append_command(
         ),
     };
     send_store_result(reply, result);
+}
+
+fn execute_submit_action_command(
+    state: &mut ExecutorState,
+    timeline: TimelineId,
+    registry: &PluginRegistry,
+    proposal: &ProposedAction,
+    maximum: u64,
+    reply: oneshot::Sender<Result<Event, ActionCommandError>>,
+) {
+    let result = match &mut state.store {
+        ExecutorStore::Host(host) => {
+            execute_host_action(host, timeline, registry, proposal, maximum)
+        }
+        #[cfg(test)]
+        ExecutorStore::Generic(store) => {
+            execute_test_store_action(store.as_mut(), timeline, registry, proposal, maximum)
+        }
+        #[cfg(test)]
+        ExecutorStore::Gateway(store) => {
+            execute_test_store_action(store.event_store(), timeline, registry, proposal, maximum)
+        }
+    };
+    drop(reply.send(result));
+}
+
+fn execute_host_action(
+    host: &mut ErasureExecutionHostV1,
+    timeline: TimelineId,
+    registry: &PluginRegistry,
+    proposal: &ProposedAction,
+    maximum: u64,
+) -> Result<Event, ActionCommandError> {
+    let mut sender = host.command_sender().map_err(host_action_error)?;
+    let mut result = None;
+    let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
+        result = Some(prepare_and_append_action(
+            sender.timeline(timeline).map_err(host_action_error),
+            |draft| {
+                sender
+                    .append_bounded(timeline, std::slice::from_ref(draft), maximum)
+                    .map_err(host_action_error)
+            },
+            timeline,
+            registry,
+            proposal,
+        ));
+    };
+    sender
+        .with_protected_effect_fence(
+            timeline,
+            ErasureProtectedOperationV1::ProposedAction,
+            &mut effect,
+        )
+        .map_err(host_action_error)?;
+    result.unwrap_or_else(|| Err(ActionCommandError::Executor(StoreExecutorError::Unhealthy)))
+}
+
+#[cfg(test)]
+fn execute_test_store_action(
+    store: &mut dyn EventStore,
+    timeline: TimelineId,
+    registry: &PluginRegistry,
+    proposal: &ProposedAction,
+    maximum: u64,
+) -> Result<Event, ActionCommandError> {
+    prepare_and_append_action(
+        store
+            .get_timeline(timeline)
+            .map_err(StoreExecutorError::Store)
+            .map_err(ActionCommandError::Executor),
+        |draft| {
+            store
+                .append_bounded(timeline, std::slice::from_ref(draft), maximum)
+                .map_err(StoreExecutorError::Store)
+                .map_err(ActionCommandError::Executor)
+        },
+        timeline,
+        registry,
+        proposal,
+    )
+}
+
+fn prepare_and_append_action(
+    timeline_result: Result<Option<Timeline>, ActionCommandError>,
+    append: impl FnOnce(&EventDraft) -> Result<Option<Vec<Event>>, ActionCommandError>,
+    timeline: TimelineId,
+    registry: &PluginRegistry,
+    proposal: &ProposedAction,
+) -> Result<Event, ActionCommandError> {
+    timeline_result?.ok_or_else(|| {
+        ActionCommandError::Executor(StoreExecutorError::Store(CoreError::TimelineNotFound(
+            timeline,
+        )))
+    })?;
+    let draft = registry
+        .submit_action(timeline, proposal)
+        .map_err(ActionCommandError::Submission)?;
+    let mut events = append(&draft)?.ok_or_else(event_limit_reached)?;
+    events.pop().ok_or_else(empty_action_append)
+}
+
+fn host_action_error(error: ErasureHostErrorV1) -> ActionCommandError {
+    ActionCommandError::Executor(StoreExecutorError::Store(host_error_to_core(error)))
+}
+
+fn event_limit_reached() -> ActionCommandError {
+    ActionCommandError::Executor(StoreExecutorError::Store(CoreError::Storage(
+        "event limit reached".to_owned(),
+    )))
+}
+
+fn empty_action_append() -> ActionCommandError {
+    ActionCommandError::Executor(StoreExecutorError::Store(CoreError::Storage(
+        "empty append".to_owned(),
+    )))
 }
 
 fn execute_append_consent_grant_command(

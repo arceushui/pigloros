@@ -931,6 +931,15 @@ impl From<executor::StoreExecutorError> for GatewayError {
     }
 }
 
+impl From<executor::ActionCommandError> for GatewayError {
+    fn from(error: executor::ActionCommandError) -> Self {
+        match error {
+            executor::ActionCommandError::Executor(error) => error.into(),
+            executor::ActionCommandError::Submission(error) => error.into(),
+        }
+    }
+}
+
 impl From<ActionSubmissionError> for GatewayError {
     fn from(error: ActionSubmissionError) -> Self {
         match error {
@@ -2114,18 +2123,28 @@ impl Gateway {
             Ok(decision) => decision,
             Err(error) => return Err(error),
         };
-        if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
-            return Err(error);
-        }
-        let draft = match self.submit_action_draft(timeline, &proposal) {
-            Ok(draft) => draft,
-            Err(error) => return Err(error),
-        };
         let decision = reauthorize_at_commit_fence(&authorization, &decision)?;
-        let event = match self.append_draft(timeline, draft).await {
+        let event = match self
+            .store
+            .submit_action(
+                timeline,
+                Arc::clone(&self.action_registry),
+                proposal,
+                self.limits.max_events_per_timeline,
+            )
+            .await
+        {
             Ok(event) => event,
-            Err(error) => return Err(error),
+            Err(executor::ActionCommandError::Executor(executor::StoreExecutorError::Store(
+                CoreError::Storage(message),
+            ))) if message == "event limit reached" => {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                });
+            }
+            Err(error) => return Err(error.into()),
         };
+        self.publish_event_notice(timeline, &event);
         drop(fence);
         authorization
             .record_audit(decision.audit().with_event_id(event.id))
@@ -2466,8 +2485,13 @@ impl Gateway {
                 }
             }
         };
+        self.publish_event_notice(timeline, &event);
+        Ok(event)
+    }
+
+    fn publish_event_notice(&self, timeline: TimelineId, event: &Event) {
         if pos_core::is_consent_event_type(&event.event_type) {
-            return Ok(event);
+            return;
         }
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
@@ -2477,7 +2501,6 @@ impl Gateway {
             seq: event.seq.as_u64(),
         };
         drop(self.bus.send(notice));
-        Ok(event)
     }
 
     fn publish_geographic_notice(
@@ -3336,6 +3359,60 @@ mod tests {
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn host_owned_action_command_fences_plugin_approval_and_append() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_for(actor);
+        let audit_host = authorization.clone();
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gateway =
+            Gateway::new_with_erasure_host_and_authorization(host, [body], authorization).test_ok();
+        let timeline = gateway.create_timeline("host-owned-action").await.test_ok();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+        let event = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_ok();
+        assert_eq!(event.entity, actor);
+        assert_eq!(audit_host.audits().await[0].event_id(), Some(event.id));
+
+        let missing = gateway
+            .submit_json_action(
+                &TimelineId::new().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            missing,
+            GatewayError::Store(CoreError::TimelineNotFound(_))
+        ));
+        assert_eq!(audit_host.audits().await.len(), 1);
+        gateway.shutdown().await.test_ok();
     }
 
     #[tokio::test]

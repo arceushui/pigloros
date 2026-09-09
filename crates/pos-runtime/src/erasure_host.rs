@@ -10,9 +10,10 @@ use pos_core::{
     },
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
     ErasureForkPersistencePortV1, ErasureForkRecoveryV1, ErasureGate, ErasureHostErrorV1,
-    ErasureInventoryPersistencePortV1, ErasureReferenceV1, ErasureVerifiedInventoryQueryV1,
-    ErasureVerifiedInventoryV1, Event, EventDraft, EventId, OwnTracksIngressInputV1,
-    PreparedErasureForkBatchV1, PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
+    ErasureInventoryPersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event, EventDraft, EventId,
+    OwnTracksIngressInputV1, PreparedErasureForkBatchV1, PreparedOwnTracksIngressV1, Seq, Timeline,
+    TimelineId,
 };
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
@@ -526,6 +527,46 @@ pub struct ErasureCommandSenderV1<'host> {
 }
 
 impl ErasureCommandSenderV1<'_> {
+    /// Run one protected effect while retaining the host's current Tick
+    /// Boundary fence for its complete execution.
+    ///
+    /// Nested store and Plugin operations reauthorize against the same gate
+    /// state without releasing the outer fence. The callback receives only
+    /// this generation-bound sender, never the owned EventStore adapter.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error when this sender is stale or the
+    /// protected operation is frozen or unavailable.
+    pub fn with_protected_effect_fence(
+        &mut self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let gate = Arc::clone(&self.host.gate);
+        let mut fenced_effect = || effect(self);
+        gate.with_fence(timeline, operation, &mut fenced_effect)
+            .map_err(ErasureHostErrorV1::from)?;
+        self.host.ensure_generation(self.generation)
+    }
+
+    /// Read one Timeline's metadata inside a larger host command fence.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn timeline(
+        &mut self,
+        timeline: TimelineId,
+    ) -> Result<Option<Timeline>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .host_store()
+            .get_timeline(timeline)
+            .map_store_error()
+    }
+
     /// Create a root Timeline and publish its successor inventory generation.
     ///
     /// Topology changes are admitted only for a positively verified empty
