@@ -5043,7 +5043,7 @@ mod tests {
 
     fn registry_with_mock_action_approver() -> PluginRegistry {
         let plugin = plugin_with_caps("approver_plugin", &["action.type"], false, false);
-        let mut reg = PluginRegistry::default();
+        let mut reg = gated_registry();
         reg.register_with_approver(
             &plugin,
             None,
@@ -5170,7 +5170,8 @@ mod tests {
             )) if reason == "rejected"
         ));
 
-        let replay = PluginRegistry::new_replay();
+        let replay = PluginRegistry::new_replay()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         assert!(matches!(
             replay.submit_action(action_timeline, &valid),
             Err(ActionSubmissionError::Rejected(
@@ -5193,7 +5194,7 @@ mod tests {
         );
 
         let plugin = plugin_with_caps("forged_actor", &["action.type"], false, false);
-        let mut actor_registry = PluginRegistry::default();
+        let mut actor_registry = gated_registry();
         actor_registry
             .register_with_approver(
                 &plugin,
@@ -5216,7 +5217,7 @@ mod tests {
 
         let forged_event_type = Kind::new("other.action.type");
         let plugin = plugin_with_caps("forged_event_type", &["action.type"], false, false);
-        let mut event_type_registry = PluginRegistry::default();
+        let mut event_type_registry = gated_registry();
         event_type_registry
             .register_with_approver(
                 &plugin,
@@ -5255,7 +5256,9 @@ mod tests {
             Kind::new("replay.event.submit"),
         );
         assert!(matches!(
-            PluginRegistry::new_replay().submit_action(TimelineId::new(), &proposal),
+            PluginRegistry::new_replay()
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+                .submit_action(TimelineId::new(), &proposal),
             Err(ActionSubmissionError::Rejected(
                 ActionRejected::UnknownEventType
             ))
