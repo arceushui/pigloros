@@ -414,6 +414,43 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     }
 }
 
+enum HostedCoordinatorCommandV1 {
+    Submit {
+        request: ErasureRequestV1,
+        provenance: ErasureReferenceV1,
+    },
+    Authorize {
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    },
+    Freeze {
+        request: ErasureReferenceV1,
+        transition: ErasureStateTransitionV1,
+    },
+}
+
+impl HostedCoordinatorCommandV1 {
+    fn execute(
+        self,
+        coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        match self {
+            Self::Submit {
+                request,
+                provenance,
+            } => coordinator.submit(request, provenance),
+            Self::Authorize {
+                request,
+                provenance,
+            } => coordinator.authorize(request, provenance),
+            Self::Freeze {
+                request,
+                transition,
+            } => coordinator.freeze_inventory(request, &transition),
+        }
+    }
+}
+
 trait ErasureGatewayHostStore:
     ErasureHostStore
     + pos_core::geo_admission::GeoLocationAdmissionStore
@@ -932,10 +969,9 @@ impl ErasureExecutionHostV1 {
         }
     }
 
-    fn apply_atomic_freeze(
+    fn apply_coordinator_command(
         &mut self,
-        request: ErasureReferenceV1,
-        transition: &ErasureStateTransitionV1,
+        command: HostedCoordinatorCommandV1,
     ) -> Result<(ErasureStateV1, ErasureReferenceV1), ErasureHostErrorV1> {
         self.ready_generation()?;
         let maximum_requests = self.maximum_requests()?;
@@ -950,13 +986,16 @@ impl ErasureExecutionHostV1 {
         let gate = Arc::clone(&self.gate);
         let mut transition_result = None;
         let mut transition_error = None;
+        let mut command = Some(command);
         let publication = {
             let mut fenced_transition = || {
                 let port =
                     HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
                 let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
-                match state_machine
-                    .freeze_inventory(request, transition)
+                match command
+                    .take()
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?
+                    .execute(&mut state_machine)
                     .and_then(|state| {
                         state_machine
                             .verified_inventory(maximum_requests)
@@ -1231,6 +1270,50 @@ impl ErasureCommandSenderV1<'_> {
         Ok(timeline)
     }
 
+    /// Authenticate and submit one erasure request through the host-owned
+    /// coordinator and publish the successor complete inventory atomically.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error and poisons an uncertain persistence/publication outcome.
+    pub fn submit_erasure_request(
+        &mut self,
+        request: ErasureRequestV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (state, generation) =
+            self.host
+                .apply_coordinator_command(HostedCoordinatorCommandV1::Submit {
+                    request,
+                    provenance,
+                })?;
+        self.generation = generation;
+        Ok(state)
+    }
+
+    /// Authenticate and persist an authorization decision through the
+    /// host-owned coordinator, then publish its successor inventory atomically.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error and poisons an uncertain persistence/publication outcome.
+    pub fn authorize_erasure_request(
+        &mut self,
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (state, generation) =
+            self.host
+                .apply_coordinator_command(HostedCoordinatorCommandV1::Authorize {
+                    request,
+                    provenance,
+                })?;
+        self.generation = generation;
+        Ok(state)
+    }
+
     /// Atomically persist an admitted access freeze and publish the successor
     /// complete inventory before any protected operation can reauthorize.
     ///
@@ -1249,7 +1332,12 @@ impl ErasureCommandSenderV1<'_> {
         transition: &ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let (state, generation) = self.host.apply_atomic_freeze(request, transition)?;
+        let (state, generation) =
+            self.host
+                .apply_coordinator_command(HostedCoordinatorCommandV1::Freeze {
+                    request,
+                    transition: transition.clone(),
+                })?;
         self.generation = generation;
         Ok(state)
     }
