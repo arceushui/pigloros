@@ -15,8 +15,14 @@ fn validated(
     Ok(fixture.authority.validate_update(challenge, &request)?)
 }
 
-fn commit_recovery(
-) -> Result<(InstallationFixture, Vec<u8>, Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+struct RecoveryFixture {
+    installation: InstallationFixture,
+    previous: Vec<u8>,
+    next: Vec<u8>,
+    rcu: Vec<u8>,
+}
+
+fn commit_recovery() -> Result<RecoveryFixture, Box<dyn std::error::Error>> {
     let fixture = UpdateFixture::new()?;
     let update = validated(&fixture)?;
     let previous = update.previous_manifest_bytes().to_vec();
@@ -28,7 +34,12 @@ fn commit_recovery(
     } = fixture;
     let committed: CommittedInstallationUpdate = authority.commit_update(update)?;
     drop(committed);
-    Ok((installation, previous, next, rcu))
+    Ok(RecoveryFixture {
+        installation,
+        previous,
+        next,
+        rcu,
+    })
 }
 
 fn replace_manifest(
@@ -56,7 +67,12 @@ fn replace_recovery(
 #[test]
 fn recovery_loader_authenticates_previous_and_next_sic_floors() -> TestResult {
     for floor in 0..2 {
-        let (installation, previous, next, rcu) = commit_recovery()?;
+        let RecoveryFixture {
+            installation,
+            previous,
+            next,
+            rcu,
+        } = commit_recovery()?;
         if floor == 1 {
             replace_manifest(&installation, &next)?;
         }
@@ -76,7 +92,7 @@ fn recovery_loader_authenticates_previous_and_next_sic_floors() -> TestResult {
 
 #[test]
 fn recovery_loader_rechecks_current_disk_manifest_after_object_loading() -> TestResult {
-    let (installation, _, _, _) = commit_recovery()?;
+    let RecoveryFixture { installation, .. } = commit_recovery()?;
     let loaded = installation.load()?;
     replace_manifest(&installation, b"replaced after loading")?;
     assert!(loaded.load_pending_recovery().is_err());
@@ -91,7 +107,7 @@ fn recovery_loader_rechecks_current_disk_manifest_after_object_loading() -> Test
 #[test]
 fn pending_recovery_rejects_replaced_changed_and_truncated_records() -> TestResult {
     for alteration in 0..3 {
-        let (installation, _, _, _) = commit_recovery()?;
+        let RecoveryFixture { installation, .. } = commit_recovery()?;
         let pending = installation.load()?.load_pending_recovery()?;
         let path = installation
             .directory
@@ -120,7 +136,7 @@ fn pending_recovery_rejects_replaced_changed_and_truncated_records() -> TestResu
 #[test]
 fn recovery_loader_rejects_malformed_truncated_and_tampered_sir1() -> TestResult {
     for alteration in 0..3 {
-        let (installation, _, _, _) = commit_recovery()?;
+        let RecoveryFixture { installation, .. } = commit_recovery()?;
         let path = installation
             .directory
             .path()
@@ -148,7 +164,7 @@ fn recovery_loader_rejects_wrong_envelope_tags_versions_and_member_types() -> Te
         (3, Value::Null),
         (4, Value::Null),
     ] {
-        let (installation, _, _, _) = commit_recovery()?;
+        let RecoveryFixture { installation, .. } = commit_recovery()?;
         let path = installation
             .directory
             .path()
@@ -166,7 +182,7 @@ fn recovery_loader_rejects_wrong_envelope_tags_versions_and_member_types() -> Te
 #[test]
 fn recovery_loader_rejects_unsafe_recovery_file_metadata() -> TestResult {
     for alteration in 0..3 {
-        let (installation, _, _, _) = commit_recovery()?;
+        let RecoveryFixture { installation, .. } = commit_recovery()?;
         let path = installation
             .directory
             .path()
@@ -186,7 +202,7 @@ fn recovery_loader_rejects_unsafe_recovery_file_metadata() -> TestResult {
 
 #[test]
 fn recovery_loader_rejects_forged_rcu_signature() -> TestResult {
-    let (installation, _, _, _) = commit_recovery()?;
+    let RecoveryFixture { installation, .. } = commit_recovery()?;
     let path = installation
         .directory
         .path()
@@ -218,7 +234,7 @@ fn recovery_loader_rejects_forged_rcu_signature() -> TestResult {
 
 #[test]
 fn recovery_loader_rejects_a_valid_but_stale_current_sic() -> TestResult {
-    let (installation, _, _, _) = commit_recovery()?;
+    let RecoveryFixture { installation, .. } = commit_recovery()?;
     let foreign_installation = authenticated_fixture(|policy| {
         policy[5] = Value::Array(vec![bytes([77; 32])]);
     })?;
