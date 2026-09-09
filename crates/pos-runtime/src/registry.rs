@@ -5041,9 +5041,7 @@ mod tests {
         );
     }
 
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn plugin_registry_registers_approver_and_submits_action() {
+    fn registry_with_mock_action_approver() -> PluginRegistry {
         let plugin = plugin_with_caps("approver_plugin", &["action.type"], false, false);
         let mut reg = PluginRegistry::default();
         reg.register_with_approver(
@@ -5054,6 +5052,13 @@ mod tests {
             [Kind::new("action.type")],
         )
         .test_ok();
+        reg
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugin_registry_registers_one_owned_approver() {
+        let mut reg = registry_with_mock_action_approver();
 
         assert!(reg.approver_for(&Kind::new("action.type")).is_some());
         assert!(reg.approver_for(&Kind::new("other.type")).is_none());
@@ -5088,7 +5093,12 @@ mod tests {
             )
             .test_err();
         assert!(matches!(foreign, RuntimeError::CapabilityMismatch { .. }));
+    }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugin_registry_submits_and_rejects_actions() {
+        let reg = registry_with_mock_action_approver();
         let actor = EntityId::new();
         let valid = ProposedAction::new(
             Kind::new("action.type"),
