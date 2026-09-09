@@ -173,7 +173,10 @@ fn host_error(error: ErasureHostErrorV1) -> CoreError {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use pos_core::{CanonicalBytes, EntityId, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, Kind};
+    use pos_core::{
+        CanonicalBytes, EntityId, ErasureErrorV1, ErasureVerifiedInventoryQueryV1,
+        ErasureVerifiedInventoryV1, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, Kind,
+    };
     use pos_crypto::key_roles::key_material_digest;
 
     fn signing_registry(
@@ -291,6 +294,77 @@ mod tests {
             .list_timelines()
             .err()
             .is_some_and(|error| error.to_string().contains("unavailable")));
+        Ok(())
+    }
+
+    struct FailingInventory;
+
+    impl ErasureVerifiedInventoryQueryV1 for FailingInventory {
+        fn verified_inventory(
+            &mut self,
+            _maximum_requests: usize,
+        ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
+    #[test]
+    fn poisoned_host_denies_every_ledger_adapter_operation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        assert!(host
+            .install_inventory(
+                &mut FailingInventory,
+                pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            )
+            .is_err());
+        let timeline = TimelineId::new();
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("ledger.adapter.denied"),
+            CanonicalBytes::from_vec(Vec::new()),
+        );
+        let registry = KeyRegistryStateV1::new();
+        let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let request = KeyDestructionRequestV1::new(
+            identity,
+            Hash::from_bytes([1; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let mut store = HostedLedgerStore::from_host(host);
+        store.ledger_timeline = Some(timeline);
+
+        assert!(store.create_timeline("denied").is_err());
+        assert!(store
+            .append(timeline, std::slice::from_ref(&draft))
+            .is_err());
+        assert!(store.read(timeline, SeqRange::all()).is_err());
+        assert!(store
+            .read_bounded(timeline, SeqRange::all(), EventReadBounds::new(1, 1, 1, 1),)
+            .is_err());
+        assert!(store.fork(timeline, Seq::ZERO, "denied-child").is_err());
+        assert!(store.list_timelines().is_err());
+        assert!(store.root_timeline_count_bounded(1).is_err());
+        assert!(store.get_timeline(timeline).is_err());
+        assert!(store.logical_head(timeline).is_err());
+        assert!(store.load_key_registry().is_err());
+        assert!(store.save_key_registry(&registry).is_err());
+        assert!(store
+            .initialize_timeline_with_key_registry("denied", &registry)
+            .is_err());
+        assert!(store
+            .append_signed_authorized(timeline, &registry, &mut create_event)
+            .is_err());
+        assert!(store.begin_key_registry_destruction(request).is_err());
+        assert!(store
+            .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request),)
+            .is_err());
         Ok(())
     }
 }
