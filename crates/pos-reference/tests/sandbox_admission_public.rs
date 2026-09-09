@@ -648,6 +648,19 @@ fn serve_transport(
     })
 }
 
+fn serve_transport_bytes(
+    mut peer: UnixStream,
+    response: Vec<u8>,
+    expected_request: SandboxExecuteRequest,
+) -> thread::JoinHandle<std::io::Result<()>> {
+    thread::spawn(move || {
+        let mut input = Vec::new();
+        peer.read_to_end(&mut input)?;
+        validate_provider_input(&input, &expected_request)?;
+        peer.write_all(&response)
+    })
+}
+
 fn read_provider_frame(input: &mut &[u8]) -> std::io::Result<Vec<u8>> {
     let mut length = [0; 4];
     input.read_exact(&mut length)?;
@@ -830,6 +843,261 @@ fn provider_transport_exhausts_one_shared_deadline_after_admission() -> TestResu
     first_server
         .join()
         .map_err(|_| "first provider panicked")??;
+    Ok(())
+}
+
+#[test]
+fn provider_transport_rejects_bad_input_and_request_write_failures() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+
+    let (client, peer) = UnixStream::pair()?;
+    let mut invalid_input = ProviderTransport::with_connector(PairConnector(vec![client]));
+    assert!(matches!(
+        invalid_input.execute(&request, b"different", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::EvidenceInvalid { agr1_digest: None }
+    ));
+    drop(peer);
+
+    let (first, first_peer) = UnixStream::pair()?;
+    let (second, second_peer) = UnixStream::pair()?;
+    drop(first_peer);
+    drop(second_peer);
+    let mut write_failure = ProviderTransport::with_connector(PairConnector(vec![second, first]));
+    assert!(matches!(
+        write_failure.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::Incomplete { agr1_digest: None }
+    ));
+    Ok(())
+}
+
+#[test]
+fn provider_transport_handles_pre_admission_and_provider_error_records() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+    let before_admission = pre_admission_result(&fixture, &request)?;
+    let provider_error = provider_execute_error(&fixture, &request)?;
+
+    let (client, peer) = UnixStream::pair()?;
+    let server = serve_transport(peer, vec![before_admission.clone()], false, request.clone());
+    let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+    assert!(matches!(
+        transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::BeforeAdmission { result } if result == before_admission
+    ));
+    server.join().map_err(|_| "provider panicked")??;
+
+    let (client, peer) = UnixStream::pair()?;
+    let server = serve_transport(peer, vec![provider_error.clone()], false, request.clone());
+    let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+    assert!(matches!(
+        transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::Error { error } if error == provider_error
+    ));
+    server.join().map_err(|_| "provider panicked")??;
+
+    let malformed_error = encode(&Value::Array(vec![Value::Array(vec![Value::Text(
+        "SPE1".to_owned(),
+    )])]))?;
+    let (client, peer) = UnixStream::pair()?;
+    let server = serve_transport(peer, vec![malformed_error], false, request.clone());
+    let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+    assert!(matches!(
+        transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::EvidenceInvalid { agr1_digest: None }
+    ));
+    server.join().map_err(|_| "provider panicked")??;
+    Ok(())
+}
+
+#[test]
+fn provider_transport_rejects_framing_eof_and_malformed_record_wrappers() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+
+    let (first, first_peer) = UnixStream::pair()?;
+    let (second, second_peer) = UnixStream::pair()?;
+    let first_server = serve_transport(first_peer, vec![], false, request.clone());
+    let second_server = serve_transport(second_peer, vec![], false, request.clone());
+    let mut eof = ProviderTransport::with_connector(PairConnector(vec![second, first]));
+    assert!(matches!(
+        eof.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::Incomplete { agr1_digest: None }
+    ));
+    first_server
+        .join()
+        .map_err(|_| "first provider panicked")??;
+    second_server
+        .join()
+        .map_err(|_| "second provider panicked")??;
+
+    let short_prefix = vec![0, 0];
+    let (first, first_peer) = UnixStream::pair()?;
+    let (second, second_peer) = UnixStream::pair()?;
+    let first_server = serve_transport_bytes(first_peer, short_prefix.clone(), request.clone());
+    let second_server = serve_transport_bytes(second_peer, short_prefix, request.clone());
+    let mut truncated = ProviderTransport::with_connector(PairConnector(vec![second, first]));
+    assert!(matches!(
+        truncated.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::Incomplete { agr1_digest: None }
+    ));
+    first_server
+        .join()
+        .map_err(|_| "first provider panicked")??;
+    second_server
+        .join()
+        .map_err(|_| "second provider panicked")??;
+
+    for response in [
+        0_u32.to_be_bytes().to_vec(),
+        (16 * 1024 * 1024 + 1_u32).to_be_bytes().to_vec(),
+    ] {
+        let (client, peer) = UnixStream::pair()?;
+        let server = serve_transport_bytes(peer, response, request.clone());
+        let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+        assert!(matches!(
+            transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+            RootSelectorProviderReply::EvidenceInvalid { agr1_digest: None }
+        ));
+        server.join().map_err(|_| "provider panicked")??;
+    }
+
+    for malformed in [
+        encode(&Value::Null)?,
+        encode(&Value::Array(vec![Value::Null]))?,
+        encode(&Value::Array(vec![Value::Array(vec![integer(1)])]))?,
+    ] {
+        let (client, peer) = UnixStream::pair()?;
+        let server = serve_transport(peer, vec![malformed], false, request.clone());
+        let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+        assert!(matches!(
+            transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+            RootSelectorProviderReply::EvidenceInvalid { agr1_digest: None }
+        ));
+        server.join().map_err(|_| "provider panicked")??;
+    }
+
+    let unknown_record = encode(&Value::Array(vec![Value::Array(vec![Value::Text(
+        "SBC1".to_owned(),
+    )])]))?;
+    let (client, peer) = UnixStream::pair()?;
+    let server = serve_transport(peer, vec![unknown_record], false, request.clone());
+    let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+    assert!(matches!(
+        transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::EvidenceInvalid { agr1_digest: None }
+    ));
+    server.join().map_err(|_| "provider panicked")??;
+    Ok(())
+}
+
+#[test]
+fn provider_transport_rejects_invalid_admitted_lifecycle_and_output_bounds() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+    let records = complete_transport_records(&fixture, &request, &admission)?;
+    let digest = AdmissionGrant::from_canonical_cbor(&records[0])?.grant_digest;
+
+    for invalid_records in [
+        vec![records[0].clone(), records[3].clone()],
+        vec![records[0].clone(), records[4].clone()],
+        vec![
+            records[0].clone(),
+            records[1].clone(),
+            records[3].clone(),
+            records[2].clone(),
+        ],
+    ] {
+        let (client, peer) = UnixStream::pair()?;
+        let server = serve_transport(peer, invalid_records, false, request.clone());
+        let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+        assert!(matches!(
+            transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+            RootSelectorProviderReply::EvidenceInvalid { agr1_digest: Some(actual) } if actual == digest
+        ));
+        server.join().map_err(|_| "provider panicked")??;
+    }
+
+    let mut too_many_chunks = records[..4].to_vec();
+    for _ in 0..=128 {
+        too_many_chunks.push(records[4].clone());
+    }
+    let (client, peer) = UnixStream::pair()?;
+    let server = serve_transport(peer, too_many_chunks, false, request.clone());
+    let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+    assert!(matches!(
+        transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::EvidenceInvalid { agr1_digest: Some(actual) } if actual == digest
+    ));
+    server.join().map_err(|_| "provider panicked")??;
+    Ok(())
+}
+
+#[test]
+fn provider_transport_only_stages_completed_output() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+    let grant = admission_grant(&fixture, &request, admission.launch_policy())?;
+    let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
+    let audit = audit_chain(&fixture, &grant_record)?;
+    let receipt = provider_receipt(
+        &fixture,
+        &grant_record,
+        wrapped_digest(audit.last().ok_or("audit")?)?,
+    )?;
+    let receipt_record = SandboxProviderReceipt::from_canonical_cbor(&receipt)?;
+    let cancelled = terminal_result_for_outcome(
+        &fixture,
+        &request,
+        &grant_record,
+        &receipt_record,
+        1,
+        &[11, 1],
+    )?;
+    let cancelled_record =
+        pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+            &cancelled,
+        )?;
+
+    let lifecycle = vec![
+        grant.clone(),
+        audit[0].clone(),
+        audit[1].clone(),
+        receipt.clone(),
+        cancelled.clone(),
+    ];
+    let (client, peer) = UnixStream::pair()?;
+    let server = serve_transport(peer, lifecycle, false, request.clone());
+    let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+    assert!(matches!(
+        transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::Admitted { output: None, .. }
+    ));
+    server.join().map_err(|_| "provider panicked")??;
+
+    let invalid_lifecycle = vec![
+        grant,
+        audit[0].clone(),
+        audit[1].clone(),
+        receipt,
+        provider_chunk(&request, cancelled_record.result_digest)?,
+        cancelled,
+    ];
+    let (client, peer) = UnixStream::pair()?;
+    let server = serve_transport(peer, invalid_lifecycle, false, request.clone());
+    let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
+    assert!(matches!(
+        transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
+        RootSelectorProviderReply::EvidenceInvalid {
+            agr1_digest: Some(_)
+        }
+    ));
+    server.join().map_err(|_| "provider panicked")??;
     Ok(())
 }
 
