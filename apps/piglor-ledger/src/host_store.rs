@@ -284,7 +284,7 @@ mod tests {
                 .host
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            panic!("poison hosted ledger lock");
+            std::panic::resume_unwind(Box::new("poison hosted ledger lock"));
         }));
         assert!(poisoned.is_err());
         assert!(store
