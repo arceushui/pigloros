@@ -122,3 +122,26 @@ fn unavailable_or_invalid_inventory_keeps_public_host_closed(
     assert!(invalid.read_sender().is_err());
     Ok(())
 }
+
+#[test]
+fn verified_query_constructors_accept_public_trait_objects(
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut generic_inventory = OneInventory(Some(empty_inventory()?));
+    let generic_query: &mut dyn ErasureVerifiedInventoryQueryV1 = &mut generic_inventory;
+    let mut generic = ErasureExecutionHostV1::recover_from_verified_query(
+        Box::new(MemoryStore::new().without_erasure_gate()),
+        generic_query,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )?;
+    assert!(generic.read_sender().is_ok());
+
+    let mut gateway_inventory = OneInventory(Some(empty_inventory()?));
+    let gateway_query: &mut dyn ErasureVerifiedInventoryQueryV1 = &mut gateway_inventory;
+    let mut gateway = ErasureExecutionHostV1::recover_gateway_from_verified_query(
+        Box::new(MemoryStore::new().without_erasure_gate()),
+        gateway_query,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )?;
+    assert!(gateway.command_sender().is_ok());
+    Ok(())
+}
