@@ -1236,7 +1236,11 @@ where
     client.write_all(&attempt_stream)?;
     client.shutdown(std::net::Shutdown::Write)?;
     let mut response = Vec::new();
-    client.read_to_end(&mut response)?;
+    if let Err(error) = client.read_to_end(&mut response) {
+        if error.kind() != std::io::ErrorKind::ConnectionReset {
+            return Err(error.into());
+        }
+    }
     let server_result = server_thread
         .join()
         .map_err(|_| "root selector thread panicked")?;
