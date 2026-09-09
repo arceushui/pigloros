@@ -17,7 +17,7 @@ use pos_core::{
     PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
-use pos_core::{GeoLocationAdmissionStore, OwnTracksIngressStore};
+use pos_core::{geo_admission::GeoLocationAdmissionStore, OwnTracksIngressStore};
 use pos_runtime::ErasureExecutionHostV1;
 use std::{
     collections::HashMap,

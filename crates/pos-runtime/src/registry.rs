@@ -2693,7 +2693,8 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
-        Capability, ConsentGrantedV1, ConsentRevokedV1, CoreError, Event, Plugin, Reducer, State,
+        Capability, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentErrorV1,
+        Event, Plugin, Reducer, State,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
