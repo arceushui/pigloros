@@ -4,6 +4,8 @@ use ed25519_dalek::SigningKey;
 
 use super::*;
 
+mod bootstrap;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn bytes(value: [u8; 32]) -> Value {
