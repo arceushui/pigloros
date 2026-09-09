@@ -1,10 +1,13 @@
+use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
 
 use ed25519_dalek::{Signer, SigningKey};
 
 use super::*;
 use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
+use crate::profile::Profile;
 use crate::selector::installation::authority::InstalledSelectorAuthority;
+use crate::signed_bundle::verify_signed_bundle_reader;
 
 type CaseTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -95,26 +98,149 @@ fn rebind(mut request: EvaluationRequest) -> CaseTestResult<EvaluationRequest> {
     Ok(request)
 }
 
-fn archive_with_disallowed_mode(archive: &[u8]) -> CaseTestResult<Vec<u8>> {
+fn array_mut(value: &mut Value) -> Result<&mut Vec<Value>, ProtocolError> {
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => Err(ProtocolError::InvalidEncoding),
+    }
+}
+
+fn array_ref(value: &Value) -> Result<&[Value], ProtocolError> {
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => Err(ProtocolError::InvalidEncoding),
+    }
+}
+
+fn invalid_encoding() -> Box<dyn std::error::Error> {
+    Box::new(ProtocolError::InvalidEncoding)
+}
+
+fn resign_fixture(fixture: &mut [Value]) -> CaseTestResult {
+    if fixture.len() != 24 {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    }
+    let digest = crate::evaluator_protocol::contract_digest(
+        b"PiglorOS.Conformance.Fixture.v1",
+        &Value::Array(fixture[..23].to_vec()),
+    )?;
+    fixture[23] = bytes(digest);
+    Ok(())
+}
+
+fn valid_profile_with_split_case_mode(profile_bytes: &[u8]) -> CaseTestResult<(Vec<u8>, [u8; 32])> {
+    let mut profile = crate::evaluator_protocol::decode_canonical(profile_bytes)?;
+    let fields = array_mut(&mut profile)?;
+    if fields.len() != 18 {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    }
+    let fixtures = array_mut(&mut fields[9])?;
+    let first = fixtures.first().cloned().ok_or_else(invalid_encoding)?;
+    let mut mode_zero = match first {
+        Value::Array(values) if values.len() == 24 => values,
+        _ => return Err(Box::new(ProtocolError::InvalidEncoding)),
+    };
+    mode_zero[7] = Value::Array(vec![integer(0)]);
+    resign_fixture(&mut mode_zero)?;
+    let mut mode_one = mode_zero.clone();
+    mode_one[7] = Value::Array(vec![integer(1)]);
+    resign_fixture(&mut mode_one)?;
+    fixtures[0] = Value::Array(mode_zero);
+    fixtures.insert(1, Value::Array(mode_one));
+
+    let profile_digest = crate::evaluator_protocol::contract_digest(
+        b"PiglorOS.ConformanceProfile.v1",
+        &Value::Array(fields[..17].to_vec()),
+    )?;
+    fields[17] = bytes(profile_digest);
+    Ok((encode(&profile)?, profile_digest))
+}
+
+fn replace_archive_member(members: &mut [Value], path: &str, replacement: &[u8]) -> CaseTestResult {
+    let member = members
+        .iter_mut()
+        .find_map(|member| match member {
+            Value::Array(fields)
+                if fields.len() == 3
+                    && matches!(fields.first(), Some(Value::Text(value)) if value == path) =>
+            {
+                Some(fields)
+            }
+            _ => None,
+        })
+        .ok_or_else(invalid_encoding)?;
+    member[1] = Value::Bytes(replacement.to_vec());
+    Ok(())
+}
+
+fn replace_manifest_descriptor(
+    manifest: &mut [Value],
+    path: &str,
+    replacement: &[u8],
+) -> CaseTestResult {
+    let descriptors = manifest.get_mut(4).ok_or_else(invalid_encoding)?;
+    let descriptor = array_mut(descriptors)?
+        .iter_mut()
+        .find_map(|descriptor| match descriptor {
+            Value::Array(fields)
+                if fields.len() == 4
+                    && matches!(fields.first(), Some(Value::Text(value)) if value == path) =>
+            {
+                Some(fields)
+            }
+            _ => None,
+        })
+        .ok_or_else(invalid_encoding)?;
+    descriptor[1] = integer(u64::try_from(replacement.len())?);
+    descriptor[2] = bytes(*blake3::hash(replacement).as_bytes());
+    Ok(())
+}
+
+fn archive_with_valid_split_case_modes(archive: &[u8]) -> CaseTestResult<(Vec<u8>, [u8; 32])> {
     let mut document = crate::evaluator_protocol::decode_canonical(archive)?;
-    let Value::Array(root) = &mut document else {
+    let root = array_mut(&mut document)?;
+    if root.len() != 4 {
         return Err(Box::new(ProtocolError::InvalidEncoding));
-    };
-    let Some(Value::Array(manifest)) = root.first_mut() else {
-        return Err(Box::new(ProtocolError::InvalidEncoding));
-    };
+    }
+    let profile_member = array_ref(root.get(1).ok_or_else(invalid_encoding)?)?
+    .iter()
+    .find_map(|member| match member {
+        Value::Array(fields)
+            if fields.len() == 3
+                && matches!(fields.first(), Some(Value::Text(path)) if path == "profile/CPF1.cbor") =>
+        {
+            fields.get(1).and_then(|value| match value {
+                Value::Bytes(value) => Some(value.as_slice()),
+                _ => None,
+            })
+        }
+        _ => None,
+    })
+    .ok_or_else(invalid_encoding)?;
+    let (profile, profile_digest) = valid_profile_with_split_case_mode(profile_member)?;
+    let members = array_mut(root.get_mut(1).ok_or_else(invalid_encoding)?)?;
+    replace_archive_member(members, "profile/CPF1.cbor", &profile)?;
+
+    let manifest = array_mut(root.first_mut().ok_or_else(invalid_encoding)?)?;
     if manifest.len() != 6 {
         return Err(Box::new(ProtocolError::InvalidEncoding));
     }
     manifest[2] = integer(1);
+    manifest[3] = bytes(profile_digest);
+    replace_manifest_descriptor(manifest, "profile/CPF1.cbor", &profile)?;
+    let expected = array_mut(&mut manifest[5])?;
+    for result in expected {
+        let fields = array_mut(result)?;
+        if fields.len() != 6 {
+            return Err(Box::new(ProtocolError::InvalidEncoding));
+        }
+        fields[3] = integer(1);
+    }
     let signature = SigningKey::from_bytes(&[9; 32])
         .sign(&encode(&root[0])?)
         .to_bytes();
-    let Some(signature_value) = root.get_mut(3) else {
-        return Err(Box::new(ProtocolError::InvalidEncoding));
-    };
-    *signature_value = Value::Bytes(signature.to_vec());
-    Ok(encode(&document)?)
+    root[3] = Value::Bytes(signature.to_vec());
+    Ok((encode(&document)?, profile_digest))
 }
 
 #[test]
@@ -214,10 +340,19 @@ fn installed_authority_rejects_invalid_ordinal_mode_and_request_bindings() -> Ca
 #[test]
 fn installed_authority_rejects_signed_bundle_mode_outside_fixture_modes() -> CaseTestResult {
     let corpus = load_corpus("valid")?;
-    let archive = archive_with_disallowed_mode(&corpus.archive)?;
+    let (archive, profile_digest) = archive_with_valid_split_case_modes(&corpus.archive)?;
     let mut request = corpus_request(&corpus)?;
     request.fixture_bundle_digest = *blake3::hash(&archive).as_bytes();
+    request.profile_digest = profile_digest;
     let request = rebind(request)?;
+    let mut reader = Cursor::new(&archive);
+    let verified = verify_signed_bundle_reader(&mut reader, &corpus.trust_policy, &request)?;
+    let profile = Profile::from_bundle(&verified, &request)?;
+    let selected = profile.selected_fixtures(&request);
+    assert_eq!(verified.mode, 1);
+    assert_eq!(selected.len(), 8);
+    assert_eq!(selected[0].case_id, "case-0");
+    assert_eq!(selected[0].modes.as_slice(), &[0]);
     let (_fixture, authority) = install_case_fixture(&archive, &corpus.trust_policy, |_| Ok(()))?;
     assert_eq!(
         authority.resolve_installed_case(&request, 0),
