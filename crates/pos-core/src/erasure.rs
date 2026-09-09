@@ -3965,12 +3965,14 @@ impl<T> ErasureHostStoreV1 for T where
 /// the existing minimized geographic and `OwnTracks` adapter operations after
 /// the concrete store moves behind the runtime's host-owned composition boundary.
 pub trait ErasureGatewayHostStoreV1:
-    ErasureHostStoreV1 + crate::GeoLocationAdmissionStore + crate::OwnTracksIngressStore
+    ErasureHostStoreV1 + crate::geo_admission::GeoLocationAdmissionStore + crate::OwnTracksIngressStore
 {
 }
 
 impl<T> ErasureGatewayHostStoreV1 for T where
-    T: ErasureHostStoreV1 + crate::GeoLocationAdmissionStore + crate::OwnTracksIngressStore
+    T: ErasureHostStoreV1
+        + crate::geo_admission::GeoLocationAdmissionStore
+        + crate::OwnTracksIngressStore
 {
 }
 

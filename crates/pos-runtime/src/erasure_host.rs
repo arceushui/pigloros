@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use pos_core::{
+    geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     store::{
         AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
         PurgeOutcome, SeqRange,
@@ -10,9 +11,8 @@ use pos_core::{
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
     ErasureForkRecoveryV1, ErasureGate, ErasureGatewayHostStoreV1, ErasureHostErrorV1,
     ErasureHostStoreV1, ErasureReferenceV1, ErasureVerifiedInventoryQueryV1,
-    ErasureVerifiedInventoryV1, Event, EventDraft, EventId, GeoLocationAdmissionOutcome,
-    GeoLocationAdmissionRequestV1, OwnTracksIngressInputV1, PreparedErasureForkBatchV1,
-    PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
+    ErasureVerifiedInventoryV1, Event, EventDraft, EventId, OwnTracksIngressInputV1,
+    PreparedErasureForkBatchV1, PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
 };
 use std::num::NonZeroUsize;
 
@@ -796,9 +796,10 @@ const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
 mod tests {
     use super::*;
     use pos_core::{
-        AppendDedupKey, CanonicalBytes, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1,
-        EntityId, ErasureForkAdmissionInputV1, ErasurePersistenceInventorySnapshotV1,
-        GeoLocationAdmissionInputV1, Kind, TimelineMeta, TimelineMode, MODALITY_LOCATION,
+        geo_admission::GeoLocationAdmissionInputV1, AppendDedupKey, CanonicalBytes,
+        ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
+        ErasureForkAdmissionInputV1, ErasurePersistenceInventorySnapshotV1, Kind, TimelineMeta,
+        TimelineMode, MODALITY_LOCATION,
     };
     use pos_store::memory::MemoryStore;
 
