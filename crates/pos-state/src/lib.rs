@@ -40,7 +40,7 @@ pub struct AuthorizationCacheKeyV1 {
     consent_policy_revision: Hash,
     capability_policy_revision: Hash,
     revocation_epoch: u64,
-    inventory_generation: ErasureReferenceV1,
+    inventory_generation: [u8; 32],
 }
 
 impl AuthorizationCacheKeyV1 {
@@ -57,7 +57,7 @@ impl AuthorizationCacheKeyV1 {
             consent_policy_revision: decision.consent_policy_revision(),
             capability_policy_revision: decision.capability_policy_revision(),
             revocation_epoch,
-            inventory_generation,
+            inventory_generation: inventory_generation.digest(),
         }
     }
 
@@ -73,7 +73,7 @@ impl AuthorizationCacheKeyV1 {
 
     #[must_use]
     pub const fn inventory_generation(&self) -> ErasureReferenceV1 {
-        self.inventory_generation
+        ErasureReferenceV1::from_digest(self.inventory_generation)
     }
 }
 
