@@ -7852,6 +7852,11 @@ mod coverage_entrypoints {
         let mut missing_bound_gate = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
             .without_erasure_gate();
+        let mut store = pos_store::memory::MemoryStore::new();
+        assert!(matches!(
+            bind_registry_erasure_gate(&mut store, &missing_bound_gate),
+            Err(pos_core::CoreError::ErasureContainmentUnavailable)
+        ));
         assert!(bind_registry_to_host_gate(&mut missing_bound_gate, Arc::clone(&gate)).is_err());
 
         assert!(matches!(
