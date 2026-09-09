@@ -243,6 +243,41 @@ impl InstallationManifest {
     pub fn objects(&self) -> &[InstallationObject] {
         &self.objects
     }
+
+    /// Check the SIC1 portion of a revocation-only installation transition.
+    /// Signed APT1/RVS1/RCU1 verification remains a separate mandatory step.
+    ///
+    /// # Errors
+    /// Rejects changes to fixed installation authority or existing objects,
+    /// and additions other than the exact successor APT1 and RVS1 records.
+    pub fn validate_revocation_successor(&self, next: &Self) -> Result<(), ProtocolError> {
+        if self.root_key_id != next.root_key_id
+            || self.root_public_key != next.root_public_key
+            || self.trust_digest != next.trust_digest
+            || self.execute_socket != next.execute_socket
+            || self.control_socket != next.control_socket
+            || self.required_features != next.required_features
+            || self.revocation_digest == next.revocation_digest
+            || self.policy_digest == next.policy_digest
+        {
+            return Err(ProtocolError::InvalidEncoding);
+        }
+        for previous in &self.objects {
+            if next.object(previous.kind, previous.identity)? != previous {
+                return Err(ProtocolError::InvalidEncoding);
+            }
+        }
+        for entry in &next.objects {
+            if self.object(entry.kind, entry.identity).is_ok() {
+                continue;
+            }
+            let key = (entry.kind.code(), entry.identity);
+            if key != (1, next.revocation_digest) && key != (2, next.policy_digest) {
+                return Err(ProtocolError::InvalidEncoding);
+            }
+        }
+        Ok(())
+    }
 }
 
 fn nonzero_digest(value: &Value) -> Result<[u8; 32], ProtocolError> {

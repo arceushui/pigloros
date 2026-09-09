@@ -7,6 +7,7 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::SelectorBoundaryError;
 
 /// Authenticated installed TRS1/RVS1/APT1 and their retained installation files.
+///
 /// This is not an execution permit: provider, image, host and case admission
 /// still have to succeed before an evaluator socket is exposed.
 #[derive(Debug)]
