@@ -3136,7 +3136,7 @@ mod tests {
         let error = store
             .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
             .test_err();
-        assert!(matches!(error, CoreError::ErasureAccessFrozen));
+        assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
     }
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
