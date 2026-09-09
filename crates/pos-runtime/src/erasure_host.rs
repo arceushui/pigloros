@@ -501,7 +501,7 @@ mod tests {
     use super::*;
     use pos_core::{
         CanonicalBytes, EntityId, ErasureForkAdmissionInputV1,
-        ErasurePersistenceInventorySnapshotV1, Kind, TimelineMeta, TimelineMode,
+        ErasurePersistenceInventorySnapshotV1, EventStore, Kind, TimelineMeta, TimelineMode,
     };
     use pos_store::memory::MemoryStore;
 
