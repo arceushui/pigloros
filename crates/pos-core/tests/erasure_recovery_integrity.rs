@@ -1417,6 +1417,91 @@ fn coordinator_prepares_bound_erse1_and_child_without_committing() -> Result<(),
     Ok(())
 }
 
+fn fork_input(extension: ErasureScopeExtensionV1) -> ErasureForkAdmissionInputV1 {
+    ErasureForkAdmissionInputV1 {
+        operation: reference(180),
+        expected_inventory_generation: reference(181),
+        child_scope: extension.fork(),
+        child: TimelineMeta {
+            id: TimelineId::new(),
+            mode: TimelineMode::Historical,
+            name: Some("failure-child".to_owned()),
+            owner: None,
+            fork_point: Some((TimelineId::new(), Seq::from_u64(1))),
+        },
+    }
+}
+
+#[test]
+fn fork_preparation_rejects_missing_recovery_context() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let request = request()?;
+    let adapter = port(vec![target(10)], Some(lineage_rule));
+    let scope = scope(request.reference(), &[target(10)], lineage_rule)?;
+    let extension = extension(request.reference(), &scope, lineage_rule)?;
+    let input = fork_input(extension);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR).prepare_fork_admission(
+            request.reference(),
+            extension,
+            input.clone()
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut submitted = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
+    submitted.submit(request.clone(), request.provenance())?;
+    assert_eq!(
+        submitted.prepare_fork_admission(request.reference(), extension, input),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let graph = completed_graph(vec![target(10)], None)?;
+    let unrelated_scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let unrelated_extension = extension(graph.request.reference(), &unrelated_scope, lineage_rule)?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR).prepare_fork_admission(
+            graph.request.reference(),
+            unrelated_extension,
+            fork_input(unrelated_extension),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn fork_preparation_rejects_mismatched_or_unavailable_admission() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let committed_scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let mismatched = extension(reference(199), &committed_scope, lineage_rule)?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+            .prepare_fork_admission(
+                graph.request.reference(),
+                mismatched,
+                fork_input(mismatched),
+            ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let extension = extension(graph.request.reference(), &committed_scope, lineage_rule)?;
+    let unavailable = graph.adapter.with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::AdmitScopeExtension,
+        occurrence: 0,
+    });
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(unavailable, COORDINATOR).prepare_fork_admission(
+            graph.request.reference(),
+            extension,
+            fork_input(extension),
+        ),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    Ok(())
+}
+
 #[test]
 fn fork_preparation_rejects_unbound_child_metadata() -> Result<(), ErasureErrorV1> {
     let lineage_rule = reference(170);

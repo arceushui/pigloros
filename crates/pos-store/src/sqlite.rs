@@ -4781,10 +4781,9 @@ fn sqlite_erasure_inventory_snapshot(
     conn: &Connection,
     maximum_requests: usize,
 ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-    let request_limit = i64::try_from(maximum_requests.saturating_add(1))
-        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-    let topology_limit = i64::try_from(ERASURE_MAX_INVENTORY_TIMELINES.saturating_add(1))
-        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+    let request_limit = i64::try_from(maximum_requests.saturating_add(1)).unwrap_or(i64::MAX);
+    let topology_limit =
+        i64::try_from(ERASURE_MAX_INVENTORY_TIMELINES.saturating_add(1)).unwrap_or(i64::MAX);
     let request_heads = {
         let mut statement = conn
             .prepare(

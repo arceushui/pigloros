@@ -1289,10 +1289,16 @@ mod tests {
             ErasureReferenceV1::from_digest([38; 32]),
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let direct_batch = batch.clone();
         assert_eq!(
             host.command_sender()
                 .and_then(|mut sender| sender.commit_fork_admission(batch)),
             Err(ErasureHostErrorV1::Conflict)
+        );
+        host.state = HostStateV1::Closed;
+        assert_eq!(
+            host.apply_fork_batch(direct_batch),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
     }
 
