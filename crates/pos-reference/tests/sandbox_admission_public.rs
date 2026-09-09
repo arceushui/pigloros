@@ -1282,6 +1282,10 @@ enum SelectorProviderMode {
     MismatchedOutput,
     MissingOutput,
     MismatchedOutputDigest,
+    IncompleteBeforeAdmission,
+    IncompleteAfterAdmission,
+    EvidenceInvalidBeforeAdmission,
+    EvidenceInvalidAfterAdmission,
 }
 
 struct ScenarioSelectorProvider {
@@ -1295,13 +1299,43 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
         request: &SandboxExecuteRequest,
         _: &[u8],
         _: Duration,
-        _: &RootSelectorAdmission,
+        admission: &RootSelectorAdmission,
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
         if matches!(self.mode, SelectorProviderMode::Unavailable) {
             return Err(RootSelectorServiceError::ProviderUnavailable);
         }
         if matches!(self.mode, SelectorProviderMode::EvidenceFailure) {
             return Err(RootSelectorServiceError::ProviderEvidence);
+        }
+        if matches!(self.mode, SelectorProviderMode::IncompleteBeforeAdmission) {
+            return Ok(RootSelectorProviderReply::Incomplete { agr1_digest: None });
+        }
+        if matches!(self.mode, SelectorProviderMode::IncompleteAfterAdmission) {
+            return Ok(RootSelectorProviderReply::Incomplete {
+                agr1_digest: Some(
+                    self.signed
+                        .authenticated_grant_digest(request, admission)
+                        .map_err(|_| RootSelectorServiceError::ProviderEvidence)?,
+                ),
+            });
+        }
+        if matches!(
+            self.mode,
+            SelectorProviderMode::EvidenceInvalidBeforeAdmission
+        ) {
+            return Ok(RootSelectorProviderReply::EvidenceInvalid { agr1_digest: None });
+        }
+        if matches!(
+            self.mode,
+            SelectorProviderMode::EvidenceInvalidAfterAdmission
+        ) {
+            return Ok(RootSelectorProviderReply::EvidenceInvalid {
+                agr1_digest: Some(
+                    self.signed
+                        .authenticated_grant_digest(request, admission)
+                        .map_err(|_| RootSelectorServiceError::ProviderEvidence)?,
+                ),
+            });
         }
         if matches!(self.mode, SelectorProviderMode::InvalidBeforeAdmission) {
             return Ok(RootSelectorProviderReply::BeforeAdmission {
@@ -1359,7 +1393,11 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                 | SelectorProviderMode::BeforeAdmission
                 | SelectorProviderMode::InvalidBeforeAdmission
                 | SelectorProviderMode::InvalidError
-                | SelectorProviderMode::Error => {}
+                | SelectorProviderMode::Error
+                | SelectorProviderMode::IncompleteBeforeAdmission
+                | SelectorProviderMode::IncompleteAfterAdmission
+                | SelectorProviderMode::EvidenceInvalidBeforeAdmission
+                | SelectorProviderMode::EvidenceInvalidAfterAdmission => {}
             }
         }
         Ok(reply)
@@ -1395,6 +1433,15 @@ impl RootSelectorProvider for SignedSelectorProvider {
 }
 
 impl SignedSelectorProvider {
+    fn authenticated_grant_digest(
+        &self,
+        request: &SandboxExecuteRequest,
+        admission: &RootSelectorAdmission,
+    ) -> TestResult<[u8; 32]> {
+        let grant = admission_grant(&self.fixture, request, &self.launch)?;
+        Ok(admission.authenticate_grant(request, &grant)?.grant_digest)
+    }
+
     fn reply(&self, request: &SandboxExecuteRequest) -> TestResult<RootSelectorProviderReply> {
         let mut output_stream = Vec::new();
         write_observation(
@@ -1735,18 +1782,28 @@ fn exercise_disconnected_selector<A: RootSelectorAuthoritySource, P: RootSelecto
     request: &EvaluationRequest,
     attempt: &CaseAttempt,
 ) -> TestResult<Result<(), RootSelectorServiceError>> {
+    let (control, attempt_stream) = selector_client_request(request, attempt, 0)?;
+    exercise_disconnected_selector_wire(
+        authority,
+        provider,
+        &selector_wire(&control, &attempt_stream)?,
+    )
+}
+
+fn exercise_disconnected_selector_wire<A: RootSelectorAuthoritySource, P: RootSelectorProvider>(
+    authority: A,
+    provider: P,
+    wire: &[u8],
+) -> TestResult<Result<(), RootSelectorServiceError>> {
     let temporary = tempfile::tempdir()?;
     let socket = temporary.path().join("disconnected-selector.sock");
     let listener = UnixListener::bind(&socket)?;
     let evaluator_uid = std::fs::metadata(temporary.path())?.uid();
     let mut server =
         RootSelectorServer::new(authority, provider, evaluator_uid, Duration::from_secs(2));
-    let (control, attempt_stream) = selector_client_request(request, attempt, 0)?;
     let mut client = UnixStream::connect(&socket)?;
     client.set_write_timeout(Some(Duration::from_secs(2)))?;
-    client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
-    client.write_all(&control)?;
-    client.write_all(&attempt_stream)?;
+    client.write_all(wire)?;
     client.shutdown(std::net::Shutdown::Both)?;
     drop(client);
     // Accept only after the peer is gone: no race with the response writer.
@@ -2650,6 +2707,45 @@ fn root_selector_server_reports_provider_failure_phases_as_sle1() -> TestResult 
 }
 
 #[test]
+fn root_selector_preserves_provider_recovery_phase_and_retained_grant() -> TestResult {
+    for (mode, phase, code, retains_grant) in [
+        (
+            SelectorProviderMode::IncompleteBeforeAdmission,
+            SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCode::ProviderUnavailable,
+            false,
+        ),
+        (
+            SelectorProviderMode::IncompleteAfterAdmission,
+            SandboxLocalErrorPhase::AfterAdmission,
+            SandboxLocalErrorCode::ProviderTerminalUnavailable,
+            true,
+        ),
+        (
+            SelectorProviderMode::EvidenceInvalidBeforeAdmission,
+            SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+            false,
+        ),
+        (
+            SelectorProviderMode::EvidenceInvalidAfterAdmission,
+            SandboxLocalErrorPhase::AfterAdmission,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+            true,
+        ),
+    ] {
+        let (server_result, control, trailing) = exercise_selector_provider_mode(mode)?;
+        assert_eq!(server_result, Ok(()));
+        assert!(trailing.is_empty());
+        let local = SandboxLocalError::from_canonical_cbor(&control)?;
+        assert_eq!(local.phase, phase);
+        assert_eq!(local.code, code);
+        assert_eq!(local.agr1_digest.is_some(), retains_grant);
+    }
+    Ok(())
+}
+
+#[test]
 fn root_selector_authenticates_noncompleted_outcomes_and_rejects_their_output() -> TestResult {
     for (outcome, unexpected_output) in [(1, false), (4, false), (1, true), (4, true)] {
         let fixture = Fixture::new()?;
@@ -3164,6 +3260,52 @@ fn root_selector_distinguishes_declared_ceiling_from_descriptor_mismatch() -> Te
 }
 
 #[test]
+fn root_selector_rejects_an_actual_payload_stream_over_the_hard_limit() -> TestResult {
+    const CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let attempt = selector_case_attempt();
+    let (control, _) = selector_client_request(&request, &attempt, 0)?;
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let temporary = tempfile::tempdir()?;
+    let socket = temporary.path().join("oversized-selector.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let evaluator_uid = std::fs::metadata(temporary.path())?.uid();
+    let mut server = RootSelectorServer::new(
+        FailingSelectorAuthority(RootSelectorServiceError::AuthorityUnavailable),
+        ScenarioSelectorProvider {
+            signed: SignedSelectorProvider { fixture, launch },
+            mode: SelectorProviderMode::Valid,
+        },
+        evaluator_uid,
+        Duration::from_secs(15),
+    );
+    let server_thread = thread::spawn(move || server.serve_once(&listener));
+    let mut client = UnixStream::connect(&socket)?;
+    client.set_write_timeout(Some(Duration::from_secs(15)))?;
+    client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
+    client.write_all(&control)?;
+    for _ in 0..(128 * 1024 * 1024 / CHUNK.len()) {
+        client.write_all(&CHUNK)?;
+    }
+    client.write_all(&[0])?;
+    client.shutdown(std::net::Shutdown::Write)?;
+    let mut prefix = [0; 4];
+    client.read_exact(&mut prefix)?;
+    let mut response = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
+    client.read_exact(&mut response)?;
+    let error = SandboxLocalError::from_canonical_cbor(&response)?;
+    assert_eq!(error.phase, SandboxLocalErrorPhase::BeforeSpx1);
+    assert_eq!(error.code, SandboxLocalErrorCode::PayloadLimitExceeded);
+    assert_eq!(error.request_id, Some(request.request_id));
+    assert!(error.attempt_id.is_some());
+    server_thread
+        .join()
+        .map_err(|_| "root selector thread panicked")??;
+    Ok(())
+}
+
+#[test]
 fn root_selector_classifies_valid_but_wrong_derived_ids_as_authority_mismatch() -> TestResult {
     let fixture = Fixture::new()?;
     let request = selector_evaluation_request(&fixture)?;
@@ -3179,6 +3321,26 @@ fn root_selector_classifies_valid_but_wrong_derived_ids_as_authority_mismatch() 
             assert_eq!(error.attempt_id, Some([99; 16]));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn root_selector_propagates_derived_id_rejection_to_a_disconnected_evaluator() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let attempt = selector_case_attempt();
+    let (control, input) = selector_client_request(&request, &attempt, 0)?;
+    let control = redigest_unsigned_field(&control, "SLX1", 2, Value::Bytes(vec![99; 16]))?;
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let result = exercise_disconnected_selector_wire(
+        FailingSelectorAuthority(RootSelectorServiceError::AuthorityUnavailable),
+        ScenarioSelectorProvider {
+            signed: SignedSelectorProvider { fixture, launch },
+            mode: SelectorProviderMode::Valid,
+        },
+        &selector_wire(&control, &input)?,
+    )?;
+    assert_eq!(result, Err(RootSelectorServiceError::Io));
     Ok(())
 }
 
