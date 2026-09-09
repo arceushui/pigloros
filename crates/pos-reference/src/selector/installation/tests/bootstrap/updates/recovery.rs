@@ -75,6 +75,49 @@ fn recovery_loader_authenticates_previous_and_next_sic_floors() -> TestResult {
 }
 
 #[test]
+fn recovery_loader_rechecks_current_disk_manifest_after_object_loading() -> TestResult {
+    let (installation, _, _, _) = commit_recovery()?;
+    let loaded = installation.load()?;
+    replace_manifest(&installation, b"replaced after loading")?;
+    assert!(loaded.load_pending_recovery().is_err());
+    assert!(installation
+        .directory
+        .path()
+        .join("installation-update.cbor")
+        .exists());
+    Ok(())
+}
+
+#[test]
+fn pending_recovery_rejects_replaced_changed_and_truncated_records() -> TestResult {
+    for alteration in 0..3 {
+        let (installation, _, _, _) = commit_recovery()?;
+        let pending = installation.load()?.load_pending_recovery()?;
+        let path = installation
+            .directory
+            .path()
+            .join("installation-update.cbor");
+        let bytes = std::fs::read(&path)?;
+        if alteration == 0 {
+            replace_recovery(&installation, &bytes)?;
+        } else {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let mut changed = bytes;
+            if alteration == 1 {
+                changed[0] ^= 1;
+            } else {
+                changed.truncate(changed.len() / 2);
+            }
+            std::fs::write(&path, changed)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+        }
+        assert!(pending.verify_recovery_floor().is_err());
+        assert!(path.exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn recovery_loader_rejects_malformed_truncated_and_tampered_sir1() -> TestResult {
     for alteration in 0..3 {
         let (installation, _, _, _) = commit_recovery()?;
