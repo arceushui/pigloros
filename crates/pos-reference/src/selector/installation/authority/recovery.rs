@@ -8,7 +8,7 @@ use ciborium::value::Value;
 
 use super::update::ValidatedInstallationUpdate;
 use super::InstalledSelectorAuthority;
-use crate::evaluator_protocol::{array, decode_canonical, text, uint};
+use crate::evaluator_protocol::{array, decode_canonical_with_limit, text, uint};
 use crate::selector::installation::{open_file, InstalledSelectorObjects, MANIFEST_LIMIT};
 use crate::selector::SelectorBoundaryError;
 
@@ -99,7 +99,11 @@ impl InstalledSelectorObjects {
             .uid();
         let recovery_file = open_file(&self.root, RECOVERY_NAME, owner, 0o400, RECOVERY_LIMIT)?;
         let recovery_bytes = read_file(&recovery_file, RECOVERY_LIMIT)?;
-        let (previous_bytes, next_bytes, update_bytes) = decode_recovery(&recovery_bytes)?;
+        let RecoveryRecords {
+            previous_bytes,
+            next_bytes,
+            update_bytes,
+        } = decode_recovery(&recovery_bytes)?;
         if self.manifest_bytes != previous_bytes && self.manifest_bytes != next_bytes {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
@@ -121,8 +125,15 @@ impl InstalledSelectorObjects {
     }
 }
 
-fn decode_recovery(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), SelectorBoundaryError> {
-    let document = decode_canonical(bytes).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+struct RecoveryRecords {
+    previous_bytes: Vec<u8>,
+    next_bytes: Vec<u8>,
+    update_bytes: Vec<u8>,
+}
+
+fn decode_recovery(bytes: &[u8]) -> Result<RecoveryRecords, SelectorBoundaryError> {
+    let document = decode_canonical_with_limit(bytes, 48 * 1024 * 1024)
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     let fields = array(&document, 5).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     if text(&fields[0]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)? != "SIR1"
         || uint(&fields[1]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)? != 1
@@ -141,7 +152,39 @@ fn decode_recovery(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), Selector
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
     }
-    Ok((previous.clone(), next.clone(), update.clone()))
+    Ok(RecoveryRecords {
+        previous_bytes: previous.clone(),
+        next_bytes: next.clone(),
+        update_bytes: update.clone(),
+    })
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_envelope_has_a_separate_limit_from_embedded_records(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for length in [9 * 1024 * 1024, 16 * 1024 * 1024 + 1] {
+            let document = Value::Array(vec![
+                Value::Text("SIR1".to_owned()),
+                Value::Integer(1_u64.into()),
+                Value::Bytes(vec![1; length]),
+                Value::Bytes(vec![2; 9 * 1024 * 1024]),
+                Value::Bytes(vec![3]),
+            ]);
+            let encoded =
+                crate::evaluator_protocol::encode_with_limit(&document, 48 * 1024 * 1024)?;
+            assert!(encoded.len() > 16 * 1024 * 1024);
+            assert_eq!(
+                decode_recovery(&encoded).is_ok(),
+                length <= 16 * 1024 * 1024
+            );
+        }
+        Ok(())
+    }
 }
 
 fn read_current_manifest(root: &File, owner: u32) -> Result<Vec<u8>, SelectorBoundaryError> {

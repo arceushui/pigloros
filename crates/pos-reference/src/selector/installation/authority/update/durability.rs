@@ -15,7 +15,7 @@ use rustix::fs::{
 };
 
 use super::{InstalledSelectorAuthority, ValidatedInstallationUpdate};
-use crate::evaluator_protocol::encode;
+use crate::evaluator_protocol::encode_with_limit;
 use crate::selector::installation::{
     open_directory_chain, open_file, InstallationObjectKind, MANIFEST_LIMIT,
 };
@@ -173,13 +173,16 @@ fn recovery_bytes(update: &ValidatedInstallationUpdate) -> Result<Vec<u8>, Selec
     if records.iter().any(|record| record.len() > CONTROL_LIMIT) {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    let encoded = encode(&Value::Array(vec![
-        Value::Text("SIR1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Bytes(records[0].to_vec()),
-        Value::Bytes(records[1].to_vec()),
-        Value::Bytes(records[2].to_vec()),
-    ]))
+    let encoded = encode_with_limit(
+        &Value::Array(vec![
+            Value::Text("SIR1".to_owned()),
+            Value::Integer(1_u64.into()),
+            Value::Bytes(records[0].to_vec()),
+            Value::Bytes(records[1].to_vec()),
+            Value::Bytes(records[2].to_vec()),
+        ]),
+        RECOVERY_LIMIT,
+    )
     .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     if encoded.len() > RECOVERY_LIMIT {
         return Err(SelectorBoundaryError::ArtifactInvalid);
