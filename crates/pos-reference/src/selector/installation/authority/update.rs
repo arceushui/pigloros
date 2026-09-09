@@ -1,5 +1,7 @@
 //! Single-use administrator challenges and signed revocation-only validation.
 
+pub mod durability;
+
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
