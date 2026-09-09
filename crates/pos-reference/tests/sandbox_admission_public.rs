@@ -25,13 +25,14 @@ use pos_reference::root_selector::{
 };
 use pos_reference::sandbox_provider_protocol::{
     AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, ExecuteAuthority,
-    HostCapabilityProfile, LaunchPolicy, NetworkExchangePlan, PayloadDescriptor,
-    ProviderConformanceReport, RootSelectorAdmission, RootSelectorAdmissionInputs,
-    SandboxAdministratorPolicy, SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord,
-    SandboxExecuteRequest, SandboxGrantExpectations, SandboxLocalError, SandboxLocalErrorCode,
-    SandboxLocalErrorPhase, SandboxProviderAdmissionInputs, SandboxProviderOperation,
-    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxRevocationSnapshot,
-    SandboxTerminalOutcome, SandboxTrustSnapshot,
+    HostCapabilityProfile, LaunchPolicy, NetworkExchangePlan, PayloadDescriptor, PayloadDirection,
+    PayloadStreamValidator, ProviderConformanceReport, RootSelectorAdmission,
+    RootSelectorAdmissionInputs, SandboxAdministratorPolicy, SandboxAdmissionError,
+    SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest, SandboxGrantExpectations,
+    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxPayloadChunk,
+    SandboxProviderAdmissionInputs, SandboxProviderOperation, SandboxProviderProtocolError,
+    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTerminalOutcome,
+    SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -524,15 +525,15 @@ fn payload_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn staged_output(bytes: &[u8]) -> TestResult<StagedOutput> {
+fn staged_output(bytes: &[u8]) -> Result<StagedOutput, RootSelectorServiceError> {
     let mut reader = bytes;
-    Ok(StagedOutput::stage_verified(
+    StagedOutput::stage_verified(
         &mut reader,
         PayloadDescriptor {
             byte_length: bytes.len() as u64,
             digest: payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", bytes),
         },
-    )?)
+    )
 }
 
 struct PairConnector(Vec<UnixStream>);
@@ -545,8 +546,9 @@ impl ProviderConnector for PairConnector {
     }
 }
 
-fn provider_frame(stream: &mut UnixStream, record: &[u8]) -> TestResult {
-    stream.write_all(&u32::try_from(record.len())?.to_be_bytes())?;
+fn provider_frame(stream: &mut UnixStream, record: &[u8]) -> std::io::Result<()> {
+    let length = u32::try_from(record.len()).map_err(std::io::Error::other)?;
+    stream.write_all(&length.to_be_bytes())?;
     stream.write_all(record)?;
     Ok(())
 }
@@ -628,10 +630,12 @@ fn serve_transport(
     mut peer: UnixStream,
     records: Vec<Vec<u8>>,
     trailing: bool,
-) -> thread::JoinHandle<TestResult> {
+    expected_request: SandboxExecuteRequest,
+) -> thread::JoinHandle<std::io::Result<()>> {
     thread::spawn(move || {
         let mut input = Vec::new();
         peer.read_to_end(&mut input)?;
+        validate_provider_input(&input, &expected_request)?;
         for record in records {
             provider_frame(&mut peer, &record)?;
         }
@@ -640,6 +644,43 @@ fn serve_transport(
         }
         Ok(())
     })
+}
+
+fn read_provider_frame(input: &mut &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut length = [0; 4];
+    input.read_exact(&mut length)?;
+    let length = usize::try_from(u32::from_be_bytes(length)).map_err(std::io::Error::other)?;
+    if length > 16 * 1024 * 1024 {
+        return Err(std::io::Error::other("oversized provider test frame"));
+    }
+    let mut record = vec![0; length];
+    input.read_exact(&mut record)?;
+    Ok(record)
+}
+
+fn validate_provider_input(
+    mut input: &[u8],
+    request: &SandboxExecuteRequest,
+) -> std::io::Result<()> {
+    let request_bytes = read_provider_frame(&mut input)?;
+    assert_eq!(
+        request_bytes,
+        request.to_canonical_cbor().map_err(std::io::Error::other)?
+    );
+    let mut validator = PayloadStreamValidator::new(
+        request.request_digest,
+        request.request.request_id,
+        request.attempt_id,
+        PayloadDirection::Input,
+        request.adapter_input.clone(),
+    )
+    .map_err(std::io::Error::other)?;
+    while !input.is_empty() {
+        let chunk = SandboxPayloadChunk::from_canonical_cbor(&read_provider_frame(&mut input)?)
+            .map_err(std::io::Error::other)?;
+        validator.accept(&chunk).map_err(std::io::Error::other)?;
+    }
+    validator.finish().map_err(std::io::Error::other)
 }
 
 #[test]
@@ -667,23 +708,20 @@ fn provider_transport_accepts_complete_framed_transcript_and_stages_output() -> 
         pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
             &result,
         )?;
-    let (client, mut peer) = UnixStream::pair()?;
-    let request_for_provider = request.clone();
-    let server = thread::spawn(move || -> TestResult {
-        let mut input = Vec::new();
-        peer.read_to_end(&mut input)?;
-        for record in [
+    let (client, peer) = UnixStream::pair()?;
+    let server = serve_transport(
+        peer,
+        vec![
             grant,
             audit[0].clone(),
             audit[1].clone(),
             receipt,
-            provider_chunk(&request_for_provider, result_record.result_digest)?,
+            provider_chunk(&request, result_record.result_digest)?,
             result,
-        ] {
-            provider_frame(&mut peer, &record)?;
-        }
-        Ok(())
-    });
+        ],
+        false,
+        request.clone(),
+    );
     let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
     let reply = transport.execute(&request, b"input", Duration::from_secs(1), &admission)?;
     server.join().map_err(|_| "provider panicked")??;
@@ -707,8 +745,9 @@ fn provider_transport_replays_once_after_authenticated_grant() -> TestResult {
     let records = complete_transport_records(&fixture, &request, &admission)?;
     let (first, first_peer) = UnixStream::pair()?;
     let (second, second_peer) = UnixStream::pair()?;
-    let first_server = serve_transport(first_peer, vec![records[0].clone()], false);
-    let second_server = serve_transport(second_peer, records, false);
+    let first_server =
+        serve_transport(first_peer, vec![records[0].clone()], false, request.clone());
+    let second_server = serve_transport(second_peer, records, false, request.clone());
     let mut transport = ProviderTransport::with_connector(PairConnector(vec![second, first]));
     assert!(matches!(
         transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
@@ -732,10 +771,11 @@ fn provider_transport_retains_grant_on_changed_replay_and_rejects_trailing() -> 
     let digest = AdmissionGrant::from_canonical_cbor(&records[0])?.grant_digest;
     let (first, first_peer) = UnixStream::pair()?;
     let (second, second_peer) = UnixStream::pair()?;
-    let first_server = serve_transport(first_peer, vec![records[0].clone()], false);
+    let first_server =
+        serve_transport(first_peer, vec![records[0].clone()], false, request.clone());
     let mut changed = records[0].clone();
     changed[0] ^= 1;
-    let second_server = serve_transport(second_peer, vec![changed], false);
+    let second_server = serve_transport(second_peer, vec![changed], false, request.clone());
     let mut transport = ProviderTransport::with_connector(PairConnector(vec![second, first]));
     assert!(
         matches!(transport.execute(&request, b"input", Duration::from_secs(1), &admission)?, RootSelectorProviderReply::EvidenceInvalid { agr1_digest: Some(actual) } if actual == digest)
@@ -747,7 +787,7 @@ fn provider_transport_retains_grant_on_changed_replay_and_rejects_trailing() -> 
         .join()
         .map_err(|_| "second provider panicked")??;
     let (client, peer) = UnixStream::pair()?;
-    let trailing = serve_transport(peer, records, true);
+    let trailing = serve_transport(peer, records, true, request.clone());
     let mut transport = ProviderTransport::with_connector(PairConnector(vec![client]));
     assert!(matches!(
         transport.execute(&request, b"input", Duration::from_secs(1), &admission)?,
@@ -779,7 +819,8 @@ fn provider_transport_exhausts_one_shared_deadline_after_admission() -> TestResu
     let records = complete_transport_records(&fixture, &request, &admission)?;
     let digest = AdmissionGrant::from_canonical_cbor(&records[0])?.grant_digest;
     let (first, first_peer) = UnixStream::pair()?;
-    let first_server = serve_transport(first_peer, vec![records[0].clone()], false);
+    let first_server =
+        serve_transport(first_peer, vec![records[0].clone()], false, request.clone());
     let mut transport = ProviderTransport::with_connector(ExpiringReplayConnector(Some(first)));
     assert!(
         matches!(transport.execute(&request, b"input", Duration::from_secs(1), &admission)?, RootSelectorProviderReply::Incomplete { agr1_digest: Some(actual) } if actual == digest)
@@ -1303,10 +1344,12 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                 SelectorProviderMode::MismatchedOutputDigest => {
                     let length = output
                         .as_ref()
-                        .ok_or("output must exist")?
+                        .ok_or(RootSelectorServiceError::ProviderEvidence)?
                         .descriptor()
                         .byte_length;
-                    *output = Some(staged_output(&vec![0; length as usize])?);
+                    let length = usize::try_from(length)
+                        .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
+                    *output = Some(staged_output(&vec![0; length])?);
                 }
                 SelectorProviderMode::Valid
                 | SelectorProviderMode::Unavailable
