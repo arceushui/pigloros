@@ -89,6 +89,7 @@ fn durable_commit_persists_the_exact_sir1_restart_floor() -> TestResult {
     assert_eq!(committed.previous_manifest_bytes(), previous);
     assert_eq!(committed.next_manifest_bytes(), next);
     assert_eq!(committed.revocation_update_bytes(), rcu);
+    assert_ne!(committed.sir1_digest(), [0; 32]);
     committed.verify_recovery_floor()?;
     assert_eq!(
         std::fs::read(installation.directory.path().join(MANIFEST_NAME))?,
@@ -116,6 +117,41 @@ fn durable_commit_persists_the_exact_sir1_restart_floor() -> TestResult {
     assert_eq!(installed.manifest_bytes(), next);
     assert!(!recovery.exists());
     installed.authenticate_authority()?;
+    Ok(())
+}
+
+#[test]
+fn live_completion_rejects_an_authenticated_acknowledgement_from_another_transaction() -> TestResult
+{
+    let first = UpdateFixture::new()?;
+    let first_update = validated(&first)?;
+    let first_rcu = first_update.revocation_update_bytes().to_vec();
+    let first_snapshot = recovery_snapshot(&first.authority)?;
+    let first_committed = first
+        .authority
+        .commit_update(first_update, first_snapshot)?;
+    let first_context = first_committed.cancellation_context()?;
+    let first_acknowledgement = first_committed.authenticate_live_acknowledgement(
+        &recovery_acknowledgement(&first_context, &first_rcu)?,
+        100,
+    )?;
+
+    let second = UpdateFixture::new()?;
+    let second_update = validated(&second)?;
+    let second_snapshot = recovery_snapshot(&second.authority)?;
+    let second_recovery = second
+        .installation
+        .directory
+        .path()
+        .join("installation-update.cbor");
+    let second_committed = second
+        .authority
+        .commit_update(second_update, second_snapshot)?;
+    assert!(matches!(
+        second_committed.complete_live_update(first_acknowledgement),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    ));
+    assert!(second_recovery.exists());
     Ok(())
 }
 
