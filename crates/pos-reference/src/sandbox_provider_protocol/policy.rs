@@ -47,6 +47,63 @@ impl SandboxAdministratorPolicy {
         trust: &SandboxTrustSnapshot,
         revocation: &SandboxRevocationSnapshot,
     ) -> Result<Self, SandboxTrustError> {
+        let (policy, _) = Self::authenticate_record(bytes, trust, revocation)?;
+        if revocation.provider_revoked(&policy.selection.provider_manifest)
+            || revocation.provider_revoked(&policy.selection.provider_binary)
+        {
+            return Err(SandboxTrustError::Revoked);
+        }
+        Ok(policy)
+    }
+
+    /// Validate a signed, strictly revocation-only APT1 successor.
+    ///
+    /// Unlike execution admission, this accepts revoking the selected provider.
+    /// It returns no policy or execution authority under that revoked state.
+    ///
+    /// # Errors
+    /// Rejects forged or unbound policies, non-successor revocation epochs,
+    /// changed selection, non-increasing policy epochs, and unauthorized signer rotation.
+    pub fn validate_revocation_successor(
+        previous_bytes: &[u8],
+        next_bytes: &[u8],
+        trust: &SandboxTrustSnapshot,
+        previous_revocation: &SandboxRevocationSnapshot,
+        next_revocation: &SandboxRevocationSnapshot,
+    ) -> Result<(), SandboxTrustError> {
+        previous_revocation.validate_immediate_epoch_for_same_registry(next_revocation)?;
+        let (previous, previous_signer) =
+            Self::authenticate_record(previous_bytes, trust, previous_revocation)?;
+        let (next, next_signer) = Self::authenticate_record(next_bytes, trust, next_revocation)?;
+        if next.policy_epoch <= previous.policy_epoch
+            || next.selection != previous.selection
+            || next.accepted_launch_policies != previous.accepted_launch_policies
+            || next.accepted_images != previous.accepted_images
+        {
+            return Err(SandboxTrustError::AuthorityMismatch);
+        }
+        previous_revocation.active_key(
+            trust,
+            &next_signer,
+            SandboxTrustRole::AdministratorPolicy,
+        )?;
+        if previous_signer != next_signer
+            && next_revocation.active_key(
+                trust,
+                &previous_signer,
+                SandboxTrustRole::AdministratorPolicy,
+            ) != Err(SandboxTrustError::Revoked)
+        {
+            return Err(SandboxTrustError::AuthorityMismatch);
+        }
+        Ok(())
+    }
+
+    fn authenticate_record(
+        bytes: &[u8],
+        trust: &SandboxTrustSnapshot,
+        revocation: &SandboxRevocationSnapshot,
+    ) -> Result<(Self, String), SandboxTrustError> {
         let document = decode_document(bytes)?;
         let (fields, policy_digest, signature) = signed::<16>(&document, "APT1")?;
         let policy_epoch = uint(&fields[2])?;
@@ -82,18 +139,16 @@ impl SandboxAdministratorPolicy {
         {
             return Err(SandboxTrustError::AuthorityMismatch);
         }
-        if revocation.provider_revoked(&selection.provider_manifest)
-            || revocation.provider_revoked(&selection.provider_binary)
-        {
-            return Err(SandboxTrustError::Revoked);
-        }
-        Ok(Self {
-            policy_epoch,
-            selection,
-            accepted_launch_policies,
-            accepted_images,
-            policy_digest,
-        })
+        Ok((
+            Self {
+                policy_epoch,
+                selection,
+                accepted_launch_policies,
+                accepted_images,
+                policy_digest,
+            },
+            signer,
+        ))
     }
 
     /// Administrator policy epoch, independent of trust and revocation epochs.
