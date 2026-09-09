@@ -1335,7 +1335,7 @@ fn post_append_capture_failure_faults_the_session() {
     adapter.fail_after_first_logical_head();
     let mut session = adapter
         .gate_experiment(experiment)
-        .start_with_store(Box::new(adapter.clone()))
+        .start_with_store(Box::new(adapter))
         .test_ok();
     assert!(matches!(
         session.step_tick(),
@@ -1691,7 +1691,7 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
     );
     let mut parent = fork_adapter
         .gate_experiment(forkable)
-        .start_with_store(Box::new(fork_adapter.clone()))
+        .start_with_store(Box::new(fork_adapter))
         .test_ok();
     parent.step_tick().test_ok();
     let parent_timeline = parent.timeline().id();
