@@ -363,17 +363,13 @@ impl ErasureExecutionHostV1 {
         generation: ErasureReferenceV1,
         timeline: TimelineId,
         operation: ErasureProtectedOperationV1,
-        effect: impl FnOnce(&mut dyn ErasureHostStore) -> Result<T, CoreError>,
+        mut effect: impl FnMut(&mut dyn ErasureHostStore) -> Result<T, CoreError>,
     ) -> Result<T, ErasureHostErrorV1> {
         self.ensure_generation(generation)?;
         let gate = Arc::clone(&self.gate);
-        let mut effect = Some(effect);
         let mut result = None;
         let fence_result = {
             let mut fenced_effect = || {
-                let Some(effect) = effect.take() else {
-                    return;
-                };
                 result = Some(effect(self.store.host_store()).map_store_error());
             };
             gate.with_fence(timeline, operation, &mut fenced_effect)
