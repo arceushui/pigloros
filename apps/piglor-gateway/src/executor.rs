@@ -380,13 +380,13 @@ impl ExecutorStore {
         match self {
             Self::Host(_) => {}
             Self::Generic(store) => {
-                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())))
+                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
             }
             Self::GeoLocation(store) => {
-                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())))
+                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
             }
             Self::OwnTracks(store) => {
-                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())))
+                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
             }
         }
     }

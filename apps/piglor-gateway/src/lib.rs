@@ -6377,6 +6377,7 @@ mod coverage_entrypoints {
             .purge_expired_ingress_identities(NonZeroUsize::MIN)
             .await?;
         gateway.shutdown().await?;
+        drop(gateway);
         Ok(())
     }
 }
