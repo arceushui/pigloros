@@ -349,12 +349,31 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         decoded: &DecodedSelectorRequest,
     ) -> Result<Option<(RootSelectorCasePlan, RootSelectorAdmission)>, RootSelectorServiceError>
     {
+        let mut expected_request = decoded.evaluation.request_id;
+        expected_request[14..].copy_from_slice(&decoded.ordinal.to_be_bytes());
+        let mut expected_attempt = decoded.evaluation.request_id;
+        expected_attempt[14..].copy_from_slice(&(decoded.ordinal ^ 0x8000).to_be_bytes());
+        if decoded.encoded.provider_request_id != expected_request
+            || decoded.encoded.attempt_id != expected_attempt
+        {
+            Self::write_local_error(
+                stream,
+                decoded,
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::RequestAuthorityMismatch,
+                None,
+            )?;
+            return Ok(None);
+        }
         let plan = match self
             .authority
             .resolve_case(&decoded.evaluation, decoded.ordinal)
         {
             Ok(plan) => plan,
-            Err(RootSelectorServiceError::AuthorityUnavailable) => {
+            Err(
+                RootSelectorServiceError::AuthorityUnavailable
+                | RootSelectorServiceError::Admission,
+            ) => {
                 Self::write_local_error(
                     stream,
                     decoded,
@@ -396,15 +415,22 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             )?;
             return Ok(None);
         }
-        let Ok(admission) = plan.admission.admit(&decoded.evaluation) else {
-            Self::write_local_error(
-                stream,
-                decoded,
-                SandboxLocalErrorPhase::BeforeSpx1,
-                SandboxLocalErrorCode::PolicyUnavailable,
-                None,
-            )?;
-            return Ok(None);
+        let admission = match plan.admission.admit(&decoded.evaluation) {
+            Ok(admission) => admission,
+            Err(error) => {
+                Self::write_local_error(
+                    stream,
+                    decoded,
+                    SandboxLocalErrorPhase::BeforeSpx1,
+                    if error == RootSelectorServiceError::AuthorityMismatch {
+                        SandboxLocalErrorCode::RequestAuthorityMismatch
+                    } else {
+                        SandboxLocalErrorCode::PolicyUnavailable
+                    },
+                    None,
+                )?;
+                return Ok(None);
+            }
         };
         Ok(Some((plan, admission)))
     }
@@ -414,14 +440,21 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         context: ProviderResponseContext<'_>,
         reply: Result<RootSelectorProviderReply, RootSelectorServiceError>,
     ) -> Result<(), RootSelectorServiceError> {
-        let Ok(reply) = reply else {
-            return Self::write_local_error(
-                stream,
-                context.decoded,
-                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
-                SandboxLocalErrorCode::ProviderUnavailable,
-                None,
-            );
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(error) => {
+                return Self::write_local_error(
+                    stream,
+                    context.decoded,
+                    SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                    if error == RootSelectorServiceError::ProviderEvidence {
+                        SandboxLocalErrorCode::ProviderEvidenceInvalid
+                    } else {
+                        SandboxLocalErrorCode::ProviderUnavailable
+                    },
+                    None,
+                );
+            }
         };
         match reply {
             RootSelectorProviderReply::Admitted {
@@ -606,27 +639,30 @@ fn read_selector_request(
         .read_exact(&mut prefix)
         .map_err(|_| failure.clone())?;
     let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| failure.clone())?;
-    if length == 0 || length > CONTROL_LIMIT {
+    if length > CONTROL_LIMIT {
+        failure.code = SandboxLocalErrorCode::PayloadLimitExceeded;
         return Err(failure);
     }
-    let mut control = vec![0_u8; length];
-    stream
-        .read_exact(&mut control)
-        .map_err(|_| failure.clone())?;
-    if let Some((request, attempt)) = crate::selector_protocol::request_identities(&control) {
-        failure.operation = Some(SandboxProviderOperation::Execute);
-        failure.request_id = Some(request);
-        failure.attempt_id = Some(attempt);
+    if length == 0 {
+        return Err(failure);
     }
+    let mut control = Vec::new();
+    let received = (&mut *stream).take(length as u64).read_to_end(&mut control);
+    crate::selector_protocol::request_identities(&control, &mut failure);
+    if received.is_err() || control.len() != length {
+        return Err(failure);
+    }
+    crate::selector_protocol::request_payload_length(&control).map_err(|code| {
+        failure.code = code;
+        failure.clone()
+    })?;
     let mut attempt_stream = Vec::new();
     stream
         .take(SANDBOX_PAYLOAD_LIMIT + 1)
         .read_to_end(&mut attempt_stream)
         .map_err(|_| failure.clone())?;
     if attempt_stream.len() as u64 > SANDBOX_PAYLOAD_LIMIT {
-        if failure.attempt_id.is_some() {
-            failure.code = SandboxLocalErrorCode::PayloadLimitExceeded;
-        }
+        failure.code = SandboxLocalErrorCode::PayloadLimitExceeded;
         return Err(failure);
     }
     decode_request(&control, &attempt_stream).map_err(|_| failure)

@@ -12,8 +12,8 @@ use crate::evaluator_protocol::{
 };
 use crate::sandbox_provider_protocol::{
     AdmissionGrant, SandboxAuditRecord, SandboxExecuteRequest, SandboxLocalError,
-    SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderReceipt, SandboxProviderResult,
-    SandboxTerminalOutcome,
+    SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderOperation,
+    SandboxProviderReceipt, SandboxProviderResult, SandboxTerminalOutcome,
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
@@ -102,24 +102,62 @@ pub(crate) fn encode_request(
     })
 }
 
-/// Recover identities only from a complete canonical, self-digested SLX1.
-pub(crate) fn request_identities(control: &[u8]) -> Option<([u8; 16], [u8; 16])> {
-    let value = decode_canonical_with_limit(control, CONTROL_LIMIT).ok()?;
-    let wrapper = array(&value, 2).ok()?;
-    let fields = array(&wrapper[0], 6).ok()?;
-    if text(&fields[0]).ok()? != "SLX1" || uint(&fields[1]).ok()? != 1 {
-        return None;
+/// Retain only preferred-encoded identity fields, even if later bytes are invalid.
+pub(crate) fn request_identities(control: &[u8], failure: &mut SandboxLocalError) {
+    let Some(fields) = control.strip_prefix(b"\x82\x86\x64SLX1") else {
+        return;
+    };
+    failure.operation = Some(SandboxProviderOperation::Execute);
+    let Some(ids) = fields.strip_prefix(b"\x01\x50") else {
+        return;
+    };
+    failure.request_id = decoded_nonzero_id(ids);
+    if failure.request_id.is_some() {
+        failure.attempt_id = ids
+            .get(16..)
+            .and_then(|tail| tail.strip_prefix(b"\x50"))
+            .and_then(decoded_nonzero_id);
     }
-    let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT).ok()?;
-    if fixed_bytes::<32>(&wrapper[1]).ok()? != domain_digest(SLX1_DOMAIN, &unsigned) {
-        return None;
+}
+
+fn decoded_nonzero_id(bytes: &[u8]) -> Option<[u8; 16]> {
+    bytes
+        .get(..16)
+        .map(|bytes| {
+            let mut id = [0; 16];
+            id.copy_from_slice(bytes);
+            id
+        })
+        .filter(|id| *id != [0; 16])
+}
+
+/// Validate the complete control record before receiving its declared payload.
+pub(crate) fn request_payload_length(control: &[u8]) -> Result<u64, SandboxLocalErrorCode> {
+    let invalid = SandboxLocalErrorCode::InvalidSelectorRequest;
+    let value = decode_canonical_with_limit(control, CONTROL_LIMIT).map_err(|_| invalid)?;
+    let wrapper = array(&value, 2).map_err(|_| invalid)?;
+    let fields = array(&wrapper[0], 6).map_err(|_| invalid)?;
+    if text(&fields[0]).map_err(|_| invalid)? != "SLX1"
+        || uint(&fields[1]).map_err(|_| invalid)? != 1
+        || fixed_bytes::<16>(&fields[2]).map_err(|_| invalid)? == [0; 16]
+        || fixed_bytes::<16>(&fields[3]).map_err(|_| invalid)? == [0; 16]
+    {
+        return Err(invalid);
     }
-    let request = fixed_bytes::<16>(&fields[2]).ok()?;
-    let attempt = fixed_bytes::<16>(&fields[3]).ok()?;
-    if request == [0; 16] || attempt == [0; 16] {
-        return None;
+    let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| invalid)?;
+    if fixed_bytes::<32>(&wrapper[1]).map_err(|_| invalid)? != domain_digest(SLX1_DOMAIN, &unsigned)
+    {
+        return Err(invalid);
     }
-    Some((request, attempt))
+    EvaluationRequest::from_canonical_cbor(bytes(&fields[4]).map_err(|_| invalid)?)
+        .map_err(|_| invalid)?;
+    let descriptor = array(&fields[5], 2).map_err(|_| invalid)?;
+    let length = uint(&descriptor[0]).map_err(|_| invalid)?;
+    fixed_bytes::<32>(&descriptor[1]).map_err(|_| invalid)?;
+    if length > SANDBOX_PAYLOAD_LIMIT {
+        return Err(SandboxLocalErrorCode::PayloadLimitExceeded);
+    }
+    Ok(length)
 }
 
 pub(crate) fn decode_request(
@@ -149,11 +187,6 @@ pub(crate) fn decode_request(
             .try_into()
             .map_err(|_| AdapterError::ProtocolFailure)?,
     );
-    if provider_request_id != derived_id(evaluation.request_id, ordinal)
-        || attempt_id != derived_id(evaluation.request_id, ordinal ^ 0x8000)
-    {
-        return Err(AdapterError::ProtocolFailure);
-    }
     let descriptor = array(&fields[5], 2).map_err(|_| AdapterError::ProtocolFailure)?;
     if uint(&descriptor[0]).map_err(|_| AdapterError::ProtocolFailure)?
         != attempt_stream.len() as u64

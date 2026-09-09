@@ -957,6 +957,7 @@ impl RootSelectorAuthoritySource for FailingSelectorAuthority {
 enum SelectorProviderMode {
     Valid,
     Unavailable,
+    EvidenceFailure,
     BeforeAdmission,
     Error,
     InvalidBeforeAdmission,
@@ -980,6 +981,9 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
         if matches!(self.mode, SelectorProviderMode::Unavailable) {
             return Err(RootSelectorServiceError::ProviderUnavailable);
+        }
+        if matches!(self.mode, SelectorProviderMode::EvidenceFailure) {
+            return Err(RootSelectorServiceError::ProviderEvidence);
         }
         if matches!(self.mode, SelectorProviderMode::InvalidBeforeAdmission) {
             return Ok(RootSelectorProviderReply::BeforeAdmission {
@@ -1022,6 +1026,7 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                 }
                 SelectorProviderMode::Valid
                 | SelectorProviderMode::Unavailable
+                | SelectorProviderMode::EvidenceFailure
                 | SelectorProviderMode::BeforeAdmission
                 | SelectorProviderMode::InvalidBeforeAdmission
                 | SelectorProviderMode::InvalidError
@@ -2184,6 +2189,12 @@ fn root_selector_server_reports_provider_failure_phases_as_sle1() -> TestResult 
             false,
         ),
         (
+            SelectorProviderMode::EvidenceFailure,
+            SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+            false,
+        ),
+        (
             SelectorProviderMode::InvalidGrant,
             SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
             SandboxLocalErrorCode::ProviderEvidenceInvalid,
@@ -2244,6 +2255,10 @@ fn root_selector_server_fails_closed_for_authority_and_peer_mismatches() -> Test
             RootSelectorServiceError::AuthorityMismatch,
             SandboxLocalErrorCode::RequestAuthorityMismatch,
         ),
+        (
+            RootSelectorServiceError::Admission,
+            SandboxLocalErrorCode::PolicyUnavailable,
+        ),
     ] {
         let fixture = Fixture::new()?;
         let request = selector_evaluation_request(&fixture)?;
@@ -2290,7 +2305,7 @@ fn root_selector_server_fails_closed_for_authority_and_peer_mismatches() -> Test
     let attempt = selector_case_attempt();
     let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
     let (server_result, control, trailing) = exercise_root_selector(
-        FailingSelectorAuthority(RootSelectorServiceError::Admission),
+        FailingSelectorAuthority(RootSelectorServiceError::Io),
         ScenarioSelectorProvider {
             signed: SignedSelectorProvider { fixture, launch },
             mode: SelectorProviderMode::Valid,
@@ -2299,7 +2314,7 @@ fn root_selector_server_fails_closed_for_authority_and_peer_mismatches() -> Test
         &attempt,
         0,
     )?;
-    assert_eq!(server_result, Err(RootSelectorServiceError::Admission));
+    assert_eq!(server_result, Err(RootSelectorServiceError::Io));
     assert!(control.is_empty());
     assert!(trailing.is_empty());
     Ok(())
@@ -2392,9 +2407,284 @@ fn root_selector_reports_truncated_attempt_with_decoded_identities() -> TestResu
     Ok(())
 }
 
+/// Exercise only the public listener boundary; reaching authority is a distinct failure.
+fn selector_rejection(wire: &[u8]) -> TestResult<SandboxLocalError> {
+    let fixture = Fixture::new()?;
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let temporary = tempfile::tempdir()?;
+    let socket = temporary.path().join("rejection.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let uid = std::fs::metadata(temporary.path())?.uid();
+    let mut server = RootSelectorServer::new(
+        FailingSelectorAuthority(RootSelectorServiceError::AuthorityUnavailable),
+        SignedSelectorProvider { fixture, launch },
+        uid,
+        Duration::from_secs(2),
+    );
+    let server_thread = thread::spawn(move || server.serve_once(&listener));
+    let mut client = UnixStream::connect(&socket)?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    client.write_all(wire)?;
+    client.shutdown(std::net::Shutdown::Write)?;
+    let mut prefix = [0; 4];
+    client.read_exact(&mut prefix)?;
+    let mut response = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
+    client.read_exact(&mut response)?;
+    let mut trailing = Vec::new();
+    client.read_to_end(&mut trailing)?;
+    assert!(trailing.is_empty());
+    server_thread
+        .join()
+        .map_err(|_| "selector thread panicked")??;
+    let error = SandboxLocalError::from_canonical_cbor(&response)?;
+    assert_eq!(error.phase, SandboxLocalErrorPhase::BeforeSpx1);
+    assert_eq!(error.agr1_digest, None);
+    assert_eq!(error.safe_detail, None);
+    Ok(error)
+}
+
+fn selector_wire(control: &[u8], input: &[u8]) -> TestResult<Vec<u8>> {
+    let mut wire = u32::try_from(control.len())?.to_be_bytes().to_vec();
+    wire.extend_from_slice(control);
+    wire.extend_from_slice(input);
+    Ok(wire)
+}
+
+#[test]
+fn root_selector_retains_only_canonical_partial_identities() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let (control, _) = selector_client_request(&request, &selector_case_attempt(), 0)?;
+    let request_id = request.request_id;
+    let mut attempt_id = request_id;
+    attempt_id[14..].copy_from_slice(&0x8000_u16.to_be_bytes());
+    // Cut within the transport prefix, magic/version, both IDs, EVR1 and self-digest.
+    let wire = selector_wire(&control, &[])?;
+    for end in [
+        0,
+        1,
+        3,
+        4,
+        10,
+        11,
+        12,
+        13,
+        28,
+        29,
+        30,
+        45,
+        46,
+        wire.len() - 1,
+    ] {
+        let error = selector_rejection(&wire[..end])?;
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+        assert_eq!(
+            error.operation,
+            (end >= 11).then_some(SandboxProviderOperation::Execute)
+        );
+        assert_eq!(error.request_id, (end >= 29).then_some(request_id));
+        assert_eq!(error.attempt_id, (end >= 46).then_some(attempt_id));
+    }
+    // Preferred encoding is checked field by field; later noncanonical bytes do
+    // not erase earlier identities, and an undecodable request blocks attempt ID.
+    for (offset, replacement, expected_request, expected_attempt) in [
+        (0, vec![0x98, 2], None, None),
+        (7, vec![0x18, 1], None, None),
+        (8, vec![0x58, 16], None, None),
+        (25, vec![0x58, 16], Some(request_id), None),
+    ] {
+        let mut changed = control.clone();
+        drop(changed.splice(offset..=offset, replacement));
+        let error = selector_rejection(&selector_wire(&changed, &[])?)?;
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+        assert_eq!(
+            error.operation,
+            (offset != 0).then_some(SandboxProviderOperation::Execute)
+        );
+        assert_eq!(error.request_id, expected_request);
+        assert_eq!(error.attempt_id, expected_attempt);
+    }
+    Ok(())
+}
+
+#[test]
+fn root_selector_rejects_malformed_canonical_slx_and_invalid_digests() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let (control, _) = selector_client_request(&request, &selector_case_attempt(), 0)?;
+    let request_id = request.request_id;
+    let mut attempt_id = request_id;
+    attempt_id[14..].copy_from_slice(&0x8000_u16.to_be_bytes());
+    for (field, replacement, expected_request, expected_attempt) in [
+        (0, Value::Text("OTHER".to_owned()), None, None),
+        (1, integer(2), None, None),
+        (2, Value::Bytes(vec![0; 16]), None, None),
+        (2, Value::Bytes(vec![1; 15]), None, None),
+        (3, Value::Bytes(vec![0; 16]), Some(request_id), None),
+        (3, Value::Null, Some(request_id), None),
+        (4, Value::Null, Some(request_id), Some(attempt_id)),
+        (
+            4,
+            Value::Bytes(b"not-cbor".to_vec()),
+            Some(request_id),
+            Some(attempt_id),
+        ),
+        (
+            4,
+            Value::Bytes(corrupt_signed_digest(&request.to_canonical_cbor()?)?),
+            Some(request_id),
+            Some(attempt_id),
+        ),
+        (5, Value::Null, Some(request_id), Some(attempt_id)),
+        (
+            5,
+            Value::Array(vec![integer(1)]),
+            Some(request_id),
+            Some(attempt_id),
+        ),
+        (
+            5,
+            Value::Array(vec![Value::Integer((-1).into()), bytes([1; 32])]),
+            Some(request_id),
+            Some(attempt_id),
+        ),
+        (
+            5,
+            Value::Array(vec![integer(134_217_729), Value::Bytes(vec![1; 31])]),
+            Some(request_id),
+            Some(attempt_id),
+        ),
+    ] {
+        let changed = redigest_unsigned_field(&control, "SLX1", field, replacement)?;
+        let error = selector_rejection(&selector_wire(&changed, &[])?)?;
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+        assert_eq!(
+            error.operation,
+            (field != 0).then_some(SandboxProviderOperation::Execute)
+        );
+        assert_eq!(error.request_id, expected_request);
+        assert_eq!(error.attempt_id, expected_attempt);
+    }
+    let mut trailing_control = control.clone();
+    trailing_control.push(0);
+    let mut wrapper: Vec<Value> = ciborium::from_reader(control.as_slice())?;
+    wrapper[1] = Value::Null;
+    for changed in [
+        corrupt_signed_digest(&control)?,
+        trailing_control,
+        encode(&Value::Array(wrapper))?,
+    ] {
+        let error = selector_rejection(&selector_wire(&changed, &[])?)?;
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+        assert_eq!(error.request_id, Some(request_id));
+        assert_eq!(error.attempt_id, Some(attempt_id));
+    }
+    Ok(())
+}
+
+#[test]
+fn root_selector_rejects_malformed_attempt_bytes_with_valid_descriptors() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let (control, input) = selector_client_request(&request, &selector_case_attempt(), 0)?;
+    let mut trailing_input = input.clone();
+    trailing_input.push(0);
+    for malformed in [
+        Vec::new(),
+        vec![0; 4],
+        input[..input.len() - 1].to_vec(),
+        trailing_input,
+    ] {
+        let changed = redigest_unsigned_field(
+            &control,
+            "SLX1",
+            5,
+            Value::Array(vec![
+                integer(u64::try_from(malformed.len())?),
+                bytes(payload_digest(
+                    b"PiglorOS.SandboxInputBytes.v1\0",
+                    &malformed,
+                )),
+            ]),
+        )?;
+        let error = selector_rejection(&selector_wire(&changed, &malformed)?)?;
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+        assert_eq!(error.request_id, Some(request.request_id));
+        assert!(error.attempt_id.is_some());
+    }
+    let changed = redigest_unsigned_field(
+        &control,
+        "SLX1",
+        5,
+        Value::Array(vec![integer(u64::try_from(input.len())?), bytes([99; 32])]),
+    )?;
+    let error = selector_rejection(&selector_wire(&changed, &input)?)?;
+    assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+    Ok(())
+}
+
+#[test]
+fn root_selector_distinguishes_declared_ceiling_from_descriptor_mismatch() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let (control, input) = selector_client_request(&request, &selector_case_attempt(), 0)?;
+    for length in [134_217_729, u64::MAX] {
+        let changed = redigest_unsigned_field(
+            &control,
+            "SLX1",
+            5,
+            Value::Array(vec![integer(length), bytes([1; 32])]),
+        )?;
+        let error = selector_rejection(&selector_wire(&changed, &[])?)?;
+        assert_eq!(error.code, SandboxLocalErrorCode::PayloadLimitExceeded);
+        assert_eq!(error.operation, Some(SandboxProviderOperation::Execute));
+        assert_eq!(error.request_id, Some(request.request_id));
+        assert!(error.attempt_id.is_some());
+    }
+    let error = selector_rejection(&16_777_217_u32.to_be_bytes())?;
+    assert_eq!(error.code, SandboxLocalErrorCode::PayloadLimitExceeded);
+    assert_eq!(error.operation, None);
+    assert_eq!(error.request_id, None);
+    assert_eq!(error.attempt_id, None);
+    for length in [0, u64::try_from(input.len())? + 1, 134_217_728] {
+        let changed = redigest_unsigned_field(
+            &control,
+            "SLX1",
+            5,
+            Value::Array(vec![
+                integer(length),
+                bytes(payload_digest(b"PiglorOS.SandboxInputBytes.v1\0", &input)),
+            ]),
+        )?;
+        let error = selector_rejection(&selector_wire(&changed, &input)?)?;
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+        assert_eq!(error.request_id, Some(request.request_id));
+    }
+    Ok(())
+}
+
+#[test]
+fn root_selector_classifies_valid_but_wrong_derived_ids_as_authority_mismatch() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let (control, input) = selector_client_request(&request, &selector_case_attempt(), 0)?;
+    for field in [2, 3] {
+        let changed = redigest_unsigned_field(&control, "SLX1", field, Value::Bytes(vec![99; 16]))?;
+        let error = selector_rejection(&selector_wire(&changed, &input)?)?;
+        assert_eq!(error.code, SandboxLocalErrorCode::RequestAuthorityMismatch);
+        assert_eq!(error.operation, Some(SandboxProviderOperation::Execute));
+        if field == 2 {
+            assert_eq!(error.request_id, Some([99; 16]));
+        } else {
+            assert_eq!(error.attempt_id, Some([99; 16]));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> TestResult {
-    for drift in 0_u8..3 {
+    for drift in 0_u8..4 {
         let fixture = Fixture::new()?;
         let request = selector_evaluation_request(&fixture)?;
         let attempt = selector_case_attempt();
@@ -2402,7 +2692,7 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
         match drift {
             0 => plan.expected_attempt.watchdog_ms += 1,
             1 => plan.execute_authority.cpf1_digest = [99; 32],
-            _ => plan.network_plans.push(NetworkExchangePlan {
+            2 => plan.network_plans.push(NetworkExchangePlan {
                 exchange_id: [0; 16],
                 occurrence: 0,
                 capability_id: String::new(),
@@ -2413,6 +2703,7 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
                 retention_policy_digest: [0; 32],
                 plan_digest: [0; 32],
             }),
+            _ => plan.admission.provider_manifest = corrupt_signed_digest(&fixture.spm1)?,
         }
         let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
         let (server_result, control, trailing) = exercise_root_selector(
@@ -2429,7 +2720,14 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
         assert!(trailing.is_empty());
         let local = SandboxLocalError::from_canonical_cbor(&control)?;
         assert_eq!(local.phase, SandboxLocalErrorPhase::BeforeSpx1);
-        assert_eq!(local.code, SandboxLocalErrorCode::RequestAuthorityMismatch);
+        assert_eq!(
+            local.code,
+            if drift == 3 {
+                SandboxLocalErrorCode::PolicyUnavailable
+            } else {
+                SandboxLocalErrorCode::RequestAuthorityMismatch
+            }
+        );
     }
 
     let fixture = Fixture::new()?;
@@ -2455,7 +2753,7 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
     assert!(trailing.is_empty());
     let local = SandboxLocalError::from_canonical_cbor(&control)?;
     assert_eq!(local.phase, SandboxLocalErrorPhase::BeforeSpx1);
-    assert_eq!(local.code, SandboxLocalErrorCode::PolicyUnavailable);
+    assert_eq!(local.code, SandboxLocalErrorCode::RequestAuthorityMismatch);
     Ok(())
 }
 
