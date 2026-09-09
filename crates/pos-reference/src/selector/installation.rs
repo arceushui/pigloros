@@ -1,5 +1,7 @@
 //! Fixed SIC1 installation metadata. Decoding is not provider admission.
 
+pub mod authority;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -316,6 +318,7 @@ fn decode_objects(value: &Value) -> Result<Vec<InstallationObject>, ProtocolErro
 /// The only production constructor reads the fixed root-owned installation.
 #[derive(Debug)]
 pub struct InstalledSelectorObjects {
+    root: File,
     manifest_file: File,
     manifest_bytes: Vec<u8>,
     manifest: InstallationManifest,
@@ -383,6 +386,7 @@ impl InstalledSelectorObjects {
             );
         }
         Ok(Self {
+            root: root.try_clone().map_err(|_| SelectorBoundaryError::Io)?,
             manifest_file,
             manifest_bytes,
             manifest,
