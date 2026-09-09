@@ -173,10 +173,7 @@ fn host_error(error: ErasureHostErrorV1) -> CoreError {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use pos_core::{
-        CanonicalBytes, EntityId, ErasureErrorV1, ErasureVerifiedInventoryQueryV1,
-        ErasureVerifiedInventoryV1, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, Kind,
-    };
+    use pos_core::{CanonicalBytes, EntityId, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, Kind};
     use pos_crypto::key_roles::key_material_digest;
 
     fn signing_registry(
@@ -297,17 +294,6 @@ mod tests {
         Ok(())
     }
 
-    struct FailingInventory;
-
-    impl ErasureVerifiedInventoryQueryV1 for FailingInventory {
-        fn verified_inventory(
-            &mut self,
-            _maximum_requests: usize,
-        ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
-            Err(ErasureErrorV1::ProvenanceMissing)
-        }
-    }
-
     #[test]
     fn poisoned_host_denies_every_ledger_adapter_operation(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -327,16 +313,15 @@ mod tests {
             .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request),)
             .is_err());
 
-        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
-            pos_store::StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
-        )?;
-        assert!(host
-            .install_inventory(
-                &mut FailingInventory,
-                pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
-            )
-            .is_err());
+        let store = HostedLedgerStore::open(pos_store::StoreConfig::Memory)?;
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store
+                .host
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison hosted ledger lock"));
+        }));
+        assert!(poisoned.is_err());
         let timeline = TimelineId::new();
         let draft = EventDraft::new(
             EntityId::new(),
@@ -346,7 +331,7 @@ mod tests {
         let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
             Err(CoreError::Storage("callback must not run".to_owned()))
         };
-        let mut store = HostedLedgerStore::from_host(host);
+        let mut store = store;
         assert!(store.save_key_registry(&registry).is_err());
         assert!(store.begin_key_registry_destruction(request).is_err());
         assert!(store

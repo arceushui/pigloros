@@ -638,27 +638,13 @@ impl ErasureExecutionHostV1 {
         Self::recover_verified_empty(store, maximum_requests)
     }
 
-    /// Open and recover an exclusively owned store from one independently
-    /// verified complete inventory.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
-        config: StoreConfig,
-        query: &mut Q,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_from_verified_query(store, query, maximum_requests)
-    }
-
     /// Open and recover an exclusively owned store with one replaceable
     /// coordinator authority Plugin.
     ///
-    /// Unlike [`Self::open_from_verified_query`], this constructor creates the
-    /// core coordinator over the exact adapter retained by this host. It can
-    /// therefore recover a non-empty durable request set without accepting an
-    /// inventory assembled by a different composition root.
+    /// Unlike the verified-empty bootstrap, this constructor creates the core
+    /// coordinator over the exact adapter retained by this host. It can recover
+    /// a non-empty durable request set without accepting an inventory assembled
+    /// by a different composition root.
     ///
     /// # Errors
     /// Returns a closed adapter, authority, topology, or recovery error before
@@ -713,21 +699,6 @@ impl ErasureExecutionHostV1 {
         Self::recover_verified_empty_gateway(store, maximum_requests)
     }
 
-    /// Open and recover a Gateway-capable exclusively owned store from one
-    /// independently verified complete inventory.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
-        config: StoreConfig,
-        query: &mut Q,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        let store =
-            open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_gateway_from_verified_query(store, query, maximum_requests)
-    }
-
     /// Open and recover a Gateway-capable store with one replaceable
     /// coordinator authority Plugin composed over the same owned adapter.
     ///
@@ -779,7 +750,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed recovery error and leaves the host closed when the
     /// query fails or the candidate inventory cannot be published.
-    pub fn install_inventory<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+    fn install_inventory<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
         &mut self,
         query: &mut Q,
         maximum_requests: usize,
@@ -1082,7 +1053,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// A non-empty request set, failed adapter snapshot, or rejected gate
     /// binding fails closed. Production recovery for a non-empty set enters
-    /// through [`Self::open_from_verified_query`].
+    /// through [`Self::open_with_coordinator_authority`].
     fn recover_verified_empty(
         mut store: Box<dyn ErasureHostStore>,
         maximum_requests: usize,
@@ -1142,7 +1113,7 @@ impl ErasureExecutionHostV1 {
     ///
     /// # Errors
     /// Returns a closed recovery or adapter error under the same current-store
-    /// generation checks as [`Self::open_from_verified_query`].
+    /// generation checks as [`Self::open_with_coordinator_authority`].
     fn recover_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
         store: Box<dyn ErasureGatewayHostStore>,
         query: &mut Q,
