@@ -89,20 +89,16 @@ fn launch_policy() -> LaunchPolicyV1 {
         policy_id: "local-strict".to_owned(),
         execution_mode: ExecutionModeV1::Local,
         sim1_digest: digest(12),
-        effective_limits: vec![
-            SandboxLimitV1 {
-                limit_id: 0,
-                value: 1,
-            },
-            SandboxLimitV1 {
-                limit_id: 1,
-                value: 4096,
-            },
-            SandboxLimitV1 {
-                limit_id: 16,
-                value: 30_000,
-            },
-        ],
+        effective_limits: (0..=16)
+            .map(|limit_id| SandboxLimitV1 {
+                limit_id,
+                value: match limit_id {
+                    0 => 1,
+                    16 => 30_000,
+                    _ => 4096,
+                },
+            })
+            .collect(),
         network_capabilities: vec![NetworkCapabilityV1 {
             capability_id: "tcp-loopback".to_owned(),
             address: vec![127, 0, 0, 1],
