@@ -23,6 +23,7 @@ const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 const CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_AUDIT_RECORDS: usize = 256;
 const ROOT_UID: u32 = 0;
+const MAX_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
 
 /// A verified, root-owned staged EAO1 stream. Its bytes are never materialized
 /// as one receiver-owned allocation.
@@ -45,6 +46,9 @@ impl StagedOutput {
 
     /// Copy the staged output only after the caller has authenticated all
     /// provider lifecycle evidence.
+    ///
+    /// # Errors
+    /// Returns a closed I/O failure when staging or destination I/O fails.
     pub fn copy_to(&mut self, writer: &mut impl Write) -> Result<(), RootSelectorServiceError> {
         let file = self.file.as_file_mut();
         file.seek(SeekFrom::Start(0))
@@ -63,19 +67,46 @@ impl StagedOutput {
         }
     }
 
-    /// Construct bounded test evidence without changing the production
-    /// receiver's incremental staging rule.
-    pub fn from_bytes_for_test(bytes: &[u8]) -> Result<Self, RootSelectorServiceError> {
+    /// Incrementally stage bytes that exactly match a bounded descriptor.
+    ///
+    /// # Errors
+    /// Rejects oversized, short, trailing, or digest-mismatched input.
+    pub fn stage_verified(
+        reader: &mut impl Read,
+        descriptor: PayloadDescriptor,
+    ) -> Result<Self, RootSelectorServiceError> {
+        if descriptor.byte_length > MAX_PAYLOAD_BYTES {
+            return Err(RootSelectorServiceError::ProviderEvidence);
+        }
         let mut file = tempfile::NamedTempFile::new().map_err(|_| RootSelectorServiceError::Io)?;
-        file.write_all(bytes)
-            .map_err(|_| RootSelectorServiceError::Io)?;
-        Ok(Self::new(
-            file,
-            PayloadDescriptor {
-                byte_length: bytes.len() as u64,
-                digest: output_digest(bytes),
-            },
-        ))
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.SandboxOutputBytes.v1\0");
+        let mut remaining = descriptor.byte_length;
+        let mut buffer = [0_u8; 8192];
+        while remaining != 0 {
+            let maximum = usize::try_from(remaining.min(buffer.len() as u64))
+                .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
+            let read = reader
+                .read(&mut buffer[..maximum])
+                .map_err(|_| RootSelectorServiceError::Io)?;
+            if read == 0 {
+                return Err(RootSelectorServiceError::ProviderEvidence);
+            }
+            hasher.update(&buffer[..read]);
+            file.write_all(&buffer[..read])
+                .map_err(|_| RootSelectorServiceError::Io)?;
+            remaining -= read as u64;
+        }
+        let mut trailing = [0_u8; 1];
+        if reader
+            .read(&mut trailing)
+            .map_err(|_| RootSelectorServiceError::Io)?
+            != 0
+            || *hasher.finalize().as_bytes() != descriptor.digest
+        {
+            return Err(RootSelectorServiceError::ProviderEvidence);
+        }
+        Ok(Self::new(file, descriptor))
     }
 }
 
@@ -83,6 +114,9 @@ impl StagedOutput {
 /// Production obtains it only from a validated root-owned endpoint.
 pub trait ProviderConnector {
     /// Connect one fresh execute stream.
+    ///
+    /// # Errors
+    /// Returns a closed failure when the provider cannot be connected.
     fn connect(&mut self) -> Result<UnixStream, RootSelectorServiceError>;
 }
 
@@ -96,6 +130,9 @@ pub struct SelectedProviderEndpoint {
 
 impl SelectedProviderEndpoint {
     /// Validate a root-owned provider endpoint selected by installation state.
+    ///
+    /// # Errors
+    /// Rejects an insecure, non-root-owned, non-socket, or unstable endpoint.
     pub fn validate(path: &Path) -> Result<Self, RootSelectorServiceError> {
         if !path.is_absolute() || !root_owned_ancestors(path) {
             return Err(RootSelectorServiceError::ProviderUnavailable);
@@ -104,7 +141,7 @@ impl SelectedProviderEndpoint {
             .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
         if !metadata.file_type().is_socket()
             || metadata.uid() != ROOT_UID
-            || metadata.mode() & 0o177 != 0
+            || metadata.mode() & 0o7777 != 0o600
         {
             return Err(RootSelectorServiceError::ProviderUnavailable);
         }
@@ -576,7 +613,7 @@ fn endpoint_metadata(
         .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
     if !metadata.file_type().is_socket()
         || metadata.uid() != ROOT_UID
-        || metadata.mode() & 0o177 != 0
+        || metadata.mode() & 0o7777 != 0o600
         || metadata.dev() != device
         || metadata.ino() != inode
     {
@@ -598,6 +635,7 @@ fn root_owned_ancestors(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn completed(descriptor: PayloadDescriptor) -> SandboxProviderResult {
         SandboxProviderResult {
@@ -696,5 +734,19 @@ mod tests {
             &Deadline::new(Duration::from_secs(1)).expect("deadline")
         )
         .is_err());
+    }
+
+    #[test]
+    fn endpoint_mode_is_exactly_root_private_socket_mode() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join("provider.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).expect("socket");
+        let metadata = std::fs::metadata(&path).expect("metadata");
+        for mode in [0o400, 0o200, 0o000, 0o1600, 0o2600, 0o4600] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
+            assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_err());
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_ok());
     }
 }
