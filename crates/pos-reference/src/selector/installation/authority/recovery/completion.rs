@@ -108,8 +108,9 @@ impl PendingInstallationRecovery {
         acknowledgement: &AuthenticatedRevocationAcknowledgement,
         proof: &RecoveryPeerTerminationProof,
     ) -> Result<(), SelectorBoundaryError> {
+        let previous_proof_matches = proof.previous_proof_identity == previous.proof_identity;
         if proof.sir1_digest != self.sir1_digest
-            || proof.previous_proof_identity != previous.proof_identity
+            || !previous_proof_matches
             || proof.recovery_slot_ids != self.snapshot.recovery_slot_ids()
             || proof.recovery_peer_pid == 0
             || proof.acknowledgement_digest != acknowledgement.acknowledgement_digest()

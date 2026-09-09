@@ -577,7 +577,12 @@ fn decode_attempts(value: &Value) -> Result<Vec<[u8; 16]>, SandboxProviderProtoc
 }
 
 fn attempt_values(attempts: &[[u8; 16]]) -> Value {
-    Value::Array(attempts.iter().map(bytes_value).collect())
+    Value::Array(
+        attempts
+            .iter()
+            .map(|attempt| bytes_value(attempt))
+            .collect(),
+    )
 }
 
 fn wire_digest(bytes: &[u8]) -> [u8; 32] {

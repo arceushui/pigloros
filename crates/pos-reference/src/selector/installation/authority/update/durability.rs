@@ -18,11 +18,12 @@ use rustix::fs::{
 use super::{InstalledSelectorAuthority, ValidatedInstallationUpdate};
 use crate::evaluator_protocol::encode_with_limit;
 use crate::sandbox_provider_protocol::{
-    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext,
+    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, SelectorRevocationState,
 };
 use crate::selector::installation::authority::recovery::InstallationRecoverySnapshot;
 use crate::selector::installation::{
-    open_directory_chain, open_file, InstallationObjectKind, MANIFEST_LIMIT,
+    open_directory_chain, open_file, InstallationObjectKind, InstalledSelectorObjects,
+    MANIFEST_LIMIT,
 };
 use crate::selector::{digest_name, SelectorBoundaryError};
 
@@ -95,6 +96,34 @@ impl CommittedInstallationUpdate {
             self.snapshot.required_cancelled_attempt_ids().to_vec(),
         )
         .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    }
+
+    pub(crate) fn authenticate_live_acknowledgement(
+        &self,
+        acknowledgement_bytes: &[u8],
+        elapsed_ms: u64,
+    ) -> Result<AuthenticatedRevocationAcknowledgement, SelectorBoundaryError> {
+        if elapsed_ms > 100 {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        let context = self.cancellation_context()?;
+        let mut state = SelectorRevocationState::new(
+            self.authority.revocation().clone(),
+            self.authority.trust(),
+            self.snapshot.runtime_key_id(),
+        )
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        state
+            .begin_update(
+                self.update.revocation_update_bytes(),
+                self.authority.trust(),
+                context,
+                0,
+            )
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        state
+            .acknowledge(acknowledgement_bytes, elapsed_ms)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
     }
 
     /// Recheck the retained SIR1 descriptor and the on-disk SIC1 recovery floor.

@@ -92,6 +92,58 @@ fn recovery_loader_authenticates_previous_and_next_sic_floors() -> TestResult {
 }
 
 #[test]
+fn restart_recovery_requires_both_termination_proofs_before_durable_completion() -> TestResult {
+    let RecoveryFixture {
+        installation,
+        next,
+        rcu,
+        ..
+    } = commit_recovery()?;
+    let pending = installation.load()?.load_pending_recovery()?;
+    let context = pending.cancellation_context()?;
+    let acknowledgement_bytes = recovery_acknowledgement(&context, &rcu)?;
+    let acknowledgement =
+        pending.authenticate_recovery_acknowledgement(&acknowledgement_bytes, 100)?;
+    let authority = ProviderTerminationAuthority { _private: () };
+    let previous = authority.prove_previous_termination(&pending)?;
+    let peer = authority.prove_recovery_peer_termination(
+        &pending,
+        &previous,
+        &acknowledgement,
+        101,
+        202,
+    )?;
+    let installed = pending.complete_recovery(previous, acknowledgement, peer)?;
+    assert_eq!(installed.manifest_bytes(), next);
+    assert!(!installation
+        .directory
+        .path()
+        .join("installation-update.cbor")
+        .exists());
+    installed.authenticate_authority()?;
+    Ok(())
+}
+
+#[test]
+fn restart_recovery_rejects_late_acknowledgement_without_clearing_sir1() -> TestResult {
+    let RecoveryFixture {
+        installation, rcu, ..
+    } = commit_recovery()?;
+    let pending = installation.load()?.load_pending_recovery()?;
+    let acknowledgement = recovery_acknowledgement(&pending.cancellation_context()?, &rcu)?;
+    assert!(pending
+        .authenticate_recovery_acknowledgement(&acknowledgement, 101)
+        .is_err());
+    assert!(installation
+        .directory
+        .path()
+        .join("installation-update.cbor")
+        .exists());
+    pending.verify_recovery_floor()?;
+    Ok(())
+}
+
+#[test]
 fn recovery_loader_rechecks_current_disk_manifest_after_object_loading() -> TestResult {
     let RecoveryFixture { installation, .. } = commit_recovery()?;
     let loaded = installation.load()?;
@@ -181,6 +233,10 @@ fn recovery_loader_rejects_wrong_envelope_tags_versions_and_member_types() -> Te
         (2, Value::Null),
         (3, Value::Null),
         (4, Value::Null),
+        (5, Value::Null),
+        (6, Value::Null),
+        (7, Value::Null),
+        (8, Value::Null),
     ] {
         let RecoveryFixture { installation, .. } = commit_recovery()?;
         let path = installation
@@ -201,6 +257,18 @@ fn recovery_loader_rejects_wrong_envelope_tags_versions_and_member_types() -> Te
         assert!(installation.load()?.load_pending_recovery().is_err());
         assert!(path.exists());
     }
+    let RecoveryFixture { installation, .. } = commit_recovery()?;
+    replace_recovery(
+        &installation,
+        &encode(&Value::Array(vec![
+            Value::Text("SIR1".to_owned()),
+            integer(1),
+            Value::Bytes(vec![1]),
+            Value::Bytes(vec![2]),
+            Value::Bytes(vec![3]),
+        ]))?,
+    )?;
+    assert!(installation.load()?.load_pending_recovery().is_err());
     Ok(())
 }
 
