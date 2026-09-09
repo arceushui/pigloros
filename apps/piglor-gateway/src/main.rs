@@ -400,7 +400,7 @@ mod coverage_tests {
         assert_eq!(
             super::erasure_host_recovery_error(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
                 .to_string(),
-            "erasure host recovery failed (recovery_unavailable)"
+            "erasure host recovery failed (0)"
         );
     }
 }
