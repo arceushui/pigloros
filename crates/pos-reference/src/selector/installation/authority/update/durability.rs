@@ -26,7 +26,7 @@ const STAGING_NAME: &str = ".installation-update-staging";
 const RECOVERY_LIMIT: usize = 48 * 1024 * 1024;
 const RECOVERY_LIMIT_U64: u64 = 48 * 1024 * 1024;
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
-const PRIVATE_DIRECTORY_MODE: Mode = Mode::RUSR | Mode::WUSR | Mode::XUSR;
+const PRIVATE_DIRECTORY_MODE: Mode = Mode::RWXU;
 const RECOVERY_MODE: Mode = Mode::RUSR;
 
 /// A sealed SIR1 commit that keeps both installation generations alive.
