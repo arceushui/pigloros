@@ -3,7 +3,7 @@
 #![warn(clippy::pedantic)]
 //! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
 //!
-//! JSON HTTP envelope; CBOR payloads into [`EventStore`]. Host-bound Principal
+//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. Host-bound Principal
 //! authorization is opt-in through [`GatewayAuthorization`].
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
@@ -23,24 +23,22 @@ pub use authorization::{
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
-#[cfg(test)]
-use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
-    geo_admission::{
-        GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
-    },
+    geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EntityId, EventId, PluginId, TimelineId},
     store::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
-        EventReadBounds, EventStore, PurgeOutcome, SeqRange,
+        EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
     ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, Plugin,
     ProposedAction,
 };
+#[cfg(test)]
+use pos_core::{store::EventStore, ErasureContainmentGateV1, GeoLocationAdmissionStore};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
 use pos_runtime::{ErasureExecutionHostV1, PluginRegistry};
@@ -543,9 +541,9 @@ fn new_pending_consent_cleanup() -> Arc<tokio::sync::Mutex<Vec<AppendDedupScope>
 /// Shared Gateway handle (bounded `StoreExecutor` + live Event bus).
 ///
 /// The supported local-first write boundary permits Gateway and experiment-host
-/// processes to open one `SQLite` file through [`EventStore`]. Adapter-owned immediate
+/// processes to open one `SQLite` file through [`pos_core::store::EventStore`]. Adapter-owned immediate
 /// transactions serialize appends and enforce each owned-Event ceiling atomically.
-/// Direct SQL mutation that bypasses [`EventStore`] remains outside this contract.
+/// Direct SQL mutation that bypasses [`pos_core::store::EventStore`] remains outside this contract.
 #[derive(Clone)]
 pub struct Gateway {
     store: executor::StoreExecutor,
@@ -1134,7 +1132,7 @@ impl Gateway {
     ///
     /// Binding happens before the bounded `StoreExecutor` starts, so every
     /// Gateway append/read/export command observes the same gate as direct
-    /// `EventStore` consumers.
+    /// [`pos_core::store::EventStore`] consumers.
     ///
     /// # Errors
     /// Returns a store error when the supplied gate cannot be bound before the
@@ -1170,10 +1168,10 @@ impl Gateway {
     }
 
     /// Construct a Gateway whose executor exclusively owns the recovered
-    /// erasure host and its `EventStore` adapter.
+    /// erasure host and its [`pos_core::store::EventStore`] adapter.
     ///
     /// The Gateway receives only the host's read-only containment view for
-    /// Plugin/action checks. All `EventStore` effects remain in the host-owned
+    /// Plugin/action checks. All [`pos_core::store::EventStore`] effects remain in the host-owned
     /// single-consumer command stream.
     ///
     /// # Errors
@@ -1208,7 +1206,7 @@ impl Gateway {
 
     /// Construct an action-capable Gateway over one recovered erasure host.
     ///
-    /// The host remains the exclusive owner of the `EventStore`; the action
+    /// The host remains the exclusive owner of the [`pos_core::store::EventStore`]; the action
     /// registry receives only the same read-only containment gate used by the
     /// host command stream. Provider authentication and ADR-059 authorization
     /// therefore cannot enable a proposed action outside ADR-060 containment.
