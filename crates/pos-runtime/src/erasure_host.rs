@@ -181,7 +181,7 @@ impl ErasureExecutionHostV1 {
         Self::recover_verified_empty(store, maximum_requests)
     }
 
-    /// Open an existing SQLite store read-only and recover it only when its
+    /// Open an existing `SQLite` store read-only and recover it only when its
     /// complete durable erasure inventory is verified empty.
     ///
     /// # Errors
@@ -369,16 +369,16 @@ impl ErasureExecutionHostV1 {
         let gate = Arc::clone(&self.gate);
         let mut effect = Some(effect);
         let mut result = None;
-        let mut fenced_effect = || {
-            let Some(effect) = effect.take() else {
-                return;
+        let fence_result = {
+            let mut fenced_effect = || {
+                let Some(effect) = effect.take() else {
+                    return;
+                };
+                result = Some(effect(self.store.host_store()).map_store_error());
             };
-            result = Some(effect(self.store.host_store()).map_store_error());
+            gate.with_fence(timeline, operation, &mut fenced_effect)
+                .map_err(ErasureHostErrorV1::from)
         };
-        let fence_result = gate
-            .with_fence(timeline, operation, &mut fenced_effect)
-            .map_err(ErasureHostErrorV1::from);
-        drop(fenced_effect);
         fence_result?;
         self.ensure_generation(generation)?;
         result.unwrap_or(Err(ErasureHostErrorV1::RecoveryUnavailable))
