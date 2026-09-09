@@ -693,6 +693,78 @@ mod tests {
         output_digest_with(b"PiglorOS.SandboxOutputBytes.v1\0", bytes)
     }
 
+    #[test]
+    fn verified_staging_rejects_invalid_payload_boundaries() {
+        let bytes = b"complete";
+        for (length, digest, mut input) in [
+            (
+                MAX_PAYLOAD_BYTES + 1,
+                output_digest(bytes),
+                bytes.as_slice(),
+            ),
+            (9, output_digest(bytes), bytes.as_slice()),
+            (7, output_digest(bytes), bytes.as_slice()),
+            (8, output_digest(b"different"), bytes.as_slice()),
+        ] {
+            let descriptor = PayloadDescriptor {
+                byte_length: length,
+                digest,
+            };
+            assert!(StagedOutput::stage_verified(&mut input, descriptor).is_err());
+        }
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected read failure"))
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn verified_staging_propagates_payload_and_eof_read_failures() {
+        for byte_length in [0, 1] {
+            let descriptor = PayloadDescriptor {
+                byte_length,
+                digest: output_digest(b""),
+            };
+            assert!(StagedOutput::stage_verified(&mut FailingReader, descriptor).is_err());
+        }
+    }
+
+    #[test]
+    fn verified_staging_rewinds_after_copy_and_destination_failure() -> TestResult {
+        for bytes in [Vec::new(), vec![7; 8193]] {
+            let descriptor = PayloadDescriptor {
+                byte_length: bytes.len() as u64,
+                digest: output_digest(&bytes),
+            };
+            let mut staged = StagedOutput::stage_verified(&mut bytes.as_slice(), descriptor)?;
+            if !bytes.is_empty() {
+                assert!(staged.copy_to(&mut FailingWriter).is_err());
+            }
+            for _ in 0..2 {
+                let mut copied = Vec::new();
+                staged.copy_to(&mut copied)?;
+                assert_eq!(copied, bytes);
+            }
+        }
+        Ok(())
+    }
+
     fn completed(descriptor: PayloadDescriptor) -> SandboxProviderResult {
         SandboxProviderResult {
             request_id: [2; 16],
