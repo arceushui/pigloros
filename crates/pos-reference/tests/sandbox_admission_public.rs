@@ -505,7 +505,11 @@ fn launch_policy(sim1_digest: [u8; 32]) -> TestResult<Vec<u8>> {
             Value::Text("air-gapped".to_owned()),
             integer(1),
             bytes(sim1_digest),
-            Value::Array(vec![Value::Array(vec![integer(0), integer(1)])]),
+            Value::Array(
+                (0..=16)
+                    .map(|limit_id| Value::Array(vec![integer(limit_id), integer(1)]))
+                    .collect(),
+            ),
             Value::Array(vec![]),
         ]),
     )

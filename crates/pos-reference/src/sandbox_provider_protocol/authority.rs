@@ -304,8 +304,7 @@ impl LaunchPolicy {
     fn validate(&self, unsigned: &[Value; 7]) -> Result<(), SandboxProviderProtocolError> {
         if !valid_identifier(&self.policy_id)
             || self.sim1_digest == [0; 32]
-            || self.effective_limits.is_empty()
-            || self.effective_limits.len() > 17
+            || self.effective_limits.len() != 17
             || self.network_capabilities.len() > MAX_LIST_ENTRIES
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);

@@ -628,6 +628,22 @@ fn decoders_reject_wrong_directional_digest_for_empty_payloads() -> TestResult {
 }
 
 #[test]
+fn launch_policy_rejects_each_missing_limit_after_digest_refresh() -> TestResult {
+    for removed in 0..17 {
+        let mut policy = decode_value(Record::Lps1.bytes())?;
+        let limits = value_at_mut(&mut policy, &[0, 5]).ok_or("LPS1 limits must exist")?;
+        let Value::Array(limits) = limits else {
+            return Err("LPS1 limits must be an array".into());
+        };
+        assert_eq!(limits.len(), 17);
+        limits.remove(removed);
+        refresh_record_digest(&mut policy, "LPS1")?;
+        assert_rejected(Record::Lps1, &policy, &format!("missing limit {removed}"))?;
+    }
+    Ok(())
+}
+
+#[test]
 fn signed_error_decoders_reject_nul_detail_and_orphaned_digest() -> TestResult {
     for (path, replacement, name) in [
         (
