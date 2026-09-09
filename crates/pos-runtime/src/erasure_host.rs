@@ -232,11 +232,11 @@ impl ErasureExecutionHostV1 {
             .commit_fork_admission(admission)
             .map_err(map_erasure_error)?;
         match (current_generation == expected_generation, outcome) {
-            (true, ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry) => self
+            (true, ErasureCasOutcomeV1::Applied) => self
                 .publish_inventory(successor, maximum_requests)
                 .map(|generation| (child, generation)),
             (false, ErasureCasOutcomeV1::ExactRetry) => Ok((child, current_generation)),
-            (false, ErasureCasOutcomeV1::Applied) => {
+            (true, ErasureCasOutcomeV1::ExactRetry) | (false, ErasureCasOutcomeV1::Applied) => {
                 self.state = HostStateV1::Poisoned;
                 self.inventory = None;
                 Err(ErasureHostErrorV1::RecoveryUnavailable)
@@ -511,6 +511,7 @@ mod tests {
         InventorySnapshot,
         NonemptyRequestInventory,
         NonemptyInventory,
+        MisreportInitialExactRetry,
         MisreportExactRetry,
         Recovery,
         EventStore,
@@ -621,6 +622,9 @@ mod tests {
             &mut self,
             admission: PreparedErasureForkBatchV1,
         ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+            if self.fault == FaultModeV1::MisreportInitialExactRetry {
+                return Ok(ErasureCasOutcomeV1::ExactRetry);
+            }
             let outcome = self.inner.commit_fork_admission(admission)?;
             if self.fault == FaultModeV1::MisreportExactRetry
                 && outcome == ErasureCasOutcomeV1::ExactRetry
@@ -939,6 +943,26 @@ mod tests {
         assert_eq!(
             host.command_sender()
                 .and_then(|mut sender| sender.create_timeline("denied")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    #[test]
+    fn closed_and_poisoned_hosts_reject_empty_topology_changes() {
+        let mut host =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.apply_empty_topology_change(|store| store.create_timeline("closed")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            host.maximum_requests(),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        host.state = HostStateV1::Poisoned;
+        assert_eq!(
+            host.apply_empty_topology_change(|store| store.create_timeline("poisoned")),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
     }
@@ -1282,6 +1306,32 @@ mod tests {
             host.command_sender(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
+    }
+
+    #[test]
+    fn impossible_initial_exact_retry_poisons_the_host() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(FaultModeV1::MisreportInitialExactRetry)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let root = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("exact-retry-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let batch = empty_fork_batch(
+            root.id(),
+            TimelineId::new(),
+            ErasureReferenceV1::from_digest([36; 32]),
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.commit_fork_admission(batch)),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(host.state, HostStateV1::Poisoned);
+        assert!(host.inventory.is_none());
     }
 
     #[test]
