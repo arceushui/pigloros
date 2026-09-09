@@ -108,6 +108,50 @@ fn durable_commit_persists_the_exact_sir1_restart_floor() -> TestResult {
     assert_eq!(staging_metadata.uid(), installation.owner);
     assert_eq!(staging_metadata.mode() & 0o7777, 0o700);
     assert_eq!(staging_metadata.dev(), installation.root.metadata()?.dev());
+    let context = committed.cancellation_context()?;
+    let acknowledgement_bytes = recovery_acknowledgement(&context, &rcu)?;
+    let acknowledgement =
+        committed.authenticate_live_acknowledgement(&acknowledgement_bytes, 100)?;
+    let installed = committed.complete_live_update(acknowledgement)?;
+    assert_eq!(installed.manifest_bytes(), next);
+    assert!(!recovery.exists());
+    installed.authenticate_authority()?;
+    Ok(())
+}
+
+#[test]
+fn live_completion_rejects_late_or_foreign_acknowledgement_and_retains_sir1() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let update = validated(&fixture)?;
+    let rcu = update.revocation_update_bytes().to_vec();
+    let snapshot = recovery_snapshot(&fixture.authority)?;
+    let UpdateFixture {
+        installation,
+        authority,
+    } = fixture;
+    let committed = authority.commit_update(update, snapshot)?;
+    let recovery = installation
+        .directory
+        .path()
+        .join("installation-update.cbor");
+    let context = committed.cancellation_context()?;
+    let acknowledgement = recovery_acknowledgement(&context, &rcu)?;
+    assert!(committed
+        .authenticate_live_acknowledgement(&acknowledgement, 101)
+        .is_err());
+    let changed_context = RecoveryCancellationContext::for_committed_recovery(
+        [99; 32],
+        context.previous_provider_binding_digest,
+        &rcu,
+        context.previous_live_attempt_ids.clone(),
+        context.required_cancelled_attempt_ids.clone(),
+    )?;
+    let foreign = recovery_acknowledgement(&changed_context, &rcu)?;
+    assert!(committed
+        .authenticate_live_acknowledgement(&foreign, 100)
+        .is_err());
+    assert!(recovery.exists());
+    committed.verify_recovery_floor()?;
     Ok(())
 }
 

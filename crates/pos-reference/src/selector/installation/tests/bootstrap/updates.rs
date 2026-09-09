@@ -1,4 +1,5 @@
 use super::*;
+use crate::sandbox_provider_protocol::RecoveryCancellationContext;
 use crate::sandbox_provider_protocol::SandboxTrustRole;
 use crate::selector::installation::authority::recovery::InstallationRecoverySnapshot;
 use crate::selector::installation::authority::update::InstallationChallenge;
@@ -156,6 +157,39 @@ fn recovery_snapshot(
         vec![[21; 16], [22; 16]],
         vec![[21; 16]],
     )?)
+}
+
+fn recovery_acknowledgement(
+    context: &RecoveryCancellationContext,
+    update: &[u8],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let document = decode_canonical(update)?;
+    let fields = array(&array(&document, 3)?[0], 8)?;
+    let request_id: [u8; 16] = fixed_bytes(&fields[2])?;
+    let revocation_digest: [u8; 32] = fixed_bytes(&fields[5])?;
+    let runtime = SigningKey::from_bytes(&[45; 32]);
+    Ok(sign_record(
+        "RCA1",
+        vec![
+            Value::Text("RCA1".to_owned()),
+            integer(1),
+            Value::Bytes(request_id.to_vec()),
+            bytes(revocation_digest),
+            bytes(context.sir1_digest),
+            bytes(context.previous_provider_binding_digest),
+            Value::Array(
+                context
+                    .required_cancelled_attempt_ids
+                    .iter()
+                    .map(|id| Value::Bytes(id.to_vec()))
+                    .collect(),
+            ),
+            integer(0),
+            Value::Text("runtime".to_owned()),
+        ],
+        &runtime,
+    )?
+    .0)
 }
 
 #[test]
