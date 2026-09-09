@@ -125,18 +125,18 @@ mod lifecycle_coverage_tests {
             store.bind_test_erasure_gate();
         }
 
-        assert_eq!(
+        assert!(matches!(
             host_error_to_core(ErasureHostErrorV1::AccessFrozen),
             CoreError::ErasureAccessFrozen
-        );
+        ));
         for error in [
             ErasureHostErrorV1::RecoveryUnavailable,
             ErasureHostErrorV1::StaleGeneration,
         ] {
-            assert_eq!(
+            assert!(matches!(
                 host_error_to_core(error),
                 CoreError::ErasureContainmentUnavailable
-            );
+            ));
         }
         for error in [
             ErasureHostErrorV1::AuthorizationDenied,

@@ -94,9 +94,7 @@ impl ErasureExecutionHostV1 {
         permit: ConsentAppendPermit,
     ) -> Result<(), ErasureHostErrorV1> {
         self.ready_generation()?;
-        self.store
-            .bind_consent_authority(permit)
-            .map_err(map_owned_store_error)
+        self.store.bind_consent_authority(permit).map_store_error()
     }
 
     /// Install one complete inventory before any protected sender is granted.
@@ -221,7 +219,7 @@ impl ErasureExecutionHostV1 {
         else {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
-        let timeline = change(self.store.as_mut()).map_err(map_owned_store_error)?;
+        let timeline = change(self.store.as_mut()).map_store_error()?;
         let Ok(inventory) = self
             .store
             .complete_erasure_inventory_snapshot(maximum_requests)
@@ -400,10 +398,7 @@ impl ErasureCommandSenderV1<'_> {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        self.host
-            .store
-            .append(timeline, drafts)
-            .map_err(map_owned_store_error)
+        self.host.store.append(timeline, drafts).map_store_error()
     }
 
     /// Atomically append Events when they fit the owned-event ceiling.
@@ -420,7 +415,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host
             .store
             .append_bounded(timeline, drafts, maximum)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Append a Gateway-owned consent Event inside the current fence.
@@ -438,7 +433,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host
             .store
             .append_consent_bounded(timeline, drafts, permit, maximum)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Append a consent revocation and its cleanup marker atomically.
@@ -457,7 +452,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host
             .store
             .append_consent_revocation_bounded(timeline, drafts, permit, maximum, cleanup_scope)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Append an identified intent or return its exact prior admission.
@@ -475,7 +470,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host
             .store
             .append_intent_or_duplicate_bounded(timeline, identity, intent, maximum)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Remove one bounded batch of expired append identities.
@@ -490,7 +485,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host
             .store
             .purge_expired_append_identities_bounded(limit)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Remove one bounded batch of append identities for a revoked scope.
@@ -506,7 +501,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host
             .store
             .remove_append_identities_bounded(scope, limit)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Return the next durable append-identity cleanup marker.
@@ -520,7 +515,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host
             .store
             .pending_append_identity_cleanup()
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 }
 
@@ -545,7 +540,7 @@ impl ErasureReadSenderV1<'_> {
         self.host
             .store
             .read_bounded(timeline, range, bounds)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Read one Event by its durable identifier under the current generation.
@@ -561,7 +556,7 @@ impl ErasureReadSenderV1<'_> {
         self.host
             .store
             .read_event_by_id(timeline, event)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Read one Timeline's metadata under the current inventory generation.
@@ -573,10 +568,7 @@ impl ErasureReadSenderV1<'_> {
         timeline: TimelineId,
     ) -> Result<Option<Timeline>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        self.host
-            .store
-            .get_timeline(timeline)
-            .map_err(map_owned_store_error)
+        self.host.store.get_timeline(timeline).map_store_error()
     }
 
     /// List only Timelines classified by the installed inventory generation.
@@ -585,10 +577,7 @@ impl ErasureReadSenderV1<'_> {
     /// Returns only payload-free host errors.
     pub fn timelines(&mut self) -> Result<Vec<Timeline>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        self.host
-            .store
-            .list_timelines()
-            .map_err(map_owned_store_error)
+        self.host.store.list_timelines().map_store_error()
     }
 
     /// Count visible root Timelines without exceeding `maximum + 1`.
@@ -603,7 +592,7 @@ impl ErasureReadSenderV1<'_> {
         self.host
             .store
             .root_timeline_count_bounded(maximum)
-            .map_err(map_owned_store_error)
+            .map_store_error()
     }
 
     /// Return the logical head of one inventory-classified Timeline.
@@ -612,10 +601,7 @@ impl ErasureReadSenderV1<'_> {
     /// Returns only payload-free host errors.
     pub fn logical_head(&mut self, timeline: TimelineId) -> Result<Seq, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        self.host
-            .store
-            .logical_head(timeline)
-            .map_err(map_owned_store_error)
+        self.host.store.logical_head(timeline).map_store_error()
     }
 }
 
@@ -627,11 +613,14 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     }
 }
 
-// `Result::map_err` supplies the owned error. A function pointer avoids
-// duplicating closure-only coverage regions at every host adapter boundary.
-#[allow(clippy::needless_pass_by_value)]
-fn map_owned_store_error(error: CoreError) -> ErasureHostErrorV1 {
-    map_store_error(&error)
+trait MapStoreErrorV1<T> {
+    fn map_store_error(self) -> Result<T, ErasureHostErrorV1>;
+}
+
+impl<T> MapStoreErrorV1<T> for Result<T, CoreError> {
+    fn map_store_error(self) -> Result<T, ErasureHostErrorV1> {
+        self.map_err(|error| map_store_error(&error))
+    }
 }
 
 const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {

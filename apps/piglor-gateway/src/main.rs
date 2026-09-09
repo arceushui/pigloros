@@ -398,7 +398,8 @@ mod coverage_tests {
     #[test]
     fn startup_recovery_error_is_payload_free() {
         assert_eq!(
-            erasure_host_recovery_error(ErasureHostErrorV1::RecoveryUnavailable).to_string(),
+            super::erasure_host_recovery_error(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
+                .to_string(),
             "erasure host recovery failed (recovery_unavailable)"
         );
     }
