@@ -6,16 +6,16 @@ use std::sync::{Arc, Mutex};
 
 /// Private compatibility adapter over the host's generation-bound senders.
 ///
-/// The concrete MemoryStore or SQLite adapter remains exclusively owned by
+/// The concrete `MemoryStore` or `SQLite` adapter remains exclusively owned by
 /// `ErasureExecutionHostV1`; experiment code cannot recover raw store or gate
 /// publication authority through this wrapper.
-pub(super) struct HostedExperimentStore {
+pub struct HostedExperimentStore {
     host: Mutex<pos_runtime::ErasureExecutionHostV1>,
     gate: Arc<dyn ErasureGate>,
 }
 
 impl HostedExperimentStore {
-    pub(super) fn open(config: pos_store::StoreConfig) -> Result<Self, ErasureHostErrorV1> {
+    pub fn open(config: pos_store::StoreConfig) -> Result<Self, ErasureHostErrorV1> {
         let host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             config,
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
@@ -27,7 +27,7 @@ impl HostedExperimentStore {
         })
     }
 
-    pub(super) fn containment_gate(&self) -> Arc<dyn ErasureGate> {
+    pub fn containment_gate(&self) -> Arc<dyn ErasureGate> {
         Arc::clone(&self.gate)
     }
 

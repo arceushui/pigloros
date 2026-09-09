@@ -7741,18 +7741,17 @@ mod coverage_entrypoints {
 
     #[test]
     fn production_experiment_hosts_own_the_store_gate() {
-        let database = tempfile::NamedTempFile::new().test_ok();
+        let database = ok(tempfile::NamedTempFile::new());
         let sqlite = StoreConfig::Sqlite {
             path: database.path().to_string_lossy().into_owned(),
         };
         for store_config in [StoreConfig::Memory, sqlite] {
-            let session = Experiment::new(ExperimentConfig {
+            let session = ok(Experiment::new(ExperimentConfig {
                 name: "host-owned-start".to_owned(),
                 stop: StopCondition::MaxTicks(0),
                 store_config,
             })
-            .start()
-            .test_ok();
+            .start());
             assert!(session.registry.erasure_gate_is_bound());
         }
 
@@ -7763,7 +7762,7 @@ mod coverage_entrypoints {
         assert!(matches!(
             rejected,
             Err(ExperimentError::Store(
-                CoreError::ErasureContainmentUnavailable
+                pos_core::CoreError::ErasureContainmentUnavailable
             ))
         ));
 
@@ -7781,7 +7780,7 @@ mod coverage_entrypoints {
         assert!(matches!(
             rejected,
             Err(ExperimentError::Store(
-                CoreError::ErasureContainmentUnavailable
+                pos_core::CoreError::ErasureContainmentUnavailable
             ))
         ));
     }
@@ -7790,8 +7789,8 @@ mod coverage_entrypoints {
     fn host_gate_binding_and_startup_errors_are_closed() {
         let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
         let mut registry = PluginRegistry::new();
-        bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)).test_ok();
-        bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)).test_ok();
+        ok(bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)));
+        ok(bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)));
         assert!(bind_registry_to_host_gate(
             &mut registry,
             Arc::new(ErasureContainmentGateV1::new())
@@ -7800,7 +7799,7 @@ mod coverage_entrypoints {
 
         assert!(matches!(
             hosted_store_error(pos_core::ErasureHostErrorV1::AccessFrozen),
-            ExperimentError::Store(CoreError::ErasureAccessFrozen)
+            ExperimentError::Store(pos_core::CoreError::ErasureAccessFrozen)
         ));
         for error in [
             pos_core::ErasureHostErrorV1::RecoveryUnavailable,
@@ -7808,7 +7807,7 @@ mod coverage_entrypoints {
         ] {
             assert!(matches!(
                 hosted_store_error(error),
-                ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+                ExperimentError::Store(pos_core::CoreError::ErasureContainmentUnavailable)
             ));
         }
         for error in [
@@ -7818,7 +7817,7 @@ mod coverage_entrypoints {
         ] {
             assert!(matches!(
                 hosted_store_error(error),
-                ExperimentError::Store(CoreError::Storage(_))
+                ExperimentError::Store(pos_core::CoreError::Storage(_))
             ));
         }
     }
