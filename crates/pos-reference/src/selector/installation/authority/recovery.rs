@@ -100,9 +100,9 @@ impl InstalledSelectorObjects {
         let recovery_file = open_file(&self.root, RECOVERY_NAME, owner, 0o400, RECOVERY_LIMIT)?;
         let recovery_bytes = read_file(&recovery_file, RECOVERY_LIMIT)?;
         let RecoveryRecords {
-            previous_bytes,
-            next_bytes,
-            update_bytes,
+            previous: previous_bytes,
+            next: next_bytes,
+            update: update_bytes,
         } = decode_recovery(&recovery_bytes)?;
         if self.manifest_bytes != previous_bytes && self.manifest_bytes != next_bytes {
             return Err(SelectorBoundaryError::ArtifactInvalid);
@@ -128,9 +128,9 @@ impl InstalledSelectorObjects {
 }
 
 struct RecoveryRecords {
-    previous_bytes: Vec<u8>,
-    next_bytes: Vec<u8>,
-    update_bytes: Vec<u8>,
+    previous: Vec<u8>,
+    next: Vec<u8>,
+    update: Vec<u8>,
 }
 
 fn decode_recovery(bytes: &[u8]) -> Result<RecoveryRecords, SelectorBoundaryError> {
@@ -155,10 +155,35 @@ fn decode_recovery(bytes: &[u8]) -> Result<RecoveryRecords, SelectorBoundaryErro
         }
     }
     Ok(RecoveryRecords {
-        previous_bytes: previous.clone(),
-        next_bytes: next.clone(),
-        update_bytes: update.clone(),
+        previous: previous.clone(),
+        next: next.clone(),
+        update: update.clone(),
     })
+}
+
+fn read_current_manifest(root: &File, owner: u32) -> Result<Vec<u8>, SelectorBoundaryError> {
+    let manifest = open_file(root, "installation.cbor", owner, 0o400, MANIFEST_LIMIT)?;
+    read_file(&manifest, MANIFEST_LIMIT)
+}
+
+fn read_file(file: &File, limit: u64) -> Result<Vec<u8>, SelectorBoundaryError> {
+    let mut file = file.try_clone().map_err(|_| SelectorBoundaryError::Io)?;
+    let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+    if metadata.len() > limit {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    let capacity =
+        usize::try_from(metadata.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| SelectorBoundaryError::Io)?;
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SelectorBoundaryError::Io)?;
+    if bytes.len() != capacity {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -187,29 +212,4 @@ mod tests {
         }
         Ok(())
     }
-}
-
-fn read_current_manifest(root: &File, owner: u32) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let manifest = open_file(root, "installation.cbor", owner, 0o400, MANIFEST_LIMIT)?;
-    read_file(&manifest, MANIFEST_LIMIT)
-}
-
-fn read_file(file: &File, limit: u64) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let mut file = file.try_clone().map_err(|_| SelectorBoundaryError::Io)?;
-    let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
-    if metadata.len() > limit {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    let capacity =
-        usize::try_from(metadata.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let mut bytes = Vec::with_capacity(capacity);
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| SelectorBoundaryError::Io)?;
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| SelectorBoundaryError::Io)?;
-    if bytes.len() != capacity {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(bytes)
 }
