@@ -48,7 +48,7 @@ impl TestAuthority {
 
     fn topology(
         &self,
-        request: ErasureReferenceV1,
+        _request: ErasureReferenceV1,
         manifest: ErasureReferenceV1,
     ) -> Result<ErasureVerifiedTopologyObservationV1, ErasureErrorV1> {
         let timelines = self
@@ -57,25 +57,9 @@ impl TestAuthority {
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .clone();
         if self.frozen.load(Ordering::Acquire) {
-            let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
-                request,
-                scope_members: vec![reference(9)],
-                target_closure: target_closure_digest(&[persistence_target()]),
-                lineage_rule: Some(reference(100)),
-            })?;
             Ok(ErasureVerifiedTopologyObservationV1::new(
                 manifest,
-                timelines
-                    .into_iter()
-                    .map(|(timeline, child_scope)| {
-                        let resolved_scope = if child_scope == reference(9) {
-                            scope.reference()
-                        } else {
-                            child_scope
-                        };
-                        (timeline, resolved_scope)
-                    })
-                    .collect(),
+                timelines,
                 Vec::new(),
             ))
         } else {
