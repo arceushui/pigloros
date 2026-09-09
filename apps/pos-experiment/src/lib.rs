@@ -3057,6 +3057,7 @@ mod tests {
                 pos_runtime::RuntimeError::ErasureOperationUnavailable
             ))
         ));
+        drop(missing);
 
         for reason in [
             pos_core::ErasureContainmentErrorV1::AccessFrozen,

@@ -6010,6 +6010,7 @@ mod tests {
                 CoreError::ErasureContainmentUnavailable
             ))
         ));
+        drop(missing);
 
         let frozen = Gateway::new_with_erasure_gate(
             open_store(StoreConfig::Memory).test_ok(),
@@ -6022,6 +6023,7 @@ mod tests {
             frozen.submit_action_draft(timeline, &proposal),
             Err(GatewayError::Store(CoreError::ErasureAccessFrozen))
         ));
+        drop(frozen);
 
         let unavailable = Gateway::new_with_erasure_gate(
             open_store(StoreConfig::Memory).test_ok(),
@@ -6036,6 +6038,7 @@ mod tests {
                 CoreError::ErasureContainmentUnavailable
             ))
         ));
+        drop(unavailable);
     }
 
     #[tokio::test]
