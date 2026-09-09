@@ -1350,6 +1350,30 @@ where
     ))
 }
 
+fn exercise_disconnected_selector<A: RootSelectorAuthoritySource, P: RootSelectorProvider>(
+    authority: A,
+    provider: P,
+    request: &EvaluationRequest,
+    attempt: &CaseAttempt,
+) -> TestResult<Result<(), RootSelectorServiceError>> {
+    let temporary = tempfile::tempdir()?;
+    let socket = temporary.path().join("disconnected-selector.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let evaluator_uid = std::fs::metadata(temporary.path())?.uid();
+    let mut server =
+        RootSelectorServer::new(authority, provider, evaluator_uid, Duration::from_secs(2));
+    let (control, attempt_stream) = selector_client_request(request, attempt, 0)?;
+    let mut client = UnixStream::connect(&socket)?;
+    client.set_write_timeout(Some(Duration::from_secs(2)))?;
+    client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
+    client.write_all(&control)?;
+    client.write_all(&attempt_stream)?;
+    client.shutdown(std::net::Shutdown::Both)?;
+    drop(client);
+    // Accept only after the peer is gone: no race with the response writer.
+    Ok(server.serve_once(&listener))
+}
+
 fn assert_unsupported_host_feature_rejected(fixture: &Fixture) -> TestResult {
     let unsupported_features = vec!["invented-feature".to_owned()];
     let unsupported_digest = feature_set_digest(&unsupported_features)?;
@@ -2539,10 +2563,14 @@ fn root_selector_rejects_malformed_canonical_slx_and_invalid_digests() -> TestRe
     attempt_id[14..].copy_from_slice(&0x8000_u16.to_be_bytes());
     for (field, replacement, expected_request, expected_attempt) in [
         (0, Value::Text("OTHER".to_owned()), None, None),
+        (0, Value::Null, None, None),
         (1, integer(2), None, None),
+        (1, Value::Null, None, None),
         (2, Value::Bytes(vec![0; 16]), None, None),
         (2, Value::Bytes(vec![1; 15]), None, None),
+        (2, Value::Null, None, None),
         (3, Value::Bytes(vec![0; 16]), Some(request_id), None),
+        (3, Value::Bytes(vec![1; 15]), Some(request_id), None),
         (3, Value::Null, Some(request_id), None),
         (4, Value::Null, Some(request_id), Some(attempt_id)),
         (
@@ -2600,6 +2628,23 @@ fn root_selector_rejects_malformed_canonical_slx_and_invalid_digests() -> TestRe
         assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
         assert_eq!(error.request_id, Some(request_id));
         assert_eq!(error.attempt_id, Some(attempt_id));
+    }
+    Ok(())
+}
+
+#[test]
+fn root_selector_rejects_malformed_control_containers() -> TestResult {
+    for value in [
+        Value::Null,
+        Value::Array(Vec::new()),
+        Value::Array(vec![Value::Null, bytes([1; 32])]),
+        Value::Array(vec![Value::Array(Vec::new()), bytes([1; 32])]),
+    ] {
+        let error = selector_rejection(&selector_wire(&encode(&value)?, &[])?)?;
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+        assert_eq!(error.operation, None);
+        assert_eq!(error.request_id, None);
+        assert_eq!(error.attempt_id, None);
     }
     Ok(())
 }
@@ -2700,6 +2745,62 @@ fn root_selector_classifies_valid_but_wrong_derived_ids_as_authority_mismatch() 
         } else {
             assert_eq!(error.attempt_id, Some([99; 16]));
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn root_selector_propagates_disconnected_response_errors() -> TestResult {
+    for scenario in 0..6 {
+        let fixture = Fixture::new()?;
+        let request = selector_evaluation_request(&fixture)?;
+        let attempt = selector_case_attempt();
+        let mut plan = selector_case_plan(&fixture, &request, attempt.clone())?;
+        match scenario {
+            0 => plan.expected_attempt.watchdog_ms += 1,
+            1 => plan.execute_authority.cpf1_digest = [99; 32],
+            2 => plan.admission.provider_manifest = corrupt_signed_digest(&fixture.spm1)?,
+            3 => {
+                plan.admission
+                    .grant_expectations
+                    .required_provider_capability
+                    .capability_id = "different-capability".to_owned();
+            }
+            _ => {}
+        }
+        let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+        let result = exercise_disconnected_selector(
+            FixedSelectorAuthority { plan },
+            ScenarioSelectorProvider {
+                signed: SignedSelectorProvider { fixture, launch },
+                mode: if scenario == 4 {
+                    SelectorProviderMode::Unavailable
+                } else {
+                    SelectorProviderMode::Valid
+                },
+            },
+            &request,
+            &attempt,
+        )?;
+        assert_eq!(result, Err(RootSelectorServiceError::Io));
+    }
+    for error in [
+        RootSelectorServiceError::AuthorityUnavailable,
+        RootSelectorServiceError::AuthorityMismatch,
+    ] {
+        let fixture = Fixture::new()?;
+        let request = selector_evaluation_request(&fixture)?;
+        let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+        let result = exercise_disconnected_selector(
+            FailingSelectorAuthority(error),
+            ScenarioSelectorProvider {
+                signed: SignedSelectorProvider { fixture, launch },
+                mode: SelectorProviderMode::Unavailable,
+            },
+            &request,
+            &selector_case_attempt(),
+        )?;
+        assert_eq!(result, Err(RootSelectorServiceError::Io));
     }
     Ok(())
 }
