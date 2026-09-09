@@ -657,12 +657,14 @@ fn endpoint_metadata(
 }
 
 fn root_owned_ancestors(path: &Path) -> bool {
-    path.parent().is_some_and(|parent| {
-        parent.ancestors().all(|ancestor| {
-            std::fs::metadata(ancestor).is_ok_and(|metadata| {
-                metadata.is_dir() && metadata.uid() == ROOT_UID && metadata.mode() & 0o022 == 0
-            })
-        })
+    let Some(relative_parent) = path
+        .parent()
+        .and_then(|parent| parent.strip_prefix("/").ok())
+    else {
+        return false;
+    };
+    std::fs::File::open("/").is_ok_and(|root| {
+        crate::selector::installation::open_directory_chain(root, relative_parent, ROOT_UID).is_ok()
     })
 }
 
@@ -674,6 +676,18 @@ mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn endpoint_ancestry_requires_absolute_descriptor_validated_directories() {
+        assert!(root_owned_ancestors(Path::new("/provider.sock")));
+        for path in [
+            "provider.sock",
+            "/proc/self/provider.sock",
+            "/proc/self/fd/0/provider.sock",
+        ] {
+            assert!(!root_owned_ancestors(Path::new(path)), "{path}");
+        }
+    }
 
     fn output_digest(bytes: &[u8]) -> [u8; 32] {
         output_digest_with(b"PiglorOS.SandboxOutputBytes.v1\0", bytes)
