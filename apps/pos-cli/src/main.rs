@@ -67,8 +67,26 @@ const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 100
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    open_store_with_gate(config).map(|(store, _gate)| store)
+}
+
+fn open_store_with_gate(
+    config: StoreConfig,
+) -> Result<
+    (
+        Box<dyn pos_core::store::EventStore>,
+        std::sync::Arc<dyn pos_core::ErasureGate>,
+    ),
+    pos_core::CoreError,
+> {
     HostedCliStore::open(config)
-        .map(|store| Box::new(store) as Box<dyn pos_core::store::EventStore>)
+        .map(|store| {
+            let gate = store.containment_gate();
+            (
+                Box::new(store) as Box<dyn pos_core::store::EventStore>,
+                gate,
+            )
+        })
         .map_err(hosted_cli_store_error)
 }
 
@@ -356,11 +374,11 @@ fn cmd_timeline_fork(
 
 fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tl_id = parse_timeline_id(tl_id_str)?;
-    let store = open_store(StoreConfig::Sqlite {
+    let (store, erasure_gate) = open_store_with_gate(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
 
-    let mut registry = pos_state::ProjectionRegistry::new();
+    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
     let events = replay_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
     let entity_count = events
@@ -376,11 +394,11 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
 
 fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tl_id = parse_timeline_id(tl_id_str)?;
-    let store = open_store(StoreConfig::Sqlite {
+    let (store, erasure_gate) = open_store_with_gate(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
 
-    let mut registry = pos_state::ProjectionRegistry::new();
+    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
     let snapshot = snapshot_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
@@ -462,14 +480,15 @@ fn cmd_timeline_compare(
     let timeline_b = parse_timeline_id(second_timeline_str)?;
     let fork_seq = parse_seq(fork_seq_str)?;
 
-    let store = open_store(StoreConfig::Sqlite {
+    let (store, erasure_gate) = open_store_with_gate(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
 
-    let mut reg_a = pos_state::ProjectionRegistry::new();
+    let mut reg_a = pos_state::ProjectionRegistry::new()
+        .with_erasure_gate(std::sync::Arc::clone(&erasure_gate));
     reg_a.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
-    let mut reg_b = pos_state::ProjectionRegistry::new();
+    let mut reg_b = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     reg_b.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
     let diff = pos_time::compare(

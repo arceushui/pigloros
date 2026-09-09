@@ -33,6 +33,10 @@ impl HostedCliStore {
             .map_err(|_| pos_core::CoreError::ErasureContainmentUnavailable)
             .and_then(|mut host| operation(&mut host).map_err(hosted_cli_store_error))
     }
+
+    fn containment_gate(&self) -> std::sync::Arc<dyn pos_core::ErasureGate> {
+        std::sync::Arc::clone(&self.gate)
+    }
 }
 
 impl pos_core::store::EventStore for HostedCliStore {
