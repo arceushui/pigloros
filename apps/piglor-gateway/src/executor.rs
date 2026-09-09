@@ -124,7 +124,7 @@ mod lifecycle_coverage_tests {
             ERASURE_MAX_INVENTORY_REQUESTS,
         )?;
         for mut store in [
-            ExecutorStore::Host(host),
+            ExecutorStore::Host(Box::new(host)),
             ExecutorStore::Generic(Box::new(MemoryStore::new())),
             ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(
                 MemoryStore::new(),
@@ -595,7 +595,7 @@ impl GatewayExecutorStore {
 }
 
 enum ExecutorStore {
-    Host(ErasureExecutionHostV1),
+    Host(Box<ErasureExecutionHostV1>),
     #[cfg(test)]
     Generic(Box<dyn EventStore>),
     #[cfg(test)]
@@ -960,7 +960,7 @@ impl StoreExecutor {
     ) -> Result<Self, CoreError> {
         host.bind_consent_authority(permit)
             .map_err(host_error_to_core)?;
-        Ok(Self::spawn(ExecutorStore::Host(host), None))
+        Ok(Self::spawn(ExecutorStore::Host(Box::new(host)), None))
     }
 
     pub(crate) fn new_with_owntracks_erasure_host(
@@ -970,7 +970,10 @@ impl StoreExecutor {
     ) -> Result<Self, CoreError> {
         host.bind_consent_authority(permit)
             .map_err(host_error_to_core)?;
-        Ok(Self::spawn(ExecutorStore::Host(host), Some(owner_key)))
+        Ok(Self::spawn(
+            ExecutorStore::Host(Box::new(host)),
+            Some(owner_key),
+        ))
     }
 
     #[cfg(test)]
@@ -3132,7 +3135,7 @@ mod tests {
             .create_timeline("unbounded-host-append")?
             .id();
         let mut hosted_state = ExecutorState {
-            store: ExecutorStore::Host(host),
+            store: ExecutorStore::Host(Box::new(host)),
             owntracks_owner_key: None,
             owntracks_rate_limiter: OwnTracksRateLimiter {
                 buckets: HashMap::new(),
