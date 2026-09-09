@@ -24,15 +24,15 @@ use pos_reference::root_selector::{
     RootSelectorProvider, RootSelectorProviderReply, RootSelectorServer, RootSelectorServiceError,
 };
 use pos_reference::sandbox_provider_protocol::{
-    AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, ExecuteAuthority,
-    HostCapabilityProfile, LaunchPolicy, NetworkExchangePlan, PayloadDescriptor, PayloadDirection,
-    PayloadStreamValidator, ProviderConformanceReport, RootSelectorAdmission,
-    RootSelectorAdmissionInputs, SandboxAdministratorPolicy, SandboxAdmissionError,
-    SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest, SandboxGrantExpectations,
-    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxPayloadChunk,
-    SandboxProviderAdmissionInputs, SandboxProviderError, SandboxProviderErrorCode,
-    SandboxProviderOperation, SandboxProviderProtocolError, SandboxProviderReceipt,
-    SandboxRevocationSnapshot, SandboxTerminalOutcome, SandboxTrustSnapshot,
+    AdmissionGrant, AdmittedSandboxProvider, ExecuteAuthority, HostCapabilityProfile, LaunchPolicy,
+    NetworkExchangePlan, PayloadDescriptor, PayloadDirection, PayloadStreamValidator,
+    ProviderConformanceReport, RootSelectorAdmission, RootSelectorAdmissionInputs,
+    SandboxAdministratorPolicy, SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord,
+    SandboxExecuteRequest, SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase,
+    SandboxPayloadChunk, SandboxProviderAdmissionInputs, SandboxProviderError,
+    SandboxProviderErrorCode, SandboxProviderOperation, SandboxProviderProtocolError,
+    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTerminalOutcome,
+    SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -47,6 +47,15 @@ const ROOT_VERITY_X86_64: [u8; 16] = [
 ];
 const ROOT_SIGNATURE_X86_64: [u8; 16] = [
     0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08, 0xb1, 0x76,
+];
+const ROOT_DATA_AARCH64: [u8; 16] = [
+    0xb9, 0x21, 0xb0, 0x45, 0x1d, 0xf0, 0x41, 0xc3, 0xaf, 0x44, 0x4c, 0x6f, 0x28, 0x0d, 0x3f, 0xae,
+];
+const ROOT_VERITY_AARCH64: [u8; 16] = [
+    0xdf, 0x33, 0x00, 0xce, 0xd6, 0x9f, 0x4c, 0x92, 0x97, 0x8c, 0x9b, 0xfb, 0x0f, 0x38, 0xd8, 0x20,
+];
+const ROOT_SIGNATURE_AARCH64: [u8; 16] = [
+    0x6d, 0xb6, 0x9d, 0xe6, 0x29, 0xf4, 0x47, 0x58, 0xa7, 0xa5, 0x96, 0x21, 0x90, 0xf0, 0x0c, 0xe3,
 ];
 
 fn integer(value: u64) -> Value {
@@ -301,10 +310,44 @@ fn required_feature_ids() -> Vec<String> {
     values
 }
 
+fn required_provider_capability() -> RequiredProviderCapability {
+    RequiredProviderCapability {
+        capability_id: "execute".to_owned(),
+        capability_version: 1,
+        minimum_strength: 1,
+    }
+}
+
+fn broker_hard_caps() -> TestResult<Vec<u8>> {
+    broker_hard_caps_with([2_000; 17])
+}
+
+fn broker_hard_caps_with(values: [u64; 17]) -> TestResult<Vec<u8>> {
+    encode(&Value::Array(vec![
+        Value::Text("BHC1".to_owned()),
+        integer(1),
+        Value::Array(
+            (0_u64..)
+                .zip(values)
+                .map(|(limit_id, value)| Value::Array(vec![integer(limit_id), integer(value)]))
+                .collect(),
+        ),
+    ]))
+}
+
 fn provider_manifest(
     authority: &SigningAuthority,
     binary_digest: [u8; 32],
     feature_digest: [u8; 32],
+) -> TestResult<Vec<u8>> {
+    provider_manifest_for_architecture(authority, binary_digest, feature_digest, 0)
+}
+
+fn provider_manifest_for_architecture(
+    authority: &SigningAuthority,
+    binary_digest: [u8; 32],
+    feature_digest: [u8; 32],
+    architecture: u64,
 ) -> TestResult<Vec<u8>> {
     sign_record(
         "SPM1",
@@ -318,7 +361,7 @@ fn provider_manifest(
             bytes([12; 32]),
             Value::Text("runtime".to_owned()),
             Value::Array(vec![capability_value()]),
-            Value::Array(vec![integer(0)]),
+            Value::Array(vec![integer(architecture)]),
             bytes([13; 32]),
             bytes([14; 32]),
             bytes([15; 32]),
@@ -424,6 +467,15 @@ fn image_manifest(
     architecture: u64,
 ) -> TestResult<Vec<u8>> {
     let der = b"pkcs7";
+    let partition_types = if architecture == 0 {
+        [ROOT_DATA_X86_64, ROOT_VERITY_X86_64, ROOT_SIGNATURE_X86_64]
+    } else {
+        [
+            ROOT_DATA_AARCH64,
+            ROOT_VERITY_AARCH64,
+            ROOT_SIGNATURE_AARCH64,
+        ]
+    };
     sign_record(
         "SIM1",
         Value::Array(vec![
@@ -434,9 +486,9 @@ fn image_manifest(
             integer(u64::try_from(root_image.len())?),
             bytes(*blake3::hash(root_image).as_bytes()),
             Value::Array(vec![
-                partition(0, ROOT_DATA_X86_64, 1, 0),
-                partition(1, ROOT_VERITY_X86_64, 2, 1),
-                partition(2, ROOT_SIGNATURE_X86_64, 3, 2),
+                partition(0, partition_types[0], 1, 0),
+                partition(1, partition_types[1], 2, 1),
+                partition(2, partition_types[2], 3, 2),
             ]),
             bytes([22; 32]),
             integer(4096),
@@ -502,22 +554,53 @@ fn administrator_policy(
 }
 
 fn launch_policy(sim1_digest: [u8; 32]) -> TestResult<Vec<u8>> {
+    launch_policy_with(sim1_digest, 1, [1; 17])
+}
+
+fn launch_policy_with(sim1_digest: [u8; 32], mode: u64, limits: [u64; 17]) -> TestResult<Vec<u8>> {
     self_digested_record(
         "LPS1",
         Value::Array(vec![
             Value::Text("LPS1".to_owned()),
             integer(1),
             Value::Text("air-gapped".to_owned()),
-            integer(1),
+            integer(mode),
             bytes(sim1_digest),
             Value::Array(
-                (0..=16)
-                    .map(|limit_id| Value::Array(vec![integer(limit_id), integer(1)]))
+                (0_u64..)
+                    .zip(limits)
+                    .map(|(limit_id, value)| Value::Array(vec![integer(limit_id), integer(value)]))
                     .collect(),
             ),
             Value::Array(vec![]),
         ]),
     )
+}
+
+fn network_plan(exchange_id: [u8; 16], capability_id: &str) -> TestResult<NetworkExchangePlan> {
+    let unsigned = Value::Array(vec![
+        Value::Text("NXP1".to_owned()),
+        integer(1),
+        Value::Bytes(exchange_id.to_vec()),
+        integer(0),
+        Value::Text(capability_id.to_owned()),
+        integer(1),
+        bytes([71; 32]),
+        integer(1),
+        bytes([72; 32]),
+        bytes([73; 32]),
+    ]);
+    Ok(NetworkExchangePlan {
+        exchange_id,
+        occurrence: 0,
+        capability_id: capability_id.to_owned(),
+        request_length: 1,
+        request_digest: [71; 32],
+        response_maximum: 1,
+        expected_response_digest: [72; 32],
+        retention_policy_digest: [73; 32],
+        plan_digest: digest_value(b"PiglorOS.NetworkExchangePlan.v1\0", &unsigned)?,
+    })
 }
 
 fn payload_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
@@ -620,18 +703,44 @@ fn provider_frame(stream: &mut UnixStream, record: &[u8]) -> std::io::Result<()>
 }
 
 fn transport_admission(fixture: &Fixture) -> TestResult<RootSelectorAdmission> {
-    Ok(RootSelectorAdmission::establish(
+    let evaluation = selector_evaluation_request(fixture)?;
+    let attempt = selector_case_attempt();
+    establish_admission(
+        fixture,
         &fixture.policy,
+        &fixture.broker_hard_caps,
+        &fixture.lps1,
+        &evaluation,
+        &attempt,
+        &[],
+    )
+}
+
+fn establish_admission(
+    fixture: &Fixture,
+    policy: &SandboxAdministratorPolicy,
+    broker_hard_caps: &[u8],
+    launch_policy: &[u8],
+    evaluation: &EvaluationRequest,
+    attempt: &CaseAttempt,
+    network_plans: &[NetworkExchangePlan],
+) -> TestResult<RootSelectorAdmission> {
+    Ok(RootSelectorAdmission::establish(
+        policy,
         &fixture.trust,
         &fixture.revocation,
         RootSelectorAdmissionInputs {
-            provider: fixture.inputs(),
+            provider: SandboxProviderAdmissionInputs {
+                broker_hard_caps,
+                ..fixture.inputs()
+            },
             image_manifest: &fixture.sim1,
             root_image: &fixture.root_image,
             executable: &fixture.executable,
-            subject_artifact_digest: fixture.subject_digest(),
-            launch_policy: &fixture.lps1,
-            grant_expectations: Fixture::grant_expectations(),
+            launch_policy,
+            evaluation,
+            attempt,
+            network_plans,
         },
     )?)
 }
@@ -667,7 +776,7 @@ fn complete_transport_records(
     request: &SandboxExecuteRequest,
     admission: &RootSelectorAdmission,
 ) -> TestResult<Vec<Vec<u8>>> {
-    let grant = admission_grant(fixture, request, admission.launch_policy())?;
+    let grant = admission_grant(fixture, request, admission)?;
     let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
     let audit = audit_chain(fixture, &grant_record)?;
     let receipt = provider_receipt(
@@ -767,7 +876,7 @@ fn provider_transport_accepts_complete_framed_transcript_and_stages_output() -> 
     let fixture = Fixture::new()?;
     let admission = transport_admission(&fixture)?;
     let request = transport_request(&fixture, &admission)?;
-    let grant = admission_grant(&fixture, &request, admission.launch_policy())?;
+    let grant = admission_grant(&fixture, &request, &admission)?;
     let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
     let audit = audit_chain(&fixture, &grant_record)?;
     let receipt = provider_receipt(
@@ -1106,7 +1215,7 @@ fn provider_transport_only_stages_completed_output() -> TestResult {
     let fixture = Fixture::new()?;
     let admission = transport_admission(&fixture)?;
     let request = transport_request(&fixture, &admission)?;
-    let grant = admission_grant(&fixture, &request, admission.launch_policy())?;
+    let grant = admission_grant(&fixture, &request, &admission)?;
     let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
     let audit = audit_chain(&fixture, &grant_record)?;
     let receipt = provider_receipt(
@@ -1216,7 +1325,7 @@ fn execute_request(
 fn admission_grant(
     fixture: &Fixture,
     request: &SandboxExecuteRequest,
-    launch: &LaunchPolicy,
+    admission: &RootSelectorAdmission,
 ) -> TestResult<Vec<u8>> {
     let authority = &request.authority;
     sign_record(
@@ -1242,11 +1351,11 @@ fn admission_grant(
             integer(fixture.trust.trust_epoch()),
             integer(fixture.revocation.revocation_epoch()),
             integer(fixture.policy.policy_epoch()),
-            bytes([39; 32]),
+            bytes(admission.effective_limits_digest()),
             bytes(request.adapter_input.digest),
             Value::Array(vec![]),
-            bytes(launch.policy_digest),
-            bytes([40; 32]),
+            bytes(admission.launch_policy().policy_digest),
+            bytes(admission.expected_readback_set_digest()),
             Value::Text("runtime".to_owned()),
         ]),
         &fixture.authority.runtime,
@@ -1452,27 +1561,36 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> TestResult<Self> {
+        Self::for_architecture(0)
+    }
+
+    fn for_architecture(architecture: u64) -> TestResult<Self> {
         let authority = SigningAuthority::fixed();
         let trust = authority.trust()?;
         let revocation = revocation(&trust, &authority, vec![], vec![])?;
         let required_features = required_feature_ids();
         let feature_digest = feature_set_digest(&required_features)?;
         let provider_binary = b"exact provider binary".to_vec();
-        let broker_hard_caps = b"broker hard caps".to_vec();
+        let broker_hard_caps = broker_hard_caps()?;
         let binary_digest = *blake3::hash(&provider_binary).as_bytes();
-        let provider_record = provider_manifest(&authority, binary_digest, feature_digest)?;
-        let scs1 = syscall_set(0)?;
-        let hcp1 = host_profile(&authority, None, 0)?;
+        let provider_record = provider_manifest_for_architecture(
+            &authority,
+            binary_digest,
+            feature_digest,
+            architecture,
+        )?;
+        let scs1 = syscall_set(architecture)?;
+        let hcp1 = host_profile(&authority, None, architecture)?;
         let pcr1 = conformance_report(
             &authority,
             binary_digest,
             feature_digest,
             wrapped_digest(&hcp1)?,
-            0,
+            architecture,
         )?;
         let root_image = b"img".to_vec();
         let executable = b"adapter executable".to_vec();
-        let image_record = image_manifest(&authority, &root_image, &executable, 0)?;
+        let image_record = image_manifest(&authority, &root_image, &executable, architecture)?;
         let lps1 = launch_policy(wrapped_digest(&image_record)?)?;
         let policy = administrator_policy(
             &trust,
@@ -1515,7 +1633,6 @@ impl Fixture {
             conformance_report: &self.pcr1,
             host_profile: &self.hcp1,
             syscall_set: &self.scs1,
-            required_features: &self.required_features,
         }
     }
 
@@ -1525,18 +1642,6 @@ impl Fixture {
 
     fn subject_digest(&self) -> [u8; 32] {
         *blake3::hash(&self.executable).as_bytes()
-    }
-
-    fn grant_expectations() -> SandboxGrantExpectations {
-        SandboxGrantExpectations {
-            required_provider_capability: RequiredProviderCapability {
-                capability_id: "execute".to_owned(),
-                capability_version: 1,
-                minimum_strength: 1,
-            },
-            effective_limits_digest: [39; 32],
-            expected_readback_set_digest: [40; 32],
-        }
     }
 
     fn policy_for_provider(
@@ -1578,6 +1683,27 @@ impl Fixture {
                 syscall_set: wrapped_digest(&self.scs1)?,
                 launch_policy: wrapped_digest(launch)?,
                 image_manifest: wrapped_digest(image_manifest)?,
+            },
+        )
+    }
+
+    fn policy_for_broker_and_launch(
+        &self,
+        broker_hard_caps: &[u8],
+        launch: &[u8],
+    ) -> TestResult<SandboxAdministratorPolicy> {
+        administrator_policy(
+            &self.trust,
+            &self.revocation,
+            &self.authority,
+            &PolicySelectionDigests {
+                provider_manifest: wrapped_digest(&self.spm1)?,
+                provider_binary: *blake3::hash(&self.provider_binary).as_bytes(),
+                broker_hard_caps: *blake3::hash(broker_hard_caps).as_bytes(),
+                conformance_report: wrapped_digest(&self.pcr1)?,
+                syscall_set: wrapped_digest(&self.scs1)?,
+                launch_policy: wrapped_digest(launch)?,
+                image_manifest: wrapped_digest(&self.sim1)?,
             },
         )
     }
@@ -1693,7 +1819,7 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
         }
         let mut reply = self
             .signed
-            .reply(request)
+            .reply(request, admission)
             .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
         if let RootSelectorProviderReply::Admitted {
             grant,
@@ -1757,24 +1883,38 @@ impl RootSelectorProvider for SignedSelectorProvider {
         request: &SandboxExecuteRequest,
         _: &[u8],
         _: Duration,
-        _: &RootSelectorAdmission,
+        admission: &RootSelectorAdmission,
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
-        self.reply(request)
+        self.reply(request, admission)
             .map_err(|_| RootSelectorServiceError::ProviderEvidence)
     }
 }
 
 impl SignedSelectorProvider {
+    fn ensure_selected_launch(&self, admission: &RootSelectorAdmission) -> TestResult {
+        if &self.launch == admission.launch_policy() {
+            Ok(())
+        } else {
+            Err("selector admitted a foreign launch policy".into())
+        }
+    }
+
     fn authenticated_grant_digest(
         &self,
         request: &SandboxExecuteRequest,
         admission: &RootSelectorAdmission,
     ) -> TestResult<[u8; 32]> {
-        let grant = admission_grant(&self.fixture, request, &self.launch)?;
+        self.ensure_selected_launch(admission)?;
+        let grant = admission_grant(&self.fixture, request, admission)?;
         Ok(admission.authenticate_grant(request, &grant)?.grant_digest)
     }
 
-    fn reply(&self, request: &SandboxExecuteRequest) -> TestResult<RootSelectorProviderReply> {
+    fn reply(
+        &self,
+        request: &SandboxExecuteRequest,
+        admission: &RootSelectorAdmission,
+    ) -> TestResult<RootSelectorProviderReply> {
+        self.ensure_selected_launch(admission)?;
         let mut output_stream = Vec::new();
         write_observation(
             &mut output_stream,
@@ -1783,7 +1923,7 @@ impl SignedSelectorProvider {
                 usage: ResourceUsage::default(),
             },
         )?;
-        let grant = admission_grant(&self.fixture, request, &self.launch)?;
+        let grant = admission_grant(&self.fixture, request, admission)?;
         let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
         let audit = audit_chain(&self.fixture, &grant_record)?;
         let receipt = provider_receipt(&self.fixture, &grant_record, wrapped_digest(&audit[1])?)?;
@@ -1812,9 +1952,14 @@ struct NonCompletedSelectorProvider {
 }
 
 impl NonCompletedSelectorProvider {
-    fn reply(&self, request: &SandboxExecuteRequest) -> TestResult<RootSelectorProviderReply> {
+    fn reply(
+        &self,
+        request: &SandboxExecuteRequest,
+        admission: &RootSelectorAdmission,
+    ) -> TestResult<RootSelectorProviderReply> {
+        self.signed.ensure_selected_launch(admission)?;
         let fixture = &self.signed.fixture;
-        let grant = admission_grant(fixture, request, &self.signed.launch)?;
+        let grant = admission_grant(fixture, request, admission)?;
         let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
         let (events, ready): (&[u8], _) = if self.outcome == 1 {
             (&[11, 13, 1], Some([41; 32]))
@@ -1857,9 +2002,9 @@ impl RootSelectorProvider for NonCompletedSelectorProvider {
         request: &SandboxExecuteRequest,
         _: &[u8],
         _: Duration,
-        _: &RootSelectorAdmission,
+        admission: &RootSelectorAdmission,
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
-        self.reply(request)
+        self.reply(request, admission)
             .map_err(|_| RootSelectorServiceError::ProviderEvidence)
     }
 }
@@ -2113,13 +2258,30 @@ fn selector_evaluation_request(fixture: &Fixture) -> TestResult<EvaluationReques
         sandbox_requirement: Some(SandboxRequirement {
             lps1_digest: wrapped_digest(&fixture.lps1)?,
             sim1_digest: wrapped_digest(&fixture.sim1)?,
-            required_provider_capability: Fixture::grant_expectations()
-                .required_provider_capability,
+            required_provider_capability: required_provider_capability(),
             apt1_digest: fixture.policy.policy_digest(),
             policy_epoch: fixture.policy.policy_epoch(),
         }),
         request_digest: [1; 32],
     };
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    Ok(request)
+}
+
+fn evaluation_for_authority(
+    fixture: &Fixture,
+    policy: &SandboxAdministratorPolicy,
+    launch_policy: &[u8],
+) -> TestResult<EvaluationRequest> {
+    let mut request = selector_evaluation_request(fixture)?;
+    let requirement = request
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement")?;
+    requirement.lps1_digest = wrapped_digest(launch_policy)?;
+    requirement.apt1_digest = policy.policy_digest();
+    requirement.policy_epoch = policy.policy_epoch();
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
     Ok(request)
@@ -2195,12 +2357,10 @@ fn selector_case_plan(
             conformance_report: fixture.pcr1.clone(),
             host_profile: fixture.hcp1.clone(),
             syscall_set: fixture.scs1.clone(),
-            required_features: fixture.required_features.clone(),
             image_manifest: fixture.sim1.clone(),
             root_image: fixture.root_image.clone(),
             executable: fixture.executable.clone(),
             launch_policy: fixture.lps1.clone(),
-            grant_expectations: Fixture::grant_expectations(),
         },
     })
 }
@@ -2361,11 +2521,10 @@ fn assert_unsupported_host_feature_rejected(fixture: &Fixture) -> TestResult {
             SandboxProviderAdmissionInputs {
                 provider_manifest: &unsupported_spm1,
                 conformance_report: &unsupported_pcr1,
-                required_features: &unsupported_features,
                 ..fixture.inputs()
             },
         ),
-        Err(SandboxAdmissionError::HostCapabilityMismatch)
+        Err(SandboxAdmissionError::ConformanceMismatch)
     );
     Ok(())
 }
@@ -2394,6 +2553,423 @@ fn complete_provider_and_image_admission_binds_all_authority() -> TestResult {
         fixture.subject_digest(),
     )?;
     assert_eq!(image.manifest().executable_path, "/adapter");
+    Ok(())
+}
+
+#[test]
+fn selector_derives_effective_limits_and_exact_readback_commitment() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    assert_eq!(admission.effective_limits().len(), 17);
+    assert!(admission
+        .effective_limits()
+        .iter()
+        .enumerate()
+        .all(|(limit_id, limit)| usize::from(limit.limit_id) == limit_id && limit.value == 1));
+
+    let elm1_unsigned = Value::Array(vec![
+        Value::Text("ELM1".to_owned()),
+        integer(1),
+        Value::Array(
+            admission
+                .effective_limits()
+                .iter()
+                .map(|limit| {
+                    Value::Array(vec![
+                        integer(u64::from(limit.limit_id)),
+                        integer(limit.value),
+                    ])
+                })
+                .collect(),
+        ),
+        bytes(*blake3::hash(&fixture.broker_hard_caps).as_bytes()),
+        bytes(fixture.policy.policy_digest()),
+        bytes(admission.launch_policy().policy_digest),
+        bytes([38; 32]),
+        bytes([37; 32]),
+        Value::Text("runtime".to_owned()),
+    ]);
+    assert_eq!(
+        admission.effective_limits_digest(),
+        digest_value(b"PiglorOS.ELM1.v1\0", &elm1_unsigned)?
+    );
+
+    let Value::Array(readback_wrapper) = ciborium::from_reader(admission.expected_readback_set())?
+    else {
+        return Err("RBS1 wrapper must be an array".into());
+    };
+    let Value::Array(readback_unsigned) = &readback_wrapper[0] else {
+        return Err("RBS1 unsigned value must be an array".into());
+    };
+    assert_eq!(readback_unsigned.len(), 19);
+    assert_eq!(readback_unsigned[0], Value::Text("RBS1".to_owned()));
+    assert_eq!(readback_unsigned[2], integer(0));
+    assert_eq!(readback_unsigned[3], Value::Text("provider".to_owned()));
+    assert_eq!(readback_unsigned[11], integer(1));
+    assert_eq!(
+        readback_unsigned[15],
+        bytes(admission.effective_limits_digest())
+    );
+    assert_eq!(
+        readback_unsigned[17],
+        Value::Array(
+            required_feature_ids()
+                .into_iter()
+                .map(Value::Text)
+                .collect(),
+        )
+    );
+    let fdl1 = Value::Array(vec![
+        Value::Text("FDL1".to_owned()),
+        integer(1),
+        integer(1),
+        Value::Array(vec![Value::Array(vec![integer(3), integer(1)])]),
+    ]);
+    assert_eq!(
+        readback_unsigned[16],
+        bytes(digest_value(b"PiglorOS.FDL1.v1\0", &fdl1)?)
+    );
+    assert_eq!(
+        wrapped_digest(admission.expected_readback_set())?,
+        admission.expected_readback_set_digest()
+    );
+    assert_eq!(
+        admission.expected_readback_set_digest(),
+        digest_value(
+            b"PiglorOS.SandboxReadbackSet.v1\0",
+            &Value::Array(readback_unsigned.clone()),
+        )?
+    );
+    Ok(())
+}
+
+#[test]
+fn selector_readback_vectors_bind_both_supported_architectures() -> TestResult {
+    let mut digests = Vec::new();
+    for (architecture, expected) in [
+        (0, SandboxArchitecture::X86_64),
+        (1, SandboxArchitecture::Aarch64),
+    ] {
+        let fixture = Fixture::for_architecture(architecture)?;
+        let admission = transport_admission(&fixture)?;
+        let Value::Array(wrapper) = ciborium::from_reader(admission.expected_readback_set())?
+        else {
+            return Err("RBS1 wrapper must be an array".into());
+        };
+        let Value::Array(unsigned) = &wrapper[0] else {
+            return Err("RBS1 unsigned value must be an array".into());
+        };
+        assert_eq!(unsigned[8], integer(architecture));
+        assert_eq!(
+            admission.launch_policy().sim1_digest,
+            wrapped_digest(&fixture.sim1)?
+        );
+        assert_eq!(fixture.admit()?.syscall_set().architecture, expected);
+        digests.push(admission.expected_readback_set_digest());
+    }
+    assert_ne!(digests[0], digests[1]);
+    Ok(())
+}
+
+#[test]
+fn selector_rejects_every_malformed_broker_hard_cap_shape() -> TestResult {
+    let fixture = Fixture::new()?;
+    let attempt = selector_case_attempt();
+    let valid_limits = (0_u64..=16)
+        .map(|limit_id| Value::Array(vec![integer(limit_id), integer(1)]))
+        .collect::<Vec<_>>();
+    let record = |magic: &str, version: u64, limits: Vec<Value>| {
+        encode(&Value::Array(vec![
+            Value::Text(magic.to_owned()),
+            integer(version),
+            Value::Array(limits),
+        ]))
+    };
+    let mut duplicate = valid_limits.clone();
+    duplicate[1] = duplicate[0].clone();
+    let mut reordered = valid_limits.clone();
+    reordered.swap(0, 1);
+    let mut unknown = valid_limits.clone();
+    unknown[16] = Value::Array(vec![integer(17), integer(1)]);
+    let mut malformed = valid_limits.clone();
+    malformed[0] = Value::Null;
+    for caps in [
+        Vec::new(),
+        vec![0; 1025],
+        record("BHC2", 1, valid_limits.clone())?,
+        record("BHC1", 2, valid_limits.clone())?,
+        record("BHC1", 1, valid_limits[..16].to_vec())?,
+        record("BHC1", 1, duplicate)?,
+        record("BHC1", 1, reordered)?,
+        record("BHC1", 1, unknown)?,
+        record("BHC1", 1, malformed)?,
+    ] {
+        let policy = fixture.policy_for_broker_and_launch(&caps, &fixture.lps1)?;
+        let evaluation = evaluation_for_authority(&fixture, &policy, &fixture.lps1)?;
+        assert!(establish_admission(
+            &fixture,
+            &policy,
+            &caps,
+            &fixture.lps1,
+            &evaluation,
+            &attempt,
+            &[],
+        )
+        .is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn selector_intersects_each_same_unit_fixture_limit_and_preserves_zero() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut attempt = selector_case_attempt();
+    attempt.budget.memory_bytes = 900;
+    attempt.watchdog_ms = 800;
+    attempt.budget.output_bytes = 700;
+    attempt.budget.storage_bytes = 600;
+    let mut broker_values = [1_000; 17];
+    broker_values[8] = 500;
+    broker_values[13] = 200;
+    let broker = broker_hard_caps_with(broker_values)?;
+    let mut launch_values = [1_500; 17];
+    launch_values[4] = 700;
+    launch_values[13] = 220;
+    let launch = launch_policy_with(wrapped_digest(&fixture.sim1)?, 1, launch_values)?;
+    let policy = fixture.policy_for_broker_and_launch(&broker, &launch)?;
+    let evaluation = evaluation_for_authority(&fixture, &policy, &launch)?;
+    let admission = establish_admission(
+        &fixture,
+        &policy,
+        &broker,
+        &launch,
+        &evaluation,
+        &attempt,
+        &[],
+    )?;
+    let values = admission
+        .effective_limits()
+        .iter()
+        .map(|limit| limit.value)
+        .collect::<Vec<_>>();
+    assert_eq!(values[0], 900);
+    assert_eq!(values[4], 700);
+    assert_eq!(values[8], 500);
+    assert_eq!(values[9], 600);
+    assert_eq!(values[13], 200);
+    assert!(values
+        .iter()
+        .enumerate()
+        .all(|(id, value)| matches!(id, 0 | 4 | 8 | 9 | 13) || *value == 1_000));
+
+    broker_values[0] = 0;
+    let zero_memory = broker_hard_caps_with(broker_values)?;
+    let policy = fixture.policy_for_broker_and_launch(&zero_memory, &launch)?;
+    let evaluation = evaluation_for_authority(&fixture, &policy, &launch)?;
+    let admission = establish_admission(
+        &fixture,
+        &policy,
+        &zero_memory,
+        &launch,
+        &evaluation,
+        &attempt,
+        &[],
+    )?;
+    assert_eq!(admission.effective_limits()[0].value, 0);
+    Ok(())
+}
+
+#[test]
+fn selector_closes_zero_watchdog_and_unrepresentable_concurrency() -> TestResult {
+    let fixture = Fixture::new()?;
+    let attempt = selector_case_attempt();
+    for (broker_values, launch_values) in {
+        let mut zero_watchdog = [1; 17];
+        zero_watchdog[4] = 0;
+        let mut excess_broker = [300; 17];
+        excess_broker[4] = 1;
+        let mut excess_launch = [300; 17];
+        excess_launch[4] = 1;
+        [(zero_watchdog, [1; 17]), (excess_broker, excess_launch)]
+    } {
+        let broker = broker_hard_caps_with(broker_values)?;
+        let launch = launch_policy_with(wrapped_digest(&fixture.sim1)?, 1, launch_values)?;
+        let policy = fixture.policy_for_broker_and_launch(&broker, &launch)?;
+        let evaluation = evaluation_for_authority(&fixture, &policy, &launch)?;
+        assert!(establish_admission(
+            &fixture,
+            &policy,
+            &broker,
+            &launch,
+            &evaluation,
+            &attempt,
+            &[],
+        )
+        .is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn selector_derives_mode_specific_descriptor_layouts() -> TestResult {
+    let fixture = Fixture::new()?;
+    for mode in 0_u64..=3 {
+        let launch = launch_policy_with(wrapped_digest(&fixture.sim1)?, mode, [1; 17])?;
+        let policy = fixture.policy_for_broker_and_launch(&fixture.broker_hard_caps, &launch)?;
+        let evaluation = evaluation_for_authority(&fixture, &policy, &launch)?;
+        let mut attempt = selector_case_attempt();
+        attempt.mode = u8::try_from(mode)?;
+        let admission = establish_admission(
+            &fixture,
+            &policy,
+            &fixture.broker_hard_caps,
+            &launch,
+            &evaluation,
+            &attempt,
+            &[],
+        )?;
+        let Value::Array(wrapper) = ciborium::from_reader(admission.expected_readback_set())?
+        else {
+            return Err("RBS1 wrapper must be an array".into());
+        };
+        let Value::Array(unsigned) = &wrapper[0] else {
+            return Err("RBS1 unsigned value must be an array".into());
+        };
+        let entries = if mode == 0 {
+            vec![
+                Value::Array(vec![integer(3), integer(0)]),
+                Value::Array(vec![integer(4), integer(1)]),
+            ]
+        } else {
+            vec![Value::Array(vec![integer(3), integer(1)])]
+        };
+        let fdl1 = Value::Array(vec![
+            Value::Text("FDL1".to_owned()),
+            integer(1),
+            integer(mode),
+            Value::Array(entries),
+        ]);
+        assert_eq!(unsigned[11], integer(mode));
+        assert_eq!(
+            unsigned[16],
+            bytes(digest_value(b"PiglorOS.FDL1.v1\0", &fdl1)?)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn selector_rejects_foreign_required_capability_and_attempt_authority() -> TestResult {
+    let fixture = Fixture::new()?;
+    for capability in [
+        RequiredProviderCapability {
+            capability_id: "other".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        RequiredProviderCapability {
+            capability_id: "execute".to_owned(),
+            capability_version: 2,
+            minimum_strength: 1,
+        },
+        RequiredProviderCapability {
+            capability_id: "execute".to_owned(),
+            capability_version: 1,
+            minimum_strength: 2,
+        },
+    ] {
+        let mut evaluation = selector_evaluation_request(&fixture)?;
+        evaluation
+            .sandbox_requirement
+            .as_mut()
+            .ok_or("sandbox requirement")?
+            .required_provider_capability = capability;
+        evaluation.output_capability.capability_digest =
+            evaluation.expected_output_capability_digest()?;
+        evaluation.request_digest = evaluation.digest()?;
+        assert!(establish_admission(
+            &fixture,
+            &fixture.policy,
+            &fixture.broker_hard_caps,
+            &fixture.lps1,
+            &evaluation,
+            &selector_case_attempt(),
+            &[],
+        )
+        .is_err());
+    }
+
+    let evaluation = selector_evaluation_request(&fixture)?;
+    for attempt in {
+        let mut wrong_mode = selector_case_attempt();
+        wrong_mode.mode = 0;
+        let mut missing_capability = selector_case_attempt();
+        missing_capability.capability_ids.clear();
+        let mut zero_fixture = selector_case_attempt();
+        zero_fixture.fixture_digest = [0; 32];
+        [wrong_mode, missing_capability, zero_fixture]
+    } {
+        assert!(establish_admission(
+            &fixture,
+            &fixture.policy,
+            &fixture.broker_hard_caps,
+            &fixture.lps1,
+            &evaluation,
+            &attempt,
+            &[],
+        )
+        .is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn selector_preserves_network_plan_order_and_bounds_the_commitment() -> TestResult {
+    let fixture = Fixture::new()?;
+    let launch = launch_policy_with(wrapped_digest(&fixture.sim1)?, 0, [1; 17])?;
+    let policy = fixture.policy_for_broker_and_launch(&fixture.broker_hard_caps, &launch)?;
+    let evaluation = evaluation_for_authority(&fixture, &policy, &launch)?;
+    let mut attempt = selector_case_attempt();
+    attempt.mode = 0;
+    attempt.network_allowed = true;
+    let plans = vec![
+        network_plan([1; 16], "execute")?,
+        network_plan([2; 16], "execute")?,
+    ];
+    let admission = establish_admission(
+        &fixture,
+        &policy,
+        &fixture.broker_hard_caps,
+        &launch,
+        &evaluation,
+        &attempt,
+        &plans,
+    )?;
+    let Value::Array(wrapper) = ciborium::from_reader(admission.expected_readback_set())? else {
+        return Err("RBS1 wrapper must be an array".into());
+    };
+    let Value::Array(unsigned) = &wrapper[0] else {
+        return Err("RBS1 unsigned value must be an array".into());
+    };
+    assert_eq!(
+        unsigned[18],
+        Value::Array(plans.iter().map(|plan| bytes(plan.plan_digest)).collect())
+    );
+
+    let mut zero_digest = plans[0].clone();
+    zero_digest.plan_digest = [0; 32];
+    for invalid in [vec![zero_digest], vec![plans[0].clone(); 257]] {
+        assert!(establish_admission(
+            &fixture,
+            &policy,
+            &fixture.broker_hard_caps,
+            &launch,
+            &evaluation,
+            &attempt,
+            &invalid,
+        )
+        .is_err());
+    }
     Ok(())
 }
 
@@ -2889,6 +3465,7 @@ fn image_admission_rejects_provider_architecture_substitution() -> TestResult {
 #[test]
 fn launch_and_execute_admission_reject_each_selected_authority_mismatch() -> TestResult {
     let fixture = Fixture::new()?;
+    let selector = transport_admission(&fixture)?;
     let admitted = fixture.admit()?;
     let image = admitted.admit_image(
         &fixture.sim1,
@@ -2925,15 +3502,43 @@ fn launch_and_execute_admission_reject_each_selected_authority_mismatch() -> Tes
     let changed_request = redigest_unsigned_field(&request_bytes, "SPX1", 10, bytes([99; 32]))?;
     let request = SandboxExecuteRequest::from_canonical_cbor(&changed_request)?;
     assert_eq!(
-        admitted.authenticate_grant(
-            &admission_grant(&fixture, &request, &launch)?,
-            &request,
-            &image,
-            &launch,
-            &Fixture::grant_expectations(),
-        ),
+        selector.authenticate_grant(&request, &admission_grant(&fixture, &request, &selector)?,),
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn grant_authentication_rejects_selector_commitment_substitution() -> TestResult {
+    let fixture = Fixture::new()?;
+    let selector = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &selector)?;
+    for substitution in 0..5 {
+        let mut authority = request.authority.clone();
+        let mut capability_ids = request.capability_ids.clone();
+        let mut plans = request.network_plans.clone();
+        match substitution {
+            0 => authority.evr1_digest = [91; 32],
+            1 => authority.execution_profile_digest = [92; 32],
+            2 => authority.fixture_digest = [93; 32],
+            3 => capability_ids = vec!["other".to_owned()],
+            4 => plans = vec![network_plan([9; 16], "execute")?],
+            _ => return Err("unsupported selector commitment substitution".into()),
+        }
+        let foreign = SandboxExecuteRequest::for_selector(
+            request.request.clone(),
+            request.attempt_id,
+            authority,
+            capability_ids,
+            request.adapter_input.clone(),
+            plans,
+        )?;
+        let grant = admission_grant(&fixture, &foreign, &selector)?;
+        assert_eq!(
+            selector.authenticate_grant(&foreign, &grant),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+    }
     Ok(())
 }
 
@@ -3027,20 +3632,7 @@ fn host_profile_requires_the_closed_passing_feature_set() -> TestResult {
 #[test]
 fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResult {
     let fixture = Fixture::new()?;
-    let selector = RootSelectorAdmission::establish(
-        &fixture.policy,
-        &fixture.trust,
-        &fixture.revocation,
-        RootSelectorAdmissionInputs {
-            provider: fixture.inputs(),
-            image_manifest: &fixture.sim1,
-            root_image: &fixture.root_image,
-            executable: &fixture.executable,
-            subject_artifact_digest: fixture.subject_digest(),
-            launch_policy: &fixture.lps1,
-            grant_expectations: Fixture::grant_expectations(),
-        },
-    )?;
+    let selector = transport_admission(&fixture)?;
     assert_eq!(
         selector.revocation_state()?.current().snapshot_digest(),
         fixture.revocation.snapshot_digest()
@@ -3050,7 +3642,7 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         selector.launch_policy(),
         &["execute"],
     )?)?;
-    let grant_bytes = admission_grant(&fixture, &request, selector.launch_policy())?;
+    let grant_bytes = admission_grant(&fixture, &request, &selector)?;
     let grant = AdmissionGrant::from_canonical_cbor(&grant_bytes)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
@@ -3078,7 +3670,7 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
     assert_eq!(
         selector.authenticate_execution(
             &unsupported,
-            &admission_grant(&fixture, &unsupported, selector.launch_policy())?,
+            &admission_grant(&fixture, &unsupported, &selector)?,
             &receipt_bytes,
             &result_bytes,
             &audit,
@@ -3870,12 +4462,7 @@ fn root_selector_propagates_disconnected_response_errors() -> TestResult {
             0 => plan.expected_attempt.watchdog_ms += 1,
             1 => plan.execute_authority.cpf1_digest = [99; 32],
             2 => plan.admission.provider_manifest = corrupt_signed_digest(&fixture.spm1)?,
-            3 => {
-                plan.admission
-                    .grant_expectations
-                    .required_provider_capability
-                    .capability_id = "different-capability".to_owned();
-            }
+            3 => plan.admission.broker_hard_caps = b"not-cbor".to_vec(),
             _ => {}
         }
         let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
@@ -4013,13 +4600,17 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
     }
 
     let fixture = Fixture::new()?;
-    let request = selector_evaluation_request(&fixture)?;
-    let attempt = selector_case_attempt();
-    let mut plan = selector_case_plan(&fixture, &request, attempt.clone())?;
-    plan.admission
-        .grant_expectations
+    let mut request = selector_evaluation_request(&fixture)?;
+    request
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement")?
         .required_provider_capability
         .capability_id = "different-capability".to_owned();
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    let attempt = selector_case_attempt();
+    let plan = selector_case_plan(&fixture, &request, attempt.clone())?;
     let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
     let (server_result, control, trailing) = exercise_root_selector(
         FixedSelectorAuthority { plan },
@@ -4035,17 +4626,19 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
     assert!(trailing.is_empty());
     let local = SandboxLocalError::from_canonical_cbor(&control)?;
     assert_eq!(local.phase, SandboxLocalErrorPhase::BeforeSpx1);
-    assert_eq!(local.code, SandboxLocalErrorCode::RequestAuthorityMismatch);
+    assert_eq!(local.code, SandboxLocalErrorCode::PolicyUnavailable);
     Ok(())
 }
 
 #[test]
 fn root_selector_establishment_fails_closed_at_each_admission_stage() -> TestResult {
     let fixture = Fixture::new()?;
+    let evaluation = selector_evaluation_request(&fixture)?;
+    let attempt = selector_case_attempt();
     let establish = |provider_manifest: &[u8],
                      image_manifest: &[u8],
-                     subject_digest: [u8; 32],
-                     launch_policy: &[u8]| {
+                     launch_policy: &[u8],
+                     evaluation: &EvaluationRequest| {
         RootSelectorAdmission::establish(
             &fixture.policy,
             &fixture.trust,
@@ -4058,63 +4651,68 @@ fn root_selector_establishment_fails_closed_at_each_admission_stage() -> TestRes
                 image_manifest,
                 root_image: &fixture.root_image,
                 executable: &fixture.executable,
-                subject_artifact_digest: subject_digest,
                 launch_policy,
-                grant_expectations: Fixture::grant_expectations(),
+                evaluation,
+                attempt: &attempt,
+                network_plans: &[],
             },
         )
     };
-    assert!(establish(
-        b"not-cbor",
-        &fixture.sim1,
-        fixture.subject_digest(),
-        &fixture.lps1
-    )
-    .is_err());
-    assert!(establish(
-        &fixture.spm1,
-        b"not-cbor",
-        fixture.subject_digest(),
-        &fixture.lps1
-    )
-    .is_err());
+    assert!(establish(b"not-cbor", &fixture.sim1, &fixture.lps1, &evaluation).is_err());
+    assert!(establish(&fixture.spm1, b"not-cbor", &fixture.lps1, &evaluation).is_err());
+    let mut invalid_evaluation = evaluation.clone();
+    invalid_evaluation.request_digest = [99; 32];
     assert_eq!(
-        establish(&fixture.spm1, &fixture.sim1, [99; 32], &fixture.lps1),
+        establish(
+            &fixture.spm1,
+            &fixture.sim1,
+            &fixture.lps1,
+            &invalid_evaluation,
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+    let mut without_sandbox = evaluation.clone();
+    without_sandbox.sandbox_requirement = None;
+    without_sandbox.output_capability.capability_digest =
+        without_sandbox.expected_output_capability_digest()?;
+    without_sandbox.request_digest = without_sandbox.digest()?;
+    assert_eq!(
+        establish(
+            &fixture.spm1,
+            &fixture.sim1,
+            &fixture.lps1,
+            &without_sandbox,
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+    let mut foreign_subject = evaluation.clone();
+    foreign_subject.subject_artifact_digest = [99; 32];
+    foreign_subject.output_capability.capability_digest =
+        foreign_subject.expected_output_capability_digest()?;
+    foreign_subject.request_digest = foreign_subject.digest()?;
+    assert_eq!(
+        establish(
+            &fixture.spm1,
+            &fixture.sim1,
+            &fixture.lps1,
+            &foreign_subject,
+        ),
         Err(SandboxAdmissionError::ArtifactMismatch)
     );
-    assert!(establish(
-        &fixture.spm1,
-        &fixture.sim1,
-        fixture.subject_digest(),
-        b"not-cbor"
-    )
-    .is_err());
+    assert!(establish(&fixture.spm1, &fixture.sim1, b"not-cbor", &evaluation).is_err());
     Ok(())
 }
 
 #[test]
 fn root_selector_rejects_each_incomplete_execution_evidence_stage() -> TestResult {
     let fixture = Fixture::new()?;
-    let selector = RootSelectorAdmission::establish(
-        &fixture.policy,
-        &fixture.trust,
-        &fixture.revocation,
-        RootSelectorAdmissionInputs {
-            provider: fixture.inputs(),
-            image_manifest: &fixture.sim1,
-            root_image: &fixture.root_image,
-            executable: &fixture.executable,
-            subject_artifact_digest: fixture.subject_digest(),
-            launch_policy: &fixture.lps1,
-            grant_expectations: Fixture::grant_expectations(),
-        },
-    )?;
+    let selector = transport_admission(&fixture)?;
     let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
         &fixture,
         selector.launch_policy(),
         &["execute"],
     )?)?;
-    let grant_bytes = admission_grant(&fixture, &request, selector.launch_policy())?;
+    let grant_bytes = admission_grant(&fixture, &request, &selector)?;
     let grant = AdmissionGrant::from_canonical_cbor(&grant_bytes)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
@@ -4153,6 +4751,7 @@ fn root_selector_rejects_each_incomplete_execution_evidence_stage() -> TestResul
 #[test]
 fn provider_terminal_audit_authority_covers_failure_and_denial_paths() -> TestResult {
     let fixture = Fixture::new()?;
+    let selector = transport_admission(&fixture)?;
     let admitted = fixture.admit()?;
     let image = admitted.admit_image(
         &fixture.sim1,
@@ -4166,13 +4765,8 @@ fn provider_terminal_audit_authority_covers_failure_and_denial_paths() -> TestRe
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
-        &request,
-        &image,
-        &launch,
-        &Fixture::grant_expectations(),
-    )?;
+    let grant_bytes = admission_grant(&fixture, &request, &selector)?;
+    let grant = selector.authenticate_grant(&request, &grant_bytes)?;
 
     for (outcome, events, ready) in [(4, vec![0], None), (1, vec![11, 13, 1], Some([41; 32]))] {
         let audit = audit_chain_for_events(&fixture, &grant, &events)?;
@@ -4331,6 +4925,7 @@ fn conformance_report_rejects_closed_wire_and_verification_boundaries() -> TestR
 #[test]
 fn admission_entry_points_reject_malformed_records() -> TestResult {
     let fixture = Fixture::new()?;
+    let selector = transport_admission(&fixture)?;
     let admitted = fixture.admit()?;
     let image = admitted.admit_image(
         &fixture.sim1,
@@ -4344,13 +4939,8 @@ fn admission_entry_points_reject_malformed_records() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
-        &request,
-        &image,
-        &launch,
-        &Fixture::grant_expectations(),
-    )?;
+    let grant_bytes = admission_grant(&fixture, &request, &selector)?;
+    let grant = selector.authenticate_grant(&request, &grant_bytes)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt = admitted.authenticate_receipt(
         &provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?,
@@ -4366,15 +4956,7 @@ fn admission_entry_points_reject_malformed_records() -> TestResult {
         )
         .is_err());
     assert!(admitted.admit_launch_policy(b"not-cbor", &image).is_err());
-    assert!(admitted
-        .authenticate_grant(
-            b"not-cbor",
-            &request,
-            &image,
-            &launch,
-            &Fixture::grant_expectations(),
-        )
-        .is_err());
+    assert!(selector.authenticate_grant(&request, b"not-cbor").is_err());
     assert!(admitted.authenticate_receipt(b"not-cbor", &grant).is_err());
     assert!(admitted
         .authenticate_terminal_result(b"not-cbor", &request, &grant, &receipt)
@@ -4429,66 +5011,9 @@ fn admission_entry_points_reject_forged_signatures() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn provider_admission_rejects_invalid_required_feature_sets() -> TestResult {
-    let fixture = Fixture::new()?;
-    for required_features in [
-        Vec::new(),
-        vec![String::new()],
-        vec!["cgroup-v2".to_owned(), "cgroup-v2".to_owned()],
-        vec!["z-feature".to_owned(), "a-feature".to_owned()],
-    ] {
-        let inputs = SandboxProviderAdmissionInputs {
-            required_features: &required_features,
-            ..fixture.inputs()
-        };
-        assert_eq!(
-            AdmittedSandboxProvider::admit(
-                &fixture.policy,
-                &fixture.trust,
-                &fixture.revocation,
-                inputs,
-            ),
-            Err(SandboxAdmissionError::HostCapabilityMismatch)
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn provider_admission_requires_canonical_not_lexical_feature_order() -> TestResult {
-    let fixture = Fixture::new()?;
-    assert!(AdmittedSandboxProvider::admit(
-        &fixture.policy,
-        &fixture.trust,
-        &fixture.revocation,
-        fixture.inputs(),
-    )
-    .is_ok());
-    let mut lexical = fixture.required_features.clone();
-    lexical.sort_unstable();
-    assert_ne!(lexical, fixture.required_features);
-    let inputs = SandboxProviderAdmissionInputs {
-        required_features: &lexical,
-        ..fixture.inputs()
-    };
-    assert_eq!(
-        AdmittedSandboxProvider::admit(
-            &fixture.policy,
-            &fixture.trust,
-            &fixture.revocation,
-            inputs
-        ),
-        Err(SandboxAdmissionError::HostCapabilityMismatch)
-    );
-    Ok(())
-}
-
 fn assert_grant_substitutions(
     fixture: &Fixture,
-    admitted: &AdmittedSandboxProvider,
-    image: &AdmittedSandboxImage,
-    launch: &LaunchPolicy,
+    selector: &RootSelectorAdmission,
     request: &SandboxExecuteRequest,
     grant_bytes: &[u8],
 ) -> TestResult {
@@ -4506,40 +5031,7 @@ fn assert_grant_substitutions(
             &fixture.authority.runtime,
         )?;
         assert_eq!(
-            admitted.authenticate_grant(
-                &changed,
-                request,
-                image,
-                launch,
-                &Fixture::grant_expectations(),
-            ),
-            Err(SandboxAdmissionError::ConformanceMismatch)
-        );
-    }
-
-    for required_provider_capability in [
-        RequiredProviderCapability {
-            capability_id: "other".to_owned(),
-            capability_version: 1,
-            minimum_strength: 1,
-        },
-        RequiredProviderCapability {
-            capability_id: "execute".to_owned(),
-            capability_version: 2,
-            minimum_strength: 1,
-        },
-        RequiredProviderCapability {
-            capability_id: "execute".to_owned(),
-            capability_version: 1,
-            minimum_strength: 2,
-        },
-    ] {
-        let expectations = SandboxGrantExpectations {
-            required_provider_capability,
-            ..Fixture::grant_expectations()
-        };
-        assert_eq!(
-            admitted.authenticate_grant(grant_bytes, request, image, launch, &expectations),
+            selector.authenticate_grant(request, &changed),
             Err(SandboxAdmissionError::ConformanceMismatch)
         );
     }
@@ -4549,6 +5041,7 @@ fn assert_grant_substitutions(
 #[test]
 fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> TestResult {
     let fixture = Fixture::new()?;
+    let selector = transport_admission(&fixture)?;
     let admitted = fixture.admit()?;
     let image = admitted.admit_image(
         &fixture.sim1,
@@ -4562,15 +5055,9 @@ fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> Te
         &launch,
         &["execute"],
     )?)?;
-    let grant_bytes = admission_grant(&fixture, &request, &launch)?;
-    assert_grant_substitutions(&fixture, &admitted, &image, &launch, &request, &grant_bytes)?;
-    let grant = admitted.authenticate_grant(
-        &grant_bytes,
-        &request,
-        &image,
-        &launch,
-        &Fixture::grant_expectations(),
-    )?;
+    let grant_bytes = admission_grant(&fixture, &request, &selector)?;
+    assert_grant_substitutions(&fixture, &selector, &request, &grant_bytes)?;
+    let grant = selector.authenticate_grant(&request, &grant_bytes)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
     for (field, replacement) in [
@@ -4643,6 +5130,7 @@ fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> Te
 #[test]
 fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
     let fixture = Fixture::new()?;
+    let selector = transport_admission(&fixture)?;
     let admitted = fixture.admit()?;
     let image = admitted.admit_image(
         &fixture.sim1,
@@ -4656,23 +5144,11 @@ fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant_bytes = admission_grant(&fixture, &request, &launch)?;
-    assert!(admitted
-        .authenticate_grant(
-            &replace_signed_signature(&grant_bytes, [9; 64])?,
-            &request,
-            &image,
-            &launch,
-            &Fixture::grant_expectations(),
-        )
+    let grant_bytes = admission_grant(&fixture, &request, &selector)?;
+    assert!(selector
+        .authenticate_grant(&request, &replace_signed_signature(&grant_bytes, [9; 64])?)
         .is_err());
-    let grant = admitted.authenticate_grant(
-        &grant_bytes,
-        &request,
-        &image,
-        &launch,
-        &Fixture::grant_expectations(),
-    )?;
+    let grant = selector.authenticate_grant(&request, &grant_bytes)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
     assert!(admitted
@@ -4724,6 +5200,7 @@ fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
 #[test]
 fn audit_record_rejects_every_malformed_wire_field() -> TestResult {
     let fixture = Fixture::new()?;
+    let selector = transport_admission(&fixture)?;
     let admitted = fixture.admit()?;
     let image = admitted.admit_image(
         &fixture.sim1,
@@ -4737,13 +5214,8 @@ fn audit_record_rejects_every_malformed_wire_field() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
-        &request,
-        &image,
-        &launch,
-        &Fixture::grant_expectations(),
-    )?;
+    let grant_bytes = admission_grant(&fixture, &request, &selector)?;
+    let grant = selector.authenticate_grant(&request, &grant_bytes)?;
     let record = audit_record(&fixture, &grant, 0, 11, None)?;
     assert!(SandboxAuditRecord::from_canonical_cbor(b"not-cbor").is_err());
     assert!(SandboxAuditRecord::from_canonical_cbor(&encode(&Value::Null)?).is_err());

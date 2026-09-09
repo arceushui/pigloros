@@ -15,7 +15,7 @@ use crate::provider_transport::StagedOutput;
 use crate::sandbox_provider_protocol::{
     ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor, RequestAuthority,
     RootSelectorAdmission, RootSelectorAdmissionInputs, SandboxAdministratorPolicy,
-    SandboxGrantExpectations, SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase,
+    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase,
     SandboxProviderAdmissionInputs, SandboxProviderOperation, SandboxRevocationSnapshot,
     SandboxTerminalOutcome, SandboxTrustSnapshot,
 };
@@ -49,8 +49,6 @@ pub struct RootSelectorAdmissionArtifacts {
     pub host_profile: Vec<u8>,
     /// Exact architecture-qualified SCS1 bytes.
     pub syscall_set: Vec<u8>,
-    /// Canonically ordered host-feature identifiers selected for admission.
-    pub required_features: Vec<String>,
     /// Exact selected SIM1 bytes.
     pub image_manifest: Vec<u8>,
     /// Exact immutable root-image bytes bound by SIM1.
@@ -59,21 +57,15 @@ pub struct RootSelectorAdmissionArtifacts {
     pub executable: Vec<u8>,
     /// Exact selected LPS1 bytes.
     pub launch_policy: Vec<u8>,
-    /// Selector-derived ELM1, readback, and provider-capability expectations.
-    pub grant_expectations: SandboxGrantExpectations,
 }
 
 impl RootSelectorAdmissionArtifacts {
     fn admit(
         &self,
         request: &EvaluationRequest,
-        requirement: &SandboxRequirement,
+        attempt: &CaseAttempt,
+        network_plans: &[NetworkExchangePlan],
     ) -> Result<RootSelectorAdmission, RootSelectorServiceError> {
-        if self.grant_expectations.required_provider_capability
-            != requirement.required_provider_capability
-        {
-            return Err(RootSelectorServiceError::AuthorityMismatch);
-        }
         RootSelectorAdmission::establish(
             &self.policy,
             &self.trust,
@@ -86,14 +78,14 @@ impl RootSelectorAdmissionArtifacts {
                     conformance_report: &self.conformance_report,
                     host_profile: &self.host_profile,
                     syscall_set: &self.syscall_set,
-                    required_features: &self.required_features,
                 },
                 image_manifest: &self.image_manifest,
                 root_image: &self.root_image,
                 executable: &self.executable,
-                subject_artifact_digest: request.subject_artifact_digest,
                 launch_policy: &self.launch_policy,
-                grant_expectations: self.grant_expectations.clone(),
+                evaluation: request,
+                attempt,
+                network_plans,
             },
         )
         .map_err(|_| RootSelectorServiceError::Admission)
@@ -424,7 +416,11 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             )?;
             return Ok(None);
         }
-        let admission = match plan.admission.admit(&decoded.evaluation, requirement) {
+        let admission = match plan.admission.admit(
+            &decoded.evaluation,
+            &plan.expected_attempt,
+            &plan.network_plans,
+        ) {
             Ok(admission) => admission,
             Err(error) => {
                 Self::write_local_error(
