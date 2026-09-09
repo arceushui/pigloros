@@ -7859,6 +7859,13 @@ mod coverage_entrypoints {
         ));
         assert!(bind_registry_to_host_gate(&mut missing_bound_gate, Arc::clone(&gate)).is_err());
 
+        let mut fork_registry = PluginRegistry::new();
+        ok(bind_fork_registry_erasure_gate(
+            &mut fork_registry,
+            &missing_bound_gate,
+        ));
+        assert!(!fork_registry.erasure_gate_is_bound());
+
         assert!(matches!(
             hosted_store_error(pos_core::ErasureHostErrorV1::AccessFrozen),
             ExperimentError::Store(pos_core::CoreError::ErasureAccessFrozen)
