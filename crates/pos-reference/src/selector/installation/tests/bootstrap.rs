@@ -37,13 +37,14 @@ fn install_record(
     let path = fixture
         .directory
         .path()
-        .join("authority")
+        .join(if code == 11 { "providers" } else { "authority" })
         .join(digest_name(digest));
     if path.exists() {
         assert_eq!(std::fs::read(&path)?, encoded);
     } else {
         std::fs::write(&path, encoded)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
+        let mode = if code == 11 { 0o500 } else { 0o400 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
     }
     let mut entries = array_values(&fields[10])?.to_vec();
     entries[usize::from(code)] = Value::Array(vec![
@@ -53,7 +54,9 @@ fn install_record(
         integer(u64::try_from(encoded.len())?),
     ]);
     fields[10] = Value::Array(entries);
-    fields[4 + usize::from(code)] = bytes(identity);
+    if code <= 2 {
+        fields[4 + usize::from(code)] = bytes(identity);
+    }
     Ok(())
 }
 
@@ -71,6 +74,8 @@ pub(super) fn authenticated_fixture(
     let fixture = InstallationFixture::new()?;
     let root = SigningKey::from_bytes(&[42; 32]);
     let administrator = SigningKey::from_bytes(&[43; 32]);
+    let release = SigningKey::from_bytes(&[44; 32]);
+    let runtime = SigningKey::from_bytes(&[45; 32]);
     let mut manifest = unsigned();
     let (trust, trust_digest) = sign_record(
         "TRS1",
@@ -78,12 +83,26 @@ pub(super) fn authenticated_fixture(
             Value::Text("TRS1".to_owned()),
             integer(1),
             integer(1),
-            Value::Array(vec![Value::Array(vec![
-                Value::Text("administrator".to_owned()),
-                integer(1),
-                bytes(administrator.verifying_key().to_bytes()),
-                integer(1),
-            ])]),
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Text("release".to_owned()),
+                    integer(2),
+                    bytes(release.verifying_key().to_bytes()),
+                    integer(1),
+                ]),
+                Value::Array(vec![
+                    Value::Text("runtime".to_owned()),
+                    integer(3),
+                    bytes(runtime.verifying_key().to_bytes()),
+                    integer(1),
+                ]),
+                Value::Array(vec![
+                    Value::Text("administrator".to_owned()),
+                    integer(1),
+                    bytes(administrator.verifying_key().to_bytes()),
+                    integer(1),
+                ]),
+            ]),
             Value::Array(Vec::new()),
             Value::Text("offline-root".to_owned()),
         ],
@@ -105,12 +124,56 @@ pub(super) fn authenticated_fixture(
         &administrator,
     )?;
     install_record(&fixture, &mut manifest, 1, &revocation, revocation_digest)?;
+    let provider_binary = [11; 32];
+    let provider_binary_digest = *blake3::hash(&provider_binary).as_bytes();
+    let (provider_manifest, provider_manifest_digest) = sign_record(
+        "SPM1",
+        vec![
+            Value::Text("SPM1".to_owned()),
+            integer(1),
+            Value::Text("provider".to_owned()),
+            bytes([10; 32]),
+            bytes([11; 32]),
+            bytes(provider_binary_digest),
+            bytes([12; 32]),
+            Value::Text("runtime".to_owned()),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("execute".to_owned()),
+                integer(1),
+                integer(1),
+            ])]),
+            Value::Array(vec![integer(0)]),
+            bytes([13; 32]),
+            bytes([14; 32]),
+            bytes([15; 32]),
+            bytes([16; 32]),
+            integer(1),
+            bytes([17; 32]),
+            bytes([18; 32]),
+            Value::Text("release".to_owned()),
+        ],
+        &release,
+    )?;
+    install_record(
+        &fixture,
+        &mut manifest,
+        3,
+        &provider_manifest,
+        provider_manifest_digest,
+    )?;
+    install_record(
+        &fixture,
+        &mut manifest,
+        11,
+        &provider_binary,
+        provider_binary_digest,
+    )?;
     let mut policy = vec![
         Value::Text("APT1".to_owned()),
         integer(1),
         integer(1),
-        bytes([4; 32]),
-        bytes(*blake3::hash(&[11; 32]).as_bytes()),
+        bytes(provider_manifest_digest),
+        bytes(provider_binary_digest),
         Value::Array(vec![bytes([9; 32])]),
         Value::Array(vec![bytes([10; 32])]),
         bytes(*blake3::hash(&[10; 32]).as_bytes()),

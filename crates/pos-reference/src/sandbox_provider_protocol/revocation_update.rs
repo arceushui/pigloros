@@ -247,6 +247,51 @@ pub struct RevocationAcknowledgement {
     signature: [u8; 64],
 }
 
+/// Sealed RCA1 authenticated against the exact previous runtime and committed RCC1.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedRevocationAcknowledgement {
+    request_id: [u8; 16],
+    revocation_digest: [u8; 32],
+    sir1_digest: [u8; 32],
+    previous_provider_binding_digest: [u8; 32],
+    cancelled_attempt_ids: Vec<[u8; 16]>,
+    acknowledgement_digest: [u8; 32],
+}
+
+impl AuthenticatedRevocationAcknowledgement {
+    fn from_verified(
+        acknowledgement: &RevocationAcknowledgement,
+        context: &RecoveryCancellationContext,
+    ) -> Self {
+        Self {
+            request_id: acknowledgement.request_id,
+            revocation_digest: acknowledgement.revocation_digest,
+            sir1_digest: context.sir1_digest,
+            previous_provider_binding_digest: context.previous_provider_binding_digest,
+            cancelled_attempt_ids: context.required_cancelled_attempt_ids.clone(),
+            acknowledgement_digest: acknowledgement.acknowledgement_digest,
+        }
+    }
+
+    /// Exact authenticated RCA1 self-digest.
+    #[must_use]
+    pub const fn acknowledgement_digest(&self) -> [u8; 32] {
+        self.acknowledgement_digest
+    }
+
+    pub(crate) fn matches_context(
+        &self,
+        context: &RecoveryCancellationContext,
+        expected_revocation_digest: [u8; 32],
+    ) -> bool {
+        self.request_id != [0; 16]
+            && self.revocation_digest == expected_revocation_digest
+            && self.sir1_digest == context.sir1_digest
+            && self.previous_provider_binding_digest == context.previous_provider_binding_digest
+            && self.cancelled_attempt_ids == context.required_cancelled_attempt_ids
+    }
+}
+
 impl RevocationAcknowledgement {
     pub(super) fn authenticate(
         bytes: &[u8],
@@ -295,16 +340,16 @@ struct PendingRevocationUpdate {
     deadline_ms: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct CompletedRevocationUpdate {
     request: [u8; 32],
     wire: [u8; 32],
     context: [u8; 32],
-    acknowledgement: [u8; 32],
+    acknowledgement: AuthenticatedRevocationAcknowledgement,
 }
 
 impl CompletedRevocationUpdate {
-    fn matches_request(self, identity: RequestIdentity, context: [u8; 32]) -> bool {
+    fn matches_request(&self, identity: RequestIdentity, context: [u8; 32]) -> bool {
         self.request == identity.request_digest
             && self.wire == identity.wire_digest
             && self.context == context
@@ -413,15 +458,17 @@ impl SelectorRevocationState {
         &mut self,
         bytes: &[u8],
         now_ms: u64,
-    ) -> Result<(), SandboxRevocationUpdateError> {
+    ) -> Result<AuthenticatedRevocationAcknowledgement, SandboxRevocationUpdateError> {
         let acknowledgement = RevocationAcknowledgement::authenticate(
             bytes,
             &self.runtime_key_id,
             &self.runtime_key,
         )?;
         if let Some(completed) = self.completed.get(&acknowledgement.request_id) {
-            return if completed.acknowledgement == acknowledgement.acknowledgement_digest {
-                Ok(())
+            return if completed.acknowledgement.acknowledgement_digest
+                == acknowledgement.acknowledgement_digest
+            {
+                Ok(completed.acknowledgement.clone())
             } else {
                 Err(SandboxRevocationUpdateError::RequestIdentityConflict)
             };
@@ -444,6 +491,10 @@ impl SelectorRevocationState {
         {
             return Err(SandboxRevocationUpdateError::AcknowledgementMismatch);
         }
+        let authenticated = AuthenticatedRevocationAcknowledgement::from_verified(
+            &acknowledgement,
+            &pending.context,
+        );
         let pending = self
             .pending
             .take()
@@ -455,10 +506,10 @@ impl SelectorRevocationState {
                 request: pending.request.request_digest,
                 wire: pending.wire_digest,
                 context: pending.context.context_digest,
-                acknowledgement: acknowledgement.acknowledgement_digest,
+                acknowledgement: authenticated.clone(),
             },
         );
-        Ok(())
+        Ok(authenticated)
     }
 
     /// Abandon an overdue transition and retain its exact committed recovery context.

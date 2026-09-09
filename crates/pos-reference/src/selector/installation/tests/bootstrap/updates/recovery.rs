@@ -28,11 +28,12 @@ fn commit_recovery() -> Result<RecoveryFixture, Box<dyn std::error::Error>> {
     let previous = update.previous_manifest_bytes().to_vec();
     let next = update.next_manifest_bytes().to_vec();
     let rcu = update.revocation_update_bytes().to_vec();
+    let snapshot = recovery_snapshot(&fixture.authority)?;
     let UpdateFixture {
         installation,
         authority,
     } = fixture;
-    let committed: CommittedInstallationUpdate = authority.commit_update(update)?;
+    let committed: CommittedInstallationUpdate = authority.commit_update(update, snapshot)?;
     drop(committed);
     Ok(RecoveryFixture {
         installation,
@@ -187,9 +188,16 @@ fn recovery_loader_rejects_wrong_envelope_tags_versions_and_member_types() -> Te
             .path()
             .join("installation-update.cbor");
         let document = decode_canonical(&std::fs::read(&path)?)?;
-        let mut fields = array(&document, 5)?.to_vec();
+        let wrapper = array(&document, 2)?;
+        let mut fields = array(&wrapper[0], 9)?.to_vec();
         fields[index] = replacement;
-        replace_recovery(&installation, &encode(&Value::Array(fields))?)?;
+        replace_recovery(
+            &installation,
+            &encode(&Value::Array(vec![
+                Value::Array(fields),
+                wrapper[1].clone(),
+            ]))?,
+        )?;
         assert!(installation.load()?.load_pending_recovery().is_err());
         assert!(path.exists());
     }
@@ -225,7 +233,8 @@ fn recovery_loader_rejects_forged_rcu_signature() -> TestResult {
         .path()
         .join("installation-update.cbor");
     let document = decode_canonical(&std::fs::read(&path)?)?;
-    let mut fields = array(&document, 5)?.to_vec();
+    let wrapper = array(&document, 2)?;
+    let mut fields = array(&wrapper[0], 9)?.to_vec();
     let Value::Bytes(update) = &mut fields[4] else {
         return Err(Box::new(ProtocolError::InvalidEncoding));
     };
@@ -244,7 +253,13 @@ fn recovery_loader_rejects_forged_rcu_signature() -> TestResult {
     };
     *last ^= 1;
     *update = encode(&update_document)?;
-    replace_recovery(&installation, &encode(&Value::Array(fields))?)?;
+    replace_recovery(
+        &installation,
+        &encode(&Value::Array(vec![
+            Value::Array(fields),
+            wrapper[1].clone(),
+        ]))?,
+    )?;
     assert!(installation.load()?.load_pending_recovery().is_err());
     Ok(())
 }

@@ -476,6 +476,52 @@ impl AuthenticatedSandboxExecution {
 }
 
 impl RootSelectorAdmission {
+    /// Allocate opaque root-selector identities for this admitted provider runtime.
+    #[must_use]
+    pub fn allocate_runtime_slot(
+        &self,
+    ) -> crate::selector::installation::authority::recovery::ProviderRuntimeSlot {
+        crate::selector::installation::authority::recovery::ProviderRuntimeSlot::allocate(
+            self.provider.manifest.manifest_digest,
+        )
+    }
+
+    /// Seal the fenced runtime and its complete attempt snapshot for one SIR1 commit.
+    ///
+    /// # Errors
+    /// Rejects a runtime allocated for another provider, malformed attempt sets,
+    /// or a runtime-key binding that no longer matches this admitted provider.
+    pub fn seal_installation_recovery(
+        &self,
+        runtime: &crate::selector::installation::authority::recovery::AdmittedProviderRuntime,
+        previous_live_attempt_ids: Vec<[u8; 16]>,
+        required_cancelled_attempt_ids: Vec<[u8; 16]>,
+    ) -> Result<
+        crate::selector::installation::authority::recovery::InstallationRecoverySnapshot,
+        crate::selector::SelectorBoundaryError,
+    > {
+        let runtime_key = self
+            .provider
+            .trust
+            .keys()
+            .iter()
+            .find(|key| key.key_id == self.provider.manifest.runtime_attestation_key_id)
+            .ok_or(crate::selector::SelectorBoundaryError::ArtifactInvalid)?;
+        if runtime_key.public_key != self.provider.runtime_key.to_bytes() {
+            return Err(crate::selector::SelectorBoundaryError::ArtifactInvalid);
+        }
+        crate::selector::installation::authority::recovery::InstallationRecoverySnapshot::seal(
+            self.provider.manifest.provider_id.clone(),
+            self.provider.manifest.manifest_digest,
+            self.provider.manifest.binary_digest,
+            self.provider.manifest.public_contract_digest,
+            runtime_key,
+            runtime,
+            previous_live_attempt_ids,
+            required_cancelled_attempt_ids,
+        )
+    }
+
     /// Establish one root-owned session from an exact, immutable authority set.
     ///
     /// # Errors

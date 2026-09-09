@@ -14,13 +14,39 @@ fn validated(
     Ok(fixture.authority.validate_update(challenge, &request)?)
 }
 
-fn exact_recovery(update: &ValidatedInstallationUpdate) -> Result<Vec<u8>, ProtocolError> {
-    encode(&Value::Array(vec![
+fn exact_recovery(
+    update: &ValidatedInstallationUpdate,
+    snapshot: &InstallationRecoverySnapshot,
+) -> Result<Vec<u8>, ProtocolError> {
+    let unsigned = Value::Array(vec![
         Value::Text("SIR1".to_owned()),
         integer(1),
         Value::Bytes(update.previous_manifest_bytes().to_vec()),
         Value::Bytes(update.next_manifest_bytes().to_vec()),
         Value::Bytes(update.revocation_update_bytes().to_vec()),
+        snapshot.previous_provider_value(),
+        snapshot.recovery_slot_value(),
+        Value::Array(
+            snapshot
+                .previous_live_attempt_ids()
+                .iter()
+                .map(|id| Value::Bytes(id.to_vec()))
+                .collect(),
+        ),
+        Value::Array(
+            snapshot
+                .required_cancelled_attempt_ids()
+                .iter()
+                .map(|id| Value::Bytes(id.to_vec()))
+                .collect(),
+        ),
+    ]);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.SIR1.v1\0");
+    hasher.update(&encode(&unsigned)?);
+    encode(&Value::Array(vec![
+        unsigned,
+        bytes(*hasher.finalize().as_bytes()),
     ]))
 }
 
@@ -39,7 +65,8 @@ fn replace_current_manifest(
 fn durable_commit_persists_the_exact_sir1_restart_floor() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let update = validated(&fixture)?;
-    let expected = exact_recovery(&update)?;
+    let snapshot = recovery_snapshot(&fixture.authority)?;
+    let expected = exact_recovery(&update, &snapshot)?;
     let previous = update.previous_manifest_bytes().to_vec();
     let next = update.next_manifest_bytes().to_vec();
     let rcu = update.revocation_update_bytes().to_vec();
@@ -47,7 +74,7 @@ fn durable_commit_persists_the_exact_sir1_restart_floor() -> TestResult {
         installation,
         authority,
     } = fixture;
-    let committed = authority.commit_update(update)?;
+    let committed = authority.commit_update(update, snapshot)?;
     let recovery = installation
         .directory
         .path()
@@ -89,6 +116,7 @@ fn durable_commit_rejects_duplicate_and_unsafe_recovery_entries() -> TestResult 
     for existing in 0..2 {
         let fixture = UpdateFixture::new()?;
         let update = validated(&fixture)?;
+        let snapshot = recovery_snapshot(&fixture.authority)?;
         let recovery = fixture
             .installation
             .directory
@@ -101,7 +129,7 @@ fn durable_commit_rejects_duplicate_and_unsafe_recovery_entries() -> TestResult 
             symlink("missing-recovery", &recovery)?;
         }
         let UpdateFixture { authority, .. } = fixture;
-        assert!(authority.commit_update(update).is_err());
+        assert!(authority.commit_update(update, snapshot).is_err());
         if existing == 0 {
             assert_eq!(std::fs::read(&recovery)?, b"existing SIR1");
         } else {
@@ -117,11 +145,12 @@ fn durable_commit_rejects_duplicate_and_unsafe_recovery_entries() -> TestResult 
 fn committed_recovery_rejects_manifest_outside_both_generations() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let update = validated(&fixture)?;
+    let snapshot = recovery_snapshot(&fixture.authority)?;
     let UpdateFixture {
         installation,
         authority,
     } = fixture;
-    let committed = authority.commit_update(update)?;
+    let committed = authority.commit_update(update, snapshot)?;
     let path = installation.directory.path().join(MANIFEST_NAME);
     std::fs::remove_file(&path)?;
     std::fs::write(&path, b"unrelated generation")?;
@@ -146,15 +175,17 @@ fn committed_recovery_rejects_manifest_outside_both_generations() -> TestResult 
 fn durable_commit_rejects_stale_and_foreign_authority_pairs() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let update = validated(&fixture)?;
+    let snapshot = recovery_snapshot(&fixture.authority)?;
     replace_current_manifest(&fixture, update.next_manifest_bytes())?;
     let UpdateFixture { authority, .. } = fixture;
-    assert!(authority.commit_update(update).is_err());
+    assert!(authority.commit_update(update, snapshot).is_err());
 
     let fixture = UpdateFixture::new()?;
     let update = validated(&fixture)?;
+    let snapshot = recovery_snapshot(&fixture.authority)?;
     let foreign = authenticated_fixture(|policy| policy[2] = integer(2))?;
     let foreign_authority = foreign.load()?.authenticate_authority()?;
-    assert!(foreign_authority.commit_update(update).is_err());
+    assert!(foreign_authority.commit_update(update, snapshot).is_err());
     assert!(!foreign
         .directory
         .path()
@@ -163,12 +194,13 @@ fn durable_commit_rejects_stale_and_foreign_authority_pairs() -> TestResult {
 
     let fixture = UpdateFixture::new()?;
     let update = validated(&fixture)?;
+    let snapshot = recovery_snapshot(&fixture.authority)?;
     let foreign = UpdateFixture::new()?;
     let UpdateFixture {
         authority: foreign_authority,
         installation: foreign_installation,
     } = foreign;
-    assert!(foreign_authority.commit_update(update).is_err());
+    assert!(foreign_authority.commit_update(update, snapshot).is_err());
     assert!(!foreign_installation
         .directory
         .path()
@@ -182,11 +214,12 @@ fn recovery_floor_rejects_replaced_or_modified_records() -> TestResult {
     for alteration in 0..3 {
         let fixture = UpdateFixture::new()?;
         let update = validated(&fixture)?;
+        let snapshot = recovery_snapshot(&fixture.authority)?;
         let UpdateFixture {
             installation,
             authority,
         } = fixture;
-        let committed = authority.commit_update(update)?;
+        let committed = authority.commit_update(update, snapshot)?;
         let path = installation
             .directory
             .path()
@@ -223,6 +256,7 @@ fn durable_commit_rejects_successor_descriptor_replacement_after_validation() ->
     for code in [1, 2] {
         let fixture = UpdateFixture::new()?;
         let update = validated(&fixture)?;
+        let snapshot = recovery_snapshot(&fixture.authority)?;
         let identity = update.next_manifest().authority_digests()[usize::from(code)];
         let object = update
             .next_manifest()
@@ -242,7 +276,7 @@ fn durable_commit_rejects_successor_descriptor_replacement_after_validation() ->
             authority,
         } = fixture;
         assert!(matches!(
-            authority.commit_update(update),
+            authority.commit_update(update, snapshot),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
         assert!(!installation
@@ -259,11 +293,12 @@ fn recovery_floor_rejects_missing_recovery_and_unsafe_current_manifest() -> Test
     for missing_recovery in [false, true] {
         let fixture = UpdateFixture::new()?;
         let update = validated(&fixture)?;
+        let snapshot = recovery_snapshot(&fixture.authority)?;
         let UpdateFixture {
             installation,
             authority,
         } = fixture;
-        let committed = authority.commit_update(update)?;
+        let committed = authority.commit_update(update, snapshot)?;
         let recovery = installation
             .directory
             .path()
@@ -290,6 +325,7 @@ fn durable_commit_rejects_unsafe_staging_without_publishing_recovery() -> TestRe
     for mode in [0o755, 0o777, 0o1700] {
         let fixture = UpdateFixture::new()?;
         let update = validated(&fixture)?;
+        let snapshot = recovery_snapshot(&fixture.authority)?;
         let staging = fixture
             .installation
             .directory
@@ -301,7 +337,10 @@ fn durable_commit_rejects_unsafe_staging_without_publishing_recovery() -> TestRe
             installation,
             authority,
         } = fixture;
-        assert!(authority.commit_update(update).is_err(), "mode {mode:o}");
+        assert!(
+            authority.commit_update(update, snapshot).is_err(),
+            "mode {mode:o}"
+        );
         assert!(!installation
             .directory
             .path()
