@@ -5689,6 +5689,23 @@ mod tests {
     }
 
     #[test]
+    fn backtest_rejects_a_different_prebound_registry_gate() {
+        let host_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let foreign_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let mut registry = PluginRegistry::new().with_erasure_gate(foreign_gate);
+        let mut store = pos_store::memory::MemoryStore::new();
+
+        assert!(matches!(
+            bind_backtest_erasure_gate(&mut store, &mut registry, Arc::clone(&host_gate)),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+        assert!(matches!(
+            inherit_backtest_erasure_gate(&mut registry, host_gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_fork_propagates_runtime_factory_failure() {
         let mut session = Experiment::new(ExperimentConfig {
