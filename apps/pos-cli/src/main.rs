@@ -60,6 +60,11 @@ const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
+struct OpenedCliStore {
+    store: Box<dyn pos_core::store::EventStore>,
+    erasure_gate: std::sync::Arc<dyn pos_core::ErasureGate>,
+}
+
 /// Open a store through the CLI composition seam.
 ///
 /// The concrete adapter remains exclusively owned by the recovered erasure
@@ -67,25 +72,17 @@ const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 100
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    open_store_with_gate(config).map(|(store, _gate)| store)
+    open_store_with_gate(config).map(|opened| opened.store)
 }
 
-fn open_store_with_gate(
-    config: StoreConfig,
-) -> Result<
-    (
-        Box<dyn pos_core::store::EventStore>,
-        std::sync::Arc<dyn pos_core::ErasureGate>,
-    ),
-    pos_core::CoreError,
-> {
+fn open_store_with_gate(config: StoreConfig) -> Result<OpenedCliStore, pos_core::CoreError> {
     HostedCliStore::open(config)
         .map(|store| {
-            let gate = store.containment_gate();
-            (
-                Box::new(store) as Box<dyn pos_core::store::EventStore>,
-                gate,
-            )
+            let erasure_gate = store.containment_gate();
+            OpenedCliStore {
+                store: Box::new(store) as Box<dyn pos_core::store::EventStore>,
+                erasure_gate,
+            }
         })
         .map_err(hosted_cli_store_error)
 }
@@ -374,7 +371,10 @@ fn cmd_timeline_fork(
 
 fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tl_id = parse_timeline_id(tl_id_str)?;
-    let (store, erasure_gate) = open_store_with_gate(StoreConfig::Sqlite {
+    let OpenedCliStore {
+        store,
+        erasure_gate,
+    } = open_store_with_gate(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
 
@@ -394,7 +394,10 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
 
 fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tl_id = parse_timeline_id(tl_id_str)?;
-    let (store, erasure_gate) = open_store_with_gate(StoreConfig::Sqlite {
+    let OpenedCliStore {
+        store,
+        erasure_gate,
+    } = open_store_with_gate(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
 
@@ -480,7 +483,10 @@ fn cmd_timeline_compare(
     let timeline_b = parse_timeline_id(second_timeline_str)?;
     let fork_seq = parse_seq(fork_seq_str)?;
 
-    let (store, erasure_gate) = open_store_with_gate(StoreConfig::Sqlite {
+    let OpenedCliStore {
+        store,
+        erasure_gate,
+    } = open_store_with_gate(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
 
