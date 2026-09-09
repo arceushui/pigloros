@@ -957,6 +957,8 @@ impl RootSelectorAuthoritySource for FailingSelectorAuthority {
 enum SelectorProviderMode {
     Valid,
     Unavailable,
+    BeforeAdmission,
+    Error,
     InvalidGrant,
     InvalidReceipt,
     MismatchedOutput,
@@ -977,6 +979,18 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
         if matches!(self.mode, SelectorProviderMode::Unavailable) {
             return Err(RootSelectorServiceError::ProviderUnavailable);
         }
+        if matches!(self.mode, SelectorProviderMode::BeforeAdmission) {
+            return Ok(RootSelectorProviderReply::BeforeAdmission {
+                result: pre_admission_result(&self.signed.fixture, request)
+                    .map_err(|_| RootSelectorServiceError::ProviderEvidence)?,
+            });
+        }
+        if matches!(self.mode, SelectorProviderMode::Error) {
+            return Ok(RootSelectorProviderReply::Error {
+                error: provider_execute_error(&self.signed.fixture, request)
+                    .map_err(|_| RootSelectorServiceError::ProviderEvidence)?,
+            });
+        }
         let mut reply = self
             .signed
             .reply(request)
@@ -994,7 +1008,10 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                 SelectorProviderMode::MismatchedOutput => {
                     *output_stream = Some(b"substituted".to_vec());
                 }
-                SelectorProviderMode::Valid | SelectorProviderMode::Unavailable => {}
+                SelectorProviderMode::Valid
+                | SelectorProviderMode::Unavailable
+                | SelectorProviderMode::BeforeAdmission
+                | SelectorProviderMode::Error => {}
             }
         }
         Ok(reply)
@@ -1058,6 +1075,46 @@ impl SignedSelectorProvider {
             output_stream: Some(output_stream),
         })
     }
+}
+
+fn pre_admission_result(fixture: &Fixture, request: &SandboxExecuteRequest) -> TestResult<Vec<u8>> {
+    sign_record(
+        "SPY1",
+        Value::Array(vec![
+            Value::Text("SPY1".to_owned()),
+            integer(1),
+            Value::Bytes(request.request.request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
+            integer(3),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Array(Vec::new()),
+            Value::Text("runtime".to_owned()),
+        ]),
+        &fixture.authority.runtime,
+    )
+}
+
+fn provider_execute_error(
+    fixture: &Fixture,
+    request: &SandboxExecuteRequest,
+) -> TestResult<Vec<u8>> {
+    sign_record(
+        "SPE1",
+        Value::Array(vec![
+            Value::Text("SPE1".to_owned()),
+            integer(1),
+            integer(1),
+            Value::Bytes(request.request.request_id.to_vec()),
+            bytes(request.request_digest),
+            Value::Bytes(request.attempt_id.to_vec()),
+            integer(11),
+            Value::Text("sandbox unavailable".to_owned()),
+            Value::Text("runtime".to_owned()),
+        ]),
+        &fixture.authority.runtime,
+    )
 }
 
 fn selector_evaluation_request(fixture: &Fixture) -> TestResult<EvaluationRequest> {
@@ -2131,6 +2188,26 @@ fn root_selector_server_reports_provider_failure_phases_as_sle1() -> TestResult 
 }
 
 #[test]
+fn root_selector_server_forwards_authenticated_pre_admission_records() -> TestResult {
+    for mode in [
+        SelectorProviderMode::BeforeAdmission,
+        SelectorProviderMode::Error,
+    ] {
+        let (server_result, control, trailing) = exercise_selector_provider_mode(mode)?;
+        assert_eq!(server_result, Ok(()));
+        assert!(trailing.is_empty());
+        let Value::Array(wrapper) = ciborium::from_reader(control.as_slice())? else {
+            return Err("SLY1 wrapper must be an array".into());
+        };
+        let Value::Array(fields) = wrapper.first().ok_or("SLY1 prefix missing")? else {
+            return Err("SLY1 prefix must be an array".into());
+        };
+        assert_eq!(fields.first(), Some(&Value::Text("SLY1".to_owned())));
+    }
+    Ok(())
+}
+
+#[test]
 fn root_selector_server_fails_closed_for_authority_and_peer_mismatches() -> TestResult {
     for (authority_error, expected_code) in [
         (
@@ -2213,6 +2290,31 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
         assert_eq!(local.phase, SandboxLocalErrorPhase::BeforeSpx1);
         assert_eq!(local.code, SandboxLocalErrorCode::RequestAuthorityMismatch);
     }
+
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let attempt = selector_case_attempt();
+    let mut plan = selector_case_plan(&fixture, &request, attempt.clone())?;
+    plan.admission
+        .grant_expectations
+        .required_provider_capability
+        .capability_id = "different-capability".to_owned();
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let (server_result, control, trailing) = exercise_root_selector(
+        FixedSelectorAuthority { plan },
+        ScenarioSelectorProvider {
+            signed: SignedSelectorProvider { fixture, launch },
+            mode: SelectorProviderMode::Valid,
+        },
+        &request,
+        &attempt,
+        0,
+    )?;
+    assert_eq!(server_result, Ok(()));
+    assert!(trailing.is_empty());
+    let local = SandboxLocalError::from_canonical_cbor(&control)?;
+    assert_eq!(local.phase, SandboxLocalErrorPhase::BeforeSpx1);
+    assert_eq!(local.code, SandboxLocalErrorCode::PolicyUnavailable);
     Ok(())
 }
 
