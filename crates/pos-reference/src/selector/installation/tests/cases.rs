@@ -183,7 +183,7 @@ fn installed_authority_rejects_noncanonical_or_trailing_archive_bytes() -> CaseT
         let mut archive = corpus.archive.clone();
         if noncanonical {
             assert_eq!(archive[0], 0x84);
-            archive.splice(..1, [0x98, 4]);
+            drop(archive.splice(..1, [0x98, 4]));
         } else {
             archive.push(0);
         }

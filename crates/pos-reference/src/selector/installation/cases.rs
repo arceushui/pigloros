@@ -28,7 +28,7 @@ impl ResolvedInstalledCase {
         &self.attempt
     }
 
-    /// Verified FixtureContract binding selected by CPF1.
+    /// Verified `FixtureContract` binding selected by CPF1.
     #[must_use]
     pub const fn fixture_contract_digest(&self) -> [u8; 32] {
         self.fixture_contract_digest
