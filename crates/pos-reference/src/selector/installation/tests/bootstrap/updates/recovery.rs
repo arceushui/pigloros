@@ -1,6 +1,7 @@
 use std::os::unix::fs::PermissionsExt;
 
 use crate::evaluator_protocol::{array, decode_canonical, encode, ProtocolError};
+use crate::selector::installation::authority::recovery::ProviderTerminationAuthority;
 use crate::selector::installation::authority::update::durability::CommittedInstallationUpdate;
 use crate::selector::installation::authority::update::ValidatedInstallationUpdate;
 use ciborium::value::Value;
@@ -140,6 +141,51 @@ fn restart_recovery_rejects_late_acknowledgement_without_clearing_sir1() -> Test
         .join("installation-update.cbor")
         .exists());
     pending.verify_recovery_floor()?;
+    Ok(())
+}
+
+#[test]
+fn restart_recovery_rejects_cross_transaction_proofs_and_zero_peer_pid() -> TestResult {
+    let first = commit_recovery()?;
+    let first_pending = first.installation.load()?.load_pending_recovery()?;
+    let first_acknowledgement_bytes =
+        recovery_acknowledgement(&first_pending.cancellation_context()?, &first.rcu)?;
+    let first_acknowledgement =
+        first_pending.authenticate_recovery_acknowledgement(&first_acknowledgement_bytes, 100)?;
+    let authority = ProviderTerminationAuthority { _private: () };
+    let first_previous = authority.prove_previous_termination(&first_pending)?;
+    assert!(authority
+        .prove_recovery_peer_termination(
+            &first_pending,
+            &first_previous,
+            &first_acknowledgement,
+            0,
+            200,
+        )
+        .is_err());
+    let first_peer = authority.prove_recovery_peer_termination(
+        &first_pending,
+        &first_previous,
+        &first_acknowledgement,
+        100,
+        200,
+    )?;
+
+    let second = commit_recovery()?;
+    let second_pending = second.installation.load()?.load_pending_recovery()?;
+    let second_acknowledgement_bytes =
+        recovery_acknowledgement(&second_pending.cancellation_context()?, &second.rcu)?;
+    let second_acknowledgement =
+        second_pending.authenticate_recovery_acknowledgement(&second_acknowledgement_bytes, 100)?;
+    assert!(second_pending
+        .complete_recovery(first_previous, second_acknowledgement, first_peer)
+        .is_err());
+    assert!(second
+        .installation
+        .directory
+        .path()
+        .join("installation-update.cbor")
+        .exists());
     Ok(())
 }
 

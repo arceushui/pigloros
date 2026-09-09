@@ -190,6 +190,10 @@ impl CommittedInstallationUpdate {
     /// # Errors
     /// Rejects a foreign acknowledgement or changed recovery floor. Every
     /// failure after SIR1 commit leaves recovery mandatory.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the authenticated acknowledgement is a single-use capability"
+    )]
     pub fn complete_live_update(
         self,
         acknowledgement: AuthenticatedRevocationAcknowledgement,

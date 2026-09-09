@@ -16,6 +16,9 @@ pub struct ProviderTerminationAuthority {
 impl ProviderTerminationAuthority {
     /// Seal proof that the exact previous runtime, descendants, attempts, and
     /// transaction-owned resource namespace have been reconciled to empty.
+    ///
+    /// # Errors
+    /// Rejects recovery state whose retained provider binding is invalid.
     pub fn prove_previous_termination(
         &self,
         recovery: &PendingInstallationRecovery,

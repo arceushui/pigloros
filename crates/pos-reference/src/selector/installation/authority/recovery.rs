@@ -181,6 +181,10 @@ impl PendingInstallationRecovery {
     /// # Errors
     /// Rejects any cross-transaction proof, acknowledgement mismatch, changed
     /// recovery floor, or durable publication/removal failure.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the three opaque completion capabilities are single-use"
+    )]
     pub fn complete_recovery(
         self,
         previous: PreviousRuntimeTerminationProof,
