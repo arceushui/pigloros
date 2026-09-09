@@ -136,6 +136,67 @@ impl UpdateFixture {
 }
 
 #[test]
+fn bootstrap_authority_rejects_an_oversized_control_artifact_before_decoding() -> TestResult {
+    const OVERSIZED_CONTROL_BYTES: u64 = 16 * 1024 * 1024 + 1;
+    const HASH_BLOCK_BYTES: usize = 8192;
+
+    let fixture = authenticated_fixture(|_| {})?;
+    let installed = fixture.load()?;
+    let trust_identity = installed.manifest().authority_digests()[0];
+    let document = decode_canonical(installed.manifest_bytes())?;
+    let mut fields = array_values(&array(&document, 2)?[0])?.to_vec();
+    drop(installed);
+
+    let zeros = [0_u8; HASH_BLOCK_BYTES];
+    let block_length = u64::try_from(HASH_BLOCK_BYTES)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut remaining = OVERSIZED_CONTROL_BYTES;
+    while remaining >= block_length {
+        hasher.update(&zeros);
+        remaining -= block_length;
+    }
+    if remaining != 0 {
+        hasher.update(&zeros[..usize::try_from(remaining)?]);
+    }
+    let content = *hasher.finalize().as_bytes();
+    let path = fixture
+        .directory
+        .path()
+        .join("authority")
+        .join(digest_name(content));
+    let file = std::fs::File::create(&path)?;
+    file.set_len(OVERSIZED_CONTROL_BYTES)?;
+    drop(file);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+
+    let mut entries = array_values(&fields[10])?.to_vec();
+    let mut replaced = false;
+    for entry in &mut entries {
+        let object = array(entry, 4)?;
+        if uint(&object[0])? == 0 && fixed_bytes::<32>(&object[1])? == trust_identity {
+            *entry = Value::Array(vec![
+                integer(0),
+                bytes(trust_identity),
+                bytes(content),
+                integer(OVERSIZED_CONTROL_BYTES),
+            ]);
+            replaced = true;
+        }
+    }
+    if !replaced {
+        return Err("installed trust object missing".into());
+    }
+    fields[10] = Value::Array(entries);
+    install_manifest(&fixture, fields)?;
+
+    assert_eq!(
+        fixture.load()?.authenticate_authority().map(|_| ()),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    );
+    Ok(())
+}
+
+#[test]
 fn update_validation_retains_exact_records_without_installing_or_acknowledging() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let challenge = fixture.authority.issue_update_challenge()?;
@@ -180,6 +241,48 @@ fn update_validation_retains_exact_records_without_installing_or_acknowledging()
         .path()
         .join("installation-update.cbor")
         .exists());
+    Ok(())
+}
+
+#[test]
+fn update_validation_rejects_an_oversized_successor_control_descriptor() -> TestResult {
+    const OVERSIZED_CONTROL_BYTES: u64 = 16 * 1024 * 1024 + 1;
+
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.authority.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let document = decode_canonical(&request)?;
+    let mut fields = array(&document, 5)?.to_vec();
+    let Value::Bytes(next) = &fields[3] else {
+        return Err("missing successor SIC1".into());
+    };
+    let manifest = InstallationManifest::from_cbor(next)?;
+    let next_revocation = manifest.authority_digests()[1];
+    let next_document = decode_canonical(next)?;
+    let mut next_fields = array_values(&array(&next_document, 2)?[0])?.to_vec();
+    let mut entries = array_values(&next_fields[10])?.to_vec();
+    let mut replaced = false;
+    for entry in &mut entries {
+        let object = array(entry, 4)?;
+        if uint(&object[0])? == 1 && fixed_bytes::<32>(&object[1])? == next_revocation {
+            let mut fields = object.to_vec();
+            fields[3] = integer(OVERSIZED_CONTROL_BYTES);
+            *entry = Value::Array(fields);
+            replaced = true;
+        }
+    }
+    if !replaced {
+        return Err("successor revocation object missing".into());
+    }
+    next_fields[10] = Value::Array(entries);
+    fields[3] = Value::Bytes(manifest_bytes(next_fields)?);
+    assert_eq!(
+        fixture
+            .authority
+            .validate_update(challenge, &encode(&Value::Array(fields))?)
+            .map(|_| ()),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    );
     Ok(())
 }
 
