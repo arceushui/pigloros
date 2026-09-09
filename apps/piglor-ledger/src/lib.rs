@@ -29,7 +29,7 @@ macro_rules! output_stderr {
 pub(crate) mod cli;
 pub(crate) mod export;
 pub mod hex;
-pub(crate) mod host_store;
+mod host_store;
 pub(crate) mod html;
 pub(crate) mod json;
 pub mod key_output;
