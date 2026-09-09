@@ -5,6 +5,85 @@
 use pos_conformance::*;
 use std::collections::BTreeMap;
 
+fn executed_non_interference_matrix() -> Vec<NonInterferenceCaseV1> {
+    execute_wave8_non_interference_matrix([1; 32], |run| {
+        let Some(profile) = non_interference_capture_profiles_v1()
+            .into_iter()
+            .find(|profile| profile.fixture_id == run.subject.fixture_id)
+        else {
+            return Err(NonInterferenceExecutionErrorV1::CaptureUnavailable);
+        };
+        normalize_non_interference_capture_v1(
+            run.subject.fixture_id,
+            NonInterferenceRawCaptureV1 {
+                surface_names: profile.surface_names.clone(),
+                authoritative: profile
+                    .surface_names
+                    .iter()
+                    .map(|_| run.subject.permitted_input.to_vec())
+                    .collect(),
+                public: profile
+                    .surface_names
+                    .iter()
+                    .map(|_| b"public".to_vec())
+                    .collect(),
+                operational: profile
+                    .surface_normalizations
+                    .iter()
+                    .copied()
+                    .map(test_raw_operational)
+                    .collect(),
+                unexpected_network_accesses: 0,
+                provenance_digest: [8; 32],
+            },
+        )
+    })
+    .unwrap_or_default()
+}
+
+fn test_raw_operational(
+    normalization: NonInterferenceNormalizationV1,
+) -> NonInterferenceRawOperationalV1 {
+    match normalization {
+        NonInterferenceNormalizationV1::CategoryCountDigest => {
+            NonInterferenceRawOperationalV1::CategoryCountDigest {
+                category: 1,
+                count: 1,
+                digest: [7; 32],
+                excluded_sensitive: Vec::new(),
+            }
+        }
+        NonInterferenceNormalizationV1::CountClass => NonInterferenceRawOperationalV1::CountClass {
+            class: 1,
+            count: 1,
+            excluded_sensitive: Vec::new(),
+        },
+        NonInterferenceNormalizationV1::CategoryCount => {
+            NonInterferenceRawOperationalV1::CategoryCount {
+                category: 1,
+                count: 1,
+                excluded_sensitive: Vec::new(),
+            }
+        }
+        NonInterferenceNormalizationV1::CategoryCountPaddedLength => {
+            NonInterferenceRawOperationalV1::CategoryCountPaddedLength {
+                category: 1,
+                count: 1,
+                padded_length: 64,
+                excluded_sensitive: Vec::new(),
+            }
+        }
+        NonInterferenceNormalizationV1::OmitOperational => {
+            NonInterferenceRawOperationalV1::OmitOperational {
+                excluded_sensitive: Vec::new(),
+            }
+        }
+        NonInterferenceNormalizationV1::ByteExact => {
+            NonInterferenceRawOperationalV1::ByteExact(b"operational".to_vec())
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum EvidenceField {
     Magic,
@@ -190,6 +269,64 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
         },
         contract: proof_contract_fixture(),
     }
+}
+
+fn unsigned_executed_evidence_fixture() -> MoatProofEvidenceV1 {
+    let mut evidence = public_evidence_fixture();
+    evidence.contract.non_interference_status = NonInterferenceExecutionStatusV1::Executed;
+    evidence.contract.non_interference = executed_non_interference_matrix();
+    evidence
+}
+
+#[test]
+fn unsigned_executed_public_evidence_is_rejected_by_the_independent_fork_verifier() {
+    let serialized = ok(serde_json::to_string(&unsigned_executed_evidence_fixture()));
+    let mut baseline: serde_json::Value = ok(serde_json::from_str(&serialized));
+    let mut counterfactual = baseline.clone();
+    baseline["manifest"]["fork_cut_seq"] = serde_json::json!(1);
+    counterfactual["manifest"]["fork_cut_seq"] = serde_json::json!(1);
+    baseline["authoritative_events"] = serde_json::json!([
+        event_json(1, "body", "world.observation.v1", 1, None),
+        event_json(2, "agent", "proof.agent.reaction.v1", 2, Some(1)),
+        event_json(3, "society", "society.signal", 3, Some(2)),
+    ]);
+    counterfactual["authoritative_events"] = serde_json::json!([
+        event_json(1, "body", "world.observation.v1", 1, None),
+        event_json(2, "operator", "world.action.v1", 24, Some(1)),
+        event_json(3, "body", "world.observation.v1", 25, Some(2)),
+        event_json(4, "agent", "proof.agent.reaction.v1", 26, Some(3)),
+        event_json(5, "society", "society.signal", 27, Some(4)),
+    ]);
+    let baseline_json = baseline.to_string();
+    let counterfactual_json = counterfactual.to_string();
+    let result =
+        pos_reference::verify_fork_json(&baseline_json, &counterfactual_json, "world.action.v1");
+    assert!(
+        matches!(
+            &result,
+            Err(pos_reference::ReferenceError::InvalidForkEvidence(
+                "signed non-interference execution evidence is required"
+            ))
+        ),
+        "unexpected verification result: {result:?}"
+    );
+}
+
+fn event_json(
+    seq: u64,
+    entity: &str,
+    event_type: &str,
+    digest: u8,
+    causation_seq: Option<u64>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "seq": seq,
+        "tick": seq,
+        "entity": entity,
+        "event_type": event_type,
+        "payload_digest": vec![digest; 32],
+        "causation_seq": causation_seq,
+    })
 }
 
 fn artifact_evaluation(
@@ -638,7 +775,9 @@ fn proof_contract_fixture() -> Wave8ProofContractV1 {
             committed: true,
             failure_class: None,
         }],
-        non_interference: wave8_non_interference_matrix([1; 32]),
+        non_interference_status:
+            pos_conformance::NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable,
+        non_interference: Vec::new(),
     }
 }
 
@@ -1305,10 +1444,26 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &ciborium::Value::Array(short_evidence),
     )));
+    let mut exhaustive_fields =
+        cloned_array_fields(&value, "decode evidence fixture for exhaustive mutation");
+    let mut exhaustive_contract = cloned_array_fields(
+        &exhaustive_fields[EvidenceField::Contract.index()],
+        "decode proof contract for exhaustive mutation",
+    );
+    exhaustive_contract[6] = ciborium::Value::Integer(1_u64.into());
+    exhaustive_contract[7] = ciborium::Value::Array(
+        executed_non_interference_matrix()
+            .iter()
+            .map(|case| decode_value(ok(case.to_canonical_cbor())))
+            .collect(),
+    );
+    exhaustive_fields[EvidenceField::Contract.index()] =
+        ciborium::Value::Array(exhaustive_contract);
+    let exhaustive_value = ciborium::Value::Array(exhaustive_fields);
     let mut paths = Vec::new();
-    structural_paths(&value, &mut Vec::new(), &mut paths);
+    structural_paths(&exhaustive_value, &mut Vec::new(), &mut paths);
     assert!(paths.len() > 512);
-    let mut mutant = value.clone();
+    let mut mutant = exhaustive_value.clone();
     for path in paths {
         let displaced = replace_at_path(
             &mut mutant,
@@ -1320,7 +1475,10 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
         )));
         drop(replace_at_path(&mut mutant, &path, displaced));
     }
-    assert_eq!(mutant, value, "tag mutation helper must restore its input");
+    assert_eq!(
+        mutant, exhaustive_value,
+        "tag mutation helper must restore its input"
+    );
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &replace_field(
             value.clone(),
@@ -1479,7 +1637,7 @@ fn public_moat_proof_contract_excludes_cnr1_and_rejects_the_retired_field() {
         &evidence_fields[EvidenceField::Contract.index()],
         "decode proof-contract fixture structure",
     );
-    assert_eq!(contract_fields.len(), 7);
+    assert_eq!(contract_fields.len(), 8);
 
     let retired_shape = append_retired_contract_field(&encoded);
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
@@ -1498,6 +1656,38 @@ fn public_moat_proof_contract_excludes_cnr1_and_rejects_the_retired_field() {
         ciborium::Value::Array(trailing_contract_fields);
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &ciborium::Value::Array(trailing_evidence_fields),
+    )));
+}
+
+#[test]
+fn non_interference_execution_status_cannot_turn_missing_or_placeholder_results_into_a_pass() {
+    let unsigned_executed = unsigned_executed_evidence_fixture();
+    assert_eq!(
+        verify_evidence(&unsigned_executed),
+        Err(EvidenceError::InvalidNonInterferenceMatrix)
+    );
+
+    let mut evidence = public_evidence_fixture();
+    evidence.contract.non_interference = executed_non_interference_matrix();
+    assert!(verify_evidence(&evidence).is_err());
+
+    evidence.contract.non_interference.clear();
+    assert!(verify_evidence(&evidence).is_ok());
+
+    evidence.contract.non_interference_status =
+        pos_conformance::NonInterferenceExecutionStatusV1::Executed;
+    assert!(verify_evidence(&evidence).is_err());
+
+    let encoded = decode_value(ok(public_evidence_fixture().to_canonical_cbor()));
+    let mut evidence_fields = cloned_array_fields(&encoded, "decode evidence fixture structure");
+    let mut contract_fields = cloned_array_fields(
+        &evidence_fields[EvidenceField::Contract.index()],
+        "decode proof-contract fixture structure",
+    );
+    contract_fields[6] = ciborium::Value::Integer(2_u64.into());
+    evidence_fields[EvidenceField::Contract.index()] = ciborium::Value::Array(contract_fields);
+    expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+        &ciborium::Value::Array(evidence_fields),
     )));
 }
 

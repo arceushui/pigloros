@@ -11,6 +11,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod non_interference_report;
+
+pub use non_interference_report::{
+    verify_non_interference_report_v1, IndependentNonInterferenceReportErrorV1,
+};
+
 pub mod adapter_transport;
 pub mod evaluator;
 pub mod evaluator_build_identity;
@@ -184,12 +190,36 @@ fn validate_contract(
             "plugin boundary is not an object",
         ))?;
     validate_plugin_boundary_shape(boundary)?;
+    validate_non_interference_contract(contract)
+}
+
+fn validate_non_interference_contract(
+    contract: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), ReferenceError> {
     let matrix = contract
         .get("non_interference")
         .ok_or(ReferenceError::InvalidForkEvidence(
             "non-interference matrix is missing",
         ))?;
-    validate_non_interference_matrix(matrix)
+    match contract
+        .get("non_interference_status")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("not_executed_capture_unavailable")
+            if matrix.as_array().is_some_and(Vec::is_empty) =>
+        {
+            Ok(())
+        }
+        Some("executed") => {
+            // This legacy JSON envelope cannot bind NIR1/NIA1 signatures or trusted keys.
+            Err(ReferenceError::InvalidForkEvidence(
+                "signed non-interference execution evidence is required",
+            ))
+        }
+        _ => Err(ReferenceError::InvalidForkEvidence(
+            "non-interference execution status is invalid",
+        )),
+    }
 }
 
 fn verify_fork_suffix(
@@ -561,6 +591,7 @@ fn validate_contract_shape(
         "authorization_decisions",
         "counterfactual",
         "atomicity",
+        "non_interference_status",
         "non_interference",
     ];
     for field in required {
@@ -570,36 +601,45 @@ fn validate_contract_shape(
             ));
         }
     }
-    if contract
-        .keys()
-        .any(|field| !required.contains(&field.as_str()))
-        || !contract
-            .get("scenario_room")
-            .is_some_and(serde_json::Value::is_object)
-        || !contract
-            .get("plugin_boundary")
-            .is_some_and(serde_json::Value::is_object)
-        || !contract
-            .get("counterfactual")
-            .is_some_and(serde_json::Value::is_object)
-        || !contract
-            .get("knowledge_snapshots")
-            .is_some_and(serde_json::Value::is_array)
-        || !contract
-            .get("authorization_decisions")
-            .is_some_and(serde_json::Value::is_array)
-        || !contract
-            .get("atomicity")
-            .is_some_and(serde_json::Value::is_array)
-        || !contract
-            .get("non_interference")
-            .is_some_and(serde_json::Value::is_array)
-    {
+    if !contract_fields_have_expected_shapes(contract, &required) {
         return Err(ReferenceError::InvalidForkEvidence(
             "contract shape is invalid",
         ));
     }
     Ok(())
+}
+
+fn contract_fields_have_expected_shapes(
+    contract: &serde_json::Map<String, serde_json::Value>,
+    required: &[&str],
+) -> bool {
+    !contract
+        .keys()
+        .any(|field| !required.contains(&field.as_str()))
+        && contract
+            .get("scenario_room")
+            .is_some_and(serde_json::Value::is_object)
+        && contract
+            .get("plugin_boundary")
+            .is_some_and(serde_json::Value::is_object)
+        && contract
+            .get("counterfactual")
+            .is_some_and(serde_json::Value::is_object)
+        && contract
+            .get("knowledge_snapshots")
+            .is_some_and(serde_json::Value::is_array)
+        && contract
+            .get("authorization_decisions")
+            .is_some_and(serde_json::Value::is_array)
+        && contract
+            .get("atomicity")
+            .is_some_and(serde_json::Value::is_array)
+        && contract
+            .get("non_interference_status")
+            .is_some_and(serde_json::Value::is_string)
+        && contract
+            .get("non_interference")
+            .is_some_and(serde_json::Value::is_array)
 }
 
 fn validate_plugin_boundary_shape(
@@ -671,89 +711,6 @@ fn validate_plugin_boundary_shape(
     Ok(())
 }
 
-fn validate_non_interference_matrix(value: &serde_json::Value) -> Result<(), ReferenceError> {
-    let cases = value.as_array().ok_or(ReferenceError::InvalidForkEvidence(
-        "non-interference matrix is not an array",
-    ))?;
-    if cases.len() != 192 {
-        return Err(ReferenceError::InvalidForkEvidence(
-            "non-interference matrix has the wrong size",
-        ));
-    }
-    let fixtures = [
-        "NI-TOOL-001",
-        "NI-CACHE-002",
-        "NI-STATE-003",
-        "NI-OBS-004",
-        "NI-TIME-005",
-        "NI-PUBLIC-006",
-        "NI-EVAL-007",
-        "NI-FORK-008",
-        "NI-ARCHIVE-009",
-        "NI-NET-010",
-        "NI-SERVICE-011",
-        "NI-CRASH-012",
-    ];
-    let variants = ["success", "denial", "warm_cache", "cold_cache"];
-    let modes = ["local", "air_gapped", "replay", "fork"];
-    let mut index = 0;
-    for fixture in fixtures {
-        for variant in variants {
-            for mode in modes {
-                let case = cases[index]
-                    .as_object()
-                    .ok_or(ReferenceError::InvalidForkEvidence(
-                        "non-interference case is not an object",
-                    ))?;
-                let required = [
-                    "fixture_id",
-                    "variant",
-                    "mode",
-                    "control_input_digest",
-                    "canary_input_digest",
-                    "authoritative_digest",
-                    "public_digest",
-                    "operational_digest",
-                    "authoritative_equal",
-                    "public_equal",
-                    "operational_equal",
-                    "provenance_digest",
-                ];
-                if required.iter().any(|field| !case.contains_key(*field))
-                    || case.keys().any(|field| !required.contains(&field.as_str()))
-                    || case.get("fixture_id") != Some(&serde_json::json!(fixture))
-                    || case.get("variant") != Some(&serde_json::json!(variant))
-                    || case.get("mode") != Some(&serde_json::json!(mode))
-                    || case.get("authoritative_equal") != Some(&serde_json::json!(true))
-                    || case.get("public_equal") != Some(&serde_json::json!(true))
-                    || case.get("operational_equal") != Some(&serde_json::json!(true))
-                    || case.get("control_input_digest") == case.get("canary_input_digest")
-                    || [
-                        "control_input_digest",
-                        "canary_input_digest",
-                        "authoritative_digest",
-                        "public_digest",
-                        "operational_digest",
-                        "provenance_digest",
-                    ]
-                    .iter()
-                    .any(|field| {
-                        case.get(*field)
-                            .and_then(serde_json::Value::as_array)
-                            .is_none_or(Vec::is_empty)
-                    })
-                {
-                    return Err(ReferenceError::InvalidForkEvidence(
-                        "non-interference case is invalid",
-                    ));
-                }
-                index += 1;
-            }
-        }
-    }
-    Ok(())
-}
-
 fn field_value<'a>(
     object: &'a serde_json::Map<String, serde_json::Value>,
     parent: &str,
@@ -774,6 +731,14 @@ mod tests {
 
     fn parse_json(value: &str) -> Result<serde_json::Value, ReferenceError> {
         Ok(serde_json::from_str(value)?)
+    }
+
+    fn assert_fork_error_contains(result: Result<(), ReferenceError>, expected: &str) {
+        let error = match result {
+            Ok(()) => std::panic::resume_unwind(Box::new("fork evidence must be rejected")),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(expected), "{error}");
     }
 
     fn object_mut(
@@ -860,6 +825,7 @@ mod tests {
                 "authorization_decisions": [],
                 "counterfactual": {},
                 "atomicity": [],
+                "non_interference_status": "not_executed_capture_unavailable",
                 "non_interference": []
             }
         })
@@ -1085,56 +1051,9 @@ mod tests {
             compare_json(&fixture(), "not-json"),
             Err(ReferenceError::Json(_))
         ));
-        assert!(matches!(
-            validate_non_interference_matrix(&serde_json::Value::Bool(false)),
-            Err(ReferenceError::InvalidForkEvidence(
-                "non-interference matrix is not an array"
-            ))
-        ));
         let object = serde_json::Map::new();
         assert_eq!(field_value(&object, "", "missing"), None);
         assert_eq!(field_value(&object, "missing", "field"), None);
-    }
-
-    fn non_interference_fixture() -> serde_json::Value {
-        let fixtures = [
-            "NI-TOOL-001",
-            "NI-CACHE-002",
-            "NI-STATE-003",
-            "NI-OBS-004",
-            "NI-TIME-005",
-            "NI-PUBLIC-006",
-            "NI-EVAL-007",
-            "NI-FORK-008",
-            "NI-ARCHIVE-009",
-            "NI-NET-010",
-            "NI-SERVICE-011",
-            "NI-CRASH-012",
-        ];
-        let variants = ["success", "denial", "warm_cache", "cold_cache"];
-        let modes = ["local", "air_gapped", "replay", "fork"];
-        let mut cases = Vec::with_capacity(192);
-        for fixture in fixtures {
-            for variant in variants {
-                for mode in modes {
-                    cases.push(serde_json::json!({
-                        "fixture_id": fixture,
-                        "variant": variant,
-                        "mode": mode,
-                        "control_input_digest": [1],
-                        "canary_input_digest": [2],
-                        "authoritative_digest": [3],
-                        "public_digest": [4],
-                        "operational_digest": [5],
-                        "authoritative_equal": true,
-                        "public_equal": true,
-                        "operational_equal": true,
-                        "provenance_digest": [6]
-                    }));
-                }
-            }
-        }
-        serde_json::Value::Array(cases)
     }
 
     fn fork_fixture() -> (String, String) {
@@ -1211,7 +1130,8 @@ mod tests {
                 "authorization_decisions": [],
                 "counterfactual": {},
                 "atomicity": [],
-                "non_interference": non_interference_fixture()
+                "non_interference_status": "not_executed_capture_unavailable",
+                "non_interference": []
             }
         });
         let mut counterfactual = baseline.clone();
@@ -1582,10 +1502,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_every_contract_and_matrix_shape_boundary() -> Result<(), ReferenceError> {
+    fn rejects_every_contract_shape_boundary() -> Result<(), ReferenceError> {
         rejects_contract_field_shapes()?;
-        rejects_plugin_boundary_shapes()?;
-        rejects_matrix_shapes()
+        rejects_plugin_boundary_shapes()
     }
 
     fn rejects_contract_field_shapes() -> Result<(), ReferenceError> {
@@ -1597,6 +1516,7 @@ mod tests {
             "authorization_decisions",
             "counterfactual",
             "atomicity",
+            "non_interference_status",
             "non_interference",
         ];
         for field in contract_fields {
@@ -1617,6 +1537,7 @@ mod tests {
             "knowledge_snapshots",
             "authorization_decisions",
             "atomicity",
+            "non_interference_status",
             "non_interference",
         ] {
             let mut value = parse_json(&counterfactual)?;
@@ -1636,6 +1557,18 @@ mod tests {
                 "contract shape is invalid"
             ))
         ));
+        let mut unknown_status = parse_json(&counterfactual)?;
+        unknown_status["contract"]["non_interference_status"] = serde_json::json!("unknown");
+        assert_fork_error_contains(
+            verify_fork_json(&baseline, &unknown_status.to_string(), "world.action.v1"),
+            "non-interference execution status is invalid",
+        );
+        let mut placeholder = parse_json(&counterfactual)?;
+        placeholder["contract"]["non_interference"] = serde_json::json!([true]);
+        assert_fork_error_contains(
+            verify_fork_json(&baseline, &placeholder.to_string(), "world.action.v1"),
+            "non-interference execution status is invalid",
+        );
         Ok(())
     }
 
@@ -1693,84 +1626,6 @@ mod tests {
             ),
             Err(ReferenceError::InvalidForkEvidence(
                 "plugin boundary semantics are invalid"
-            ))
-        ));
-        Ok(())
-    }
-
-    fn rejects_matrix_shapes() -> Result<(), ReferenceError> {
-        let (baseline, counterfactual) = fork_fixture();
-        let matrix_cases = [
-            ("fixture_id", serde_json::json!("wrong")),
-            ("variant", serde_json::json!("wrong")),
-            ("mode", serde_json::json!("wrong")),
-            ("authoritative_equal", serde_json::json!(false)),
-            ("public_equal", serde_json::json!(false)),
-            ("operational_equal", serde_json::json!(false)),
-            ("control_input_digest", serde_json::json!([2])),
-            ("canary_input_digest", serde_json::json!([])),
-            ("authoritative_digest", serde_json::json!([])),
-            ("public_digest", serde_json::json!([])),
-            ("operational_digest", serde_json::json!([])),
-            ("provenance_digest", serde_json::json!([])),
-        ];
-        for (field, invalid) in matrix_cases {
-            let mut value = parse_json(&counterfactual)?;
-            value["contract"]["non_interference"][0][field] = invalid;
-            assert!(matches!(
-                verify_fork_json(&baseline, &value.to_string(), "world.action.v1"),
-                Err(ReferenceError::InvalidForkEvidence(
-                    "non-interference case is invalid"
-                ))
-            ));
-        }
-        let mut matrix_not_array = parse_json(&counterfactual)?;
-        matrix_not_array["contract"]["non_interference"] = serde_json::json!(true);
-        assert!(matches!(
-            verify_fork_json(&baseline, &matrix_not_array.to_string(), "world.action.v1"),
-            Err(ReferenceError::InvalidForkEvidence(
-                "contract shape is invalid"
-            ))
-        ));
-        let mut matrix_wrong_size = parse_json(&counterfactual)?;
-        matrix_wrong_size["contract"]["non_interference"] = serde_json::json!([]);
-        assert!(matches!(
-            verify_fork_json(&baseline, &matrix_wrong_size.to_string(), "world.action.v1"),
-            Err(ReferenceError::InvalidForkEvidence(
-                "non-interference matrix has the wrong size"
-            ))
-        ));
-        let mut matrix_not_object = parse_json(&counterfactual)?;
-        matrix_not_object["contract"]["non_interference"][0] = serde_json::json!(true);
-        assert!(matches!(
-            verify_fork_json(&baseline, &matrix_not_object.to_string(), "world.action.v1"),
-            Err(ReferenceError::InvalidForkEvidence(
-                "non-interference case is not an object"
-            ))
-        ));
-        let mut matrix_missing_field = parse_json(&counterfactual)?;
-        object_mut(&mut matrix_missing_field["contract"]["non_interference"][0])?
-            .remove("fixture_id");
-        assert!(matches!(
-            verify_fork_json(
-                &baseline,
-                &matrix_missing_field.to_string(),
-                "world.action.v1"
-            ),
-            Err(ReferenceError::InvalidForkEvidence(
-                "non-interference case is invalid"
-            ))
-        ));
-        let mut matrix_unknown_field = parse_json(&counterfactual)?;
-        matrix_unknown_field["contract"]["non_interference"][0]["unknown"] = serde_json::json!(1);
-        assert!(matches!(
-            verify_fork_json(
-                &baseline,
-                &matrix_unknown_field.to_string(),
-                "world.action.v1"
-            ),
-            Err(ReferenceError::InvalidForkEvidence(
-                "non-interference case is invalid"
             ))
         ));
         Ok(())
