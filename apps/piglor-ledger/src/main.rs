@@ -157,13 +157,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn binary_store_fails_closed_without_host_gate() -> Result<(), Box<dyn std::error::Error>> {
+    fn binary_store_installs_host_owned_gate() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         let store_db = tmp.path().join("store.db");
 
         bin_keygen(&key_path)?;
-        let error = run(&[
+        run(&[
             "piglor-ledger".into(),
             "predict".into(),
             "--source".into(),
@@ -185,8 +185,7 @@ mod tests {
             "--osf".into(),
             "https://osf.io/x".into(),
         ])
-        .test_err()?;
-        assert!(error.to_string().contains("erasure containment boundary"));
+        .test_ok()?;
 
         Ok(())
     }
