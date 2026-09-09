@@ -1326,18 +1326,6 @@ mod tests {
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let stale = ErasureReferenceV1::from_digest([32; 32]);
-        let draft = EventDraft::new(
-            EntityId::new(),
-            Kind::new("stale.sender"),
-            CanonicalBytes::from_static(b"stale"),
-        );
-        let identity = AppendIdentity::new(
-            AppendDedupKey::from_keyed_hash([41; 32]),
-            AppendDedupScope::from_keyed_hash([42; 32]),
-        );
-        let intent = AppendIntent::new(&draft);
-        let cleanup_scope = AppendDedupScope::from_keyed_hash([43; 32]);
-        let authority = ConsentAuthority::new();
 
         {
             let mut sender = host
@@ -1364,48 +1352,6 @@ mod tests {
                 sender.append(root.id(), &[]),
                 Err(ErasureHostErrorV1::StaleGeneration)
             );
-            assert_eq!(
-                sender.append_bounded(root.id(), &[], 1),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.append_consent_bounded(root.id(), &[], authority.append_permit(), 1),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.append_consent_revocation_bounded(
-                    root.id(),
-                    &[],
-                    authority.append_permit(),
-                    1,
-                    cleanup_scope,
-                ),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.append_intent_or_duplicate_bounded(root.id(), identity, intent, 1),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.purge_expired_append_identities_bounded(NonZeroUsize::MIN),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.remove_append_identities_bounded(cleanup_scope, NonZeroUsize::MIN),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.pending_append_identity_cleanup(),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.prepare_owntracks_ingress(owntracks_input()),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.admit_geo_location(geo_request(root.id())),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
         }
 
         let mut reader = host
@@ -1429,6 +1375,88 @@ mod tests {
             reader.logical_head(root.id()),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
+    }
+
+    #[test]
+    fn specialized_host_senders_reject_stale_generation_before_adapter_access() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let root = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("specialized-stale-sender-root"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let stale = ErasureReferenceV1::from_digest([32; 32]);
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("stale.sender"),
+            CanonicalBytes::from_static(b"stale"),
+        );
+        let identity = AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([41; 32]),
+            AppendDedupScope::from_keyed_hash([42; 32]),
+        );
+        let cleanup_scope = AppendDedupScope::from_keyed_hash([43; 32]);
+        let authority = ConsentAuthority::new();
+        {
+            let mut sender = host
+                .command_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            sender.generation = stale;
+            assert_eq!(
+                sender.append_bounded(root.id(), &[], 1),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.append_consent_bounded(root.id(), &[], authority.append_permit(), 1),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.append_consent_revocation_bounded(
+                    root.id(),
+                    &[],
+                    authority.append_permit(),
+                    1,
+                    cleanup_scope,
+                ),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.append_intent_or_duplicate_bounded(
+                    root.id(),
+                    identity,
+                    AppendIntent::new(&draft),
+                    1,
+                ),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.purge_expired_append_identities_bounded(NonZeroUsize::MIN),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.remove_append_identities_bounded(cleanup_scope, NonZeroUsize::MIN),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.pending_append_identity_cleanup(),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.prepare_owntracks_ingress(owntracks_input()),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.admit_geo_location(geo_request(root.id())),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+        }
+        let mut reader = host
+            .read_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        reader.generation = stale;
         assert_eq!(
             reader.event_by_id(root.id(), EventId::new()),
             Err(ErasureHostErrorV1::StaleGeneration)
