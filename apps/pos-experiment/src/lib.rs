@@ -119,17 +119,19 @@ fn bind_registry_to_host_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<(), ExperimentError> {
-    match registry.clone_erasure_gate() {
-        Some(existing) => {
-            if !Arc::ptr_eq(&existing, &gate) {
-                return Err(ExperimentError::Store(
-                    pos_core::CoreError::ErasureContainmentUnavailable,
-                ));
-            }
-        }
-        None => {
-            registry.bind_erasure_gate(gate);
-        }
+    if !registry.erasure_gate_is_bound() {
+        registry.bind_erasure_gate(gate);
+        return Ok(());
+    }
+    let Some(existing) = registry.clone_erasure_gate() else {
+        return Err(ExperimentError::Store(
+            pos_core::CoreError::ErasureContainmentUnavailable,
+        ));
+    };
+    if !Arc::ptr_eq(&existing, &gate) {
+        return Err(ExperimentError::Store(
+            pos_core::CoreError::ErasureContainmentUnavailable,
+        ));
     }
     Ok(())
 }
@@ -7798,6 +7800,11 @@ mod coverage_entrypoints {
             Arc::new(ErasureContainmentGateV1::new())
         )
         .is_err());
+
+        let mut missing_bound_gate = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .without_erasure_gate();
+        assert!(bind_registry_to_host_gate(&mut missing_bound_gate, Arc::clone(&gate)).is_err());
 
         assert!(matches!(
             hosted_store_error(pos_core::ErasureHostErrorV1::AccessFrozen),
