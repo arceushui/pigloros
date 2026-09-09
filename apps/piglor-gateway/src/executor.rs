@@ -448,7 +448,7 @@ impl ExecutorStore {
         match self {
             Self::Host(host) => host
                 .read_sender()
-                .and_then(|mut sender| sender.logical_head(timeline))
+                .and_then(|mut sender| sender.protected_logical_head(timeline))
                 .map_err(host_error_to_core),
             Self::Generic(store) => store.logical_head(timeline),
             Self::GeoLocation(store) => store.protected_logical_head(timeline),
@@ -711,6 +711,16 @@ impl StoreExecutor {
         host.bind_consent_authority(permit)
             .map_err(host_error_to_core)?;
         Ok(Self::spawn(ExecutorStore::Host(host), None))
+    }
+
+    pub(crate) fn new_with_owntracks_erasure_host(
+        mut host: ErasureExecutionHostV1,
+        owner_key: [u8; 32],
+        permit: ConsentAppendPermit,
+    ) -> Result<Self, CoreError> {
+        host.bind_consent_authority(permit)
+            .map_err(host_error_to_core)?;
+        Ok(Self::spawn(ExecutorStore::Host(host), Some(owner_key)))
     }
 
     pub(crate) fn new_with_geo_location_admission<S>(
@@ -1645,14 +1655,20 @@ fn prepare_owntracks_ingress(
     basic_secret: [u8; 32],
     payload: pos_core::CanonicalBytes,
 ) -> Result<PreparedOwnTracksIngressOutcome, CoreError> {
-    let ExecutorStore::OwnTracks(store) = &mut state.store else {
-        return Err(CoreError::GeographicAdmissionUnavailable);
-    };
     let Some(owner_key) = state.owntracks_owner_key else {
         return Err(CoreError::GeographicAdmissionUnavailable);
     };
     let input = owntracks_input(owner_key, basic_handle, basic_secret, payload);
-    let prepared = store.prepare_owntracks_ingress(input)?;
+    let prepared = match &mut state.store {
+        ExecutorStore::Host(host) => host
+            .command_sender()
+            .and_then(|mut sender| sender.prepare_owntracks_ingress(input))
+            .map_err(host_error_to_core)?,
+        ExecutorStore::OwnTracks(store) => store.prepare_owntracks_ingress(input)?,
+        ExecutorStore::Generic(_) | ExecutorStore::GeoLocation(_) => {
+            return Err(CoreError::GeographicAdmissionUnavailable);
+        }
+    };
     if !state.owntracks_rate_limiter.allow(prepared.rate_key()) {
         return Ok(PreparedOwnTracksIngressOutcome::RateLimited);
     }
@@ -1829,11 +1845,13 @@ fn execute_geo_location_command(
     reply: oneshot::Sender<Result<GeoLocationAdmissionOutcome, StoreExecutorError>>,
 ) {
     let result = match &mut state.store {
+        ExecutorStore::Host(host) => host
+            .command_sender()
+            .and_then(|mut sender| sender.admit_geo_location(request))
+            .map_err(host_error_to_core),
         ExecutorStore::GeoLocation(store) => store.admit_geo_location(request),
         ExecutorStore::OwnTracks(store) => store.admit_geo_location(request),
-        ExecutorStore::Host(_) | ExecutorStore::Generic(_) => {
-            Err(CoreError::GeographicAdmissionUnavailable)
-        }
+        ExecutorStore::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
     };
     send_store_result(reply, result);
 }
@@ -2208,7 +2226,9 @@ mod tests {
         timeline::Timeline,
         CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1, ConsentRevokedV1,
         CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, TimelineId,
+        ERASURE_MAX_INVENTORY_REQUESTS,
     };
+    use pos_runtime::ErasureExecutionHostV1;
     use pos_store::memory::MemoryStore;
     use std::{
         collections::HashMap,
@@ -5434,11 +5454,23 @@ mod tests {
 
     async fn owntracks_executor_dispatches_geo_admission_commands_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let executor = super::StoreExecutor::new_with_owntracks_ingress(
-            MemoryStore::new(),
+        let host = ErasureExecutionHostV1::recover_verified_empty_gateway(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        let executor = super::StoreExecutor::new_with_owntracks_erasure_host(
+            host,
             [0; 32],
             ConsentAuthority::new().append_permit(),
-        );
+        )?;
+        let preparation = executor
+            .prepare_owntracks_ingress([1; 32], [2; 32], CanonicalBytes::from_static(b"payload"))
+            .await;
+        assert!(matches!(
+            preparation,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(_)))
+        ));
+        drop(executor.protected_logical_head(TimelineId::new()).await);
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
             TimelineId::new(),
             EntityId::new(),

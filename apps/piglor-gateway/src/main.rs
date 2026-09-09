@@ -24,10 +24,10 @@ use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
-use pos_core::{ErasureContainmentGateV1, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
+use pos_core::{ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::{open_erasure_host_store, StoreConfig};
-use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc};
+use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -198,15 +198,16 @@ fn gateway_for_startup(
     sqlite_path: Option<&str>,
     config: StoreConfig,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
-    erasure_gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
     match (owntracks_owner_key, sqlite_path) {
-        (Some(owner_key), Some(path)) => Gateway::new_with_owntracks_ingress_and_erasure_gate(
-            pos_store::sqlite::SqliteStore::open(path)?,
-            owner_key,
-            erasure_gate,
-        )
-        .map_err(Into::into),
+        (Some(owner_key), Some(path)) => {
+            let host = ErasureExecutionHostV1::recover_verified_empty_gateway(
+                Box::new(pos_store::sqlite::SqliteStore::open(path)?),
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            )
+            .map_err(erasure_host_recovery_error)?;
+            Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
+        }
         (None, _) => {
             let host = ErasureExecutionHostV1::recover_verified_empty(
                 open_erasure_host_store(config)?,
@@ -252,16 +253,7 @@ async fn serve_with_owntracks(
             .map(OwnTracksOwnerKey::load)
             .transpose()?
     };
-    // Startup has no durable #184 recovery query in this composition root.
-    // Keep every protected boundary fail-closed until the host installs
-    // verified evidence and Timeline/Fork bindings.
-    let erasure_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
-    let gateway = gateway_for_startup(
-        sqlite_path,
-        config,
-        owntracks_owner_key.as_ref(),
-        erasure_gate,
-    )?;
+    let gateway = gateway_for_startup(sqlite_path, config, owntracks_owner_key.as_ref())?;
     let app = router_for_addr(
         addr,
         AppState {
@@ -1148,12 +1140,7 @@ mod erasure_gate_coverage_tests {
     #[tokio::test]
     async fn startup_gateway_constructors_cover_memory_and_sqlite_paths(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let memory = gateway_for_startup(
-            None,
-            StoreConfig::Memory,
-            None,
-            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
-        )?;
+        let memory = gateway_for_startup(None, StoreConfig::Memory, None)?;
         let timeline = memory.create_timeline("host-owned-startup").await?;
         assert!(memory
             .read_events_page(&timeline.id().to_string(), 0, 1)
@@ -1177,8 +1164,13 @@ mod erasure_gate_coverage_tests {
                 path: database.to_string_lossy().into_owned(),
             },
             Some(&owner_key),
-            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
         )?;
+        let timeline = sqlite.create_timeline("host-owned-owntracks").await?;
+        assert!(sqlite
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await?
+            .events
+            .is_empty());
         sqlite.shutdown().await?;
         drop(sqlite);
 
@@ -1194,7 +1186,6 @@ mod erasure_gate_coverage_tests {
                 path: invalid_path.to_owned(),
             },
             Some(&owner_key),
-            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
         )
         .is_err());
         assert!(gateway_for_startup(
@@ -1203,7 +1194,6 @@ mod erasure_gate_coverage_tests {
                 path: invalid_path.to_owned(),
             },
             None,
-            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
         )
         .is_err());
         Ok(())
@@ -1238,7 +1228,6 @@ mod coverage_startup_error_paths {
                 path: "/dev/null/cannot/create/this/path".to_owned(),
             },
             Some(&owner_key),
-            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
         )
         .is_err());
         assert!(gateway_for_startup(
@@ -1247,7 +1236,6 @@ mod coverage_startup_error_paths {
                 path: "/dev/null/cannot/create/this/path".to_owned(),
             },
             None,
-            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
         )
         .is_err());
     }

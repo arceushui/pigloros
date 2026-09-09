@@ -8,9 +8,11 @@ use pos_core::{
         PurgeOutcome, SeqRange,
     },
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
-    ErasureForkRecoveryV1, ErasureGate, ErasureHostErrorV1, ErasureHostStoreV1, ErasureReferenceV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event, EventDraft, EventId,
-    PreparedErasureForkBatchV1, Seq, Timeline, TimelineId,
+    ErasureForkRecoveryV1, ErasureGate, ErasureGatewayHostStoreV1, ErasureHostErrorV1,
+    ErasureHostStoreV1, ErasureReferenceV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, Event, EventDraft, EventId, GeoLocationAdmissionOutcome,
+    GeoLocationAdmissionRequestV1, OwnTracksIngressInputV1, PreparedErasureForkBatchV1,
+    PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
 };
 use std::num::NonZeroUsize;
 
@@ -38,6 +40,27 @@ impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
     }
 }
 
+enum OwnedErasureStoreV1 {
+    Standard(Box<dyn ErasureHostStoreV1>),
+    Gateway(Box<dyn ErasureGatewayHostStoreV1>),
+}
+
+impl OwnedErasureStoreV1 {
+    fn host_store(&mut self) -> &mut dyn ErasureHostStoreV1 {
+        match self {
+            Self::Standard(store) => store.as_mut(),
+            Self::Gateway(store) => store.as_mut(),
+        }
+    }
+
+    fn gateway_store(&mut self) -> Result<&mut dyn ErasureGatewayHostStoreV1, ErasureHostErrorV1> {
+        match self {
+            Self::Gateway(store) => Ok(store.as_mut()),
+            Self::Standard(_) => Err(ErasureHostErrorV1::AuthorizationDenied),
+        }
+    }
+}
+
 /// Host-owned store and erasure gate with no raw adapter escape hatch.
 ///
 /// Callers receive either a mutation-capable [`ErasureCommandSenderV1`] or a
@@ -45,7 +68,7 @@ impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
 /// gives synchronous callers one logical command order. Async composition
 /// roots place this host behind their existing single-consumer command queue.
 pub struct ErasureExecutionHostV1 {
-    store: Box<dyn ErasureHostStoreV1>,
+    store: OwnedErasureStoreV1,
     gate: Arc<ErasureContainmentGateV1>,
     inventory: Option<ErasureVerifiedInventoryV1>,
     state: HostStateV1,
@@ -59,10 +82,26 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns [`ErasureHostErrorV1::AdapterFailure`] when the adapter refuses
     /// the unique host gate binding.
-    pub fn new_closed(mut store: Box<dyn ErasureHostStoreV1>) -> Result<Self, ErasureHostErrorV1> {
+    pub fn new_closed(store: Box<dyn ErasureHostStoreV1>) -> Result<Self, ErasureHostErrorV1> {
+        Self::new_closed_store(OwnedErasureStoreV1::Standard(store))
+    }
+
+    /// Bind an owned Gateway-capable store to one fail-closed gate.
+    ///
+    /// # Errors
+    /// Returns [`ErasureHostErrorV1::AdapterFailure`] when the adapter refuses
+    /// the unique host gate binding.
+    pub fn new_gateway_closed(
+        store: Box<dyn ErasureGatewayHostStoreV1>,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        Self::new_closed_store(OwnedErasureStoreV1::Gateway(store))
+    }
+
+    fn new_closed_store(mut store: OwnedErasureStoreV1) -> Result<Self, ErasureHostErrorV1> {
         let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let store_gate: Arc<dyn ErasureGate> = gate.clone();
         store
+            .host_store()
             .bind_erasure_gate(store_gate)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         Ok(Self {
@@ -94,7 +133,10 @@ impl ErasureExecutionHostV1 {
         permit: ConsentAppendPermit,
     ) -> Result<(), ErasureHostErrorV1> {
         self.ready_generation()?;
-        self.store.bind_consent_authority(permit).map_store_error()
+        self.store
+            .host_store()
+            .bind_consent_authority(permit)
+            .map_store_error()
     }
 
     /// Install one complete inventory before any protected sender is granted.
@@ -219,9 +261,10 @@ impl ErasureExecutionHostV1 {
         else {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
-        let timeline = change(self.store.as_mut()).map_store_error()?;
+        let timeline = change(self.store.host_store()).map_store_error()?;
         let Ok(inventory) = self
             .store
+            .host_store()
             .complete_erasure_inventory_snapshot(maximum_requests)
             .and_then(|snapshot| {
                 ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
@@ -250,6 +293,7 @@ impl ErasureExecutionHostV1 {
         let child = Timeline::new(admission.child().clone());
         let outcome = self
             .store
+            .host_store()
             .commit_fork_admission(admission)
             .map_err(map_erasure_error)?;
         match (current_generation == expected_generation, outcome) {
@@ -280,16 +324,36 @@ impl ErasureExecutionHostV1 {
     /// binding fails closed. Production recovery for a non-empty set must use
     /// [`Self::new_closed`] followed by [`Self::install_inventory`].
     pub fn recover_verified_empty(
-        mut store: Box<dyn ErasureHostStoreV1>,
+        store: Box<dyn ErasureHostStoreV1>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_owned_verified_empty(OwnedErasureStoreV1::Standard(store), maximum_requests)
+    }
+
+    /// Recover a Gateway-capable store only when its durable request set is empty.
+    ///
+    /// # Errors
+    /// A non-empty request set, failed adapter snapshot, or rejected gate
+    /// binding fails closed.
+    pub fn recover_verified_empty_gateway(
+        store: Box<dyn ErasureGatewayHostStoreV1>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_owned_verified_empty(OwnedErasureStoreV1::Gateway(store), maximum_requests)
+    }
+
+    fn recover_owned_verified_empty(
+        mut store: OwnedErasureStoreV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         let snapshot = store
+            .host_store()
             .complete_erasure_inventory_snapshot(maximum_requests)
             .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
         let inventory =
             ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
                 .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
-        let mut host = Self::new_closed(store)?;
+        let mut host = Self::new_closed_store(store)?;
         let mut query = OneShotInventoryV1(Some(inventory));
         host.install_inventory(&mut query, maximum_requests)?;
         Ok(host)
@@ -378,7 +442,12 @@ impl ErasureCommandSenderV1<'_> {
         operation: ErasureReferenceV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        match self.host.store.recover_fork_admission(operation) {
+        match self
+            .host
+            .store
+            .host_store()
+            .recover_fork_admission(operation)
+        {
             Ok(result) => Ok(result),
             Err(error) => {
                 self.host.state = HostStateV1::Poisoned;
@@ -398,7 +467,11 @@ impl ErasureCommandSenderV1<'_> {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        self.host.store.append(timeline, drafts).map_store_error()
+        self.host
+            .store
+            .host_store()
+            .append(timeline, drafts)
+            .map_store_error()
     }
 
     /// Atomically append Events when they fit the owned-event ceiling.
@@ -414,6 +487,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .append_bounded(timeline, drafts, maximum)
             .map_store_error()
     }
@@ -432,6 +506,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .append_consent_bounded(timeline, drafts, permit, maximum)
             .map_store_error()
     }
@@ -451,6 +526,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .append_consent_revocation_bounded(timeline, drafts, permit, maximum, cleanup_scope)
             .map_store_error()
     }
@@ -469,6 +545,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .append_intent_or_duplicate_bounded(timeline, identity, intent, maximum)
             .map_store_error()
     }
@@ -484,6 +561,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .purge_expired_append_identities_bounded(limit)
             .map_store_error()
     }
@@ -500,6 +578,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .remove_append_identities_bounded(scope, limit)
             .map_store_error()
     }
@@ -514,7 +593,42 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .pending_append_identity_cleanup()
+            .map_store_error()
+    }
+
+    /// Prepare minimized `OwnTracks` ingress through the owned Gateway store.
+    ///
+    /// # Errors
+    /// Returns a payload-free error when the sender is stale, the store lacks
+    /// the Gateway capability set, or ingress preparation is rejected.
+    pub fn prepare_owntracks_ingress(
+        &mut self,
+        input: OwnTracksIngressInputV1,
+    ) -> Result<PreparedOwnTracksIngressV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .gateway_store()?
+            .prepare_owntracks_ingress(input)
+            .map_store_error()
+    }
+
+    /// Admit one minimized geographic observation through the owned store.
+    ///
+    /// # Errors
+    /// Returns a payload-free error when the sender is stale, the store lacks
+    /// the Gateway capability set, or geographic admission is rejected.
+    pub fn admit_geo_location(
+        &mut self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .gateway_store()?
+            .admit_geo_location(request)
             .map_store_error()
     }
 }
@@ -539,6 +653,7 @@ impl ErasureReadSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .read_bounded(timeline, range, bounds)
             .map_store_error()
     }
@@ -555,6 +670,7 @@ impl ErasureReadSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .read_event_by_id(timeline, event)
             .map_store_error()
     }
@@ -568,7 +684,11 @@ impl ErasureReadSenderV1<'_> {
         timeline: TimelineId,
     ) -> Result<Option<Timeline>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        self.host.store.get_timeline(timeline).map_store_error()
+        self.host
+            .store
+            .host_store()
+            .get_timeline(timeline)
+            .map_store_error()
     }
 
     /// List only Timelines classified by the installed inventory generation.
@@ -577,7 +697,11 @@ impl ErasureReadSenderV1<'_> {
     /// Returns only payload-free host errors.
     pub fn timelines(&mut self) -> Result<Vec<Timeline>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        self.host.store.list_timelines().map_store_error()
+        self.host
+            .store
+            .host_store()
+            .list_timelines()
+            .map_store_error()
     }
 
     /// Count visible root Timelines without exceeding `maximum + 1`.
@@ -591,6 +715,7 @@ impl ErasureReadSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         self.host
             .store
+            .host_store()
             .root_timeline_count_bounded(maximum)
             .map_store_error()
     }
@@ -601,7 +726,28 @@ impl ErasureReadSenderV1<'_> {
     /// Returns only payload-free host errors.
     pub fn logical_head(&mut self, timeline: TimelineId) -> Result<Seq, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        self.host.store.logical_head(timeline).map_store_error()
+        self.host
+            .store
+            .host_store()
+            .logical_head(timeline)
+            .map_store_error()
+    }
+
+    /// Return the protected logical head used by geographic admission.
+    ///
+    /// # Errors
+    /// Returns a payload-free error when the sender is stale, the store lacks
+    /// the Gateway capability set, or the protected head cannot be read.
+    pub fn protected_logical_head(
+        &mut self,
+        timeline: TimelineId,
+    ) -> Result<Seq, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let result = match &mut self.host.store {
+            OwnedErasureStoreV1::Standard(store) => store.logical_head(timeline),
+            OwnedErasureStoreV1::Gateway(store) => store.protected_logical_head(timeline),
+        };
+        result.map_store_error()
     }
 }
 
@@ -651,8 +797,8 @@ mod tests {
     use super::*;
     use pos_core::{
         AppendDedupKey, CanonicalBytes, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1,
-        EntityId, ErasureForkAdmissionInputV1, ErasurePersistenceInventorySnapshotV1, Kind,
-        TimelineMeta, TimelineMode, MODALITY_LOCATION,
+        EntityId, ErasureForkAdmissionInputV1, ErasurePersistenceInventorySnapshotV1,
+        GeoLocationAdmissionInputV1, Kind, TimelineMeta, TimelineMode, MODALITY_LOCATION,
     };
     use pos_store::memory::MemoryStore;
 
@@ -1728,5 +1874,85 @@ mod tests {
             reader.logical_head(timeline),
             Err(ErasureHostErrorV1::AdapterFailure)
         );
+    }
+
+    #[test]
+    fn standard_host_rejects_gateway_only_commands() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let timeline = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("standard"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut sender = host
+            .command_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            sender.prepare_owntracks_ingress(owntracks_input()),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.admit_geo_location(geo_request(timeline.id())),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            host.read_sender()
+                .and_then(|mut reader| reader.protected_logical_head(timeline.id())),
+            Ok(Seq::ZERO)
+        );
+    }
+
+    #[test]
+    fn gateway_host_keeps_specialized_store_capabilities_contained() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty_gateway(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let timeline = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("gateway"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut sender = host
+            .command_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            sender.prepare_owntracks_ingress(owntracks_input()),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
+            sender.admit_geo_location(geo_request(timeline.id())),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
+            host.read_sender()
+                .and_then(|mut reader| reader.protected_logical_head(timeline.id())),
+            Ok(Seq::ZERO)
+        );
+    }
+
+    fn owntracks_input() -> OwnTracksIngressInputV1 {
+        OwnTracksIngressInputV1::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            CanonicalBytes::from_static(b"payload"),
+        )
+    }
+
+    fn geo_request(timeline: TimelineId) -> GeoLocationAdmissionRequestV1 {
+        GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            timeline,
+            EntityId::new(),
+            CanonicalBytes::from_static(b"payload"),
+            0,
+            ([0; 32], 0, [0; 32]),
+            (0, false, 0),
+            ([0; 32], [0; 32]),
+        ))
     }
 }

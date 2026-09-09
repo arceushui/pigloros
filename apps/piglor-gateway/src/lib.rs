@@ -1203,6 +1203,43 @@ impl Gateway {
         .schedule_startup_consent_cleanup())
     }
 
+    /// Construct authenticated local `OwnTracks` ingress behind one recovered
+    /// host-owned Gateway store and erasure containment gate.
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot bind the Gateway's
+    /// independently owned consent authority.
+    pub fn new_with_owntracks_erasure_host(
+        host: ErasureExecutionHostV1,
+        owner_key: &OwnTracksOwnerKey,
+    ) -> Result<Self, GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let store = executor::StoreExecutor::new_with_owntracks_erasure_host(
+            host,
+            owner_key.0,
+            consent_authority.append_permit(),
+        )?;
+        Ok(Self {
+            store,
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: true,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
     /// Wrap a store and configure the World body catalogue used for actions.
     #[must_use]
     pub fn new_with_world_bodies(

@@ -3959,6 +3959,21 @@ impl<T> ErasureHostStoreV1 for T where
 {
 }
 
+/// Optional Gateway ingress capabilities composed with the exclusive erasure host store.
+///
+/// This trait does not grant erasure publication authority. It only preserves
+/// the existing minimized geographic and `OwnTracks` adapter operations after
+/// the concrete store moves behind the runtime's host-owned composition boundary.
+pub trait ErasureGatewayHostStoreV1:
+    ErasureHostStoreV1 + crate::GeoLocationAdmissionStore + crate::OwnTracksIngressStore
+{
+}
+
+impl<T> ErasureGatewayHostStoreV1 for T where
+    T: ErasureHostStoreV1 + crate::GeoLocationAdmissionStore + crate::OwnTracksIngressStore
+{
+}
+
 /// One adapter-snapshot observation of every erasure head and Timeline/Fork.
 ///
 /// This is untrusted recovery input, not runtime authority. Core checks every
