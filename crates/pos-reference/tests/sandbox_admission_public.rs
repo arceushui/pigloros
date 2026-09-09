@@ -4593,11 +4593,12 @@ fn root_selector_server_rejects_reconstructed_attempt_and_authority_drift() -> T
         assert_eq!(local.phase, SandboxLocalErrorPhase::BeforeSpx1);
         assert_eq!(
             local.code,
-            if drift == 3 {
+            if matches!(drift, 2 | 3) {
                 SandboxLocalErrorCode::PolicyUnavailable
             } else {
                 SandboxLocalErrorCode::RequestAuthorityMismatch
-            }
+            },
+            "unexpected local error classification for drift {drift}"
         );
     }
 
