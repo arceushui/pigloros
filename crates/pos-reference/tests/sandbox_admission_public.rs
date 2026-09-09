@@ -29,7 +29,8 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest,
     SandboxGrantExpectations, SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase,
     SandboxProviderAdmissionInputs, SandboxProviderOperation, SandboxProviderProtocolError,
-    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTrustSnapshot,
+    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTerminalOutcome,
+    SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -1103,6 +1104,61 @@ impl SignedSelectorProvider {
             audit,
             output_stream: Some(output_stream),
         })
+    }
+}
+
+struct NonCompletedSelectorProvider {
+    signed: SignedSelectorProvider,
+    outcome: u64,
+    unexpected_output: bool,
+}
+
+impl NonCompletedSelectorProvider {
+    fn reply(&self, request: &SandboxExecuteRequest) -> TestResult<RootSelectorProviderReply> {
+        let fixture = &self.signed.fixture;
+        let grant = admission_grant(fixture, request, &self.signed.launch)?;
+        let grant_record = AdmissionGrant::from_canonical_cbor(&grant)?;
+        let (events, ready): (&[u8], _) = if self.outcome == 1 {
+            (&[11, 13, 1], Some([41; 32]))
+        } else {
+            (&[0], None)
+        };
+        let audit = audit_chain_for_events(fixture, &grant_record, events)?;
+        let receipt = provider_receipt_for_lifecycle(
+            fixture,
+            &grant_record,
+            wrapped_digest(audit.last().ok_or("audit chain must not be empty")?)?,
+            ready,
+            None,
+        )?;
+        let receipt_record = SandboxProviderReceipt::from_canonical_cbor(&receipt)?;
+        let result = terminal_result_for_outcome(
+            fixture,
+            request,
+            &grant_record,
+            &receipt_record,
+            self.outcome,
+            events,
+        )?;
+        Ok(RootSelectorProviderReply::Admitted {
+            grant,
+            receipt,
+            result,
+            audit,
+            output_stream: self.unexpected_output.then(|| b"unexpected".to_vec()),
+        })
+    }
+}
+
+impl RootSelectorProvider for NonCompletedSelectorProvider {
+    fn execute(
+        &mut self,
+        request: &SandboxExecuteRequest,
+        _: &[u8],
+        _: Duration,
+    ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
+        self.reply(request)
+            .map_err(|_| RootSelectorServiceError::ProviderEvidence)
     }
 }
 
@@ -2266,6 +2322,60 @@ fn root_selector_server_reports_provider_failure_phases_as_sle1() -> TestResult 
         assert_eq!(local.phase, phase);
         assert_eq!(local.code, code);
         assert_eq!(local.agr1_digest.is_some(), has_grant);
+    }
+    Ok(())
+}
+
+#[test]
+fn root_selector_authenticates_noncompleted_outcomes_and_rejects_their_output() -> TestResult {
+    for (outcome, unexpected_output) in [(1, false), (4, false), (1, true), (4, true)] {
+        let fixture = Fixture::new()?;
+        let request = selector_evaluation_request(&fixture)?;
+        let attempt = selector_case_attempt();
+        let plan = selector_case_plan(&fixture, &request, attempt.clone())?;
+        let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+        let (server_result, control, trailing) = exercise_root_selector(
+            FixedSelectorAuthority { plan },
+            NonCompletedSelectorProvider {
+                signed: SignedSelectorProvider { fixture, launch },
+                outcome,
+                unexpected_output,
+            },
+            &request,
+            &attempt,
+            0,
+        )?;
+        assert_eq!(server_result, Ok(()));
+        assert!(trailing.is_empty());
+        if unexpected_output {
+            let local = SandboxLocalError::from_canonical_cbor(&control)?;
+            assert_eq!(local.phase, SandboxLocalErrorPhase::AfterAdmission);
+            assert_eq!(local.code, SandboxLocalErrorCode::ProviderEvidenceInvalid);
+            assert!(local.agr1_digest.is_some());
+            continue;
+        }
+        let Value::Array(wrapper) = ciborium::from_reader(control.as_slice())? else {
+            return Err("SLY1 wrapper must be an array".into());
+        };
+        let Value::Array(fields) = wrapper.first().ok_or("SLY1 prefix missing")? else {
+            return Err("SLY1 prefix must be an array".into());
+        };
+        assert_eq!(fields.first(), Some(&Value::Text("SLY1".to_owned())));
+        assert_eq!(fields.get(11), Some(&Value::Null));
+        let Some(Value::Bytes(terminal)) = fields.get(7) else {
+            return Err("SLY1 terminal result missing".into());
+        };
+        let result =
+            pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
+                terminal,
+            )?;
+        let expected_outcome = if outcome == 1 {
+            SandboxTerminalOutcome::Cancelled
+        } else {
+            SandboxTerminalOutcome::UnavailableAfterAdmission
+        };
+        assert_eq!(result.outcome, expected_outcome);
+        assert!(result.output.is_none());
     }
     Ok(())
 }
