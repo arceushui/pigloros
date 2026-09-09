@@ -673,6 +673,8 @@ mod tests {
 
     use super::*;
 
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
     fn output_digest(bytes: &[u8]) -> [u8; 32] {
         output_digest_with(b"PiglorOS.SandboxOutputBytes.v1\0", bytes)
     }
@@ -692,8 +694,8 @@ mod tests {
         }
     }
 
-    fn request() -> SandboxExecuteRequest {
-        SandboxExecuteRequest::for_selector(
+    fn request() -> TestResult<SandboxExecuteRequest> {
+        Ok(SandboxExecuteRequest::for_selector(
             crate::sandbox_provider_protocol::RequestAuthority {
                 request_id: [2; 16],
                 apt1_digest: [8; 32],
@@ -724,69 +726,71 @@ mod tests {
                 digest: output_digest_with(b"PiglorOS.SandboxInputBytes.v1\0", b""),
             },
             vec![],
-        )
-        .expect("closed test request")
+        )?)
     }
 
     #[test]
-    fn staged_output_requires_the_full_parent_bound_payload() {
+    fn staged_output_requires_the_full_parent_bound_payload() -> TestResult {
         let bytes = b"complete";
         let descriptor = PayloadDescriptor {
             byte_length: bytes.len() as u64,
             digest: output_digest(bytes),
         };
         let result = completed(descriptor.clone());
-        let encoded =
-            encode_chunk(result.result_digest, [2; 16], [3; 16], 1, 0, bytes).expect("chunk");
-        let chunk = SandboxPayloadChunk::from_canonical_cbor(&encoded).expect("canonical chunk");
-        let mut file = tempfile::NamedTempFile::new().expect("stage");
-        file.write_all(bytes).expect("stage bytes");
-        let staged = stage_output(file, vec![ChunkMeta::from(&chunk)], &request(), &result)
-            .expect("validated payload")
-            .expect("completed output");
+        let encoded = encode_chunk(result.result_digest, [2; 16], [3; 16], 1, 0, bytes)?;
+        let chunk = SandboxPayloadChunk::from_canonical_cbor(&encoded)?;
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(bytes)?;
+        let staged = stage_output(file, vec![ChunkMeta::from(&chunk)], &request()?, &result)
+            .map_err(|failure| format!("payload validation failed: {failure:?}"))?
+            .ok_or("completed output absent")?;
         assert_eq!(staged.descriptor(), &descriptor);
+        Ok(())
     }
 
     #[test]
-    fn staged_output_rejects_forged_parent_and_missing_completion() {
+    fn staged_output_rejects_forged_parent_and_missing_completion() -> TestResult {
         let bytes = b"complete";
         let result = completed(PayloadDescriptor {
             byte_length: bytes.len() as u64,
             digest: output_digest(bytes),
         });
-        let encoded = encode_chunk([7; 32], [2; 16], [3; 16], 1, 0, bytes).expect("chunk");
-        let chunk = SandboxPayloadChunk::from_canonical_cbor(&encoded).expect("canonical chunk");
-        let mut file = tempfile::NamedTempFile::new().expect("stage");
-        file.write_all(bytes).expect("stage bytes");
-        assert!(stage_output(file, vec![ChunkMeta::from(&chunk)], &request(), &result).is_err());
+        let encoded = encode_chunk([7; 32], [2; 16], [3; 16], 1, 0, bytes)?;
+        let chunk = SandboxPayloadChunk::from_canonical_cbor(&encoded)?;
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(bytes)?;
+        assert!(stage_output(file, vec![ChunkMeta::from(&chunk)], &request()?, &result).is_err());
+        Ok(())
     }
 
     #[test]
-    fn deadline_and_frame_limits_fail_closed() {
+    fn deadline_and_frame_limits_fail_closed() -> TestResult {
         let expired = Deadline {
             expires_at: Instant::now(),
         };
         assert_eq!(expired.remaining(), Err(ReceiveFailure::Incomplete));
-        let (mut sender, _) = UnixStream::pair().expect("stream pair");
+        let (mut sender, _) = UnixStream::pair()?;
         assert!(write_frame(
             &mut sender,
             &vec![0; CONTROL_LIMIT + 1],
-            &Deadline::new(Duration::from_secs(1)).expect("deadline")
+            &Deadline::new(Duration::from_secs(1))?
         )
         .is_err());
+        Ok(())
     }
 
     #[test]
-    fn endpoint_mode_is_exactly_root_private_socket_mode() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
+    fn endpoint_mode_is_exactly_root_private_socket_mode() -> TestResult {
+        let temporary = tempfile::tempdir()?;
         let path = temporary.path().join("provider.sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&path).expect("socket");
-        let metadata = std::fs::metadata(&path).expect("metadata");
+        let _listener = std::os::unix::net::UnixListener::bind(&path)?;
+        let metadata = std::fs::metadata(&path)?;
         for mode in [0o400, 0o200, 0o000, 0o1600, 0o2600, 0o4600] {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
             assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_err());
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_ok());
+        Ok(())
     }
 }
