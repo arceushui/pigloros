@@ -3,7 +3,9 @@ use super::*;
 #[test]
 fn export_installed_selector_fixtures() -> TestResult {
     let temporary = tempfile::tempdir()?;
-    let destination = std::env::var_os("SELECTOR_FIXTURE_EXPORT")
+    let export = std::env::var_os("SELECTOR_FIXTURE_EXPORT");
+    let destination = export
+        .as_ref()
         .map_or_else(|| temporary.path().to_path_buf(), std::path::PathBuf::from);
     std::fs::create_dir_all(&destination)?;
     let corpora = [
@@ -28,9 +30,19 @@ fn export_installed_selector_fixtures() -> TestResult {
     for (name, corpus) in corpora {
         let directory = destination.join(name);
         std::fs::create_dir_all(&directory)?;
-        std::fs::write(directory.join("request.cbor"), corpus.request)?;
-        std::fs::write(directory.join("archive.cbor"), corpus.archive)?;
-        std::fs::write(directory.join("trust-policy.cbor"), corpus.trust_policy)?;
+        let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/installed-selector")
+            .join(name);
+        for (file, bytes) in [
+            ("request.cbor", corpus.request),
+            ("archive.cbor", corpus.archive),
+            ("trust-policy.cbor", corpus.trust_policy),
+        ] {
+            if export.is_none() {
+                assert_eq!(std::fs::read(committed.join(file))?, bytes, "{name}/{file}");
+            }
+            std::fs::write(directory.join(file), bytes)?;
+        }
     }
     Ok(())
 }

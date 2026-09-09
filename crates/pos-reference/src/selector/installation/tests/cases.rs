@@ -1,7 +1,3 @@
-#[allow(dead_code)]
-#[path = "../../../../tests/support/mod.rs"]
-mod signed_support;
-
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
@@ -9,6 +5,23 @@ use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
 use crate::selector::installation::authority::InstalledSelectorAuthority;
 
 type CaseTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+struct Corpus {
+    request: Vec<u8>,
+    archive: Vec<u8>,
+    trust_policy: Vec<u8>,
+}
+
+fn load_corpus(name: &str) -> CaseTestResult<Corpus> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/installed-selector")
+        .join(name);
+    Ok(Corpus {
+        request: std::fs::read(directory.join("request.cbor"))?,
+        archive: std::fs::read(directory.join("archive.cbor"))?,
+        trust_policy: std::fs::read(directory.join("trust-policy.cbor"))?,
+    })
+}
 
 fn install_raw_object(
     fixture: &InstallationFixture,
@@ -70,7 +83,7 @@ fn install_case_fixture(
     Ok((fixture, authority))
 }
 
-fn corpus_request(corpus: &signed_support::Corpus) -> CaseTestResult<EvaluationRequest> {
+fn corpus_request(corpus: &Corpus) -> CaseTestResult<EvaluationRequest> {
     Ok(EvaluationRequest::from_canonical_cbor(&corpus.request)?)
 }
 
@@ -82,7 +95,7 @@ fn rebind(mut request: EvaluationRequest) -> CaseTestResult<EvaluationRequest> {
 
 #[test]
 fn installed_authority_reconstructs_the_signed_selected_case() -> CaseTestResult {
-    let corpus = signed_support::corpus()?;
+    let corpus = load_corpus("valid")?;
     let request = corpus_request(&corpus)?;
     let (_fixture, authority) =
         install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
@@ -97,7 +110,7 @@ fn installed_authority_reconstructs_the_signed_selected_case() -> CaseTestResult
 
 #[test]
 fn installed_authority_rejects_missing_or_swapped_cfb1_and_tps1() -> CaseTestResult {
-    let corpus = signed_support::corpus()?;
+    let corpus = load_corpus("valid")?;
     let request = corpus_request(&corpus)?;
     for code in [14, 15] {
         let (_fixture, authority) =
@@ -114,7 +127,7 @@ fn installed_authority_rejects_missing_or_swapped_cfb1_and_tps1() -> CaseTestRes
 
 #[test]
 fn installed_authority_rejects_invalid_ordinal_mode_and_request_bindings() -> CaseTestResult {
-    let corpus = signed_support::corpus()?;
+    let corpus = load_corpus("valid")?;
     let request = corpus_request(&corpus)?;
     let (_fixture, authority) =
         install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
@@ -132,7 +145,7 @@ fn installed_authority_rejects_invalid_ordinal_mode_and_request_bindings() -> Ca
         assert!(authority.resolve_installed_case(&request, 0).is_err());
     }
 
-    let corpus = signed_support::corpus_with_bundle_mutation(signed_support::BundleMutation::Mode)?;
+    let corpus = load_corpus("mode")?;
     let request = corpus_request(&corpus)?;
     let (_fixture, authority) =
         install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
@@ -143,24 +156,19 @@ fn installed_authority_rejects_invalid_ordinal_mode_and_request_bindings() -> Ca
 #[test]
 fn installed_authority_rejects_invalid_signed_closures_before_case_reconstruction() -> CaseTestResult
 {
-    let corpus =
-        signed_support::corpus_with_bundle_mutation(signed_support::BundleMutation::Signature)?;
+    let corpus = load_corpus("signature")?;
     let request = corpus_request(&corpus)?;
     let (_fixture, authority) =
         install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
     assert!(authority.resolve_installed_case(&request, 0).is_err());
 
-    let corpus = signed_support::corpus_with_profile_mutation(
-        signed_support::ProfileMutation::FixtureAdapter,
-    )?;
+    let corpus = load_corpus("profile")?;
     let request = corpus_request(&corpus)?;
     let (_fixture, authority) =
         install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
     assert!(authority.resolve_installed_case(&request, 0).is_err());
 
-    let corpus = signed_support::corpus_with_profile_mutation(
-        signed_support::ProfileMutation::SelectedClosureCapBoundary(0),
-    )?;
+    let corpus = load_corpus("caps")?;
     let request = corpus_request(&corpus)?;
     let (_fixture, authority) =
         install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
