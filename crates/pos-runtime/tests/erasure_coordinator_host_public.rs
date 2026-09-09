@@ -33,16 +33,16 @@ use erasure_support::{
 
 #[derive(Default)]
 struct TestAuthority {
-    timeline: Mutex<Option<TimelineId>>,
+    timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
     frozen: AtomicBool,
 }
 
 impl TestAuthority {
     fn set_timeline(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
-        *self
-            .timeline
+        self.timelines
             .lock()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)? = Some(timeline);
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+            .push((timeline, reference(9)));
         Ok(())
     }
 
@@ -51,17 +51,11 @@ impl TestAuthority {
         request: ErasureReferenceV1,
         manifest: ErasureReferenceV1,
     ) -> Result<ErasureVerifiedTopologyObservationV1, ErasureErrorV1> {
-        let timeline = *self
-            .timeline
+        let timelines = self
+            .timelines
             .lock()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        let Some(timeline) = timeline else {
-            return Ok(ErasureVerifiedTopologyObservationV1::new(
-                manifest,
-                Vec::new(),
-                Vec::new(),
-            ));
-        };
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+            .clone();
         if self.frozen.load(Ordering::Acquire) {
             let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
                 request,
@@ -71,14 +65,27 @@ impl TestAuthority {
             })?;
             Ok(ErasureVerifiedTopologyObservationV1::new(
                 manifest,
-                vec![(timeline, scope.reference())],
+                timelines
+                    .into_iter()
+                    .map(|(timeline, child_scope)| {
+                        (
+                            timeline,
+                            (child_scope == reference(9))
+                                .then_some(scope.reference())
+                                .unwrap_or(child_scope),
+                        )
+                    })
+                    .collect(),
                 Vec::new(),
             ))
         } else {
             Ok(ErasureVerifiedTopologyObservationV1::new(
                 manifest,
                 Vec::new(),
-                vec![timeline],
+                timelines
+                    .into_iter()
+                    .map(|(timeline, _)| timeline)
+                    .collect(),
             ))
         }
     }
@@ -211,8 +218,12 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
     fn resolve_fork_child_scope(
         &self,
         _parent: TimelineId,
-        _child: &pos_core::TimelineMeta,
+        child: &pos_core::TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.timelines
+            .lock()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+            .push((child.id, reference(19)));
         Ok(reference(19))
     }
 
@@ -348,4 +359,68 @@ fn memory_host_freezes_access_at_the_coordinator_cas_boundary(
 fn sqlite_host_freezes_access_at_the_coordinator_cas_boundary(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_atomic_freeze_parity(StoreConfig::SqliteInMemory)
+}
+
+#[test]
+fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-host-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    let (parent, child) = {
+        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+        let mut host = ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        let mut commands = host.command_sender()?;
+        let parent = commands.create_timeline("restart-parent")?;
+        authority.set_timeline(parent.id())?;
+        let request = persistence_request()?;
+        let request_reference = request.reference();
+        commands.submit_erasure_request(request, reference(31))?;
+        commands.authorize_erasure_request(request_reference, reference(32))?;
+        commands.freeze_access(request_reference, &freeze_transition())?;
+        let child = commands.fork_timeline_identified(
+            reference(41),
+            parent.id(),
+            pos_core::Seq::ZERO,
+            "restart-child",
+        )?;
+        (parent.id(), child.id())
+    };
+    {
+        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
+        let mut recovered = ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        let mut reads = recovered.read_sender()?;
+        assert_eq!(
+            reads.timeline(parent),
+            Err(ErasureHostErrorV1::AccessFrozen)
+        );
+        assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
+    }
+    for candidate in [
+        path,
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+    Ok(())
 }
