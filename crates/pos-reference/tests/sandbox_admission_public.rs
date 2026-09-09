@@ -25,13 +25,13 @@ use pos_reference::root_selector::{
 };
 use pos_reference::sandbox_provider_protocol::{
     AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, ExecuteAuthority,
-    HostCapabilityProfile, LaunchPolicy, NetworkExchangePlan, ProviderConformanceReport,
-    RootSelectorAdmission, RootSelectorAdmissionInputs, SandboxAdministratorPolicy,
-    SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest,
-    SandboxGrantExpectations, SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase,
-    SandboxProviderAdmissionInputs, SandboxProviderOperation, SandboxProviderProtocolError,
-    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTerminalOutcome,
-    SandboxTrustSnapshot,
+    HostCapabilityProfile, LaunchPolicy, NetworkExchangePlan, PayloadDescriptor,
+    ProviderConformanceReport, RootSelectorAdmission, RootSelectorAdmissionInputs,
+    SandboxAdministratorPolicy, SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord,
+    SandboxExecuteRequest, SandboxGrantExpectations, SandboxLocalError, SandboxLocalErrorCode,
+    SandboxLocalErrorPhase, SandboxProviderAdmissionInputs, SandboxProviderOperation,
+    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxRevocationSnapshot,
+    SandboxTerminalOutcome, SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -522,6 +522,17 @@ fn payload_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     hasher.update(domain);
     hasher.update(payload);
     *hasher.finalize().as_bytes()
+}
+
+fn staged_output(bytes: &[u8]) -> TestResult<StagedOutput> {
+    let mut reader = bytes;
+    Ok(StagedOutput::stage_verified(
+        &mut reader,
+        PayloadDescriptor {
+            byte_length: bytes.len() as u64,
+            digest: payload_digest(b"PiglorOS.SandboxOutputBytes.v1\0", bytes),
+        },
+    )?)
 }
 
 fn execute_request(
@@ -1031,7 +1042,7 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                 SelectorProviderMode::InvalidGrant => *grant = b"not-cbor".to_vec(),
                 SelectorProviderMode::InvalidReceipt => *receipt = b"not-cbor".to_vec(),
                 SelectorProviderMode::MismatchedOutput => {
-                    *output = Some(StagedOutput::from_bytes_for_test(b"substituted")?);
+                    *output = Some(staged_output(b"substituted")?);
                 }
                 SelectorProviderMode::MissingOutput => *output = None,
                 SelectorProviderMode::MismatchedOutputDigest => {
@@ -1040,10 +1051,7 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                         .ok_or("output must exist")?
                         .descriptor()
                         .byte_length;
-                    *output = Some(StagedOutput::from_bytes_for_test(&vec![
-                        0;
-                        length as usize
-                    ])?);
+                    *output = Some(staged_output(&vec![0; length as usize])?);
                 }
                 SelectorProviderMode::Valid
                 | SelectorProviderMode::Unavailable
@@ -1113,7 +1121,7 @@ impl SignedSelectorProvider {
             receipt,
             result,
             audit,
-            output: Some(StagedOutput::from_bytes_for_test(&output_stream)?),
+            output: Some(staged_output(&output_stream)?),
         })
     }
 }
@@ -1158,7 +1166,7 @@ impl NonCompletedSelectorProvider {
             audit,
             output: self
                 .unexpected_output
-                .then(|| StagedOutput::from_bytes_for_test(b"unexpected"))
+                .then(|| staged_output(b"unexpected"))
                 .transpose()?,
         })
     }
