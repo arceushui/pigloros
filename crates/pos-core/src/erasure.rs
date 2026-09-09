@@ -4233,7 +4233,13 @@ impl ErasureVerifiedInventoryV1 {
         if admissions
             .windows(2)
             .any(|pair| pair[0].mutation.request() == pair[1].mutation.request())
-            || admissions.iter().any(|admission| admission.input != input)
+            || admissions.iter().any(|admission| {
+                admission.input != input
+                    || !self
+                        .request_heads
+                        .iter()
+                        .any(|(request, _)| *request == admission.mutation.request())
+            })
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -4277,9 +4283,6 @@ impl ErasureVerifiedInventoryV1 {
                 }
             }
             successor_members.push((state, proof));
-        }
-        if admission_index != admissions.len() {
-            return Err(ErasureErrorV1::PolicyConflict);
         }
         let mut topology = self.classifications.into_keys().collect::<Vec<_>>();
         topology.push(input.child.id);
@@ -5704,20 +5707,18 @@ pub trait ErasureCoordinatorPortV1:
     /// Observe every durable erasure head and the complete Timeline/Fork
     /// classification from one adapter snapshot.
     ///
-    /// The default fails closed so an older host cannot treat a configured
-    /// request list as complete recovery. `SQLite` implementations hold one read
-    /// transaction for the observation; an exclusively owned `MemoryStore`
-    /// observes its current candidate state.
+    /// Implementations must provide this observation explicitly so a host
+    /// cannot silently omit complete-set recovery. `SQLite` implementations
+    /// hold one read transaction for the observation; an exclusively owned
+    /// `MemoryStore` observes its current candidate state.
     ///
     /// # Errors
     /// Returns a closed adapter, admission-bound, or provenance error. A
     /// partial observation must never be returned.
     fn complete_erasure_inventory_observation(
         &self,
-        _maximum_requests: usize,
-    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
-    }
+        maximum_requests: usize,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1>;
 
     /// Recover the complete Timeline/Fork topology observation for one pinned
     /// manifest revision.
@@ -6571,6 +6572,98 @@ mod coverage_paths {
         assert_eq!(
             gate.authorize(timeline, ErasureProtectedOperationV1::Read),
             Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn authorized_scope_calls_the_verified_state_permission_check() {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let timeline = TimelineId::new();
+        let state = inventory_state(
+            reference(81),
+            reference(82),
+            reference(83),
+            ErasureLifecycleV1::Authorized,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("authorized state failed: {error:?}")))
+        });
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(83))],
+            Vec::new(),
+        );
+        assert!(gate
+            .install_verified_state_with_topology(&state, &proof)
+            .is_ok());
+        assert_eq!(
+            gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Ok(())
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn fork_admission_rejects_missing_predecessor_and_extraneous_request() {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 1)
+                .unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!(
+                        "empty inventory failed: {error:?}"
+                    )))
+                });
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(84),
+            expected_inventory_generation: inventory.generation(),
+            child_scope: reference(85),
+            child: crate::TimelineMeta {
+                id: child,
+                mode: crate::TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: Some((parent, crate::Seq::ZERO)),
+            },
+        };
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: reference(86),
+            scope_commitment: reference(87),
+            fork: input.child_scope,
+            lineage_rule: reference(88),
+            predecessor_extension: None,
+            admission_provenance: reference(89),
+        })
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("extension failed: {error:?}")))
+        });
+        let mutation = |expected_manifest_digest| {
+            PreparedErasureCasV1::new(
+                extension.request(),
+                expected_manifest_digest,
+                StoredErasureManifestV1::from_stored(reference(90), Vec::new()),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                ErasureCasEffectV1::None,
+            )
+        };
+        assert_eq!(
+            PreparedErasureForkAdmissionV1::new(input.clone(), extension, mutation(None)),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        let admission = PreparedErasureForkAdmissionV1::new(
+            input.clone(),
+            extension,
+            mutation(Some(reference(91))),
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("admission failed: {error:?}")))
+        });
+        assert_eq!(
+            inventory.prepare_fork_batch(input, vec![admission]),
+            Err(ErasureErrorV1::PolicyConflict)
         );
     }
 
