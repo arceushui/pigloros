@@ -873,7 +873,9 @@ mod tests {
         );
         let first = host
             .command_sender()
-            .and_then(|mut sender| sender.append_bounded(timeline.id(), &[ordinary.clone()], 8))
+            .and_then(|mut sender| {
+                sender.append_bounded(timeline.id(), std::slice::from_ref(&ordinary), 8)
+            })
             .and_then(|events| events.ok_or(ErasureHostErrorV1::Conflict))
             .and_then(|mut events| events.pop().ok_or(ErasureHostErrorV1::Conflict))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -895,6 +897,33 @@ mod tests {
                 8,
             ))
             .is_ok());
+        let cleanup_scope = append_consent_fixture(&mut host, timeline.id(), subject, &authority);
+        {
+            let mut sender = host
+                .command_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            assert!(sender.pending_append_identity_cleanup().is_ok());
+            assert!(sender
+                .remove_append_identities_bounded(cleanup_scope, NonZeroUsize::MIN)
+                .is_ok());
+            assert!(sender
+                .purge_expired_append_identities_bounded(NonZeroUsize::MIN)
+                .is_ok());
+        }
+        assert_eq!(
+            host.read_sender()
+                .and_then(|mut sender| sender.event_by_id(timeline.id(), first.id))
+                .map(|event| event.map(|event| event.id)),
+            Ok(Some(first.id))
+        );
+    }
+
+    fn append_consent_fixture(
+        host: &mut ErasureExecutionHostV1,
+        timeline: TimelineId,
+        subject: EntityId,
+        authority: &ConsentAuthority,
+    ) -> AppendDedupScope {
         let grant = ConsentGrantedV1 {
             subject_id: subject,
             grantee_id: EntityId::new(),
@@ -947,29 +976,7 @@ mod tests {
                 cleanup_scope,
             ))
             .is_ok());
-        {
-            let mut sender = host
-                .command_sender()
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-            assert!(sender.pending_append_identity_cleanup().is_ok());
-            assert!(sender
-                .remove_append_identities_bounded(
-                    cleanup_scope,
-                    NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
-                )
-                .is_ok());
-            assert!(sender
-                .purge_expired_append_identities_bounded(
-                    NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
-                )
-                .is_ok());
-        }
-        assert_eq!(
-            host.read_sender()
-                .and_then(|mut sender| sender.event_by_id(timeline.id(), first.id))
-                .map(|event| event.map(|event| event.id)),
-            Ok(Some(first.id))
-        );
+        cleanup_scope
     }
 
     #[test]
