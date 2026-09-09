@@ -3556,7 +3556,6 @@ mod tests {
             [body],
             authorization,
         );
-        gateway.limits.max_events_per_timeline = 0;
         let timeline = gateway
             .create_timeline("action-event-ceiling")
             .await
@@ -3571,6 +3570,33 @@ mod tests {
             "tick": 1
         });
 
+        let first = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "generic-action-success",
+            )
+            .await
+            .test_ok();
+        let duplicate = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "generic-action-success",
+            )
+            .await
+            .test_ok();
+        assert!(!first.duplicate);
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.event.id, first.event.id);
+        gateway.limits.max_events_per_timeline = 1;
+
         let ordinary = gateway
             .submit_json_action(
                 &timeline.id().to_string(),
@@ -3583,7 +3609,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             ordinary,
-            GatewayError::EventLimitReached { maximum: 0 }
+            GatewayError::EventLimitReached { maximum: 1 }
         ));
         let identified = gateway
             .submit_identified_json_action(
@@ -3598,11 +3624,19 @@ mod tests {
             .test_err();
         assert!(matches!(
             identified,
-            GatewayError::EventLimitReached { maximum: 0 }
+            GatewayError::EventLimitReached { maximum: 1 }
         ));
-        assert!(audit_host.audits().await.is_empty());
+        assert_eq!(audit_host.audits().await.len(), 2);
         gateway.shutdown().await.test_ok();
         drop(gateway);
+    }
+
+    #[test]
+    fn ingress_conflict_action_command_error_maps_to_gateway_error() {
+        assert!(matches!(
+            GatewayError::from(executor::ActionCommandError::IngressConflict),
+            GatewayError::IngressConflict
+        ));
     }
 
     async fn assert_authority_proposed_action_boundaries(
