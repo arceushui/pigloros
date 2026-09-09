@@ -3451,6 +3451,7 @@ mod tests {
         assert_eq!(duplicate.event.id, first.event.id);
         assert_eq!(audit_host.audits().await.len(), 3);
         gateway.shutdown().await.test_ok();
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -3539,6 +3540,7 @@ mod tests {
             .events
             .is_empty());
         gateway.shutdown().await.test_ok();
+        drop(gateway);
     }
 
     async fn assert_authority_proposed_action_boundaries(
