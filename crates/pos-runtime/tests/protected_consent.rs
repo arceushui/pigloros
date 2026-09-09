@@ -1279,7 +1279,8 @@ fn public_registry_requires_authorization_context_for_projections() {
 
 #[test]
 fn public_registry_rejects_oversized_actions() {
-    let mut action_registry = PluginRegistry::new();
+    let mut action_registry =
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
     let action_plugin = configured_plugin("action", &["action.type"], false, false);
     test_ok(action_registry.register_with_approver(
         &action_plugin,
@@ -1354,7 +1355,9 @@ fn public_registry_rejects_unknown_actions_in_live_and_replay_modes() {
     );
     let timeline = TimelineId::new();
     assert!(matches!(
-        PluginRegistry::new().submit_action(timeline, &unknown),
+        PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .submit_action(timeline, &unknown),
         Err(ActionSubmissionError::Rejected(
             ActionRejected::UnknownEventType
         ))
