@@ -24,6 +24,17 @@ fn exact_recovery(update: &ValidatedInstallationUpdate) -> Result<Vec<u8>, Proto
     ]))
 }
 
+fn replace_current_manifest(
+    fixture: &UpdateFixture,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = fixture.installation.directory.path().join(MANIFEST_NAME);
+    std::fs::remove_file(&path)?;
+    std::fs::write(&path, bytes)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
+    Ok(())
+}
+
 #[test]
 fn durable_commit_persists_the_exact_sir1_restart_floor() -> TestResult {
     let fixture = UpdateFixture::new()?;
@@ -51,10 +62,16 @@ fn durable_commit_persists_the_exact_sir1_restart_floor() -> TestResult {
     assert_eq!(committed.previous_manifest_bytes(), previous);
     assert_eq!(committed.next_manifest_bytes(), next);
     assert_eq!(committed.revocation_update_bytes(), rcu);
+    committed.verify_recovery_floor()?;
     assert_eq!(
         std::fs::read(installation.directory.path().join(MANIFEST_NAME))?,
         previous
     );
+    let manifest = installation.directory.path().join(MANIFEST_NAME);
+    std::fs::remove_file(&manifest)?;
+    std::fs::write(&manifest, &next)?;
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o400))?;
+    committed.verify_recovery_floor()?;
     let staging = installation
         .directory
         .path()
@@ -98,6 +115,12 @@ fn durable_commit_rejects_duplicate_and_unsafe_recovery_entries() -> TestResult 
 
 #[test]
 fn durable_commit_rejects_stale_and_foreign_authority_pairs() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let update = validated(&fixture)?;
+    replace_current_manifest(&fixture, update.next_manifest_bytes())?;
+    let UpdateFixture { authority, .. } = fixture;
+    assert!(authority.commit_update(update).is_err());
+
     let fixture = UpdateFixture::new()?;
     let update = validated(&fixture)?;
     let foreign = authenticated_fixture(|policy| policy[2] = integer(2))?;

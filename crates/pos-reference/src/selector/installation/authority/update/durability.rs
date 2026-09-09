@@ -5,7 +5,7 @@
 //! removal belong to the subsequent completion operation.
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -16,12 +16,15 @@ use rustix::fs::{
 
 use super::{InstalledSelectorAuthority, ValidatedInstallationUpdate};
 use crate::evaluator_protocol::encode;
-use crate::selector::installation::{open_directory_chain, InstallationObjectKind};
+use crate::selector::installation::{
+    open_directory_chain, open_file, InstallationObjectKind, MANIFEST_LIMIT,
+};
 use crate::selector::{digest_name, SelectorBoundaryError};
 
 const RECOVERY_NAME: &str = "installation-update.cbor";
 const STAGING_NAME: &str = ".installation-update-staging";
 const RECOVERY_LIMIT: usize = 48 * 1024 * 1024;
+const RECOVERY_LIMIT_U64: u64 = 48 * 1024 * 1024;
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 const PRIVATE_DIRECTORY_MODE: Mode = Mode::RUSR | Mode::WUSR | Mode::XUSR;
 const RECOVERY_MODE: Mode = Mode::RUSR;
@@ -63,6 +66,59 @@ impl CommittedInstallationUpdate {
     pub fn revocation_update_bytes(&self) -> &[u8] {
         self.update.revocation_update_bytes()
     }
+
+    /// Recheck the retained SIR1 descriptor and the on-disk SIC1 recovery floor.
+    ///
+    /// This is a fail-closed prerequisite for the later completion operation.
+    /// It does not send RCU1, receive RCA1, install successor SIC1, remove SIR1,
+    /// or reopen admission.
+    ///
+    /// # Errors
+    /// Rejects a replaced, unsafe, truncated, or altered SIR1 file, or a current
+    /// SIC1 that is neither the exact retained previous nor successor manifest.
+    pub fn verify_recovery_floor(&self) -> Result<(), SelectorBoundaryError> {
+        let owner = self
+            .authority
+            .installed
+            .root
+            .metadata()
+            .map_err(|_| SelectorBoundaryError::Io)?
+            .uid();
+        let current = read_current_manifest(&self.authority, owner)?;
+        if current != self.update.previous_manifest_bytes()
+            && current != self.update.next_manifest_bytes()
+        {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        let current_recovery = open_file(
+            &self.authority.installed.root,
+            RECOVERY_NAME,
+            owner,
+            0o400,
+            RECOVERY_LIMIT_U64,
+        )?;
+        let current_metadata = current_recovery
+            .metadata()
+            .map_err(|_| SelectorBoundaryError::Io)?;
+        let retained_metadata = self
+            .recovery_file
+            .metadata()
+            .map_err(|_| SelectorBoundaryError::Io)?;
+        let recovery_length = u64::try_from(self.recovery_bytes.len())
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        if current_metadata.dev() != retained_metadata.dev()
+            || current_metadata.ino() != retained_metadata.ino()
+            || current_metadata.len() != retained_metadata.len()
+            || current_metadata.len() != recovery_length
+        {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        let retained = read_retained_recovery(&self.recovery_file)?;
+        if retained != self.recovery_bytes {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        Ok(())
+    }
 }
 
 impl InstalledSelectorAuthority {
@@ -85,14 +141,17 @@ impl InstalledSelectorAuthority {
         if self.installed.manifest_bytes() != update.previous_manifest_bytes() {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        self.installed.require_no_pending_recovery()?;
-        let recovery_bytes = recovery_bytes(&update)?;
         let owner = self
             .installed
             .root
             .metadata()
             .map_err(|_| SelectorBoundaryError::Io)?
             .uid();
+        if read_current_manifest(&self, owner)? != update.previous_manifest_bytes() {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        self.installed.require_no_pending_recovery()?;
+        let recovery_bytes = recovery_bytes(&update)?;
         synchronize_successor_records(&self, &update, owner)?;
         let staging = open_staging_directory(&self.installed.root, owner)?;
         let recovery_file = write_recovery(&staging, &self.installed.root, owner, &recovery_bytes)?;
@@ -126,6 +185,43 @@ fn recovery_bytes(update: &ValidatedInstallationUpdate) -> Result<Vec<u8>, Selec
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
     Ok(encoded)
+}
+
+fn read_current_manifest(
+    authority: &InstalledSelectorAuthority,
+    owner: u32,
+) -> Result<Vec<u8>, SelectorBoundaryError> {
+    let file = open_file(
+        &authority.installed.root,
+        "installation.cbor",
+        owner,
+        0o400,
+        MANIFEST_LIMIT,
+    )?;
+    read_bounded(file, MANIFEST_LIMIT)
+}
+
+fn read_retained_recovery(file: &File) -> Result<Vec<u8>, SelectorBoundaryError> {
+    let retained = file.try_clone().map_err(|_| SelectorBoundaryError::Io)?;
+    read_bounded(retained, RECOVERY_LIMIT_U64)
+}
+
+fn read_bounded(mut file: File, limit: u64) -> Result<Vec<u8>, SelectorBoundaryError> {
+    let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+    if metadata.len() > limit {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    let capacity =
+        usize::try_from(metadata.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| SelectorBoundaryError::Io)?;
+    file.read_to_end(&mut bytes)
+        .map_err(|_| SelectorBoundaryError::Io)?;
+    if bytes.len() != capacity {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(bytes)
 }
 
 fn synchronize_successor_records(
@@ -227,17 +323,19 @@ fn write_recovery(
     bytes: &[u8],
 ) -> Result<File, SelectorBoundaryError> {
     let temporary_name = temporary_name();
-    let mut file = openat2(
+    let mut temporary = openat2(
         staging,
         &temporary_name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         RECOVERY_MODE,
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
     .map_err(|_| SelectorBoundaryError::Io)?;
-    fchmod(&file, RECOVERY_MODE).map_err(|_| SelectorBoundaryError::Io)?;
-    let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+    fchmod(&temporary, RECOVERY_MODE).map_err(|_| SelectorBoundaryError::Io)?;
+    let metadata = temporary
+        .metadata()
+        .map_err(|_| SelectorBoundaryError::Io)?;
     if !metadata.is_file()
         || metadata.uid() != owner
         || metadata.mode() & 0o7777 != 0o400
@@ -246,9 +344,10 @@ fn write_recovery(
     {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    file.write_all(bytes)
+    temporary
+        .write_all(bytes)
         .map_err(|_| SelectorBoundaryError::Io)?;
-    fsync(&file).map_err(|_| SelectorBoundaryError::Io)?;
+    fsync(&temporary).map_err(|_| SelectorBoundaryError::Io)?;
     renameat_with(
         staging,
         &temporary_name,
@@ -257,8 +356,21 @@ fn write_recovery(
         RenameFlags::NOREPLACE,
     )
     .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let recovery = open_file(root, RECOVERY_NAME, owner, 0o400, RECOVERY_LIMIT_U64)?;
+    let temporary_metadata = temporary
+        .metadata()
+        .map_err(|_| SelectorBoundaryError::Io)?;
+    let recovery_metadata = recovery.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+    let recovery_length =
+        u64::try_from(bytes.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    if temporary_metadata.dev() != recovery_metadata.dev()
+        || temporary_metadata.ino() != recovery_metadata.ino()
+        || recovery_metadata.len() != recovery_length
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
     fsync(root).map_err(|_| SelectorBoundaryError::Io)?;
-    Ok(file)
+    Ok(recovery)
 }
 
 fn temporary_name() -> String {
