@@ -472,7 +472,7 @@ impl RunResult {
                 return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
             }
             (None, None) => {
-                reject_protected_history(store.as_ref(), timeline.id(), current_head)?;
+                reject_protected_history(&store, timeline.id(), current_head)?;
                 fork_result = store
                     .fork(timeline.id(), current_head, name)
                     .map_err(ExperimentError::from);
