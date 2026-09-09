@@ -147,3 +147,70 @@ fn durable_commit_rejects_stale_and_foreign_authority_pairs() -> TestResult {
         .exists());
     Ok(())
 }
+
+#[test]
+fn recovery_floor_rejects_replaced_or_modified_records() -> TestResult {
+    for alteration in 0..3 {
+        let fixture = UpdateFixture::new()?;
+        let update = validated(&fixture)?;
+        let UpdateFixture {
+            installation,
+            authority,
+        } = fixture;
+        let committed = authority.commit_update(update)?;
+        let path = installation
+            .directory
+            .path()
+            .join("installation-update.cbor");
+        let original = std::fs::read(&path)?;
+        if alteration == 0 {
+            std::fs::remove_file(&path)?;
+            std::fs::write(&path, &original)?;
+        } else {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let mut changed = original;
+            if alteration == 1 {
+                changed[0] ^= 1;
+            } else {
+                changed.truncate(changed.len() - 1);
+            }
+            std::fs::write(&path, changed)?;
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+        assert!(
+            committed.verify_recovery_floor().is_err(),
+            "alteration {alteration}"
+        );
+        assert!(
+            path.exists(),
+            "verification must preserve the recovery requirement"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn durable_commit_rejects_unsafe_staging_without_publishing_recovery() -> TestResult {
+    for mode in [0o755, 0o777, 0o1700] {
+        let fixture = UpdateFixture::new()?;
+        let update = validated(&fixture)?;
+        let staging = fixture
+            .installation
+            .directory
+            .path()
+            .join(".installation-update-staging");
+        std::fs::create_dir(&staging)?;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(mode))?;
+        let UpdateFixture {
+            installation,
+            authority,
+        } = fixture;
+        assert!(authority.commit_update(update).is_err(), "mode {mode:o}");
+        assert!(!installation
+            .directory
+            .path()
+            .join("installation-update.cbor")
+            .exists());
+    }
+    Ok(())
+}
