@@ -62,29 +62,37 @@ pub fn compare(
         .map(|e| e.entity)
         .collect();
 
-    let snap_a = registry_a.state_snapshot();
-    let snap_b = registry_b.state_snapshot();
+    registry_a
+        .state_snapshot(a)
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|snap_a| {
+            registry_b
+                .state_snapshot(b)
+                .map_err(|_| CoreError::ArtifactUnavailable)
+                .map(|snap_b| {
+                    // Entities whose state differs across any registered reducer.
+                    let diverged_entities: Vec<EntityId> = all_entities
+                        .into_iter()
+                        .filter(|eid| {
+                            // Check all reducer names present in either snapshot.
+                            let names: HashSet<&String> =
+                                snap_a.keys().chain(snap_b.keys()).collect();
+                            names.iter().any(|name| {
+                                let reg_a = snap_a.get(*name).cloned().unwrap_or_default();
+                                let reg_b = snap_b.get(*name).cloned().unwrap_or_default();
+                                reg_a.get_or_default(eid) != reg_b.get_or_default(eid)
+                            })
+                        })
+                        .collect();
 
-    // Entities whose state differs across any registered reducer.
-    let diverged_entities: Vec<EntityId> = all_entities
-        .into_iter()
-        .filter(|eid| {
-            // Check all reducer names present in either snapshot.
-            let names: HashSet<&String> = snap_a.keys().chain(snap_b.keys()).collect();
-            names.iter().any(|name| {
-                let reg_a = snap_a.get(*name).cloned().unwrap_or_default();
-                let reg_b = snap_b.get(*name).cloned().unwrap_or_default();
-                reg_a.get_or_default(eid) != reg_b.get_or_default(eid)
-            })
+                    ForkDiff {
+                        fork_seq,
+                        only_in_a: events_a,
+                        only_in_b: events_b,
+                        diverged_entities,
+                    }
+                })
         })
-        .collect();
-
-    Ok(ForkDiff {
-        fork_seq,
-        only_in_a: events_a,
-        only_in_b: events_b,
-        diverged_entities,
-    })
 }
 
 #[cfg(test)]
@@ -156,7 +164,8 @@ mod tests {
     }
 
     fn make_registry() -> ProjectionRegistry {
-        let mut reg = ProjectionRegistry::new();
+        let mut reg =
+            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         reg.register("count", Box::new(CountReducer));
         reg
     }
@@ -169,8 +178,9 @@ mod tests {
         )
     }
 
-    fn count_for(reg: &ProjectionRegistry, entity: EntityId) -> u64 {
-        reg.state_snapshot()
+    fn count_for(reg: &ProjectionRegistry, timeline: TimelineId, entity: EntityId) -> u64 {
+        reg.state_snapshot(timeline)
+            .test_ok()
             .get("count")
             .and_then(|r| r.get(&entity))
             .and_then(|s| s.get("n"))
@@ -303,9 +313,9 @@ mod tests {
         assert!(diff.diverged_entities.contains(&entity));
 
         // Verify registry isolation: reg_a accumulated 3 events, reg_b accumulated 0.
-        let count_a = count_for(&reg_a, entity);
-        let count_b = count_for(&reg_b, entity);
-        let _ = count_for(&reg_b, EntityId::new());
+        let count_a = count_for(&reg_a, fork_a.id(), entity);
+        let count_b = count_for(&reg_b, fork_b.id(), entity);
+        let _ = count_for(&reg_b, fork_b.id(), EntityId::new());
 
         assert_eq!(count_a, 3, "reg_a should have folded 3 post-fork events");
         assert_eq!(count_b, 0, "reg_b should have seen no post-fork events");

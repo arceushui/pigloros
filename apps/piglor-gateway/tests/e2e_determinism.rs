@@ -339,8 +339,8 @@ impl Drop for FixtureGuard {
     }
 }
 
-fn replay_registry() -> ProjectionRegistry {
-    let mut registry = ProjectionRegistry::new();
+fn replay_registry(erasure_gate: Arc<dyn pos_core::ErasureGate>) -> ProjectionRegistry {
+    let mut registry = ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("observation", Box::new(EntityStateProjection));
     registry.register("society", Box::new(SocietyReducer));
     registry.register("agent", Box::new(AgentReducer));
@@ -349,8 +349,9 @@ fn replay_registry() -> ProjectionRegistry {
 
 fn snapshot_json(
     registry: &ProjectionRegistry,
+    timeline: TimelineId,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    serde_json::to_value(registry.state_snapshot()).test_ok()
+    serde_json::to_value(registry.state_snapshot(timeline).test_ok()?).test_ok()
 }
 
 fn state_u64(
@@ -879,9 +880,9 @@ fn assert_projection_state(
         Some(EVENT_TYPE_ACTION)
     );
     let events = session.source_events().test_ok()?;
-    let mut replayed = replay_registry();
+    let mut replayed = replay_registry(Arc::clone(&scenario.erasure_gate));
     replayed.fold_events(&events);
-    snapshot_json(&replayed)
+    snapshot_json(&replayed, scenario.timeline)
 }
 
 fn assert_replay(
@@ -908,7 +909,7 @@ fn assert_replay(
         stored[1].wall_time > stored[2].wall_time,
         "sequence order must deliberately conflict with wall-clock order"
     );
-    let mut first_replay = replay_registry();
+    let mut first_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
     let (artifact_digest, evaluation) = replay_artifact(scenario.timeline);
     pos_time::replay(
         first_store.as_ref(),
@@ -926,7 +927,7 @@ fn assert_replay(
     second_store
         .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
         .test_ok()?;
-    let mut second_replay = replay_registry();
+    let mut second_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
     pos_time::replay(
         second_store.as_ref(),
         scenario.timeline,
@@ -935,8 +936,14 @@ fn assert_replay(
         &evaluation,
     )
     .test_ok()?;
-    assert_eq!(snapshot_json(&first_replay)?, *live_snapshot);
-    assert_eq!(snapshot_json(&second_replay)?, *live_snapshot);
+    assert_eq!(
+        snapshot_json(&first_replay, scenario.timeline)?,
+        *live_snapshot
+    );
+    assert_eq!(
+        snapshot_json(&second_replay, scenario.timeline)?,
+        *live_snapshot
+    );
     Ok(())
 }
 

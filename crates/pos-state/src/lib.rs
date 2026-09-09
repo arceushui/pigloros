@@ -683,13 +683,24 @@ impl ProjectionRegistry {
         }
     }
 
-    /// Extract a snapshot of all per-reducer state as a serialisable map.
+    /// Materialize a snapshot of all per-reducer state inside the current
+    /// Timeline containment fence.
     ///
     /// The returned map is keyed by reducer name and contains each reducer's
     /// accumulated [`StateRegistry`]. This is used by `pos-time` snapshot
     /// capture and consistency verification.
-    #[must_use]
-    pub fn state_snapshot(&self) -> std::collections::HashMap<String, StateRegistry> {
+    ///
+    /// # Errors
+    /// Returns a closed source error when the host-owned gate is absent,
+    /// poisoned, stale, or denies snapshot materialization for `timeline`.
+    pub fn state_snapshot(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<std::collections::HashMap<String, StateRegistry>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| Ok(registry.snapshot_unfenced()))
+    }
+
+    fn snapshot_unfenced(&self) -> std::collections::HashMap<String, StateRegistry> {
         let mut snapshot = std::collections::HashMap::new();
         for (name, slot) in &self.slots {
             snapshot.insert(name.clone(), slot.registry.clone());
@@ -1763,11 +1774,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_loads_matching_reducer() {
-        let mut registry = ProjectionRegistry::new();
+        let timeline = TimelineId::new();
+        let mut registry =
+            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
         registry.apply_event(&make_event(entity));
-        let snapshot = registry.state_snapshot();
+        let snapshot = test_ok(registry.state_snapshot(timeline));
 
         let mut restored = ProjectionRegistry::new();
         restored.register("registered", Box::new(EntityStateProjection));
@@ -1779,6 +1792,25 @@ mod tests {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn public_state_snapshot_fails_closed_without_timeline_access() {
+        let timeline = TimelineId::new();
+        let unbound = ProjectionRegistry::new();
+        assert_eq!(
+            unbound.state_snapshot(timeline).map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+
+        let blocked_gate = Arc::new(ErasureContainmentGateV1::new());
+        blocked_gate.block_timeline(timeline);
+        let blocked = ProjectionRegistry::new().with_erasure_gate(blocked_gate);
+        assert_eq!(
+            blocked.state_snapshot(timeline).map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
     }
 
     #[test]
@@ -2185,7 +2217,7 @@ mod wave3_tests {
         reg.register("r", Box::new(TR));
         reg.apply_event(&ev(entity));
 
-        let snap = reg.state_snapshot();
+        let snap = reg.snapshot_unfenced();
         let diff = reg.diff_against_snapshot(&snap, &[entity]);
         assert!(diff.is_none());
     }
@@ -2198,7 +2230,7 @@ mod wave3_tests {
         reg.register("r", Box::new(TR));
         reg.apply_event(&ev(entity));
 
-        let snap = reg.state_snapshot();
+        let snap = reg.snapshot_unfenced();
         // Apply another event — now reg diverges from the snapshot
         reg.apply_event(&ev(entity));
         let diff = reg.diff_against_snapshot(&snap, &[entity]);

@@ -46,14 +46,17 @@ pub fn snapshot(
         )
         .map_err(|_| CoreError::ArtifactUnavailable)
         .and_then(|()| store.read(timeline, SeqRange::all()))
-        .map(|events| {
+        .and_then(|events| {
             let at_seq = events.last().map_or(Seq::ZERO, |event| event.seq);
             registry.fold_events(&events);
-            Snapshot {
-                timeline,
-                at_seq,
-                registry: registry.state_snapshot(),
-            }
+            registry
+                .state_snapshot(timeline)
+                .map(|snapshot| Snapshot {
+                    timeline,
+                    at_seq,
+                    registry: snapshot,
+                })
+                .map_err(|_| CoreError::ArtifactUnavailable)
         })
 }
 
@@ -123,25 +126,34 @@ pub fn verify_snapshot_consistency(
 
             registry.restore_from_snapshot(&snap.registry);
             registry.fold_events(&tail_events);
-            let incremental_state = registry.state_snapshot();
-
-            registry.clear_state();
-            registry.fold_events(&all_events);
-            let full_state = registry.state_snapshot();
-
-            for entity in &all_entities {
-                for name in full_state.keys() {
-                    let incremental_registry =
-                        incremental_state.get(name).cloned().unwrap_or_default();
-                    let full_registry = full_state.get(name).cloned().unwrap_or_default();
-                    if incremental_registry.get_or_default(entity)
-                        != full_registry.get_or_default(entity)
-                    {
-                        return Err(SnapshotError::Inconsistent { entity: *entity });
-                    }
-                }
-            }
-            Ok(())
+            registry
+                .state_snapshot(snap.timeline)
+                .map_err(|_| SnapshotError::ArtifactUnavailable)
+                .and_then(|incremental_state| {
+                    registry.clear_state();
+                    registry.fold_events(&all_events);
+                    registry
+                        .state_snapshot(snap.timeline)
+                        .map_err(|_| SnapshotError::ArtifactUnavailable)
+                        .and_then(|full_state| {
+                            for entity in &all_entities {
+                                for name in full_state.keys() {
+                                    let incremental_registry =
+                                        incremental_state.get(name).cloned().unwrap_or_default();
+                                    let full_registry =
+                                        full_state.get(name).cloned().unwrap_or_default();
+                                    if incremental_registry.get_or_default(entity)
+                                        != full_registry.get_or_default(entity)
+                                    {
+                                        return Err(SnapshotError::Inconsistent {
+                                            entity: *entity,
+                                        });
+                                    }
+                                }
+                            }
+                            Ok(())
+                        })
+                })
         })
 }
 
@@ -295,7 +307,8 @@ mod tests {
     }
 
     fn make_registry() -> ProjectionRegistry {
-        let mut reg = ProjectionRegistry::new();
+        let mut reg =
+            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         reg.register("count", Box::new(CountReducer));
         reg
     }
@@ -635,7 +648,8 @@ mod extra_tests {
     }
 
     fn make_registry() -> ProjectionRegistry {
-        let mut reg = ProjectionRegistry::new();
+        let mut reg =
+            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         reg.register("count", Box::new(CountReducer));
         reg
     }
