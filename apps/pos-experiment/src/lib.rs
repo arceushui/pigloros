@@ -2550,19 +2550,28 @@ impl BacktestRunner {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    fn fail_test(message: String) -> ! {
+        use std::io::Write as _;
+
+        let mut stderr = std::io::stderr().lock();
+        drop(stderr.write_all(message.as_bytes()));
+        drop(stderr.write_all(b"\n"));
+        std::panic::resume_unwind(Box::new(message))
+    }
+
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
 
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
-            self.unwrap_or_else(|error| panic!("unexpected test error: {error:?}"))
+            self.unwrap_or_else(|error| fail_test(format!("unexpected test error: {error:?}")))
         }
     }
 
     impl<T> TestValueExt<T> for Option<T> {
         fn test_ok(self) -> T {
-            self.unwrap_or_else(|| panic!("expected test value"))
+            self.unwrap_or_else(|| fail_test("expected test value".to_owned()))
         }
     }
 
