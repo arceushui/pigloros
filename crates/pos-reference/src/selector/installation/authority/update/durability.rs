@@ -17,8 +17,10 @@ use rustix::fs::{
 
 use super::{InstalledSelectorAuthority, ValidatedInstallationUpdate};
 use crate::evaluator_protocol::encode_with_limit;
+#[cfg(test)]
+use crate::sandbox_provider_protocol::SelectorRevocationState;
 use crate::sandbox_provider_protocol::{
-    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, SelectorRevocationState,
+    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext,
 };
 use crate::selector::installation::authority::recovery::InstallationRecoverySnapshot;
 use crate::selector::installation::{
@@ -98,6 +100,7 @@ impl CommittedInstallationUpdate {
         .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
     }
 
+    #[cfg(test)]
     pub(crate) fn authenticate_live_acknowledgement(
         &self,
         acknowledgement_bytes: &[u8],

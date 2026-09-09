@@ -426,6 +426,7 @@ impl InstallationRecoverySnapshot {
         ]
     }
 
+    #[cfg(test)]
     pub(crate) fn runtime_key_id(&self) -> &str {
         &self.previous_provider.runtime_key_id
     }

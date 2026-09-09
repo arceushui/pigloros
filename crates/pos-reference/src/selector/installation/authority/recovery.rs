@@ -19,8 +19,10 @@ use super::InstalledSelectorAuthority;
 use crate::evaluator_protocol::{
     array, decode_canonical_with_limit, encode, fixed_bytes, text, uint,
 };
+#[cfg(test)]
+use crate::sandbox_provider_protocol::SelectorRevocationState;
 use crate::sandbox_provider_protocol::{
-    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, SelectorRevocationState,
+    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext,
 };
 use crate::selector::installation::{open_file, InstalledSelectorObjects, MANIFEST_LIMIT};
 use crate::selector::SelectorBoundaryError;
@@ -81,6 +83,7 @@ impl PendingInstallationRecovery {
     /// # Errors
     /// Rejects a deadline over 100 ms, any changed RCC1/RCU1/RCA1 binding, or a
     /// runtime key not active under the retained previous authority.
+    #[cfg(test)]
     pub(crate) fn authenticate_recovery_acknowledgement(
         &self,
         acknowledgement_bytes: &[u8],
