@@ -407,22 +407,19 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             )?;
             return Ok(None);
         }
-        let admission = match plan.admission.admit(
+        let Ok(admission) = plan.admission.admit(
             &decoded.evaluation,
             &plan.expected_attempt,
             &plan.network_plans,
-        ) {
-            Ok(admission) => admission,
-            Err(_) => {
-                Self::write_local_error(
-                    stream,
-                    decoded,
-                    SandboxLocalErrorPhase::BeforeSpx1,
-                    SandboxLocalErrorCode::PolicyUnavailable,
-                    None,
-                )?;
-                return Ok(None);
-            }
+        ) else {
+            Self::write_local_error(
+                stream,
+                decoded,
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::PolicyUnavailable,
+                None,
+            )?;
+            return Ok(None);
         };
         Ok(Some((plan, admission)))
     }
