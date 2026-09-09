@@ -790,7 +790,11 @@ mod tests {
             assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_err());
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_ok());
+        assert_eq!(
+            endpoint_metadata(&path, metadata.dev(), metadata.ino()).is_ok(),
+            metadata.uid() == ROOT_UID,
+            "private socket permissions must not bypass root ownership"
+        );
         Ok(())
     }
 }
