@@ -120,13 +120,15 @@ fn bind_backtest_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<Arc<dyn ErasureGate>, pos_core::CoreError> {
-    match registry.clone_erasure_gate() {
-        Some(existing) => {
-            if !Arc::ptr_eq(&existing, &gate) {
-                return Err(pos_core::CoreError::ErasureContainmentUnavailable);
-            }
+    if registry.erasure_gate_is_bound() {
+        let existing = registry
+            .clone_erasure_gate()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        if !Arc::ptr_eq(&existing, &gate) {
+            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
         }
-        None => registry.bind_erasure_gate(Arc::clone(&gate)),
+    } else {
+        registry.bind_erasure_gate(Arc::clone(&gate));
     }
     store.bind_erasure_gate(Arc::clone(&gate))?;
     Ok(gate)
@@ -136,13 +138,15 @@ fn inherit_backtest_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<(), pos_core::CoreError> {
-    match registry.clone_erasure_gate() {
-        Some(existing) => {
-            if !Arc::ptr_eq(&existing, &gate) {
-                return Err(pos_core::CoreError::ErasureContainmentUnavailable);
-            }
+    if registry.erasure_gate_is_bound() {
+        let existing = registry
+            .clone_erasure_gate()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        if !Arc::ptr_eq(&existing, &gate) {
+            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
         }
-        None => registry.bind_erasure_gate(gate),
+    } else {
+        registry.bind_erasure_gate(gate);
     }
     Ok(())
 }
@@ -5479,6 +5483,23 @@ mod tests {
             .test_ok();
 
         assert_incompatible_fork(experiment.start().test_ok());
+    }
+
+    #[test]
+    fn backtest_rejects_a_bound_but_unavailable_registry_gate() {
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::clone(&gate))
+            .without_erasure_gate();
+        let mut store = pos_store::memory::MemoryStore::new();
+        assert!(matches!(
+            bind_backtest_erasure_gate(&mut store, &mut registry, Arc::clone(&gate)),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+        assert_eq!(
+            inherit_backtest_erasure_gate(&mut registry, gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        );
     }
 
     #[test]
