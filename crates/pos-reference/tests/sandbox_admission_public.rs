@@ -18,6 +18,7 @@ use pos_reference::evaluator_protocol::{
     SandboxRequirement, SubjectAdapterKind,
 };
 use pos_reference::profile::DeterministicBudget;
+use pos_reference::provider_transport::StagedOutput;
 use pos_reference::root_selector::{
     RootSelectorAdmissionArtifacts, RootSelectorAuthoritySource, RootSelectorCasePlan,
     RootSelectorProvider, RootSelectorProviderReply, RootSelectorServer, RootSelectorServiceError,
@@ -985,6 +986,7 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
         request: &SandboxExecuteRequest,
         _: &[u8],
         _: Duration,
+        _: &RootSelectorAdmission,
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
         if matches!(self.mode, SelectorProviderMode::Unavailable) {
             return Err(RootSelectorServiceError::ProviderUnavailable);
@@ -1021,7 +1023,7 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
         if let RootSelectorProviderReply::Admitted {
             grant,
             receipt,
-            output_stream,
+            output,
             ..
         } = &mut reply
         {
@@ -1029,11 +1031,19 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                 SelectorProviderMode::InvalidGrant => *grant = b"not-cbor".to_vec(),
                 SelectorProviderMode::InvalidReceipt => *receipt = b"not-cbor".to_vec(),
                 SelectorProviderMode::MismatchedOutput => {
-                    *output_stream = Some(b"substituted".to_vec());
+                    *output = Some(StagedOutput::from_bytes_for_test(b"substituted")?);
                 }
-                SelectorProviderMode::MissingOutput => *output_stream = None,
+                SelectorProviderMode::MissingOutput => *output = None,
                 SelectorProviderMode::MismatchedOutputDigest => {
-                    *output_stream = output_stream.as_ref().map(|bytes| vec![0; bytes.len()]);
+                    let length = output
+                        .as_ref()
+                        .ok_or("output must exist")?
+                        .descriptor()
+                        .byte_length;
+                    *output = Some(StagedOutput::from_bytes_for_test(&vec![
+                        0;
+                        length as usize
+                    ])?);
                 }
                 SelectorProviderMode::Valid
                 | SelectorProviderMode::Unavailable
@@ -1069,6 +1079,7 @@ impl RootSelectorProvider for SignedSelectorProvider {
         request: &SandboxExecuteRequest,
         _: &[u8],
         _: Duration,
+        _: &RootSelectorAdmission,
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
         self.reply(request)
             .map_err(|_| RootSelectorServiceError::ProviderEvidence)
@@ -1102,7 +1113,7 @@ impl SignedSelectorProvider {
             receipt,
             result,
             audit,
-            output_stream: Some(output_stream),
+            output: Some(StagedOutput::from_bytes_for_test(&output_stream)?),
         })
     }
 }
@@ -1145,7 +1156,10 @@ impl NonCompletedSelectorProvider {
             receipt,
             result,
             audit,
-            output_stream: self.unexpected_output.then(|| b"unexpected".to_vec()),
+            output: self
+                .unexpected_output
+                .then(|| StagedOutput::from_bytes_for_test(b"unexpected"))
+                .transpose()?,
         })
     }
 }
@@ -1156,6 +1170,7 @@ impl RootSelectorProvider for NonCompletedSelectorProvider {
         request: &SandboxExecuteRequest,
         _: &[u8],
         _: Duration,
+        _: &RootSelectorAdmission,
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
         self.reply(request)
             .map_err(|_| RootSelectorServiceError::ProviderEvidence)

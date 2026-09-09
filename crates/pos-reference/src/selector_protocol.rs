@@ -58,7 +58,7 @@ pub(crate) enum AuthenticatedSelectorTerminal<'a> {
 pub(crate) struct AuthenticatedSelectorReply<'a> {
     pub(crate) execute_request: &'a [u8],
     pub(crate) terminal: AuthenticatedSelectorTerminal<'a>,
-    pub(crate) output_stream: Option<&'a [u8]>,
+    pub(crate) output: Option<&'a PayloadDescriptor>,
 }
 
 pub(crate) fn encode_request(
@@ -234,7 +234,7 @@ pub(crate) fn decode_reply(
 pub(crate) fn encode_authenticated_reply(
     request: &EncodedSelectorRequest,
     reply: &AuthenticatedSelectorReply<'_>,
-) -> Result<(Vec<u8>, Vec<u8>), AdapterError> {
+) -> Result<Vec<u8>, AdapterError> {
     let (terminal_kind, terminal, grant, receipt, audit) = match reply.terminal {
         AuthenticatedSelectorTerminal::ProviderResult {
             result,
@@ -255,9 +255,7 @@ pub(crate) fn encode_authenticated_reply(
             (1_u64, error, Value::Null, Value::Null, Vec::new())
         }
     };
-    let output = reply.output_stream.map_or(Value::Null, |bytes| {
-        descriptor(bytes, domain_digest(OUTPUT_DOMAIN, bytes))
-    });
+    let output = reply.output.map_or(Value::Null, descriptor_value);
     let unsigned = Value::Array(vec![
         Value::Text("SLY1".to_owned()),
         integer(1),
@@ -280,7 +278,7 @@ pub(crate) fn encode_authenticated_reply(
         CONTROL_LIMIT,
     )
     .map_err(|_| AdapterError::ProtocolFailure)?;
-    Ok((control, reply.output_stream.unwrap_or_default().to_vec()))
+    Ok(control)
 }
 
 fn decode_local_error(
@@ -540,6 +538,13 @@ fn descriptor(payload: &[u8], digest: [u8; 32]) -> Value {
     Value::Array(vec![
         integer(payload.len() as u64),
         Value::Bytes(digest.to_vec()),
+    ])
+}
+
+fn descriptor_value(descriptor: &PayloadDescriptor) -> Value {
+    Value::Array(vec![
+        integer(descriptor.byte_length),
+        Value::Bytes(descriptor.digest.to_vec()),
     ])
 }
 
