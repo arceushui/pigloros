@@ -543,12 +543,16 @@ impl ErasureCommandSenderV1<'_> {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(&mut Self),
     ) -> Result<(), ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let gate = Arc::clone(&self.host.gate);
-        let mut fenced_effect = || effect(self);
-        gate.with_fence(timeline, operation, &mut fenced_effect)
-            .map_err(ErasureHostErrorV1::from)?;
-        self.host.ensure_generation(self.generation)
+        let generation = self.generation;
+        self.host
+            .ensure_generation(generation)
+            .and_then(|()| {
+                let gate = Arc::clone(&self.host.gate);
+                let mut fenced_effect = || effect(self);
+                gate.with_fence(timeline, operation, &mut fenced_effect)
+                    .map_err(ErasureHostErrorV1::from)
+            })
+            .and_then(|()| self.host.ensure_generation(self.generation))
     }
 
     /// Read one Timeline's metadata inside a larger host command fence.

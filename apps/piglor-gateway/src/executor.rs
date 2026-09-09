@@ -14,12 +14,12 @@ use pos_core::{
     timeline::Timeline,
     ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
     CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, OwnTracksIngressInputV1,
-    OwnTracksIngressRateKeyV1, PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1,
-    EVENT_TYPE_CONSENT_REVOKED_V1,
+    OwnTracksIngressRateKeyV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, OwnTracksIngressStore};
-use pos_runtime::{ActionSubmissionError, ErasureExecutionHostV1, PluginRegistry, ProposedAction};
+use pos_runtime::{ActionSubmissionError, ErasureExecutionHostV1, PluginRegistry};
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -1377,7 +1377,7 @@ impl StoreExecutor {
         let deadline = Instant::now() + self.command_deadline();
         let lifecycle = Arc::new(CommandLifecycle::new());
         let (reply, result) = oneshot::channel();
-        self.try_submit(
+        let submission = self.try_submit(
             Command::SubmitAction {
                 timeline,
                 registry,
@@ -1387,8 +1387,10 @@ impl StoreExecutor {
             },
             deadline,
             Arc::clone(&lifecycle),
-        )
-        .map_err(ActionCommandError::Executor)?;
+        );
+        if let Err(error) = submission {
+            return Err(ActionCommandError::Executor(error));
+        }
         await_command_result(self, result, lifecycle, deadline).await
     }
     pub(crate) async fn append_consent_grant(
@@ -2179,29 +2181,36 @@ fn execute_host_action(
     proposal: &ProposedAction,
     maximum: u64,
 ) -> Result<Event, ActionCommandError> {
-    let mut sender = host.command_sender().map_err(host_action_error)?;
-    let mut result = None;
-    let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
-        result = Some(prepare_and_append_action(
-            sender.timeline(timeline).map_err(host_action_error),
-            |draft| {
-                sender
-                    .append_bounded(timeline, std::slice::from_ref(draft), maximum)
-                    .map_err(host_action_error)
-            },
-            timeline,
-            registry,
-            proposal,
-        ));
-    };
-    sender
-        .with_protected_effect_fence(
-            timeline,
-            ErasureProtectedOperationV1::ProposedAction,
-            &mut effect,
-        )
-        .map_err(host_action_error)?;
-    result.unwrap_or_else(|| Err(ActionCommandError::Executor(StoreExecutorError::Unhealthy)))
+    host.command_sender()
+        .map_err(host_action_error)
+        .and_then(|mut sender| {
+            let mut result = None;
+            let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
+                result = Some(prepare_and_append_action(
+                    sender.timeline(timeline).map_err(host_action_error),
+                    |draft| {
+                        sender
+                            .append_bounded(timeline, std::slice::from_ref(draft), maximum)
+                            .map_err(host_action_error)
+                    },
+                    timeline,
+                    registry,
+                    proposal,
+                ));
+            };
+            sender
+                .with_protected_effect_fence(
+                    timeline,
+                    ErasureProtectedOperationV1::ProposedAction,
+                    &mut effect,
+                )
+                .map_err(host_action_error)
+                .and_then(|()| {
+                    result.unwrap_or_else(|| {
+                        Err(ActionCommandError::Executor(StoreExecutorError::Unhealthy))
+                    })
+                })
+        })
 }
 
 #[cfg(test)]
@@ -2236,16 +2245,22 @@ fn prepare_and_append_action(
     registry: &PluginRegistry,
     proposal: &ProposedAction,
 ) -> Result<Event, ActionCommandError> {
-    timeline_result?.ok_or_else(|| {
-        ActionCommandError::Executor(StoreExecutorError::Store(CoreError::TimelineNotFound(
-            timeline,
-        )))
-    })?;
-    let draft = registry
-        .submit_action(timeline, proposal)
-        .map_err(ActionCommandError::Submission)?;
-    let mut events = append(&draft)?.ok_or_else(event_limit_reached)?;
-    events.pop().ok_or_else(empty_action_append)
+    timeline_result
+        .and_then(|metadata| {
+            metadata.ok_or_else(|| {
+                ActionCommandError::Executor(StoreExecutorError::Store(
+                    CoreError::TimelineNotFound(timeline),
+                ))
+            })
+        })
+        .and_then(|_| {
+            registry
+                .submit_action(timeline, proposal)
+                .map_err(ActionCommandError::Submission)
+        })
+        .and_then(|draft| append(&draft))
+        .and_then(|events| events.ok_or_else(event_limit_reached))
+        .and_then(|mut events| events.pop().ok_or_else(empty_action_append))
 }
 
 fn host_action_error(error: ErasureHostErrorV1) -> ActionCommandError {
