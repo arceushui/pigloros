@@ -463,7 +463,7 @@ impl InstalledSelectorObjects {
     }
 }
 
-fn open_directory_chain(
+pub(crate) fn open_directory_chain(
     mut directory: File,
     relative: &Path,
     owner: u32,
