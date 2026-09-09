@@ -70,7 +70,7 @@ impl RootSelectorAdmissionArtifacts {
             &self.policy,
             &self.trust,
             &self.revocation,
-            RootSelectorAdmissionInputs {
+            &RootSelectorAdmissionInputs {
                 provider: SandboxProviderAdmissionInputs {
                     provider_manifest: &self.provider_manifest,
                     provider_binary: &self.provider_binary,

@@ -486,7 +486,7 @@ impl RootSelectorAdmission {
         policy: &SandboxAdministratorPolicy,
         trust: &SandboxTrustSnapshot,
         revocation: &SandboxRevocationSnapshot,
-        inputs: RootSelectorAdmissionInputs<'_>,
+        inputs: &RootSelectorAdmissionInputs<'_>,
     ) -> Result<Self, SandboxAdmissionError> {
         if inputs.evaluation.to_canonical_cbor().is_err() {
             return Err(SandboxAdmissionError::ConformanceMismatch);
@@ -500,7 +500,7 @@ impl RootSelectorAdmission {
         )?;
         let launch = provider.admit_launch_policy(inputs.launch_policy, &image)?;
         let grant_commitment =
-            SelectorGrantCommitment::derive(&provider, &image, &launch, policy, &inputs)?;
+            SelectorGrantCommitment::derive(&provider, &image, &launch, policy, inputs)?;
         Ok(Self {
             provider,
             image,
