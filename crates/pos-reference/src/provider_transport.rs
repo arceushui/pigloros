@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
+use rustix::net::sockopt::socket_error;
 use rustix::net::sockopt::socket_peercred;
+use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
 use crate::root_selector::{
     RootSelectorProvider, RootSelectorProviderReply, RootSelectorServiceError,
@@ -117,7 +120,7 @@ pub trait ProviderConnector {
     ///
     /// # Errors
     /// Returns a closed failure when the provider cannot be connected.
-    fn connect(&mut self) -> Result<UnixStream, RootSelectorServiceError>;
+    fn connect(&mut self, timeout: Duration) -> Result<UnixStream, RootSelectorServiceError>;
 }
 
 /// Immutable selected execute endpoint validated before it becomes usable.
@@ -154,9 +157,38 @@ impl SelectedProviderEndpoint {
 }
 
 impl ProviderConnector for SelectedProviderEndpoint {
-    fn connect(&mut self) -> Result<UnixStream, RootSelectorServiceError> {
+    fn connect(&mut self, timeout: Duration) -> Result<UnixStream, RootSelectorServiceError> {
         let before = endpoint_metadata(&self.path, self.device, self.inode)?;
-        let stream = UnixStream::connect(&self.path)
+        let address = SocketAddrUnix::new(&self.path)
+            .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+        let fd = socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )
+        .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+        if connect(&fd, &address).is_err() {
+            let seconds = i64::try_from(timeout.as_secs())
+                .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+            let timespec = Timespec {
+                tv_sec: seconds,
+                tv_nsec: timeout.subsec_nanos().into(),
+            };
+            let mut poll_fd = PollFd::new(&fd, PollFlags::OUT);
+            if poll(&mut [poll_fd], Some(&timespec))
+                .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?
+                == 0
+                || socket_error(&fd)
+                    .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?
+                    .is_err()
+            {
+                return Err(RootSelectorServiceError::ProviderUnavailable);
+            }
+        }
+        let stream = UnixStream::from(fd);
+        stream
+            .set_nonblocking(false)
             .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
         let after = endpoint_metadata(&self.path, self.device, self.inode)?;
         if before.dev() != after.dev() || before.ino() != after.ino() {
@@ -242,7 +274,11 @@ impl<C: ProviderConnector> ProviderTransport<C> {
     ) -> Result<RootSelectorProviderReply, ReceiveFailure> {
         let mut stream = self
             .connector
-            .connect()
+            .connect(
+                deadline
+                    .remaining()
+                    .map_err(|_| ReceiveFailure::Incomplete)?,
+            )
             .map_err(|_| ReceiveFailure::Incomplete)?;
         write_frame(
             &mut stream,

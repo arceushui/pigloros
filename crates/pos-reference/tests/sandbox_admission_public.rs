@@ -538,7 +538,7 @@ fn staged_output(bytes: &[u8]) -> TestResult<StagedOutput> {
 struct PairConnector(Vec<UnixStream>);
 
 impl ProviderConnector for PairConnector {
-    fn connect(&mut self) -> Result<UnixStream, RootSelectorServiceError> {
+    fn connect(&mut self, _: Duration) -> Result<UnixStream, RootSelectorServiceError> {
         self.0
             .pop()
             .ok_or(RootSelectorServiceError::ProviderUnavailable)
