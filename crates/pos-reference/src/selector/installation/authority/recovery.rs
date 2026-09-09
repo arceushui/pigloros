@@ -116,12 +116,14 @@ impl InstalledSelectorObjects {
             next_bytes,
             update_bytes,
         )?;
-        Ok(PendingInstallationRecovery {
+        let pending = PendingInstallationRecovery {
             previous_authority,
             update,
             recovery_file,
             recovery_bytes,
-        })
+        };
+        pending.verify_recovery_floor()?;
+        Ok(pending)
     }
 }
 
