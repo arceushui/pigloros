@@ -2913,8 +2913,8 @@ mod tests {
         execute_append_consent_revocation_command, execute_submit_action_command,
         execute_submit_identified_action_command, missing_duplicate_event,
         prepare_owntracks_ingress, resolve_identified_outcome, ActionCommand, ActionCommandContext,
-        ActionCommandError, Command, ExecutorState, ExecutorStore, GatewayExecutorStore,
-        OwnTracksRateLimiter,
+        ActionCommandError, AuthorizedActionContext, Command, ExecutorState, ExecutorStore,
+        GatewayExecutorStore, OwnTracksRateLimiter,
     };
     use crate::authorization::{
         test_authorization_for, GatewayAuthorizationDecision, GatewayAuthorizationRequest,
@@ -2940,6 +2940,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
+    use tokio::sync::broadcast;
 
     struct RecordingBoundedStore {
         calls: Arc<Mutex<Vec<(TimelineId, usize, u64)>>>,
@@ -2952,12 +2953,14 @@ mod tests {
         let timeline = TimelineId::new();
         let (authorization, decision, proposal) = action_fixture(timeline)?;
         let registry = PluginRegistry::new();
+        let bus = broadcast::channel(1).0;
         let context = ActionCommandContext {
             timeline,
             registry: &registry,
             proposal: &proposal,
             authorization: &authorization,
             decision: &decision,
+            bus: &bus,
             maximum: 1,
         };
         let mut state = ExecutorState {
