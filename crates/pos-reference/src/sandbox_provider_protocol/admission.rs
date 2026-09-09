@@ -373,9 +373,6 @@ pub enum SandboxAdmissionError {
     /// SCS1, PCR1, HCP1, SPM1, or SIM1 architectures disagree.
     #[error("sandbox admission architecture does not agree")]
     ArchitectureMismatch,
-    /// A required host feature is absent, failed, or bound by a different digest.
-    #[error("sandbox host capability is insufficient")]
-    HostCapabilityMismatch,
     /// SIM1 does not bind an authenticated certificate mapping.
     #[error("sandbox image certificate mapping does not agree")]
     CertificateMismatch,
@@ -903,14 +900,6 @@ impl AdmittedSandboxProvider {
             || manifest.required_hcp1_feature_set_digest != feature_digest
         {
             return Err(SandboxAdmissionError::ConformanceMismatch);
-        }
-        if required_features.iter().any(|required| {
-            !host_profile
-                .feature_proofs
-                .iter()
-                .any(|proof| proof.feature_id == required.as_str() && proof.passed)
-        }) {
-            return Err(SandboxAdmissionError::HostCapabilityMismatch);
         }
         let architecture = syscall_set.architecture;
         if conformance_report.architecture != architecture
