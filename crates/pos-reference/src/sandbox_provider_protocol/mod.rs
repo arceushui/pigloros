@@ -25,8 +25,7 @@ pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, Sand
 pub use admission::{
     AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedSandboxExecution,
     HostCapabilityProfile, HostFeatureProof, ProviderConformanceReport, RootSelectorAdmission,
-    RootSelectorAdmissionInputs, SandboxAdmissionError, SandboxGrantExpectations,
-    SandboxProviderAdmissionInputs,
+    RootSelectorAdmissionInputs, SandboxAdmissionError, SandboxProviderAdmissionInputs,
 };
 pub use audit::SandboxAuditRecord;
 pub use authority::{
