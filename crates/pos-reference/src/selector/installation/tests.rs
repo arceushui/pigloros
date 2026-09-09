@@ -229,7 +229,7 @@ fn manifest_enforces_closed_typed_index_and_raw_digest_roles() -> TestResult {
         fields[10] = Value::Array(entries);
         assert!(InstallationManifest::from_cbor(&manifest_bytes(fields)?).is_err());
     }
-    for code in 10..16 {
+    for code in 10_u8..16 {
         let mut fields = unsigned();
         let mut entries: Vec<_> = (0..16).map(object).collect();
         let mut changed = array(&entries[usize::from(code)], 4)?.to_vec();
