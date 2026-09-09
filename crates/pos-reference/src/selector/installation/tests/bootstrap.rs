@@ -2,6 +2,8 @@ use ed25519_dalek::Signer;
 
 use super::*;
 
+mod updates;
+
 fn sign_record(
     magic: &str,
     fields: Vec<Value>,
@@ -190,10 +192,11 @@ fn bootstrap_rejects_changed_pin_and_each_forged_authority_record() -> TestResul
         let loaded = fixture.load()?;
         let document = decode_canonical(loaded.manifest_bytes())?;
         let mut fields = array_values(&array(&document, 2)?[0])?.to_vec();
+        let other_root = SigningKey::from_bytes(&[44; 32]);
         fields[field] = if field == 2 {
             Value::Text("other-root".to_owned())
         } else {
-            bytes(SigningKey::from_bytes(&[44; 32]).verifying_key().to_bytes())
+            bytes(other_root.verifying_key().to_bytes())
         };
         install_manifest(&fixture, fields)?;
         assert!(fixture.load()?.authenticate_authority().is_err());

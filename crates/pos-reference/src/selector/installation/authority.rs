@@ -1,5 +1,7 @@
 //! Offline-pinned bootstrap authority, separate from provider admission.
 
+pub mod update;
+
 use super::{InstallationObjectKind, InstalledSelectorObjects, MANIFEST_LIMIT};
 use crate::sandbox_provider_protocol::{
     SandboxAdministratorPolicy, SandboxRevocationSnapshot, SandboxTrustSnapshot,
