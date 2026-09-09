@@ -34,6 +34,7 @@ use pos_reference::sandbox_provider_protocol::{
 use sha2::{Digest, Sha256};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type SelectorExercise = (Result<(), RootSelectorServiceError>, Vec<u8>, Vec<u8>);
 
 const ROOT_DATA_X86_64: [u8; 16] = [
     0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84, 0xb7, 0x09,
@@ -1214,7 +1215,7 @@ fn exercise_root_selector<A, P>(
     request: &EvaluationRequest,
     attempt: &CaseAttempt,
     evaluator_uid_offset: u32,
-) -> TestResult<(Result<(), RootSelectorServiceError>, Vec<u8>, Vec<u8>)>
+) -> TestResult<SelectorExercise>
 where
     A: RootSelectorAuthoritySource + Send + 'static,
     P: RootSelectorProvider + Send + 'static,
@@ -2066,9 +2067,7 @@ fn root_selector_server_wires_request_admission_provider_and_authenticated_reply
     Ok(())
 }
 
-fn exercise_selector_provider_mode(
-    mode: SelectorProviderMode,
-) -> TestResult<(Result<(), RootSelectorServiceError>, Vec<u8>, Vec<u8>)> {
+fn exercise_selector_provider_mode(mode: SelectorProviderMode) -> TestResult<SelectorExercise> {
     let fixture = Fixture::new()?;
     let request = selector_evaluation_request(&fixture)?;
     let attempt = selector_case_attempt();
