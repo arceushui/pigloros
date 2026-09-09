@@ -729,7 +729,7 @@ fn establish_admission(
         policy,
         &fixture.trust,
         &fixture.revocation,
-        RootSelectorAdmissionInputs {
+        &RootSelectorAdmissionInputs {
             provider: SandboxProviderAdmissionInputs {
                 broker_hard_caps,
                 ..fixture.inputs()
@@ -4643,7 +4643,7 @@ fn root_selector_establishment_fails_closed_at_each_admission_stage() -> TestRes
             &fixture.policy,
             &fixture.trust,
             &fixture.revocation,
-            RootSelectorAdmissionInputs {
+            &RootSelectorAdmissionInputs {
                 provider: SandboxProviderAdmissionInputs {
                     provider_manifest,
                     ..fixture.inputs()
