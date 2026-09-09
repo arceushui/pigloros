@@ -58,9 +58,11 @@ macro_rules! submit {
 #[cfg(test)]
 mod lifecycle_coverage_tests {
     use super::{
-        worker_loop, worker_loop_with_runtime, Command, CommandClass, CommandEnvelope,
-        CommandLifecycle, ExecutorStore, LifecycleState,
+        host_error_to_core, worker_loop, worker_loop_with_runtime, Command, CommandClass,
+        CommandEnvelope, CommandLifecycle, ExecutorStore, LifecycleState,
     };
+    use pos_core::{CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
+    use pos_runtime::ErasureExecutionHostV1;
     use pos_store::memory::MemoryStore;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -105,6 +107,44 @@ mod lifecycle_coverage_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(final_state, LifecycleState::Closed);
+    }
+
+    #[test]
+    fn test_gate_binding_and_host_error_mapping_cover_every_variant() {
+        let host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        for mut store in [
+            ExecutorStore::Host(host),
+            ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            ExecutorStore::GeoLocation(Box::new(MemoryStore::new())),
+            ExecutorStore::OwnTracks(Box::new(MemoryStore::new())),
+        ] {
+            store.bind_test_erasure_gate();
+        }
+
+        assert_eq!(
+            host_error_to_core(ErasureHostErrorV1::AccessFrozen),
+            CoreError::ErasureAccessFrozen
+        );
+        for error in [
+            ErasureHostErrorV1::RecoveryUnavailable,
+            ErasureHostErrorV1::StaleGeneration,
+        ] {
+            assert_eq!(
+                host_error_to_core(error),
+                CoreError::ErasureContainmentUnavailable
+            );
+        }
+        for error in [
+            ErasureHostErrorV1::AuthorizationDenied,
+            ErasureHostErrorV1::Conflict,
+            ErasureHostErrorV1::AdapterFailure,
+        ] {
+            assert!(matches!(host_error_to_core(error), CoreError::Storage(_)));
+        }
     }
 
     #[test]

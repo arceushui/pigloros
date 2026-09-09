@@ -24,7 +24,7 @@ use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
-use pos_core::{ErasureContainmentGateV1, ERASURE_MAX_INVENTORY_REQUESTS};
+use pos_core::{ErasureContainmentGateV1, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::{open_erasure_host_store, StoreConfig};
 use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc};
@@ -212,13 +212,15 @@ fn gateway_for_startup(
                 open_erasure_host_store(config)?,
                 ERASURE_MAX_INVENTORY_REQUESTS,
             )
-            .map_err(|error| {
-                std::io::Error::other(format!("erasure host recovery failed ({})", error.code()))
-            })?;
+            .map_err(erasure_host_recovery_error)?;
             Gateway::new_with_erasure_host(host).map_err(Into::into)
         }
         (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
     }
+}
+
+fn erasure_host_recovery_error(error: ErasureHostErrorV1) -> std::io::Error {
+    std::io::Error::other(format!("erasure host recovery failed ({})", error.code()))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -391,6 +393,14 @@ mod coverage_tests {
         .test_err()?;
         assert!(!ledger_error.to_string().is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn startup_recovery_error_is_payload_free() {
+        assert_eq!(
+            erasure_host_recovery_error(ErasureHostErrorV1::RecoveryUnavailable).to_string(),
+            "erasure host recovery failed (recovery_unavailable)"
+        );
     }
 }
 
