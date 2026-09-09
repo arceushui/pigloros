@@ -117,14 +117,17 @@ fn bind_registry_to_host_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<(), ExperimentError> {
-    if let Some(existing) = registry.clone_erasure_gate() {
-        if !Arc::ptr_eq(&existing, &gate) {
-            return Err(ExperimentError::Store(
-                pos_core::CoreError::ErasureContainmentUnavailable,
-            ));
+    match registry.clone_erasure_gate() {
+        Some(existing) => {
+            if !Arc::ptr_eq(&existing, &gate) {
+                return Err(ExperimentError::Store(
+                    pos_core::CoreError::ErasureContainmentUnavailable,
+                ));
+            }
         }
-    } else {
-        registry.bind_erasure_gate(gate);
+        None => {
+            registry.bind_erasure_gate(gate);
+        }
     }
     Ok(())
 }
