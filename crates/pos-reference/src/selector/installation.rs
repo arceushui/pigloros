@@ -1,6 +1,7 @@
 //! Fixed SIC1 installation metadata. Decoding is not provider admission.
 
 pub mod authority;
+pub mod cases;
 
 use std::collections::BTreeMap;
 use std::fs::File;

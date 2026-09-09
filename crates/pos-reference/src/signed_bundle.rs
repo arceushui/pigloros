@@ -301,6 +301,90 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
     preflight_archive(&mut snapshot, archive_length, trust_policy_bytes, request)
 }
 
+/// Authenticate and measure an immutable seekable CFB1 without staging its
+/// complete archive. Callers retaining an immutable descriptor use this before
+/// selected-cap enforcement and before full closure materialization.
+///
+/// # Errors
+/// Returns a closed failure when the archive identity, signed manifest, TPS1,
+/// CPF1, or indexed closure metadata is invalid.
+pub fn preflight_signed_bundle_reader<R: Read + Seek>(
+    archive: &mut R,
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedBundlePreflight, BundleError> {
+    let archive_length = authenticate_reader(archive, request.fixture_bundle_digest)?;
+    preflight_archive(archive, archive_length, trust_policy_bytes, request)
+}
+
+/// Fully validate a CFB1 closure from an immutable seekable reader.
+///
+/// This reader path deliberately never creates an archive-sized byte buffer;
+/// it retains only validated member bodies required by the verified closure.
+/// Callers must enforce the authenticated selected caps from
+/// [`preflight_signed_bundle_reader`] before invoking this function.
+///
+/// # Errors
+/// Returns a closed failure when CFB1 encoding, signature, trust, member body,
+/// or closure validation fails.
+pub fn verify_signed_bundle_reader<R: Read + Seek>(
+    archive: &mut R,
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<VerifiedBundle, BundleError> {
+    let archive_length = authenticate_reader(archive, request.fixture_bundle_digest)?;
+    let scanned = scan_archive(archive, archive_length)?;
+    let manifest = read_range(archive, scanned.manifest_range.clone())
+        .and_then(|bytes| decode_manifest_bytes(bytes, request))?;
+    let trust_policy = verified_trust_policy(trust_policy_bytes, request)?;
+    verify_signature(
+        &manifest.manifest_bytes,
+        scanned.signer_key,
+        scanned.signature,
+        &trust_policy,
+    )?;
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)?;
+    let (members, signer_key, signature) = read_verified_members(archive, archive_length)?;
+    if signer_key != scanned.signer_key || signature != scanned.signature {
+        return Err(BundleError::InvalidEncoding);
+    }
+    let decoded = DecodedArchive {
+        mode: manifest.mode,
+        profile_digest: manifest.profile_digest,
+        descriptors: manifest.descriptors,
+        expected: manifest.expected,
+        members,
+        signer_key,
+        signature,
+        manifest_bytes: manifest.manifest_bytes,
+    };
+    validate_archive_closure(&decoded, &trust_policy)?;
+    let (authority, authority_verifying_key) = verify_archive_signature(&decoded, &trust_policy)?;
+    if decoded
+        .members
+        .values()
+        .any(|member| prohibited_secret_material(&member.bytes))
+    {
+        return Err(BundleError::ProhibitedMaterial);
+    }
+    let expected_results = decoded
+        .expected
+        .into_iter()
+        .map(|result| (result.key, result.path))
+        .collect();
+    Ok(VerifiedBundle {
+        mode: decoded.mode,
+        profile_digest: decoded.profile_digest,
+        archive_digest: request.fixture_bundle_digest,
+        members: decoded.members,
+        expected_results,
+        authority_key_id: authority.key_id,
+        authority_verifying_key,
+    })
+}
+
 pub(crate) fn preflight_signed_bundle_bytes(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
@@ -380,6 +464,170 @@ fn authenticated_snapshot<R: Read + Seek>(
     tempfile::tempfile()
         .map_err(snapshot_unavailable)
         .and_then(|snapshot| copy_authenticated_snapshot(archive, snapshot, length, expected))
+}
+
+fn authenticate_reader<R: Read + Seek>(
+    archive: &mut R,
+    expected: [u8; 32],
+) -> Result<u64, BundleError> {
+    let length = archive
+        .seek(SeekFrom::End(0))
+        .map_err(snapshot_unavailable)?;
+    if length == 0 || length > MAX_ARCHIVE_BYTES as u64 {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    let mut bounded = archive.take(length + 1);
+    loop {
+        let read = bounded.read(&mut buffer).map_err(snapshot_unavailable)?;
+        if read == 0 {
+            break;
+        }
+        copied += read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    if copied != length || *hasher.finalize().as_bytes() != expected {
+        return Err(BundleError::DigestMismatch);
+    }
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)?;
+    verify_canonical_archive(archive)?;
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)
+        .map(|_| length)
+}
+
+fn verify_canonical_archive<R: Read + ?Sized>(archive: &mut R) -> Result<(), BundleError> {
+    verify_canonical_item(archive, 0)?;
+    let mut trailing = [0_u8; 1];
+    (archive.read(&mut trailing).map_err(snapshot_unavailable)? == 0)
+        .then_some(())
+        .ok_or(BundleError::InvalidEncoding)
+}
+
+fn verify_canonical_item<R: Read + ?Sized>(
+    archive: &mut R,
+    depth: usize,
+) -> Result<(), BundleError> {
+    if depth > 32 {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    let mut initial = [0_u8; 1];
+    archive
+        .read_exact(&mut initial)
+        .map_err(snapshot_unavailable)?;
+    let major = initial[0] >> 5;
+    let argument = canonical_argument(archive, initial[0] & 0x1f)?;
+    match major {
+        0 => Ok(()),
+        2 | 3 => drain_exact(archive, argument),
+        4 if argument <= MAX_MEMBERS as u64 => {
+            for _ in 0..argument {
+                verify_canonical_item(archive, depth + 1)?;
+            }
+            Ok(())
+        }
+        4 => Err(BundleError::FieldOutOfBounds),
+        7 if matches!(argument, 20..=22) => Ok(()),
+        _ => Err(BundleError::InvalidEncoding),
+    }
+}
+
+fn canonical_argument<R: Read + ?Sized>(
+    archive: &mut R,
+    additional: u8,
+) -> Result<u64, BundleError> {
+    let width = match additional {
+        value @ 0..=23 => return Ok(u64::from(value)),
+        24 => 1,
+        25 => 2,
+        26 => 4,
+        27 => 8,
+        _ => return Err(BundleError::InvalidEncoding),
+    };
+    let mut encoded = [0_u8; 8];
+    archive
+        .read_exact(&mut encoded[8 - width..])
+        .map_err(snapshot_unavailable)?;
+    let value = u64::from_be_bytes(encoded);
+    let minimum = match width {
+        1 => 24,
+        2 => 256,
+        4 => 65_536,
+        8 => 4_294_967_296,
+        _ => return Err(BundleError::InvalidEncoding),
+    };
+    (value >= minimum)
+        .then_some(value)
+        .ok_or(BundleError::InvalidEncoding)
+}
+
+fn drain_exact<R: Read + ?Sized>(archive: &mut R, mut length: u64) -> Result<(), BundleError> {
+    let mut buffer = [0_u8; 8192];
+    while length != 0 {
+        let take = usize::try_from(length.min(buffer.len() as u64))
+            .map_err(|_| BundleError::FieldOutOfBounds)?;
+        archive
+            .read_exact(&mut buffer[..take])
+            .map_err(snapshot_unavailable)?;
+        length -= take as u64;
+    }
+    Ok(())
+}
+
+fn read_verified_members<R: Read + ?Sized>(
+    archive: &mut R,
+    archive_length: u64,
+) -> Result<(BTreeMap<String, VerifiedMember>, [u8; 32], [u8; 64]), BundleError> {
+    let mut decoder = Decoder::from(&mut *archive);
+    expect_array(&mut decoder, 4)?;
+    skip_cbor_value(&mut decoder, 0)?;
+    let count = array_length(&mut decoder)?;
+    if count == 0 || count > MAX_MEMBERS {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    let mut members = BTreeMap::new();
+    let mut previous_path = None;
+    let mut total = 0_u64;
+    for _ in 0..count {
+        expect_array(&mut decoder, 3)?;
+        let path = validated_path(&read_text(&mut decoder, MAX_PATH_BYTES)?)?;
+        if previous_path
+            .as_ref()
+            .is_some_and(|previous: &String| previous.as_bytes() >= path.as_bytes())
+        {
+            return Err(BundleError::NonCanonicalOrder);
+        }
+        let length = bytes_length(&mut decoder)?;
+        let bytes = read_bytes(&mut decoder, length, MAX_MEMBER_BYTES)?;
+        let role = u8::try_from(positive(&mut decoder)?).map_invalid_encoding()?;
+        total = total.saturating_add(length as u64);
+        if total > MAX_ARCHIVE_BYTES as u64 || role > 19 {
+            return Err(BundleError::FieldOutOfBounds);
+        }
+        previous_path = Some(path.clone());
+        members.insert(
+            path,
+            VerifiedMember {
+                role,
+                digest: *blake3::hash(&bytes).as_bytes(),
+                bytes,
+            },
+        );
+    }
+    let signer_key = read_fixed_bytes(&mut decoder)?;
+    let signature = read_fixed_bytes(&mut decoder)?;
+    if decoder.offset() as u64 != archive_length {
+        return Err(BundleError::InvalidEncoding);
+    }
+    Ok((members, signer_key, signature))
 }
 
 fn copy_authenticated_snapshot<R: Read + ?Sized>(
