@@ -759,30 +759,34 @@ fn provider_transport_retains_grant_on_changed_replay_and_rejects_trailing() -> 
 
 #[test]
 fn provider_transport_exhausts_one_shared_deadline_after_admission() -> TestResult {
+    struct ExpiringReplayConnector(Option<UnixStream>);
+
+    impl ProviderConnector for ExpiringReplayConnector {
+        fn connect(&mut self, timeout: Duration) -> Result<UnixStream, RootSelectorServiceError> {
+            if let Some(stream) = self.0.take() {
+                return Ok(stream);
+            }
+            // Expire the remainder only after the first authenticated AGR1.
+            // No unused socket/peer thread can remain blocked when replay ends.
+            thread::sleep(timeout + Duration::from_millis(1));
+            Err(RootSelectorServiceError::ProviderUnavailable)
+        }
+    }
+
     let fixture = Fixture::new()?;
     let admission = transport_admission(&fixture)?;
     let request = transport_request(&fixture, &admission)?;
     let records = complete_transport_records(&fixture, &request, &admission)?;
     let digest = AdmissionGrant::from_canonical_cbor(&records[0])?.grant_digest;
     let (first, first_peer) = UnixStream::pair()?;
-    let (second, mut second_peer) = UnixStream::pair()?;
     let first_server = serve_transport(first_peer, vec![records[0].clone()], false);
-    let second_server = thread::spawn(move || -> TestResult {
-        let mut input = Vec::new();
-        second_peer.read_to_end(&mut input)?;
-        thread::sleep(Duration::from_millis(10));
-        Ok(())
-    });
-    let mut transport = ProviderTransport::with_connector(PairConnector(vec![second, first]));
+    let mut transport = ProviderTransport::with_connector(ExpiringReplayConnector(Some(first)));
     assert!(
-        matches!(transport.execute(&request, b"input", Duration::from_millis(1), &admission)?, RootSelectorProviderReply::Incomplete { agr1_digest: Some(actual) } if actual == digest)
+        matches!(transport.execute(&request, b"input", Duration::from_secs(1), &admission)?, RootSelectorProviderReply::Incomplete { agr1_digest: Some(actual) } if actual == digest)
     );
     first_server
         .join()
         .map_err(|_| "first provider panicked")??;
-    second_server
-        .join()
-        .map_err(|_| "second provider panicked")??;
     Ok(())
 }
 

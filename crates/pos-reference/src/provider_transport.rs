@@ -175,7 +175,7 @@ impl ProviderConnector for SelectedProviderEndpoint {
                 tv_sec: seconds,
                 tv_nsec: timeout.subsec_nanos().into(),
             };
-            let mut poll_fd = PollFd::new(&fd, PollFlags::OUT);
+            let poll_fd = PollFd::new(&fd, PollFlags::OUT);
             if poll(&mut [poll_fd], Some(&timespec))
                 .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?
                 == 0
