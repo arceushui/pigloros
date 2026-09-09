@@ -175,3 +175,24 @@ fn installed_authority_rejects_invalid_signed_closures_before_case_reconstructio
     assert!(authority.resolve_installed_case(&request, 0).is_err());
     Ok(())
 }
+
+#[test]
+fn installed_authority_rejects_noncanonical_or_trailing_archive_bytes() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    for noncanonical in [false, true] {
+        let mut archive = corpus.archive.clone();
+        if noncanonical {
+            assert_eq!(archive[0], 0x84);
+            archive.splice(..1, [0x98, 4]);
+        } else {
+            archive.push(0);
+        }
+        let mut request = corpus_request(&corpus)?;
+        request.fixture_bundle_digest = *blake3::hash(&archive).as_bytes();
+        let request = rebind(request)?;
+        let (_fixture, authority) =
+            install_case_fixture(&archive, &corpus.trust_policy, |_| Ok(()))?;
+        assert!(authority.resolve_installed_case(&request, 0).is_err());
+    }
+    Ok(())
+}
