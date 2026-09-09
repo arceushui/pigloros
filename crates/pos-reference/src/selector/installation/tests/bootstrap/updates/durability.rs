@@ -114,6 +114,35 @@ fn durable_commit_rejects_duplicate_and_unsafe_recovery_entries() -> TestResult 
 }
 
 #[test]
+fn committed_recovery_rejects_manifest_outside_both_generations() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let update = validated(&fixture)?;
+    let UpdateFixture {
+        installation,
+        authority,
+    } = fixture;
+    let committed = authority.commit_update(update)?;
+    let path = installation.directory.path().join(MANIFEST_NAME);
+    std::fs::remove_file(&path)?;
+    std::fs::write(&path, b"unrelated generation")?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+    assert_eq!(
+        committed.verify_recovery_floor(),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    );
+    assert_eq!(
+        std::fs::read(
+            installation
+                .directory
+                .path()
+                .join("installation-update.cbor")
+        )?,
+        committed.recovery_bytes()
+    );
+    Ok(())
+}
+
+#[test]
 fn durable_commit_rejects_stale_and_foreign_authority_pairs() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let update = validated(&fixture)?;
