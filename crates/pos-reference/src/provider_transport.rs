@@ -689,6 +689,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn selected_endpoint_rejects_non_socket_and_untrusted_paths() -> TestResult {
+        for path in ["relative.sock", "/dev/null", "/proc/self/provider.sock"] {
+            assert!(SelectedProviderEndpoint::validate(Path::new(path)).is_err());
+        }
+        let temporary = tempfile::tempdir()?;
+        let missing = temporary.path().join("missing.sock");
+        assert!(SelectedProviderEndpoint::validate(&missing).is_err());
+        let mut endpoint = SelectedProviderEndpoint {
+            path: missing,
+            device: 0,
+            inode: 0,
+        };
+        assert!(endpoint.connect(Duration::from_millis(100)).is_err());
+        let mut transport = ProviderTransport::from_selected_endpoint(endpoint);
+        assert!(transport
+            .connector
+            .connect(Duration::from_millis(100))
+            .is_err());
+        Ok(())
+    }
+
     fn output_digest(bytes: &[u8]) -> [u8; 32] {
         output_digest_with(b"PiglorOS.SandboxOutputBytes.v1\0", bytes)
     }
