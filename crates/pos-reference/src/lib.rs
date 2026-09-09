@@ -26,10 +26,7 @@ pub mod root_selector;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
-// Public module reachability keeps crate-only sibling access compatible with
-// both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
-#[doc(hidden)]
-pub mod selector_protocol;
+mod selector_protocol;
 pub mod signed_bundle;
 
 /// Divergence classes emitted by the independent JSON evaluator.
