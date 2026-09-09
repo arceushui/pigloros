@@ -87,10 +87,9 @@ fn backtest_runner_on_store(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn start_with_fixture_store(
     experiment: Experiment,
-    mut store: Box<dyn pos_core::store::EventStore>,
+    store: Box<dyn pos_core::store::EventStore>,
 ) -> Result<ExperimentSession, ExperimentError> {
     let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
-    store.bind_erasure_gate(Arc::clone(&gate))?;
     experiment.with_erasure_gate(gate).start_with_store(store)
 }
 
@@ -117,10 +116,10 @@ fn bind_registry_erasure_gate(
     store: &mut dyn pos_core::store::EventStore,
     registry: &PluginRegistry,
 ) -> Result<(), pos_core::CoreError> {
-    if let Some(gate) = registry.clone_erasure_gate() {
-        store.bind_erasure_gate(gate)?;
-    }
-    Ok(())
+    let gate = registry
+        .clone_erasure_gate()
+        .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+    store.bind_erasure_gate(gate)
 }
 
 fn bind_registry_to_host_gate(
@@ -1157,7 +1156,9 @@ impl Experiment {
     /// This is the production composition seam for decorators such as bounded,
     /// fault-reporting, or observability adapters. Because the supplied adapter
     /// cannot be reconstructed from [`ExperimentConfig::store_config`], results
-    /// from this session do not advertise a recovery recipe.
+    /// from this session do not advertise a recovery recipe. The experiment
+    /// must carry an explicit host-owned erasure gate; unbound composition is
+    /// rejected before Timeline creation.
     ///
     /// # Errors
     /// Returns [`ExperimentError::Store`] if the supplied store cannot create
@@ -1239,7 +1240,8 @@ impl Experiment {
     ///
     /// Persisted Events are validated and folded exactly as in [`Self::resume`].
     /// This variant keeps host decorators in the recovery path instead of
-    /// reconstructing an adapter from [`ExperimentConfig::store_config`].
+    /// reconstructing an adapter from [`ExperimentConfig::store_config`]. The
+    /// experiment must carry an explicit host-owned erasure gate.
     ///
     /// # Errors
     /// Returns a store error when the Timeline cannot be opened or its logical

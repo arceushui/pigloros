@@ -458,6 +458,7 @@ impl Driver for BoundaryDriver {
 struct SharedMemoryAdapter {
     store: Arc<Mutex<MemoryStore>>,
     control: Arc<Mutex<AdapterControl>>,
+    erasure_gate: Arc<dyn pos_core::ErasureGate>,
 }
 
 impl SharedMemoryAdapter {
@@ -465,7 +466,12 @@ impl SharedMemoryAdapter {
         Self {
             store: Arc::new(Mutex::new(MemoryStore::new())),
             control: Arc::new(Mutex::new(AdapterControl::default())),
+            erasure_gate: Arc::new(ErasureContainmentGateV1::new()),
         }
+    }
+
+    fn gate_experiment(&self, experiment: Experiment) -> Experiment {
+        experiment.with_erasure_gate(Arc::clone(&self.erasure_gate))
     }
 
     fn fail_next_append(&self) {
@@ -529,6 +535,9 @@ impl SharedMemoryAdapter {
 
 impl EventStore for SharedMemoryAdapter {
     fn bind_erasure_gate(&mut self, gate: Arc<dyn pos_core::ErasureGate>) -> Result<(), CoreError> {
+        if !Arc::ptr_eq(&self.erasure_gate, &gate) {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        }
         if self.control().erasure_gate_bound {
             return Ok(());
         }
@@ -1324,7 +1333,10 @@ fn post_append_capture_failure_faults_the_session() {
     );
     let adapter = SharedMemoryAdapter::new();
     adapter.fail_after_first_logical_head();
-    let mut session = experiment.start_with_store(Box::new(adapter)).test_ok();
+    let mut session = adapter
+        .gate_experiment(experiment)
+        .start_with_store(Box::new(adapter.clone()))
+        .test_ok();
     assert!(matches!(
         session.step_tick(),
         Err(ExperimentError::Store(_))
@@ -1345,14 +1357,16 @@ fn resume_rejects_mismatched_ancestry_metadata() {
         vec![response_attempt(&accepted)],
         vec![],
     );
-    let mut parent = experiment
+    let mut parent = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     parent.step_tick().test_ok();
     let child = parent.fork("child").test_ok();
     adapter.return_wrong_timeline_on_second_get();
     let fresh = host.experiment("agent-provider-ancestry-resume", vec![]).0;
-    assert!(fresh
+    assert!(adapter
+        .gate_experiment(fresh)
         .resume_with_store(child.timeline().id(), Box::new(adapter))
         .is_err());
 }
@@ -1368,14 +1382,16 @@ fn resume_rejects_cyclic_ancestry_metadata() {
             vec![response_attempt(&accepted)],
         )
         .0;
-    let mut original = experiment
+    let mut original = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     original.step_tick().test_ok();
     let timeline = original.timeline().id();
     adapter.return_cycle_on_second_get();
     let fresh = host.experiment("agent-provider-cyclic-resume", vec![]).0;
-    assert!(fresh
+    assert!(adapter
+        .gate_experiment(fresh)
         .resume_with_store(timeline, Box::new(adapter))
         .is_err());
 }
@@ -1394,8 +1410,8 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     );
     let adapter = SharedMemoryAdapter::new();
     let authority = ConsentAuthority::new();
-    let mut session = experiment
-        .with_consent_authority(authority.clone())
+    let mut session = adapter
+        .gate_experiment(experiment.with_consent_authority(authority.clone()))
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = session.timeline().id();
@@ -1536,8 +1552,8 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
         "agent-provider-replay-fault",
         vec![response_attempt(&accepted_response)],
     );
-    let mut failed_session = experiment
-        .with_consent_authority(authority.clone())
+    let mut failed_session = adapter
+        .gate_experiment(experiment.with_consent_authority(authority.clone()))
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = failed_session.timeline().id();
@@ -1571,8 +1587,8 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
         "agent-provider-replay-recovery",
         vec![response_attempt(&accepted_response)],
     );
-    let mut recovered = recovery
-        .with_consent_authority(authority)
+    let mut recovered = adapter
+        .gate_experiment(recovery.with_consent_authority(authority))
         .resume_with_store(timeline, Box::new(adapter.clone()))
         .test_ok();
     assert_eq!(
@@ -1639,7 +1655,8 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
         "agent-provider-resume-tick",
         vec![response_attempt(&accepted)],
     );
-    let mut original = experiment
+    let mut original = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = original.timeline().id();
@@ -1649,7 +1666,8 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
         "agent-provider-resumed-tick",
         vec![response_attempt(&no_action)],
     );
-    let mut resumed = resume
+    let mut resumed = adapter
+        .gate_experiment(resume)
         .resume_with_store(timeline, Box::new(adapter))
         .test_ok();
     assert_eq!(resumed_tick.load(), 1);
@@ -1671,7 +1689,10 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
         vec![response_attempt(&accepted)],
         vec![response_attempt(&no_action)],
     );
-    let mut parent = forkable.start_with_store(Box::new(fork_adapter)).test_ok();
+    let mut parent = fork_adapter
+        .gate_experiment(forkable)
+        .start_with_store(Box::new(fork_adapter.clone()))
+        .test_ok();
     parent.step_tick().test_ok();
     let parent_timeline = parent.timeline().id();
     let mut child = parent.fork("agent-provider-child").test_ok();
@@ -1708,7 +1729,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
         vec![response_attempt(&accepted)],
         vec![],
     );
-    let mut prefix_parent = prefix_experiment
+    let mut prefix_parent = prefix_adapter
+        .gate_experiment(prefix_experiment)
         .start_with_store(Box::new(prefix_adapter.clone()))
         .test_ok();
     prefix_parent.step_tick().test_ok();
@@ -1724,7 +1746,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
         vec![response_attempt(&accepted)],
         vec![],
     );
-    let mut ancestry_parent = ancestry_experiment
+    let mut ancestry_parent = ancestry_adapter
+        .gate_experiment(ancestry_experiment)
         .start_with_store(Box::new(ancestry_adapter.clone()))
         .test_ok();
     ancestry_parent.step_tick().test_ok();
@@ -1740,7 +1763,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
         vec![response_attempt(&accepted)],
         vec![],
     );
-    let mut cycle_parent = cycle_experiment
+    let mut cycle_parent = cycle_adapter
+        .gate_experiment(cycle_experiment)
         .start_with_store(Box::new(cycle_adapter.clone()))
         .test_ok();
     cycle_parent.step_tick().test_ok();
@@ -1760,7 +1784,8 @@ fn supplied_store_read_failure_prevents_driver_restore() {
         "agent-provider-supplied-store-read-source",
         vec![response_attempt(&accepted)],
     );
-    let mut original = experiment
+    let mut original = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     original.step_tick().test_ok();
@@ -1772,7 +1797,9 @@ fn supplied_store_read_failure_prevents_driver_restore() {
         "agent-provider-supplied-store-read-recovery",
         vec![ProviderAttempt::NoResponse],
     );
-    let result = recovery.resume_with_store(timeline, Box::new(adapter));
+    let result = adapter
+        .gate_experiment(recovery)
+        .resume_with_store(timeline, Box::new(adapter));
 
     assert!(matches!(
         result,
@@ -1789,7 +1816,8 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     let host = HostFixture::new();
     let adapter = SharedMemoryAdapter::new();
     let (experiment, _, _) = host.experiment("agent-provider-source-validation", vec![]);
-    let mut session = experiment
+    let mut session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
 
@@ -1805,7 +1833,8 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     assert!(session.source_events().is_err());
 
     let (experiment, _, _) = host.experiment("agent-provider-capture-regression", vec![]);
-    let mut session = experiment
+    let mut session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     session.step_tick().test_ok();
@@ -1813,7 +1842,8 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     assert!(session.step_tick().is_err());
 
     let (experiment, _, _) = host.experiment("agent-provider-capture-gap", vec![]);
-    let mut session = experiment
+    let mut session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = session.timeline().id();
@@ -1837,7 +1867,8 @@ fn resume_rejects_mismatched_initial_timeline_metadata() {
     let host = HostFixture::new();
     let adapter = SharedMemoryAdapter::new();
     let (experiment, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
-    let session = experiment
+    let session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = session.timeline().id();
@@ -1845,7 +1876,8 @@ fn resume_rejects_mismatched_initial_timeline_metadata() {
 
     adapter.return_wrong_timeline_on_next_get();
     let (resume, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
-    assert!(resume
+    assert!(adapter
+        .gate_experiment(resume)
         .resume_with_store(timeline, Box::new(adapter))
         .is_err());
 }
@@ -1858,7 +1890,8 @@ fn resume_fails_closed_when_the_durable_prefix_or_metadata_is_untrustworthy() {
         "agent-provider-resume-fail-closed",
         vec![ProviderAttempt::NoResponse],
     );
-    let mut session = experiment
+    let mut session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     session.step_tick().test_ok();
@@ -1867,13 +1900,15 @@ fn resume_fails_closed_when_the_durable_prefix_or_metadata_is_untrustworthy() {
 
     adapter.drop_first_on_next_read();
     let (resume, _, _) = host.experiment("agent-provider-resume-corrupt", vec![]);
-    assert!(resume
+    assert!(adapter
+        .gate_experiment(resume)
         .resume_with_store(timeline, Box::new(adapter.clone()))
         .is_err());
 
     adapter.fail_next_get_timeline();
     let (resume, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
-    assert!(resume
+    assert!(adapter
+        .gate_experiment(resume)
         .resume_with_store(timeline, Box::new(adapter))
         .is_err());
 }
