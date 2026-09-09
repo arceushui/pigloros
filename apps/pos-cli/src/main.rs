@@ -53,6 +53,8 @@ use pos_experiment::{
 use pos_store::StoreConfig;
 use ulid::Ulid;
 
+include!("host_store.rs");
+
 const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
@@ -60,24 +62,14 @@ const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 100
 
 /// Open a store through the CLI composition seam.
 ///
-/// Production callers must install the authoritative recovered erasure gate
-/// before using protected operations. In-process tests provide an empty gate
-/// so they can exercise the command wiring without fabricating ERS1 evidence.
+/// The concrete adapter remains exclusively owned by the recovered erasure
+/// host in production and tests.
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    #[cfg(test)]
-    {
-        let mut store = pos_store::open_store(config)?;
-        drop(store.bind_erasure_gate(std::sync::Arc::new(
-            pos_core::ErasureContainmentGateV1::new(),
-        )));
-        Ok(store)
-    }
-    #[cfg(not(test))]
-    {
-        pos_store::open_store(config)
-    }
+    HostedCliStore::open(config)
+        .map(|store| Box::new(store) as Box<dyn pos_core::store::EventStore>)
+        .map_err(hosted_cli_store_error)
 }
 
 #[derive(serde::Deserialize)]
