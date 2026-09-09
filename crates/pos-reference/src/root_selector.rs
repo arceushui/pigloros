@@ -676,6 +676,13 @@ mod tests {
         let temporary = tempfile::tempdir()?;
         let path = temporary.path().join("selector.sock");
         let owner_uid = std::fs::metadata(temporary.path())?.uid();
+        assert!(bind_selector_listener(Path::new(""), owner_uid).is_err());
+        assert!(bind_selector_listener(
+            &temporary.path().join("missing").join("selector.sock"),
+            owner_uid,
+        )
+        .is_err());
+        assert!(bind_selector_listener(&path, owner_uid ^ 1).is_err());
         let listener = bind_selector_listener(&path, owner_uid)?;
         assert_eq!(std::fs::metadata(&path)?.mode() & 0o7777, SOCKET_MODE);
         assert!(bind_selector_listener(&path, owner_uid).is_err());

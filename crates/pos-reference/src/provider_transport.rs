@@ -141,10 +141,17 @@ impl SelectedProviderEndpoint {
         if !path.is_absolute() || !root_owned_ancestors(path) {
             return Err(RootSelectorServiceError::ProviderUnavailable);
         }
+        Self::from_verified_ancestry(path, ROOT_UID)
+    }
+
+    fn from_verified_ancestry(
+        path: &Path,
+        owner_uid: u32,
+    ) -> Result<Self, RootSelectorServiceError> {
         let metadata = std::fs::symlink_metadata(path)
             .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
         if !metadata.file_type().is_socket()
-            || metadata.uid() != ROOT_UID
+            || metadata.uid() != owner_uid
             || metadata.mode() & 0o7777 != 0o600
         {
             return Err(RootSelectorServiceError::ProviderUnavailable);
@@ -153,7 +160,7 @@ impl SelectedProviderEndpoint {
             path: path.to_path_buf(),
             device: metadata.dev(),
             inode: metadata.ino(),
-            owner_uid: ROOT_UID,
+            owner_uid,
         })
     }
 }
@@ -918,18 +925,34 @@ mod tests {
         let path = temporary.path().join("provider.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        let metadata = std::fs::symlink_metadata(&path)?;
-        let mut endpoint = SelectedProviderEndpoint {
-            path,
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            owner_uid: metadata.uid(),
-        };
+        let owner_uid = std::fs::symlink_metadata(&path)?.uid();
+        assert!(SelectedProviderEndpoint::from_verified_ancestry(&path, owner_uid ^ 1).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+        assert!(SelectedProviderEndpoint::from_verified_ancestry(&path, owner_uid).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let mut endpoint = SelectedProviderEndpoint::from_verified_ancestry(&path, owner_uid)?;
         let server = std::thread::spawn(move || listener.accept().map(|_| ()));
 
         let stream = endpoint.connect(Duration::from_secs(1))?;
         drop(stream);
         server.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_endpoint_bounds_refused_connection_waits() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let owner_uid = std::fs::symlink_metadata(&path)?.uid();
+        let endpoint = SelectedProviderEndpoint::from_verified_ancestry(&path, owner_uid)?;
+        drop(listener);
+
+        let mut oversized_wait = endpoint.clone();
+        assert!(oversized_wait.connect(Duration::MAX).is_err());
+        let mut refused = endpoint;
+        assert!(refused.connect(Duration::from_millis(10)).is_err());
         Ok(())
     }
 }
