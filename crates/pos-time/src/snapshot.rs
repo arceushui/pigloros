@@ -426,7 +426,7 @@ mod tests {
         let drafts: Vec<EventDraft> = (0..5).map(|_| draft(entity)).collect();
         store.append(tl.id(), &drafts).test_ok();
 
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = make_registry();
         reg.register("count", Box::new(CountReducer));
         reg.register("entity_state", Box::new(EntityStateProjection));
 
