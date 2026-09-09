@@ -1835,7 +1835,7 @@ mod store_info_coverage {
     use super::*;
 
     #[test]
-    fn list_failure_retains_operation_and_root_cause() {
+    fn list_failure_retains_operation_and_sanitizes_root_cause() {
         let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("corrupt.db");
         let path = path.to_str().test_ok();
@@ -1848,11 +1848,12 @@ mod store_info_coverage {
 
         let error = cmd_store_info(path).test_err().to_string();
         assert!(error.contains("failed to list Timelines"));
-        assert!(error.contains("Invalid column type"));
+        assert!(error.contains("erasure host rejected CLI operation"));
+        assert!(!error.contains("Invalid column type"));
     }
 
     #[test]
-    fn read_failure_retains_timeline_and_root_cause() {
+    fn read_failure_retains_timeline_and_sanitizes_root_cause() {
         let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("corrupt.db");
         let path = path.to_str().test_ok();
@@ -1882,7 +1883,8 @@ mod store_info_coverage {
 
         let error = cmd_store_info(path).test_err().to_string();
         assert!(error.contains(&format!("failed to read Timeline {timeline_id}")));
-        assert!(error.contains("serialization error: bad hash"));
+        assert!(error.contains("erasure host rejected CLI operation"));
+        assert!(!error.contains("serialization error: bad hash"));
     }
 }
 
