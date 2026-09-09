@@ -667,6 +667,32 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+    struct UnusedAuthority;
+
+    impl RootSelectorAuthoritySource for UnusedAuthority {
+        fn resolve_case(
+            &mut self,
+            _: &EvaluationRequest,
+            _: u16,
+        ) -> Result<RootSelectorCasePlan, RootSelectorServiceError> {
+            Err(RootSelectorServiceError::AuthorityUnavailable)
+        }
+    }
+
+    struct UnusedProvider;
+
+    impl RootSelectorProvider for UnusedProvider {
+        fn execute(
+            &mut self,
+            _: &crate::sandbox_provider_protocol::SandboxExecuteRequest,
+            _: &[u8],
+            _: Duration,
+            _: &RootSelectorAdmission,
+        ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
+            Err(RootSelectorServiceError::ProviderUnavailable)
+        }
+    }
+
     #[test]
     fn selector_listener_requires_private_owned_parent_and_exact_socket_mode() -> TestResult {
         let temporary = tempfile::tempdir()?;
@@ -687,6 +713,47 @@ mod tests {
 
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o777))?;
         assert!(bind_selector_listener(&path, owner_uid).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selector_listener_authenticates_peer_before_rejecting_malformed_framing() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("selector.sock");
+        let owner_uid = std::fs::metadata(temporary.path())?.uid();
+        let listener = bind_selector_listener(&path, owner_uid)?;
+        let client_path = path.clone();
+        let client = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut stream = UnixStream::connect(client_path)?;
+            stream.write_all(&0_u32.to_be_bytes())?;
+            stream.shutdown(std::net::Shutdown::Write)?;
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response)?;
+            Ok(response)
+        });
+        let mut server = RootSelectorServer::new(
+            UnusedAuthority,
+            UnusedProvider,
+            owner_uid,
+            Duration::from_secs(1),
+        );
+        server.serve_once(&listener)?;
+        let response = client.join().map_err(|_| "selector client panicked")??;
+        assert!(!response.is_empty());
+
+        let foreign_path = path;
+        let foreign = std::thread::spawn(move || UnixStream::connect(foreign_path).map(drop));
+        let mut server = RootSelectorServer::new(
+            UnusedAuthority,
+            UnusedProvider,
+            owner_uid ^ 1,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            server.serve_once(&listener),
+            Err(RootSelectorServiceError::InvalidRequest)
+        );
+        foreign.join().map_err(|_| "foreign client panicked")??;
         Ok(())
     }
 }

@@ -925,11 +925,17 @@ mod tests {
         let path = temporary.path().join("provider.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        let owner_uid = std::fs::symlink_metadata(&path)?.uid();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let owner_uid = metadata.uid();
+        assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino(), owner_uid ^ 1).is_err());
         assert!(SelectedProviderEndpoint::from_verified_ancestry(&path, owner_uid ^ 1).is_err());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+        assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino(), owner_uid).is_err());
         assert!(SelectedProviderEndpoint::from_verified_ancestry(&path, owner_uid).is_err());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        assert!(endpoint_metadata(&path, metadata.dev() ^ 1, metadata.ino(), owner_uid).is_err());
+        assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino() ^ 1, owner_uid).is_err());
+        assert!(endpoint_metadata(&path, metadata.dev(), metadata.ino(), owner_uid).is_ok());
         let mut endpoint = SelectedProviderEndpoint::from_verified_ancestry(&path, owner_uid)?;
         let server = std::thread::spawn(move || listener.accept().map(|_| ()));
 
