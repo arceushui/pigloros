@@ -2258,6 +2258,60 @@ fn root_selector_server_fails_closed_for_authority_and_peer_mismatches() -> Test
     assert_eq!(server_result, Err(RootSelectorServiceError::InvalidRequest));
     assert!(control.is_empty());
     assert!(trailing.is_empty());
+
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let attempt = selector_case_attempt();
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let (server_result, control, trailing) = exercise_root_selector(
+        FailingSelectorAuthority(RootSelectorServiceError::Admission),
+        ScenarioSelectorProvider {
+            signed: SignedSelectorProvider { fixture, launch },
+            mode: SelectorProviderMode::Valid,
+        },
+        &request,
+        &attempt,
+        0,
+    )?;
+    assert_eq!(server_result, Err(RootSelectorServiceError::Admission));
+    assert!(control.is_empty());
+    assert!(trailing.is_empty());
+    Ok(())
+}
+
+#[test]
+fn root_selector_server_rejects_an_empty_control_frame() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let attempt = selector_case_attempt();
+    let plan = selector_case_plan(&fixture, &request, attempt)?;
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let temporary = tempfile::tempdir()?;
+    let socket = temporary.path().join("root-selector.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let evaluator_uid = std::fs::metadata(temporary.path())?.uid();
+    let mut server = RootSelectorServer::new(
+        FixedSelectorAuthority { plan },
+        ScenarioSelectorProvider {
+            signed: SignedSelectorProvider { fixture, launch },
+            mode: SelectorProviderMode::Valid,
+        },
+        evaluator_uid,
+        Duration::from_secs(2),
+    );
+    let server_thread = thread::spawn(move || server.serve_once(&listener));
+    let mut client = UnixStream::connect(&socket)?;
+    client.write_all(&0_u32.to_be_bytes())?;
+    client.shutdown(std::net::Shutdown::Write)?;
+    let mut response = Vec::new();
+    client.read_to_end(&mut response)?;
+    assert!(response.is_empty());
+    assert_eq!(
+        server_thread
+            .join()
+            .map_err(|_| "root selector thread panicked")?,
+        Err(RootSelectorServiceError::InvalidRequest)
+    );
     Ok(())
 }
 
