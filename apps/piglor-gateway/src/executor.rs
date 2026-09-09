@@ -265,6 +265,7 @@ enum Command {
         bounds: EventReadBounds,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
+    #[cfg(test)]
     ReadOne {
         timeline: TimelineId,
         event: EventId,
@@ -313,6 +314,7 @@ enum Command {
         reservation: ConsentRevocationReservation,
         reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
     },
+    #[cfg(test)]
     AppendIdentified {
         timeline: TimelineId,
         identity: AppendIdentity,
@@ -320,6 +322,7 @@ enum Command {
         maximum: u64,
         reply: oneshot::Sender<Result<Option<AppendOrDuplicateOutcome>, StoreExecutorError>>,
     },
+    #[cfg(test)]
     GetTimeline {
         timeline: TimelineId,
         reply: oneshot::Sender<Result<Option<Timeline>, StoreExecutorError>>,
@@ -347,11 +350,11 @@ enum CommandClass {
 impl Command {
     const fn class(&self) -> CommandClass {
         match self {
-            Self::RootCount { .. }
-            | Self::Read { .. }
-            | Self::ReadOne { .. }
-            | Self::GetTimeline { .. }
-            | Self::ProtectedLogicalHead { .. } => CommandClass::Read,
+            Self::RootCount { .. } | Self::Read { .. } | Self::ProtectedLogicalHead { .. } => {
+                CommandClass::Read
+            }
+            #[cfg(test)]
+            Self::ReadOne { .. } | Self::GetTimeline { .. } => CommandClass::Read,
             Self::PrepareOwnTracksIngress { .. }
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
@@ -362,8 +365,9 @@ impl Command {
             | Self::SubmitAction { .. }
             | Self::SubmitIdentifiedAction { .. }
             | Self::AppendConsentGrant { .. }
-            | Self::AppendConsentRevocation { .. }
-            | Self::AppendIdentified { .. } => CommandClass::Write,
+            | Self::AppendConsentRevocation { .. } => CommandClass::Write,
+            #[cfg(test)]
+            Self::AppendIdentified { .. } => CommandClass::Write,
             #[cfg(test)]
             Self::Panic { .. } => CommandClass::Write,
             #[cfg(test)]
@@ -1376,6 +1380,7 @@ impl StoreExecutor {
             reply,
         })
     }
+    #[cfg(test)]
     pub(crate) async fn read_one(
         &self,
         timeline: TimelineId,
@@ -1496,6 +1501,7 @@ impl StoreExecutor {
             reply,
         })
     }
+    #[cfg(test)]
     pub(crate) async fn append_identified(
         &self,
         timeline: TimelineId,
@@ -1511,6 +1517,7 @@ impl StoreExecutor {
             reply,
         })
     }
+    #[cfg(test)]
     pub(crate) async fn timeline(
         &self,
         timeline: TimelineId,
@@ -1845,6 +1852,7 @@ fn expire_command(command: Command) {
         Command::Read { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        #[cfg(test)]
         Command::ReadOne { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1870,9 +1878,11 @@ fn expire_command(command: Command) {
             let _was_pending = reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        #[cfg(test)]
         Command::AppendIdentified { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        #[cfg(test)]
         Command::GetTimeline { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -2034,6 +2044,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             bounds,
             reply,
         } => execute_read_command(state, timeline, range, bounds, reply),
+        #[cfg(test)]
         Command::ReadOne {
             timeline,
             event,
@@ -2097,6 +2108,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         command @ Command::AppendConsentRevocation { .. } => {
             execute_append_consent_revocation_command_from_command(state, command);
         }
+        #[cfg(test)]
         Command::AppendIdentified {
             timeline,
             identity,
@@ -2104,6 +2116,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             maximum,
             reply,
         } => execute_append_identified_command(state, timeline, identity, intent, maximum, reply),
+        #[cfg(test)]
         Command::GetTimeline { timeline, reply } => {
             execute_get_timeline_command(state, timeline, reply);
         }
@@ -2203,6 +2216,7 @@ fn execute_read_command(
     );
 }
 
+#[cfg(test)]
 fn execute_read_one_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
@@ -2720,6 +2734,7 @@ fn execute_append_consent_revocation_command(
     }
 }
 
+#[cfg(test)]
 fn execute_append_identified_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
@@ -2747,6 +2762,7 @@ fn execute_append_identified_command(
     );
 }
 
+#[cfg(test)]
 fn execute_get_timeline_command(
     state: &mut ExecutorState,
     timeline: TimelineId,

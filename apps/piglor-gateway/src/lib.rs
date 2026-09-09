@@ -23,14 +23,15 @@ pub use authorization::{
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
+#[cfg(test)]
+use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EntityId, EventId, PluginId, TimelineId},
     store::{
-        AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
-        EventReadBounds, PurgeOutcome, SeqRange,
+        AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
@@ -2539,6 +2540,7 @@ impl Gateway {
         }));
     }
 
+    #[cfg(test)]
     async fn read_event_by_id(
         &self,
         timeline: TimelineId,
