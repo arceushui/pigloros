@@ -6600,6 +6600,31 @@ mod coverage_paths {
             gate.authorize(timeline, ErasureProtectedOperationV1::Read),
             Ok(())
         );
+
+        let unavailable_gate = ErasureContainmentGateV1::new_fail_closed();
+        let unavailable_timeline = TimelineId::new();
+        let mut unavailable_state = inventory_state(
+            reference(92),
+            reference(93),
+            reference(94),
+            ErasureLifecycleV1::AccessFrozen,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unavailable state failed: {error:?}")))
+        });
+        unavailable_state.state.freeze_position = None;
+        let unavailable_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            unavailable_state.manifest_digest(),
+            vec![(unavailable_timeline, reference(94))],
+            Vec::new(),
+        );
+        assert!(unavailable_gate
+            .install_verified_state_with_topology(&unavailable_state, &unavailable_proof)
+            .is_ok());
+        assert_eq!(
+            unavailable_gate.authorize(unavailable_timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
     }
 
     #[test]

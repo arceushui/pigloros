@@ -23,7 +23,7 @@ use pos_core::{
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
     ErasureStateV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedTopologyObservationV1,
     EventStore, Seq, TimelineId, TimelineMeta, TimelineMode, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_RECOVERY_ERRORS,
+    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
 
@@ -1308,6 +1308,45 @@ fn only_fork_mutation(
 }
 
 #[cfg(feature = "sqlite")]
+fn fork_recovery_receipt_digest(
+    prepared: &pos_core::PreparedErasureForkBatchV1,
+    child: &TimelineMeta,
+) -> ErasureReferenceV1 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros/erasure-fork-recovery/v1");
+    hasher.update(&prepared.operation().digest());
+    hasher.update(&prepared.binding_digest().digest());
+    hasher.update(&prepared.successor_inventory().generation().digest());
+    hasher.update(&child.id.inner().to_bytes());
+    hasher.update(b"historical");
+    match &child.name {
+        Some(name) => {
+            hasher.update(&[1]);
+            hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(name.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    match child.owner {
+        Some(owner) => {
+            hasher.update(&[1]);
+            hasher.update(&owner.inner().to_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    let (parent, at_seq) = child
+        .fork_point
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("prepared child is not a Fork")));
+    hasher.update(&parent.inner().to_bytes());
+    hasher.update(&at_seq.as_u64().to_be_bytes());
+    ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+}
+
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::error::Error>> {
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
@@ -1371,7 +1410,50 @@ fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::erro
              WHERE operation_digest=?1",
             rusqlite::params![prepared.operation().digest().as_slice()],
         )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        let mut altered_child = prepared.child().clone();
+        altered_child.name = Some("valid-but-different".to_owned());
+        let receipt = fork_recovery_receipt_digest(prepared, &altered_child);
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET child_name=?1, receipt_digest=?2
+             WHERE operation_digest=?3",
+            rusqlite::params![
+                altered_child.name,
+                receipt.digest().as_slice(),
+                prepared.operation().digest().as_slice(),
+            ],
+        )
     })
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_complete_inventory_rejects_oversized_topology() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let mut store = SqliteStore::open(path)?;
+    let connection = rusqlite::Connection::open(path)?;
+    let maximum = ERASURE_MAX_INVENTORY_TIMELINES + 1;
+    connection.execute(
+        "WITH RECURSIVE sequence(value) AS (
+             VALUES(1) UNION ALL SELECT value + 1 FROM sequence WHERE value < ?1
+         )
+         INSERT INTO timelines (id, mode, chain_head)
+         SELECT printf('01800000-0000-7000-8000-%012x', value), 'live', zeroblob(32)
+         FROM sequence",
+        rusqlite::params![i64::try_from(maximum)?],
+    )?;
+    drop(connection);
+    assert_eq!(
+        store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]
