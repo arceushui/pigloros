@@ -134,6 +134,23 @@ fn pending_recovery_rejects_replaced_changed_and_truncated_records() -> TestResu
 }
 
 #[test]
+fn pending_recovery_rejects_a_removed_sir1_after_loading() -> TestResult {
+    let RecoveryFixture { installation, .. } = commit_recovery()?;
+    let pending = installation.load()?.load_pending_recovery()?;
+    let path = installation
+        .directory
+        .path()
+        .join("installation-update.cbor");
+    std::fs::remove_file(&path)?;
+    assert_eq!(
+        pending.verify_recovery_floor(),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    );
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[test]
 fn recovery_loader_rejects_malformed_truncated_and_tampered_sir1() -> TestResult {
     for alteration in 0..3 {
         let RecoveryFixture { installation, .. } = commit_recovery()?;

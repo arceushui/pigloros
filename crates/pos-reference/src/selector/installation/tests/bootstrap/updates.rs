@@ -213,6 +213,80 @@ fn update_validation_rejects_foreign_nonce_stale_state_and_malformed_frames() ->
 }
 
 #[test]
+fn update_validation_rejects_a_challenge_from_another_installation() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.authority.issue_update_challenge()?;
+    let foreign_installation = authenticated_fixture(|policy| policy[2] = integer(2))?;
+    let foreign_authority = foreign_installation.load()?.authenticate_authority()?;
+    let foreign = UpdateFixture {
+        installation: foreign_installation,
+        authority: foreign_authority,
+    };
+    let request = foreign.request(&challenge, None)?;
+    assert!(matches!(
+        foreign.authority.validate_update(challenge, &request),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    ));
+    Ok(())
+}
+
+#[test]
+fn update_validation_rejects_an_unsafe_authority_directory_after_request_creation() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.authority.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    std::fs::set_permissions(
+        fixture.installation.directory.path().join("authority"),
+        std::fs::Permissions::from_mode(0o777),
+    )?;
+    assert!(matches!(
+        fixture.authority.validate_update(challenge, &request),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    ));
+    Ok(())
+}
+
+#[test]
+fn update_validation_rejects_a_signed_rcu_for_a_different_successor_snapshot() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.authority.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let document = decode_canonical(&request)?;
+    let mut fields = array(&document, 5)?.to_vec();
+    let Value::Bytes(update) = &fields[4] else {
+        return Err("missing RCU1".into());
+    };
+    let update_document = decode_canonical(update)?;
+    let mut update_fields = array(&array(&update_document, 3)?[0], 8)?.to_vec();
+    let administrator = SigningKey::from_bytes(&[43; 32]);
+    let (alternate_snapshot, alternate_digest) = sign_record(
+        "RVS1",
+        vec![
+            Value::Text("RVS1".to_owned()),
+            integer(1),
+            bytes(fixture.authority.trust().snapshot_digest()),
+            integer(2),
+            Value::Array(vec![Value::Text("runtime".to_owned())]),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Text("administrator".to_owned()),
+        ],
+        &administrator,
+    )?;
+    update_fields[4] = Value::Bytes(alternate_snapshot);
+    update_fields[5] = bytes(alternate_digest);
+    let (update, _) = sign_record("RCU1", update_fields, &administrator)?;
+    fields[4] = Value::Bytes(update);
+    assert!(matches!(
+        fixture
+            .authority
+            .validate_update(challenge, &encode(&Value::Array(fields))?),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    ));
+    Ok(())
+}
+
+#[test]
 fn update_challenge_and_validation_reject_pending_recovery() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let challenge = fixture.authority.issue_update_challenge()?;
