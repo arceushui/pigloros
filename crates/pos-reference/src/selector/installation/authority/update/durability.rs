@@ -216,7 +216,8 @@ fn read_bounded(mut file: File, limit: u64) -> Result<Vec<u8>, SelectorBoundaryE
     let mut bytes = Vec::with_capacity(capacity);
     file.seek(SeekFrom::Start(0))
         .map_err(|_| SelectorBoundaryError::Io)?;
-    file.read_to_end(&mut bytes)
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| SelectorBoundaryError::Io)?;
     if bytes.len() != capacity {
         return Err(SelectorBoundaryError::ArtifactInvalid);
