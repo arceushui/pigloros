@@ -3318,7 +3318,7 @@ mod tests {
             .await
             .test_ok();
         assert_eq!(event.entity, actor);
-        let audits = audit_host.audits().await;
+        let audits = audit_host.audits();
         assert_eq!(audits.len(), 1);
         assert_eq!(audits[0].actor_entity_id(), actor);
         assert_eq!(audits[0].event_id(), Some(event.id));
@@ -3402,7 +3402,7 @@ mod tests {
             .await
             .test_ok();
         assert_eq!(event.entity, actor);
-        assert_eq!(audit_host.audits().await[0].event_id(), Some(event.id));
+        assert_eq!(audit_host.audits()[0].event_id(), Some(event.id));
 
         let missing = gateway
             .submit_json_action(
@@ -3418,7 +3418,7 @@ mod tests {
             missing,
             GatewayError::Store(CoreError::ErasureContainmentUnavailable)
         ));
-        assert_eq!(audit_host.audits().await.len(), 1);
+        assert_eq!(audit_host.audits().len(), 1);
 
         let first = gateway
             .submit_identified_json_action(
@@ -3445,7 +3445,7 @@ mod tests {
         assert!(!first.duplicate);
         assert!(duplicate.duplicate);
         assert_eq!(duplicate.event.id, first.event.id);
-        assert_eq!(audit_host.audits().await.len(), 3);
+        assert_eq!(audit_host.audits().len(), 3);
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -3485,7 +3485,7 @@ mod tests {
             .await
             .test_err();
         assert!(matches!(error, GatewayError::AuthorizationUnavailable));
-        assert!(audit_host.audits().await.is_empty());
+        assert!(audit_host.audits().is_empty());
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -3528,7 +3528,7 @@ mod tests {
             .await
             .test_err();
         assert!(matches!(error, GatewayError::AuthorizationUnavailable));
-        assert!(audit_host.audits().await.is_empty());
+        assert!(audit_host.audits().is_empty());
         assert_eq!(
             gateway
                 .store
@@ -3622,7 +3622,7 @@ mod tests {
             identified,
             GatewayError::EventLimitReached { maximum: 1 }
         ));
-        assert_eq!(audit_host.audits().await.len(), 2);
+        assert_eq!(audit_host.audits().len(), 2);
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -3813,11 +3813,8 @@ mod tests {
             .await
             .test_ok();
         assert_eq!(appended.event.entity, actor);
-        assert_eq!(audit_host.audits().await.len(), 1);
-        assert_eq!(
-            audit_host.audits().await[0].event_id(),
-            Some(appended.event.id)
-        );
+        assert_eq!(audit_host.audits().len(), 1);
+        assert_eq!(audit_host.audits()[0].event_id(), Some(appended.event.id));
 
         gateway.shutdown().await.test_ok();
         drop(gateway);

@@ -535,7 +535,7 @@ impl GatewayAuthorization {
 
     /// Retain one accepted action's minimized authorization audit.
     #[cfg(test)]
-    pub(crate) async fn record_audit(&self, audit: GatewayAuthorizationAudit) {
+    pub(crate) fn record_audit(&self, audit: GatewayAuthorizationAudit) {
         let mut audits = self
             .audits
             .lock()
@@ -565,7 +565,7 @@ impl GatewayAuthorization {
 
     /// Return the minimized authorization audits retained by this Gateway host.
     #[must_use]
-    pub async fn audits(&self) -> Vec<GatewayAuthorizationAudit> {
+    pub fn audits(&self) -> Vec<GatewayAuthorizationAudit> {
         self.audits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1403,10 +1403,10 @@ mod tests {
             .test_ok()
             .audit();
         for _ in 0..=MAX_AUTHORIZATION_AUDITS {
-            fixture.authorization.record_audit(audit.clone()).await;
+            fixture.authorization.record_audit(audit.clone());
         }
         assert_eq!(
-            fixture.authorization.audits().await.len(),
+            fixture.authorization.audits().len(),
             MAX_AUTHORIZATION_AUDITS
         );
     }
