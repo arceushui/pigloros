@@ -6082,8 +6082,8 @@ mod tests {
 
 #[cfg(test)]
 mod coverage_entrypoints {
-    use super::*;
     use super::tests::new_store;
+    use super::*;
     use pos_core::{ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey};
 
     #[cfg_attr(coverage_nightly, coverage(off))]
