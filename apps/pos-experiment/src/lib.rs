@@ -5496,10 +5496,10 @@ mod tests {
             bind_backtest_erasure_gate(&mut store, &mut registry, Arc::clone(&gate)),
             Err(CoreError::ErasureContainmentUnavailable)
         ));
-        assert_eq!(
+        assert!(matches!(
             inherit_backtest_erasure_gate(&mut registry, gate),
             Err(CoreError::ErasureContainmentUnavailable)
-        );
+        ));
     }
 
     #[test]
