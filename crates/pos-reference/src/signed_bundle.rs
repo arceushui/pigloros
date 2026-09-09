@@ -1533,6 +1533,7 @@ fn validated_path(path: &str) -> Result<String, BundleError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::error::Error;
     use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -1543,6 +1544,7 @@ mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+    type ReaderInputs = (Vec<u8>, Vec<u8>, EvaluationRequest);
 
     struct ChangingReader {
         inner: Cursor<Vec<u8>>,
@@ -1568,7 +1570,7 @@ mod tests {
         }
     }
 
-    fn reader_inputs() -> TestResult<(Vec<u8>, Vec<u8>, EvaluationRequest)> {
+    fn reader_inputs() -> TestResult<ReaderInputs> {
         let archive =
             include_bytes!("../tests/fixtures/installed-selector/valid/archive.cbor").to_vec();
         let trust_policy =
@@ -1594,7 +1596,7 @@ mod tests {
         Some(path)
     }
 
-    fn signed_secret_archive() -> TestResult<(Vec<u8>, Vec<u8>, EvaluationRequest)> {
+    fn signed_secret_archive() -> TestResult<ReaderInputs> {
         let (archive, trust_policy, request) = reader_inputs()?;
         let mut document = decode_canonical(&archive)?;
         let Value::Array(root) = &mut document else {
