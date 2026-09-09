@@ -507,6 +507,8 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FaultModeV1 {
+        BindGate,
+        InventorySnapshot,
         NonemptyInventory,
         MisreportExactRetry,
         Recovery,
@@ -520,7 +522,11 @@ mod tests {
 
     impl pos_core::EventStore for FaultStoreV1 {
         fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
-            self.inner.bind_erasure_gate(gate)
+            if self.fault == FaultModeV1::BindGate {
+                Err(CoreError::Storage("fault bind".to_owned()))
+            } else {
+                self.inner.bind_erasure_gate(gate)
+            }
         }
 
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
@@ -586,6 +592,9 @@ mod tests {
             &mut self,
             maximum_requests: usize,
         ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+            if self.fault == FaultModeV1::InventorySnapshot {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
             let snapshot = self
                 .inner
                 .complete_erasure_inventory_snapshot(maximum_requests)?;
@@ -659,6 +668,32 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(ready.read_sender().is_ok());
         assert!(ready.command_sender().is_ok());
+    }
+
+    #[test]
+    fn host_creation_rejects_an_adapter_that_refuses_its_unique_gate() {
+        assert!(matches!(
+            ErasureExecutionHostV1::new_closed(Box::new(fault_store(FaultModeV1::BindGate))),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        ));
+    }
+
+    #[test]
+    fn empty_recovery_fails_closed_for_unavailable_or_nonempty_inventory() {
+        assert!(matches!(
+            ErasureExecutionHostV1::recover_verified_empty(
+                Box::new(fault_store(FaultModeV1::InventorySnapshot)),
+                4,
+            ),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
+
+        let mut nonempty = MemoryStore::new().without_erasure_gate();
+        assert!(nonempty.create_timeline("durable-root").is_ok());
+        assert!(matches!(
+            ErasureExecutionHostV1::recover_verified_empty(Box::new(nonempty), 4),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
     }
 
     #[test]
