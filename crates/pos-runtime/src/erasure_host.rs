@@ -81,6 +81,9 @@ pub trait ErasureCoordinatorAuthorityV1:
     ErasureFreezeAuthorizationVerifierV1 + ErasureRecoveryAuthorizationVerifierV1 + Send + Sync
 {
     /// Resolve one manifest revision against the authoritative Timeline/Fork topology.
+    ///
+    /// # Errors
+    /// Returns a closed topology, policy, trust, or provenance error.
     fn verified_topology_observation(
         &self,
         request: ErasureReferenceV1,
@@ -88,9 +91,15 @@ pub trait ErasureCoordinatorAuthorityV1:
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1>;
 
     /// Authenticate a newly submitted erasure request.
+    ///
+    /// # Errors
+    /// Returns a closed Principal, capability, policy, or trust error.
     fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1>;
 
     /// Authenticate an authorization or rejection decision.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, policy, trust, or provenance error.
     fn admit_authorization(
         &self,
         request: ErasureReferenceV1,
@@ -99,6 +108,9 @@ pub trait ErasureCoordinatorAuthorityV1:
     ) -> Result<(), ErasureErrorV1>;
 
     /// Authenticate a corrected request against its rejected predecessor.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, policy, trust, or provenance error.
     fn admit_corrected_submission(
         &self,
         request: &ErasureRequestV1,
@@ -106,6 +118,9 @@ pub trait ErasureCoordinatorAuthorityV1:
     ) -> Result<(), ErasureErrorV1>;
 
     /// Resolve and authenticate one atomic access-freeze admission.
+    ///
+    /// # Errors
+    /// Returns a closed scope, authorization, policy, trust, or evidence error.
     fn admit_atomic_freeze(
         &self,
         request: ErasureReferenceV1,
@@ -113,12 +128,18 @@ pub trait ErasureCoordinatorAuthorityV1:
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1>;
 
     /// Authenticate one future-Fork scope extension.
+    ///
+    /// # Errors
+    /// Returns a closed lineage, authorization, or provenance error.
     fn admit_scope_extension(
         &self,
         extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1>;
 
     /// Authenticate a complete future-Fork admission.
+    ///
+    /// # Errors
+    /// Returns a closed lineage, scope, authorization, or generation error.
     fn admit_fork_scope_extension(
         &self,
         extension: &ErasureScopeExtensionV1,
@@ -126,12 +147,18 @@ pub trait ErasureCoordinatorAuthorityV1:
     ) -> Result<(), ErasureErrorV1>;
 
     /// Authenticate an administrative recovery resolution.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, policy, trust, or provenance error.
     fn admit_administrative_resolution(
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1>;
 
     /// Deliver idempotent destruction commands through the selected Plugin.
+    ///
+    /// # Errors
+    /// Returns a closed delivery or external-system error.
     fn dispatch_destruction(
         &self,
         request: ErasureReferenceV1,
@@ -139,18 +166,27 @@ pub trait ErasureCoordinatorAuthorityV1:
     ) -> Result<(), ErasureErrorV1>;
 
     /// Authenticate and reserve quota for one destruction attempt.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, quota, policy, or trust error.
     fn admit_attempt(
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1>;
 
     /// Authenticate an owner acknowledgement and its evidence.
+    ///
+    /// # Errors
+    /// Returns a closed owner, evidence, authorization, or provenance error.
     fn admit_acknowledgement(
         &self,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1>;
 
     /// Authenticate receipt policy, trust, and signature commitments.
+    ///
+    /// # Errors
+    /// Returns a closed policy, trust, signature, or provenance error.
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1>;
 }
 
@@ -769,8 +805,7 @@ impl ErasureExecutionHostV1 {
     ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
         let authority = self
             .authority
-            .as_ref()
-            .cloned()
+            .clone()
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let coordinator = self
             .coordinator
@@ -977,8 +1012,7 @@ impl ErasureExecutionHostV1 {
         let maximum_requests = self.maximum_requests()?;
         let authority = self
             .authority
-            .as_ref()
-            .cloned()
+            .clone()
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let coordinator = self
             .coordinator
