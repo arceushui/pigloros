@@ -121,15 +121,12 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 CliError::BadSource("store: source requires --key <path>".to_owned())
             })?;
             let signing_key = load_signing_key(key_path)?;
-            let mut event_store = pos_store::open_store(StoreConfig::Sqlite {
-                path: db.to_string_lossy().into_owned(),
-            })
-            .map_err(|e| CliError::BadSource(e.to_string()))?;
-            #[cfg(test)]
-            drop(pos_core::store::EventStore::bind_erasure_gate(
-                event_store.as_mut(),
-                std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new()),
-            ));
+            let mut event_store: Box<dyn pos_core::store::EventStore> = Box::new(
+                crate::host_store::HostedLedgerStore::open(StoreConfig::Sqlite {
+                    path: db.to_string_lossy().into_owned(),
+                })
+                .map_err(|error| CliError::BadSource(error.to_string()))?,
+            );
             let persisted_registry = event_store
                 .load_key_registry()
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
@@ -375,15 +372,10 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
     let ledger = match &source {
         Source::Toml(dir) => TomlLedgerStore::new(dir).load(&today)?,
         Source::Store(db) => {
-            let store = pos_store::open_store_read_only(&db.to_string_lossy())
-                .map_err(|e| CliError::BadSource(e.to_string()))?;
-            #[cfg(test)]
-            let mut store = store;
-            #[cfg(test)]
-            drop(pos_core::store::EventStore::bind_erasure_gate(
-                store.as_mut(),
-                std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new()),
-            ));
+            let store: Box<dyn pos_core::store::EventStore> = Box::new(
+                crate::host_store::HostedLedgerStore::open_read_only(&db.to_string_lossy())
+                    .map_err(|error| CliError::BadSource(error.to_string()))?,
+            );
             let timeline_id = find_ledger_timeline(store.as_ref())?;
             pos_plugin_ledger::load_ledger_from_store(store.as_ref(), timeline_id, &today)?
         }

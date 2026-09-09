@@ -168,15 +168,10 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
 fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
     let supplied_public_keys = parse_supplied_public_keys(pubkey_hex)?;
 
-    let store = pos_store::open_store_read_only(&db.to_string_lossy())
-        .map_err(|e| CliError::BadSource(e.to_string()))?;
-    #[cfg(test)]
-    let mut store = store;
-    #[cfg(test)]
-    drop(pos_core::store::EventStore::bind_erasure_gate(
-        store.as_mut(),
-        std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new()),
-    ));
+    let store: Box<dyn pos_core::store::EventStore> = Box::new(
+        crate::host_store::HostedLedgerStore::open_read_only(&db.to_string_lossy())
+            .map_err(|error| CliError::BadSource(error.to_string()))?,
+    );
     let registry = store
         .load_key_registry()
         .map_err(|e| CliError::BadSource(e.to_string()))?;

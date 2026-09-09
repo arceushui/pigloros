@@ -11,9 +11,10 @@ use pos_core::{
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
     ErasureForkPersistencePortV1, ErasureForkRecoveryV1, ErasureGate, ErasureHostErrorV1,
     ErasureInventoryPersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event, EventDraft, EventId,
-    OwnTracksIngressInputV1, PreparedErasureForkBatchV1, PreparedOwnTracksIngressV1, Seq, Timeline,
-    TimelineId,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event, EventDraft, EventId, Hash,
+    KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureForkBatchV1,
+    PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
 };
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
@@ -180,6 +181,21 @@ impl ErasureExecutionHostV1 {
         Self::recover_verified_empty(store, maximum_requests)
     }
 
+    /// Open an existing SQLite store read-only and recover it only when its
+    /// complete durable erasure inventory is verified empty.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_read_only_verified_empty(
+        path: &str,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
+            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_verified_empty(store, maximum_requests)
+    }
+
     /// Open and recover an exclusively owned store from one independently
     /// verified complete inventory.
     ///
@@ -340,6 +356,32 @@ impl ErasureExecutionHostV1 {
                 Err(error)
             }
         }
+    }
+
+    fn with_store_fence<T>(
+        &mut self,
+        generation: ErasureReferenceV1,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: impl FnOnce(&mut dyn ErasureHostStore) -> Result<T, CoreError>,
+    ) -> Result<T, ErasureHostErrorV1> {
+        self.ensure_generation(generation)?;
+        let gate = Arc::clone(&self.gate);
+        let mut effect = Some(effect);
+        let mut result = None;
+        let mut fenced_effect = || {
+            let Some(effect) = effect.take() else {
+                return;
+            };
+            result = Some(effect(self.store.host_store()).map_store_error());
+        };
+        let fence_result = gate
+            .with_fence(timeline, operation, &mut fenced_effect)
+            .map_err(ErasureHostErrorV1::from);
+        drop(fenced_effect);
+        fence_result?;
+        self.ensure_generation(generation)?;
+        result.unwrap_or(Err(ErasureHostErrorV1::RecoveryUnavailable))
     }
 
     fn publish_inventory(
@@ -608,6 +650,25 @@ impl ErasureCommandSenderV1<'_> {
         Ok(timeline)
     }
 
+    /// Initialize a ledger Timeline and its durable signing registry through
+    /// the host-owned topology transition.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error and poisons the host if persistence
+    /// succeeds but successor inventory publication fails.
+    pub fn initialize_timeline_with_key_registry(
+        &mut self,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (timeline, generation) = self.host.apply_empty_topology_change(|store| {
+            store.initialize_timeline_with_key_registry(name, expected_registry)
+        })?;
+        self.generation = generation;
+        Ok(timeline)
+    }
+
     /// Fork a Timeline and publish its successor inventory generation.
     ///
     /// This seam is limited to the positively verified empty active-request
@@ -695,6 +756,80 @@ impl ErasureCommandSenderV1<'_> {
             .host_store()
             .append(timeline, drafts)
             .map_store_error()
+    }
+
+    /// Persist a durable key-registry replacement inside one Timeline's
+    /// protected-effect fence.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn save_key_registry(
+        &mut self,
+        timeline: TimelineId,
+        registry: &KeyRegistryStateV1,
+    ) -> Result<(), ErasureHostErrorV1> {
+        self.host.with_store_fence(
+            self.generation,
+            timeline,
+            ErasureProtectedOperationV1::Append,
+            |store| store.save_key_registry(registry),
+        )
+    }
+
+    /// Atomically recheck the durable signing registry and append its signed
+    /// Event inside the same protected-effect fence.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn append_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
+    ) -> Result<(), ErasureHostErrorV1> {
+        self.host.with_store_fence(
+            self.generation,
+            timeline,
+            ErasureProtectedOperationV1::Append,
+            |store| store.append_signed_authorized(timeline, expected_registry, create_event),
+        )
+    }
+
+    /// Persist the pending phase of signing-key destruction inside the
+    /// ledger Timeline's protected-effect fence.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn begin_key_registry_destruction(
+        &mut self,
+        timeline: TimelineId,
+        request: KeyDestructionRequestV1,
+    ) -> Result<(KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), ErasureHostErrorV1> {
+        self.host.with_store_fence(
+            self.generation,
+            timeline,
+            ErasureProtectedOperationV1::Append,
+            |store| store.begin_key_registry_destruction(request),
+        )
+    }
+
+    /// Persist the final signing-key tombstone inside the ledger Timeline's
+    /// protected-effect fence.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn complete_key_registry_destruction(
+        &mut self,
+        timeline: TimelineId,
+        request: KeyDestructionRequestV1,
+        deletion_receipt: Hash,
+    ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), ErasureHostErrorV1> {
+        self.host.with_store_fence(
+            self.generation,
+            timeline,
+            ErasureProtectedOperationV1::Append,
+            |store| store.complete_key_registry_destruction(request, deletion_receipt),
+        )
     }
 
     /// Atomically append Events when they fit the owned-event ceiling.
@@ -912,6 +1047,23 @@ impl ErasureReadSenderV1<'_> {
             .host_store()
             .get_timeline(timeline)
             .map_store_error()
+    }
+
+    /// Load the durable signing registry only while the associated Timeline
+    /// remains readable under the installed inventory generation.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn key_registry(
+        &mut self,
+        timeline: TimelineId,
+    ) -> Result<Option<KeyRegistryStateV1>, ErasureHostErrorV1> {
+        self.host.with_store_fence(
+            self.generation,
+            timeline,
+            ErasureProtectedOperationV1::Read,
+            |store| store.load_key_registry(),
+        )
     }
 
     /// List only Timelines classified by the installed inventory generation.
