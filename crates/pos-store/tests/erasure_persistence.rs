@@ -1437,17 +1437,20 @@ fn sqlite_complete_inventory_rejects_oversized_topology() -> Result<(), Box<dyn 
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let mut store = SqliteStore::open(path)?;
-    let connection = rusqlite::Connection::open(path)?;
+    let mut connection = rusqlite::Connection::open(path)?;
     let maximum = ERASURE_MAX_INVENTORY_TIMELINES + 1;
-    connection.execute(
-        "WITH RECURSIVE sequence(value) AS (
-             VALUES(1) UNION ALL SELECT value + 1 FROM sequence WHERE value < ?1
-         )
-         INSERT INTO timelines (id, mode, chain_head)
-         SELECT printf('01800000-0000-7000-8000-%012x', value), 'live', zeroblob(32)
-         FROM sequence",
-        rusqlite::params![i64::try_from(maximum)?],
-    )?;
+    let transaction = connection.transaction()?;
+    {
+        let mut insert = transaction
+            .prepare("INSERT INTO timelines (id, mode, chain_head) VALUES (?1, 'live', ?2)")?;
+        for _ in 0..maximum {
+            insert.execute(rusqlite::params![
+                TimelineId::new().to_string(),
+                [0_u8; 32].as_slice(),
+            ])?;
+        }
+    }
+    transaction.commit()?;
     drop(connection);
     assert_eq!(
         store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS),
