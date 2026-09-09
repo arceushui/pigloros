@@ -932,6 +932,70 @@ impl ErasureExecutionHostV1 {
         }
     }
 
+    fn apply_atomic_freeze(
+        &mut self,
+        request: ErasureReferenceV1,
+        transition: &ErasureStateTransitionV1,
+    ) -> Result<(ErasureStateV1, ErasureReferenceV1), ErasureHostErrorV1> {
+        self.ready_generation()?;
+        let maximum_requests = self.maximum_requests()?;
+        let authority = self
+            .authority
+            .as_ref()
+            .cloned()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let coordinator = self
+            .coordinator
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let gate = Arc::clone(&self.gate);
+        let mut transition_result = None;
+        let mut transition_error = None;
+        let publication = {
+            let mut fenced_transition = || {
+                let port =
+                    HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
+                let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
+                match state_machine
+                    .freeze_inventory(request, transition)
+                    .and_then(|state| {
+                        state_machine
+                            .verified_inventory(maximum_requests)
+                            .map(|inventory| (state, inventory))
+                    }) {
+                    Ok((state, inventory)) => {
+                        transition_result = Some(state);
+                        Ok(inventory)
+                    }
+                    Err(error) => {
+                        transition_error = Some(error);
+                        Err(error)
+                    }
+                }
+            };
+            gate.install_from_verified_inventory_transition(&mut fenced_transition)
+        };
+        let inventory = match publication {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                self.poison();
+                return Err(transition_error.map_or_else(|| error.into(), map_erasure_error));
+            }
+        };
+        let state = transition_result.ok_or_else(|| {
+            self.poison();
+            ErasureHostErrorV1::RecoveryUnavailable
+        })?;
+        let generation = inventory.generation();
+        let request_count = inventory.request_count();
+        self.inventory = Some(inventory);
+        self.state = HostStateV1::Ready {
+            generation,
+            maximum_requests,
+            request_count,
+        };
+        Ok((state, generation))
+    }
+
     const fn maximum_requests(&self) -> Result<usize, ErasureHostErrorV1> {
         match self.state {
             HostStateV1::Ready {
@@ -1165,6 +1229,29 @@ impl ErasureCommandSenderV1<'_> {
         let (timeline, generation) = self.host.apply_fork_batch(admission)?;
         self.generation = generation;
         Ok(timeline)
+    }
+
+    /// Atomically persist an admitted access freeze and publish the successor
+    /// complete inventory before any protected operation can reauthorize.
+    ///
+    /// Scope, applicability, Principal/capability, policy, trust, and evidence
+    /// are resolved by the host's configured authority Plugin. The Plugin
+    /// never receives the durable adapter; the core coordinator performs the
+    /// CAS through the same store exclusively owned by this host.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error. Any uncertain CAS/publication outcome permanently poisons this
+    /// host instance.
+    pub fn freeze_access(
+        &mut self,
+        request: ErasureReferenceV1,
+        transition: &ErasureStateTransitionV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (state, generation) = self.host.apply_atomic_freeze(request, transition)?;
+        self.generation = generation;
+        Ok(state)
     }
 
     /// Recover the original durable Fork result after a lost reply or restart.

@@ -666,6 +666,43 @@ impl ErasureContainmentGateV1 {
         Ok(generation)
     }
 
+    /// Run one durable coordinator transition and publish its verified
+    /// successor inventory while retaining the exclusive Tick Boundary
+    /// fence.
+    ///
+    /// Protected operations cannot authorize between the transition's CAS and
+    /// publication of its successor inventory. The callback can obtain a
+    /// non-empty opaque inventory only through core-owned recovery. If it
+    /// fails, the installed inventory remains unchanged; the execution host
+    /// must poison the gate whenever it cannot prove whether persistence
+    /// advanced.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// gate is unavailable, the transition cannot produce a complete verified
+    /// inventory, or a host lock is poisoned.
+    pub fn install_from_verified_inventory_transition(
+        &self,
+        transition: &mut dyn FnMut() -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1>,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureContainmentErrorV1> {
+        self.ensure_available()?;
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
+        let candidate = transition().map_err(containment_recovery_failure)?;
+        let replacement = ErasureGateStateV1 {
+            inventory: Some(candidate.clone()),
+            ..ErasureGateStateV1::default()
+        };
+        *self
+            .authority
+            .write()
+            .map_err(containment_recovery_failure)? = Arc::new(replacement);
+        Ok(candidate)
+    }
+
     /// Return the installed complete-inventory generation.
     ///
     /// # Errors
