@@ -1437,13 +1437,13 @@ fn fork_preparation_rejects_missing_recovery_context() -> Result<(), ErasureErro
     let lineage_rule = reference(170);
     let request = request()?;
     let adapter = port(vec![target(10)], Some(lineage_rule));
-    let scope = scope(request.reference(), &[target(10)], lineage_rule)?;
-    let extension = extension(request.reference(), &scope, lineage_rule)?;
-    let input = fork_input(extension);
+    let committed_scope = scope(request.reference(), &[target(10)], lineage_rule)?;
+    let prepared_extension = extension(request.reference(), &committed_scope, lineage_rule)?;
+    let input = fork_input(prepared_extension);
     assert_eq!(
         ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR).prepare_fork_admission(
             request.reference(),
-            extension,
+            prepared_extension,
             input.clone()
         ),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -1452,7 +1452,7 @@ fn fork_preparation_rejects_missing_recovery_context() -> Result<(), ErasureErro
     let mut submitted = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
     submitted.submit(request.clone(), request.provenance())?;
     assert_eq!(
-        submitted.prepare_fork_admission(request.reference(), extension, input),
+        submitted.prepare_fork_admission(request.reference(), prepared_extension, input),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
