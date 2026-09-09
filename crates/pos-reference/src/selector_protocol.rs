@@ -53,7 +53,7 @@ pub(crate) fn encode_request(
         Value::Bytes(provider_request_id.to_vec()),
         Value::Bytes(attempt_id.to_vec()),
         Value::Bytes(request_bytes.to_vec()),
-        descriptor(&attempt_stream, input_digest)?,
+        descriptor(&attempt_stream, input_digest),
     ]);
     let unsigned_bytes =
         encode_with_limit(&unsigned, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
@@ -175,7 +175,18 @@ fn decode_reply_outcome(
     output_limit: u64,
 ) -> Result<DecodedSelectorReply, AdapterError> {
     match uint(&fields[6]).map_err(|_| AdapterError::ProtocolFailure)? {
-        0 => decode_provider_result(fields, trailing, request, output_limit),
+        0 => {
+            let post_admission = provider_reports_post_admission(&fields[7])
+                || fields[8] != Value::Null
+                || fields[9] != Value::Null
+                || array_values(&fields[10]).is_ok_and(|records| !records.is_empty());
+            let decoded = decode_provider_result(fields, trailing, request, output_limit);
+            if post_admission {
+                decoded.map_err(|_| AdapterError::AuthenticatedEvidenceFailure)
+            } else {
+                decoded
+            }
+        }
         1 => {
             SandboxProviderError::from_canonical_cbor(bytes(&fields[7])?)
                 .map_err(|_| AdapterError::ProtocolFailure)?;
@@ -187,6 +198,20 @@ fn decode_reply_outcome(
         }
         _ => Err(AdapterError::ProtocolFailure),
     }
+}
+
+fn provider_reports_post_admission(value: &Value) -> bool {
+    bytes(value)
+        .ok()
+        .and_then(|encoded| SandboxProviderResult::from_canonical_cbor(encoded).ok())
+        .is_some_and(|result| {
+            matches!(
+                result.outcome,
+                SandboxTerminalOutcome::Completed
+                    | SandboxTerminalOutcome::Cancelled
+                    | SandboxTerminalOutcome::UnavailableAfterAdmission
+            )
+        })
 }
 
 fn decode_provider_result(
@@ -270,7 +295,7 @@ fn validate_evidence(
         let record = SandboxAuditRecord::from_canonical_cbor(bytes(value)?)
             .map_err(|_| AdapterError::ProtocolFailure)?;
         if record.attempt_id != result.attempt_id
-            || record.sequence != u64::try_from(index).map_err(|_| AdapterError::ProtocolFailure)?
+            || record.sequence != index as u64
             || record.previous_digest != previous
             || record.runtime_attestation_key_id != result.runtime_attestation_key_id
             || result.operational_events.get(index) != Some(&record.event_code)
@@ -289,9 +314,7 @@ fn validate_output_descriptor(value: &Value, trailing: &[u8]) -> Result<(), Adap
     let fields = array(value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
     let length = uint(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)?;
     let digest = fixed_bytes::<32>(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)?;
-    if length != u64::try_from(trailing.len()).map_err(|_| AdapterError::ProtocolFailure)?
-        || digest != domain_digest(OUTPUT_DOMAIN, trailing)
-    {
+    if length != trailing.len() as u64 || digest != domain_digest(OUTPUT_DOMAIN, trailing) {
         return Err(AdapterError::ProtocolFailure);
     }
     Ok(())
@@ -317,11 +340,11 @@ fn derived_id(mut namespace: [u8; 16], ordinal: u16) -> [u8; 16] {
     namespace
 }
 
-fn descriptor(payload: &[u8], digest: [u8; 32]) -> Result<Value, AdapterError> {
-    Ok(Value::Array(vec![
-        integer(u64::try_from(payload.len()).map_err(|_| AdapterError::ProtocolFailure)?),
+fn descriptor(payload: &[u8], digest: [u8; 32]) -> Value {
+    Value::Array(vec![
+        integer(payload.len() as u64),
         Value::Bytes(digest.to_vec()),
-    ]))
+    ])
 }
 
 fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
@@ -564,7 +587,7 @@ mod tests {
             descriptor(
                 &request.attempt_stream,
                 domain_digest(INPUT_DOMAIN, &request.attempt_stream),
-            )?,
+            ),
             Value::Array(Vec::new()),
         ]);
         fields[4] = Value::Bytes(evr1_digest.to_vec());
@@ -1147,7 +1170,17 @@ mod tests {
         let (changed, _) = protocol_record("SLY1", changed, false)?;
         assert_eq!(
             decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
+        let mut absent = unsigned.to_vec();
+        absent[8] = Value::Null;
+        absent[9] = Value::Null;
+        absent[10] = Value::Array(Vec::new());
+        absent[11] = Value::Null;
+        let (absent, _) = protocol_record("SLY1", absent, false)?;
+        assert_eq!(
+            decode_reply(&absent, &[], &encoded, [14; 32], 1024),
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         let unavailable = unavailable_reply(&encoded, [14; 32], 2)?;
         assert_eq!(
@@ -1166,7 +1199,7 @@ mod tests {
         let wrapper = array_values(&decoded).map_err(|_| AdapterError::ProtocolFailure)?;
         let fields = array_values(&wrapper[0]).map_err(|_| AdapterError::ProtocolFailure)?;
 
-        for index in 0..=7 {
+        for index in 0..=6 {
             let mut changed = fields.to_vec();
             changed[index] = Value::Null;
             let (changed, _) = protocol_record("SLY1", changed, false)?;
@@ -1175,6 +1208,13 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+        let mut missing_result = fields.to_vec();
+        missing_result[7] = Value::Null;
+        let (missing_result, _) = protocol_record("SLY1", missing_result, false)?;
+        assert_eq!(
+            decode_reply(&missing_result, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
         for malformed in [
             Value::Null,
             Value::Array(vec![Value::Null]),
@@ -1193,15 +1233,20 @@ mod tests {
             decode_reply(&malformed_local, &[], &encoded, [14; 32], 1024),
             Err(AdapterError::ProtocolFailure)
         );
-        for index in [5_usize, 7] {
-            let mut changed = fields.to_vec();
-            changed[index] = Value::Bytes(b"not-cbor".to_vec());
-            let (changed, _) = protocol_record("SLY1", changed, false)?;
-            assert_eq!(
-                decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-                Err(AdapterError::ProtocolFailure)
-            );
-        }
+        let mut malformed_execute = fields.to_vec();
+        malformed_execute[5] = Value::Bytes(b"not-cbor".to_vec());
+        let (malformed_execute, _) = protocol_record("SLY1", malformed_execute, false)?;
+        assert_eq!(
+            decode_reply(&malformed_execute, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        let mut malformed_result = fields.to_vec();
+        malformed_result[7] = Value::Bytes(b"not-cbor".to_vec());
+        let (malformed_result, _) = protocol_record("SLY1", malformed_result, false)?;
+        assert_eq!(
+            decode_reply(&malformed_result, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
         Ok(())
     }
 
@@ -1230,7 +1275,7 @@ mod tests {
         let (changed, _) = protocol_record("SLY1", fields, false)?;
         assert_eq!(
             decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         Ok(())
     }

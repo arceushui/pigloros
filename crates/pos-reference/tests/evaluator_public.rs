@@ -26,12 +26,6 @@ struct PublicAdapter {
     output: Vec<u8>,
 }
 
-struct ProvenanceAdapter {
-    subject_digest: [u8; 32],
-    output: Vec<u8>,
-    provenance_digest: [u8; 32],
-}
-
 struct KindAdapter {
     kind: SubjectAdapterKind,
     subject_digest: [u8; 32],
@@ -171,27 +165,6 @@ impl SubjectAdapter for PublicAdapter {
             result: SubjectResult::Output(self.output.clone()),
             usage: ResourceUsage::default(),
         })
-    }
-}
-
-impl SubjectAdapter for ProvenanceAdapter {
-    fn kind(&self) -> SubjectAdapterKind {
-        SubjectAdapterKind::ExportedArtifact
-    }
-
-    fn subject_artifact_digest(&self) -> [u8; 32] {
-        self.subject_digest
-    }
-
-    fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
-        Ok(SubjectObservation {
-            result: SubjectResult::Output(self.output.clone()),
-            usage: ResourceUsage::default(),
-        })
-    }
-
-    fn take_execution_provenance_digest(&mut self) -> Option<[u8; 32]> {
-        Some(self.provenance_digest)
     }
 }
 
@@ -433,7 +406,7 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
 }
 
 #[test]
-fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
+fn sandbox_cases_reject_success_without_authenticated_selector_provenance() -> TestResult {
     let corpus = support::corpus()?;
     let request = request_with(&corpus.request, |request| {
         request.request_id[14..].fill(0);
@@ -449,25 +422,6 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
             policy_epoch: 1,
         });
     })?;
-    let receipt_digest = [91; 32];
-    let mut admitted = ProvenanceAdapter {
-        subject_digest: corpus.subject_digest,
-        output: corpus.expected_output.clone(),
-        provenance_digest: receipt_digest,
-    };
-    let report = evaluate(
-        &request,
-        &corpus.archive,
-        &corpus.trust_policy,
-        &evaluator_identity()?,
-        &mut admitted,
-    )?
-    .report;
-    assert!(report
-        .cases
-        .iter()
-        .all(|case| case.provenance_digest == receipt_digest));
-
     let mut missing = PublicAdapter {
         subject_digest: corpus.subject_digest,
         output: corpus.expected_output.clone(),
@@ -483,17 +437,6 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
         Err(EvaluatorError::AdapterIdentity)
     );
 
-    admitted.provenance_digest = [0; 32];
-    assert_eq!(
-        evaluate(
-            &request,
-            &corpus.archive,
-            &corpus.trust_policy,
-            &evaluator_identity()?,
-            &mut admitted,
-        ),
-        Err(EvaluatorError::AdapterIdentity)
-    );
     let mut unavailable = AdverseAdapter {
         subject_digest: corpus.subject_digest,
         behavior: AdverseBehavior::AdapterUnavailable,
