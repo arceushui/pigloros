@@ -14099,7 +14099,7 @@ pub(super) mod key_registry_coverage {
     mod sqlite_key_registry_failure_paths {
         use super::{
             open_store, CoreError, Event, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
-            KeyRegistryStateV1, Seq, SqliteStore, TimelineId, FAIL_BEGIN_IMMEDIATE,
+            KeyRegistryStateV1, Seq, TimelineId, FAIL_BEGIN_IMMEDIATE,
         };
 
         #[cfg_attr(coverage_nightly, coverage(off))]
