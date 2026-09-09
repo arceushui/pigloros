@@ -2011,30 +2011,9 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             scope,
             limit,
             reply,
-        } => {
-            send_store_result(
-                reply,
-                state.store.execute(
-                    |host| {
-                        host.command_sender().and_then(|mut sender| {
-                            sender.remove_append_identities_bounded(scope, limit)
-                        })
-                    },
-                    |store| store.remove_append_identities_bounded(scope, limit),
-                ),
-            );
-        }
+        } => execute_remove_append_identities_command(state, scope, limit, reply),
         Command::PendingAppendIdentityCleanup { reply } => {
-            send_store_result(
-                reply,
-                state.store.execute(
-                    |host| {
-                        host.command_sender()
-                            .and_then(|mut sender| sender.pending_append_identity_cleanup())
-                    },
-                    |store| store.pending_append_identity_cleanup(),
-                ),
-            );
+            execute_pending_append_identity_cleanup_command(state, reply);
         }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),
         Command::Create { name, reply } => execute_create_command(state, &name, reply),
@@ -2056,48 +2035,12 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             maximum,
             reply,
         } => execute_append_command(state, timeline, &drafts, maximum, reply),
-        Command::SubmitAction {
-            timeline,
-            registry,
-            proposal,
-            authorization,
-            decision,
-            maximum,
-            reply,
-        } => execute_submit_action_command(
-            state,
-            ActionCommandContext {
-                timeline,
-                registry: registry.as_ref(),
-                proposal: &proposal,
-                authorization: authorization.as_ref(),
-                decision: &decision,
-                maximum,
-            },
-            reply,
-        ),
-        Command::SubmitIdentifiedAction {
-            timeline,
-            registry,
-            proposal,
-            authorization,
-            decision,
-            identity,
-            maximum,
-            reply,
-        } => execute_submit_identified_action_command(
-            state,
-            ActionCommandContext {
-                timeline,
-                registry: registry.as_ref(),
-                proposal: &proposal,
-                authorization: authorization.as_ref(),
-                decision: &decision,
-                maximum,
-            },
-            identity,
-            reply,
-        ),
+        command @ Command::SubmitAction { .. } => {
+            execute_submit_action_command_from_command(state, command);
+        }
+        command @ Command::SubmitIdentifiedAction { .. } => {
+            execute_submit_identified_action_command_from_command(state, command);
+        }
         Command::AppendConsentGrant {
             timeline,
             grant,
@@ -2144,6 +2087,40 @@ fn execute_geo_location_command(
 ) {
     let result = state.store.admit_geo_location(request);
     send_store_result(reply, result);
+}
+
+fn execute_remove_append_identities_command(
+    state: &mut ExecutorState,
+    scope: AppendDedupScope,
+    limit: NonZeroUsize,
+    reply: oneshot::Sender<Result<PurgeOutcome, StoreExecutorError>>,
+) {
+    send_store_result(
+        reply,
+        state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.remove_append_identities_bounded(scope, limit))
+            },
+            |store| store.remove_append_identities_bounded(scope, limit),
+        ),
+    );
+}
+
+fn execute_pending_append_identity_cleanup_command(
+    state: &mut ExecutorState,
+    reply: oneshot::Sender<Result<Option<AppendDedupScope>, StoreExecutorError>>,
+) {
+    send_store_result(
+        reply,
+        state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.pending_append_identity_cleanup())
+            },
+            |store| store.pending_append_identity_cleanup(),
+        ),
+    );
 }
 
 fn execute_purge_command(
@@ -2268,39 +2245,98 @@ fn execute_append_command(
 
 fn execute_submit_action_command(
     state: &mut ExecutorState,
-    context: ActionCommandContext<'_>,
+    context: &ActionCommandContext<'_>,
     reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
 ) {
     let result = match &mut state.store {
-        ExecutorStore::Host(host) => execute_host_action(host, &context),
+        ExecutorStore::Host(host) => execute_host_action(host, context),
         #[cfg(test)]
-        ExecutorStore::Generic(store) => execute_test_store_action(store.as_mut(), &context),
+        ExecutorStore::Generic(store) => execute_test_store_action(store.as_mut(), context),
         #[cfg(test)]
-        ExecutorStore::Gateway(store) => execute_test_store_action(store.event_store(), &context),
+        ExecutorStore::Gateway(store) => execute_test_store_action(store.event_store(), context),
     };
     drop(reply.send(result));
 }
 
+fn execute_submit_action_command_from_command(state: &mut ExecutorState, command: Command) {
+    let Command::SubmitAction {
+        timeline,
+        registry,
+        proposal,
+        authorization,
+        decision,
+        maximum,
+        reply,
+    } = command
+    else {
+        return;
+    };
+    execute_submit_action_command(
+        state,
+        &ActionCommandContext {
+            timeline,
+            registry: registry.as_ref(),
+            proposal: &proposal,
+            authorization: authorization.as_ref(),
+            decision: &decision,
+            maximum,
+        },
+        reply,
+    );
+}
+
 fn execute_submit_identified_action_command(
     state: &mut ExecutorState,
-    context: ActionCommandContext<'_>,
+    context: &ActionCommandContext<'_>,
     identity: AppendIdentity,
     reply: oneshot::Sender<
         Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
     >,
 ) {
     let result = match &mut state.store {
-        ExecutorStore::Host(host) => execute_host_identified_action(host, &context, identity),
+        ExecutorStore::Host(host) => execute_host_identified_action(host, context, identity),
         #[cfg(test)]
         ExecutorStore::Generic(store) => {
-            execute_test_store_identified_action(store.as_mut(), &context, identity)
+            execute_test_store_identified_action(store.as_mut(), context, identity)
         }
         #[cfg(test)]
         ExecutorStore::Gateway(store) => {
-            execute_test_store_identified_action(store.event_store(), &context, identity)
+            execute_test_store_identified_action(store.event_store(), context, identity)
         }
     };
     drop(reply.send(result));
+}
+
+fn execute_submit_identified_action_command_from_command(
+    state: &mut ExecutorState,
+    command: Command,
+) {
+    let Command::SubmitIdentifiedAction {
+        timeline,
+        registry,
+        proposal,
+        authorization,
+        decision,
+        identity,
+        maximum,
+        reply,
+    } = command
+    else {
+        return;
+    };
+    execute_submit_identified_action_command(
+        state,
+        &ActionCommandContext {
+            timeline,
+            registry: registry.as_ref(),
+            proposal: &proposal,
+            authorization: authorization.as_ref(),
+            decision: &decision,
+            maximum,
+        },
+        identity,
+        reply,
+    );
 }
 
 fn execute_host_action(
