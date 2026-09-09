@@ -132,6 +132,28 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github/workflows/ci.yml")
 
+    def test_coverage_reporting_survives_failure_without_ignoring_failures(self) -> None:
+        for name, field, value in [
+            ("cargo llvm-cov (lines ≥99%, regions ≥99%)", "id", "wrong-result"),
+            ("cargo llvm-cov (lines ≥99%, regions ≥99%)", "continue-on-error", True),
+            ("Export LCOV for cargo-crap", "if", "${{ success() }}"),
+            ("Export coverage details for new-code gate", "if", "${{ always() }}"),
+            ("Upload LCOV for cargo-crap", "if", "${{ success() }}"),
+            ("Upload coverage details", "if", "${{ success() }}"),
+            (
+                "Enforce new production Rust code coverage (lines ≥99%, regions ≥99%)",
+                "if",
+                "${{ success() }}",
+            ),
+        ]:
+            with self.subTest(name=name, field=field):
+                def mutate(workflow):
+                    steps = workflow["jobs"]["coverage"]["steps"]
+                    step = next(step for step in steps if step.get("name") == name)
+                    step[field] = value
+
+                self.assert_rejected(mutate)
+
     def test_resolver_executes_the_exact_trusted_artifact_query(self) -> None:
         result, logs = self.run_resolver("4242\n")
 
