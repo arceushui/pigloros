@@ -122,7 +122,7 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
             })?;
             let signing_key = load_signing_key(key_path)?;
             let mut event_store: Box<dyn pos_core::store::EventStore> = Box::new(
-                crate::host_store::HostedLedgerStore::open(StoreConfig::Sqlite {
+                crate::HostedLedgerStore::open(StoreConfig::Sqlite {
                     path: db.to_string_lossy().into_owned(),
                 })
                 .map_err(|error| CliError::BadSource(error.to_string()))?,
@@ -373,7 +373,7 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
         Source::Toml(dir) => TomlLedgerStore::new(dir).load(&today)?,
         Source::Store(db) => {
             let store: Box<dyn pos_core::store::EventStore> = Box::new(
-                crate::host_store::HostedLedgerStore::open_read_only(&db.to_string_lossy())
+                crate::HostedLedgerStore::open_read_only(&db.to_string_lossy())
                     .map_err(|error| CliError::BadSource(error.to_string()))?,
             );
             let timeline_id = find_ledger_timeline(store.as_ref())?;

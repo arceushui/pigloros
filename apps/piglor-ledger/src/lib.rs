@@ -35,6 +35,41 @@ pub(crate) mod json;
 pub mod key_output;
 pub(crate) mod verify;
 
+/// Private compatibility adapter for the ledger domain port.
+///
+/// The concrete store never escapes the execution host. Every implemented
+/// `EventStore` operation delegates to a generation-bound host sender; all
+/// other trait operations retain their fail-closed defaults.
+struct HostedLedgerStore {
+    host: std::sync::Mutex<pos_runtime::ErasureExecutionHostV1>,
+    ledger_timeline: Option<pos_core::TimelineId>,
+}
+
+impl HostedLedgerStore {
+    fn open(config: pos_store::StoreConfig) -> Result<Self, pos_core::ErasureHostErrorV1> {
+        pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            config,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .map(Self::from_host)
+    }
+
+    fn open_read_only(path: &str) -> Result<Self, pos_core::ErasureHostErrorV1> {
+        pos_runtime::ErasureExecutionHostV1::open_read_only_verified_empty(
+            path,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .map(Self::from_host)
+    }
+
+    const fn from_host(host: pos_runtime::ErasureExecutionHostV1) -> Self {
+        Self {
+            host: std::sync::Mutex::new(host),
+            ledger_timeline: None,
+        }
+    }
+}
+
 /// Test support utilities shared across crate boundaries.
 pub mod test_helpers;
 

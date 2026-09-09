@@ -169,7 +169,7 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
     let supplied_public_keys = parse_supplied_public_keys(pubkey_hex)?;
 
     let store: Box<dyn pos_core::store::EventStore> = Box::new(
-        crate::host_store::HostedLedgerStore::open_read_only(&db.to_string_lossy())
+        crate::HostedLedgerStore::open_read_only(&db.to_string_lossy())
             .map_err(|error| CliError::BadSource(error.to_string()))?,
     );
     let registry = store

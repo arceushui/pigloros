@@ -1,47 +1,17 @@
-use std::sync::Mutex;
-
+use super::HostedLedgerStore;
 use pos_core::{
     store::{EventReadBounds, EventStore, SeqRange},
     CoreError, ErasureHostErrorV1, Event, EventDraft, Hash, KeyDestructionBeginOutcomeV1,
     KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyRegistryStateV1, Seq, Timeline,
-    TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
+    TimelineId,
 };
-use pos_runtime::ErasureExecutionHostV1;
-use pos_store::StoreConfig;
-
-/// Private compatibility adapter for the ledger domain port.
-///
-/// The concrete store never escapes the execution host. Every implemented
-/// `EventStore` operation delegates to a generation-bound host sender; all
-/// other trait operations retain their fail-closed defaults.
-pub(super) struct HostedLedgerStore {
-    host: Mutex<ErasureExecutionHostV1>,
-    ledger_timeline: Option<TimelineId>,
-}
 
 impl HostedLedgerStore {
-    pub(super) fn open(config: StoreConfig) -> Result<Self, CoreError> {
-        ErasureExecutionHostV1::open_verified_empty(config, ERASURE_MAX_INVENTORY_REQUESTS)
-            .map(Self::from_host)
-            .map_err(host_error)
-    }
-
-    pub(super) fn open_read_only(path: &str) -> Result<Self, CoreError> {
-        ErasureExecutionHostV1::open_read_only_verified_empty(path, ERASURE_MAX_INVENTORY_REQUESTS)
-            .map(Self::from_host)
-            .map_err(host_error)
-    }
-
-    const fn from_host(host: ErasureExecutionHostV1) -> Self {
-        Self {
-            host: Mutex::new(host),
-            ledger_timeline: None,
-        }
-    }
-
     fn with_host<T>(
         &self,
-        operation: impl FnOnce(&mut ErasureExecutionHostV1) -> Result<T, ErasureHostErrorV1>,
+        operation: impl FnOnce(
+            &mut pos_runtime::ErasureExecutionHostV1,
+        ) -> Result<T, ErasureHostErrorV1>,
     ) -> Result<T, CoreError> {
         let mut host = self
             .host

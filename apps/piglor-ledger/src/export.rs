@@ -133,7 +133,7 @@ fn collect_toml_hashes(dir: &Path) -> Vec<FileHash> {
 /// Build a manifest for the store tier.
 fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportManifest, CliError> {
     let store: Box<dyn pos_core::store::EventStore> = Box::new(
-        crate::host_store::HostedLedgerStore::open_read_only(&db.to_string_lossy())
+        crate::HostedLedgerStore::open_read_only(&db.to_string_lossy())
             .map_err(|error| CliError::BadSource(error.to_string()))?,
     );
     let timeline = store
