@@ -2925,6 +2925,27 @@ mod tests {
     };
     use tokio::sync::broadcast;
 
+    struct RejectingErasureGate(pos_core::ErasureContainmentErrorV1);
+
+    impl ErasureGate for RejectingErasureGate {
+        fn authorize(
+            &self,
+            _: TimelineId,
+            _: pos_core::ErasureProtectedOperationV1,
+        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+            Err(self.0)
+        }
+
+        fn with_fence(
+            &self,
+            timeline: TimelineId,
+            operation: pos_core::ErasureProtectedOperationV1,
+            _: &mut dyn FnMut(),
+        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+            self.authorize(timeline, operation)
+        }
+    }
+
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
     }
@@ -5971,6 +5992,50 @@ mod tests {
         );
         assert!(matches!(rejected.as_ref(), Err(GatewayError::Store(_))));
         drop(rejected);
+    }
+
+    #[test]
+    fn action_submission_maps_closed_erasure_gates() {
+        let timeline = TimelineId::new();
+        let proposal = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"blocked"),
+            Kind::new("world.action.submit"),
+        );
+        let missing = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        assert!(matches!(
+            missing.submit_action_draft(timeline, &proposal),
+            Err(GatewayError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
+        let frozen = Gateway::new_with_erasure_gate(
+            open_store(StoreConfig::Memory).test_ok(),
+            Arc::new(RejectingErasureGate(
+                pos_core::ErasureContainmentErrorV1::AccessFrozen,
+            )),
+        )
+        .test_ok();
+        assert!(matches!(
+            frozen.submit_action_draft(timeline, &proposal),
+            Err(GatewayError::Store(CoreError::ErasureAccessFrozen))
+        ));
+
+        let unavailable = Gateway::new_with_erasure_gate(
+            open_store(StoreConfig::Memory).test_ok(),
+            Arc::new(RejectingErasureGate(
+                pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
+            )),
+        )
+        .test_ok();
+        assert!(matches!(
+            unavailable.submit_action_draft(timeline, &proposal),
+            Err(GatewayError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
     }
 
     #[tokio::test]

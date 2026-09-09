@@ -3937,6 +3937,18 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn erasure_containment_errors_keep_their_public_meaning() {
+        assert!(matches!(
+            erasure_containment_error(ErasureContainmentErrorV1::AccessFrozen),
+            CoreError::ErasureAccessFrozen
+        ));
+        assert!(matches!(
+            erasure_containment_error(ErasureContainmentErrorV1::RecoveryUnavailable),
+            CoreError::ErasureContainmentUnavailable
+        ));
+    }
 }
 
 #[cfg(test)]
