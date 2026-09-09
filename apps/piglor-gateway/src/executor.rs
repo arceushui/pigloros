@@ -59,7 +59,8 @@ macro_rules! submit {
 mod lifecycle_coverage_tests {
     use super::{
         host_error_to_core, worker_loop, worker_loop_with_runtime, Command, CommandClass,
-        CommandEnvelope, CommandLifecycle, ExecutorStore, LifecycleState, StoreExecutor,
+        CommandEnvelope, CommandLifecycle, ExecutorStore, GatewayExecutorStore, LifecycleState,
+        StoreExecutor,
     };
     use pos_core::{
         ConsentAuthority, CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS,
@@ -121,8 +122,12 @@ mod lifecycle_coverage_tests {
         for mut store in [
             ExecutorStore::Host(host),
             ExecutorStore::Generic(Box::new(MemoryStore::new())),
-            ExecutorStore::GeoLocation(Box::new(MemoryStore::new())),
-            ExecutorStore::OwnTracks(Box::new(MemoryStore::new())),
+            ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(
+                MemoryStore::new(),
+            ))),
+            ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(
+                Box::new(MemoryStore::new()),
+            )),
         ] {
             store.bind_test_erasure_gate();
         }
@@ -432,11 +437,51 @@ impl<T> OwnTracksGatewayStore for T where
 {
 }
 
+enum GatewayExecutorStore {
+    GeoLocation(Box<dyn GeoLocationGatewayStore>),
+    OwnTracks(Box<dyn OwnTracksGatewayStore>),
+}
+
+impl GatewayExecutorStore {
+    fn event_store(&mut self) -> &mut dyn EventStore {
+        match self {
+            Self::GeoLocation(store) => store.as_mut(),
+            Self::OwnTracks(store) => store.as_mut(),
+        }
+    }
+
+    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        match self {
+            Self::GeoLocation(store) => store.protected_logical_head(timeline),
+            Self::OwnTracks(store) => store.protected_logical_head(timeline),
+        }
+    }
+
+    fn admit_geo_location(
+        &mut self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, CoreError> {
+        match self {
+            Self::GeoLocation(store) => store.admit_geo_location(request),
+            Self::OwnTracks(store) => store.admit_geo_location(request),
+        }
+    }
+
+    fn prepare_owntracks_ingress(
+        &mut self,
+        input: OwnTracksIngressInputV1,
+    ) -> Result<PreparedOwnTracksIngressV1, CoreError> {
+        match self {
+            Self::GeoLocation(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            Self::OwnTracks(store) => store.prepare_owntracks_ingress(input),
+        }
+    }
+}
+
 enum ExecutorStore {
     Host(ErasureExecutionHostV1),
     Generic(Box<dyn EventStore>),
-    GeoLocation(Box<dyn GeoLocationGatewayStore>),
-    OwnTracks(Box<dyn OwnTracksGatewayStore>),
+    Gateway(GatewayExecutorStore),
 }
 
 impl ExecutorStore {
@@ -447,11 +492,12 @@ impl ExecutorStore {
             Self::Generic(store) => {
                 drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
             }
-            Self::GeoLocation(store) => {
-                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
-            }
-            Self::OwnTracks(store) => {
-                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
+            Self::Gateway(store) => {
+                drop(
+                    store
+                        .event_store()
+                        .bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())),
+                );
             }
         }
     }
@@ -464,8 +510,7 @@ impl ExecutorStore {
         match self {
             Self::Host(host) => host_operation(host).map_err(host_error_to_core),
             Self::Generic(store) => store_operation(store.as_mut()),
-            Self::GeoLocation(store) => store_operation(store.as_mut()),
-            Self::OwnTracks(store) => store_operation(store.as_mut()),
+            Self::Gateway(store) => store_operation(store.event_store()),
         }
     }
 
@@ -476,8 +521,35 @@ impl ExecutorStore {
                 .and_then(|mut sender| sender.protected_logical_head(timeline))
                 .map_err(host_error_to_core),
             Self::Generic(store) => store.logical_head(timeline),
-            Self::GeoLocation(store) => store.protected_logical_head(timeline),
-            Self::OwnTracks(store) => store.protected_logical_head(timeline),
+            Self::Gateway(store) => store.protected_logical_head(timeline),
+        }
+    }
+
+    fn prepare_owntracks_ingress(
+        &mut self,
+        input: OwnTracksIngressInputV1,
+    ) -> Result<PreparedOwnTracksIngressV1, CoreError> {
+        match self {
+            Self::Host(host) => host
+                .command_sender()
+                .and_then(|mut sender| sender.prepare_owntracks_ingress(input))
+                .map_err(host_error_to_core),
+            Self::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            Self::Gateway(store) => store.prepare_owntracks_ingress(input),
+        }
+    }
+
+    fn admit_geo_location(
+        &mut self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, CoreError> {
+        match self {
+            Self::Host(host) => host
+                .command_sender()
+                .and_then(|mut sender| sender.admit_geo_location(request))
+                .map_err(host_error_to_core),
+            Self::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            Self::Gateway(store) => store.admit_geo_location(request),
         }
     }
 }
@@ -758,7 +830,10 @@ impl StoreExecutor {
         #[cfg(test)]
         drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
-        Self::spawn(ExecutorStore::GeoLocation(Box::new(store)), None)
+        Self::spawn(
+            ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store))),
+            None,
+        )
     }
 
     pub(crate) fn new_with_owntracks_ingress<S>(
@@ -772,7 +847,10 @@ impl StoreExecutor {
         #[cfg(test)]
         drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
-        Self::spawn(ExecutorStore::OwnTracks(Box::new(store)), Some(owner_key))
+        Self::spawn(
+            ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(Box::new(store))),
+            Some(owner_key),
+        )
     }
 
     fn spawn(store: ExecutorStore, owntracks_owner_key: Option<[u8; 32]>) -> Self {
@@ -1684,16 +1762,7 @@ fn prepare_owntracks_ingress(
         return Err(CoreError::GeographicAdmissionUnavailable);
     };
     let input = owntracks_input(owner_key, basic_handle, basic_secret, payload);
-    let prepared = match &mut state.store {
-        ExecutorStore::Host(host) => host
-            .command_sender()
-            .and_then(|mut sender| sender.prepare_owntracks_ingress(input))
-            .map_err(host_error_to_core)?,
-        ExecutorStore::OwnTracks(store) => store.prepare_owntracks_ingress(input)?,
-        ExecutorStore::Generic(_) | ExecutorStore::GeoLocation(_) => {
-            return Err(CoreError::GeographicAdmissionUnavailable);
-        }
-    };
+    let prepared = state.store.prepare_owntracks_ingress(input)?;
     if !state.owntracks_rate_limiter.allow(prepared.rate_key()) {
         return Ok(PreparedOwnTracksIngressOutcome::RateLimited);
     }
@@ -1869,15 +1938,7 @@ fn execute_geo_location_command(
     request: GeoLocationAdmissionRequestV1,
     reply: oneshot::Sender<Result<GeoLocationAdmissionOutcome, StoreExecutorError>>,
 ) {
-    let result = match &mut state.store {
-        ExecutorStore::Host(host) => host
-            .command_sender()
-            .and_then(|mut sender| sender.admit_geo_location(request))
-            .map_err(host_error_to_core),
-        ExecutorStore::GeoLocation(store) => store.admit_geo_location(request),
-        ExecutorStore::OwnTracks(store) => store.admit_geo_location(request),
-        ExecutorStore::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
-    };
+    let result = state.store.admit_geo_location(request);
     send_store_result(reply, result);
 }
 
@@ -2238,7 +2299,8 @@ mod tests {
 
     use super::{
         execute_append_command, execute_append_consent_revocation_command,
-        prepare_owntracks_ingress, Command, ExecutorState, ExecutorStore, OwnTracksRateLimiter,
+        prepare_owntracks_ingress, Command, ExecutorState, ExecutorStore, GatewayExecutorStore,
+        OwnTracksRateLimiter,
     };
     use pos_core::{
         clock::WallTime,
@@ -5493,7 +5555,9 @@ mod tests {
     fn owntracks_ingress_requires_an_owner_key(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut state = ExecutorState {
-            store: ExecutorStore::OwnTracks(Box::new(MemoryStore::new())),
+            store: ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(Box::new(
+                MemoryStore::new(),
+            ))),
             owntracks_owner_key: None,
             owntracks_rate_limiter: OwnTracksRateLimiter {
                 buckets: HashMap::new(),
