@@ -6313,7 +6313,7 @@ mod coverage_entrypoints {
                 &serde_json::json!({"dx": 1}),
             )
             .await?;
-        let ingress_id = Ulid::new().to_string();
+        let ingress_id = Ulid::from(1_u128).to_string();
         gateway
             .append_identified_action(
                 &timeline.id().to_string(),
