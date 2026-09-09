@@ -1,7 +1,8 @@
 use pos_core::{
-    CanonicalBytes, EntityId, ErasureErrorV1, ErasurePersistenceInventorySnapshotV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, EventDraft, EventReadBounds, Kind,
-    SeqRange, ERASURE_MAX_INVENTORY_REQUESTS,
+    CanonicalBytes, EntityId, ErasureErrorV1, ErasureHostErrorV1,
+    ErasurePersistenceInventorySnapshotV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, EventDraft, EventReadBounds, Kind, SeqRange,
+    ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::StoreConfig;
@@ -152,5 +153,28 @@ fn verified_query_constructors_accept_public_trait_objects(
         ERASURE_MAX_INVENTORY_REQUESTS,
     )
     .is_err());
+    Ok(())
+}
+
+#[test]
+fn verified_query_constructors_hide_adapter_open_failures(
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let directory = std::env::temp_dir().to_string_lossy().into_owned();
+    for result in [
+        ErasureExecutionHostV1::open_from_verified_query(
+            StoreConfig::Sqlite {
+                path: directory.clone(),
+            },
+            &mut OneInventory(Some(empty_inventory()?)),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+        ErasureExecutionHostV1::open_gateway_from_verified_query(
+            StoreConfig::Sqlite { path: directory },
+            &mut OneInventory(Some(empty_inventory()?)),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    ] {
+        assert!(matches!(result, Err(ErasureHostErrorV1::AdapterFailure)));
+    }
     Ok(())
 }
