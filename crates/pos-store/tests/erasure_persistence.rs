@@ -1301,6 +1301,30 @@ fn assert_sqlite_fork_retry_corruption_error(
 }
 
 #[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_first_commit_failure(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkBatchV1,
+    ) -> rusqlite::Result<()>,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let connection = rusqlite::Connection::open(path)?;
+    corrupt(&connection, &prepared)?;
+    drop(connection);
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared),
+        Err(expected)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 fn only_fork_mutation(
     prepared: &pos_core::PreparedErasureForkBatchV1,
 ) -> &pos_core::PreparedErasureCasV1 {
@@ -1460,6 +1484,32 @@ fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_retry_rejects_invalid_receipt_values() -> Result<(), Box<dyn std::error::Error>> {
+    for assignment in [
+        "binding_digest=X'00'",
+        "successor_generation=X'00'",
+        "receipt_digest=X'00'",
+        "fork_seq=-1",
+    ] {
+        assert_sqlite_fork_retry_corruption_error(
+            |connection, prepared| {
+                connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                connection.execute(
+                    &format!(
+                        "UPDATE erasure_fork_admissions SET {assignment} \
+                         WHERE operation_digest=?1"
+                    ),
+                    rusqlite::params![prepared.operation().digest().as_slice()],
+                )
+            },
+            ErasureErrorV1::ProvenanceMissing,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_complete_inventory_rejects_oversized_topology() -> Result<(), Box<dyn std::error::Error>>
 {
     let database = tempfile::NamedTempFile::new()?;
@@ -1532,7 +1582,22 @@ fn sqlite_complete_inventory_rejects_mistyped_rows() -> Result<(), Box<dyn std::
     assert_sqlite_inventory_rejects_sql(
         "INSERT INTO timelines (id, mode, chain_head) VALUES ('not-a-ulid', 'live', zeroblob(32))",
         ErasureErrorV1::ProvenanceMissing,
-    )
+    )?;
+    assert_sqlite_inventory_rejects_sql(
+        "INSERT INTO erasure_records (request_digest, manifest_digest, manifest_cbor)
+         VALUES (X'00', zeroblob(32), X'00')",
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_inventory_rejects_sql(
+        "INSERT INTO erasure_records (request_digest, manifest_digest, manifest_cbor)
+         VALUES (zeroblob(32), X'00', X'00')",
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_inventory_rejects_sql(
+        "DROP TABLE erasure_records",
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_inventory_rejects_sql("DROP TABLE timelines", ErasureErrorV1::ReceiptCommitFailed)
 }
 
 #[cfg(feature = "sqlite")]
@@ -1629,6 +1694,98 @@ fn sqlite_fork_retry_rejects_mistyped_child_fields() -> Result<(), Box<dyn std::
         },
         ErasureErrorV1::ReceiptCommitFailed,
     )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_retry_rejects_mistyped_manifest_fields() -> Result<(), Box<dyn std::error::Error>> {
+    for assignment in [
+        "manifest_digest=printf('%032d', 0)",
+        "manifest_cbor='not-a-blob'",
+    ] {
+        assert_sqlite_fork_retry_corruption_error(
+            |connection, prepared| {
+                connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                connection.execute(
+                    &format!("UPDATE erasure_records SET {assignment} WHERE request_digest=?1"),
+                    rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+                )
+            },
+            ErasureErrorV1::ReceiptCommitFailed,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fresh_fork_rejects_adapter_failures() -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_first_commit_failure(
+        |connection, prepared| {
+            connection.execute(
+                "DELETE FROM timelines WHERE id=?1",
+                rusqlite::params![prepared.child().fork_point.map(|point| point.0.to_string())],
+            )?;
+            Ok(())
+        },
+        ErasureErrorV1::PolicyConflict,
+    )?;
+    assert_sqlite_fork_first_commit_failure(
+        |connection, prepared| {
+            connection.execute(
+                "INSERT INTO timelines (id, mode, chain_head) VALUES (?1, 'historical', zeroblob(32))",
+                rusqlite::params![prepared.child().id.to_string()],
+            )?;
+            Ok(())
+        },
+        ErasureErrorV1::PolicyConflict,
+    )?;
+    assert_sqlite_fork_first_commit_failure(
+        |connection, _| {
+            connection.execute_batch(
+                "CREATE TRIGGER reject_fork_receipt BEFORE INSERT ON erasure_fork_admissions
+                 BEGIN SELECT RAISE(ABORT, 'receipt rejected'); END;",
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_first_commit_failure(
+        |connection, _| {
+            connection.execute_batch(
+                "CREATE TRIGGER reject_erasure_object BEFORE INSERT ON erasure_evidence
+                 BEGIN SELECT RAISE(ABORT, 'object rejected'); END;",
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fresh_fork_rejects_a_locked_database() -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    connection.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_returns_none_for_unknown_operation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SqliteStore::open_in_memory()?;
+    assert_eq!(store.recover_fork_admission(reference(250))?, None);
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]

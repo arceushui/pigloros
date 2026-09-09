@@ -385,11 +385,11 @@ impl ErasureContainmentGateV1 {
         let _fence = self
             .fence_lock
             .lock()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+            .map_err(containment_recovery_failure)?;
         let current = self
             .authority
             .read()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .map_err(containment_recovery_failure)?
             .clone();
         if current.verified_unaffected.contains_key(&timeline) {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
@@ -406,7 +406,7 @@ impl ErasureContainmentGateV1 {
         *self
             .authority
             .write()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)? = Arc::new(candidate);
+            .map_err(containment_recovery_failure)? = Arc::new(candidate);
         Ok(())
     }
 
@@ -490,7 +490,7 @@ impl ErasureContainmentGateV1 {
         let _fence = self
             .fence_lock
             .lock()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+            .map_err(containment_recovery_failure)?;
         if bindings
             .iter()
             .any(|(_, scope)| !state.scope_contains(*scope))
@@ -525,7 +525,7 @@ impl ErasureContainmentGateV1 {
         let current = self
             .authority
             .read()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .map_err(containment_recovery_failure)?
             .clone();
         if current.states.get(&request).is_some_and(|existing| {
             Self::containment_rank(existing.lifecycle()) > Self::containment_rank(state.lifecycle())
@@ -559,7 +559,7 @@ impl ErasureContainmentGateV1 {
         *self
             .authority
             .write()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)? = Arc::new(candidate);
+            .map_err(containment_recovery_failure)? = Arc::new(candidate);
         Ok(())
     }
 
@@ -625,12 +625,12 @@ impl ErasureContainmentGateV1 {
     ) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
         let candidate = query
             .verified_inventory(maximum_requests)
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+            .map_err(containment_recovery_failure)?;
         let generation = candidate.generation();
         let _fence = self
             .fence_lock
             .lock()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+            .map_err(containment_recovery_failure)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(candidate),
             ..ErasureGateStateV1::default()
@@ -638,7 +638,7 @@ impl ErasureContainmentGateV1 {
         *self
             .authority
             .write()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)? = Arc::new(replacement);
+            .map_err(containment_recovery_failure)? = Arc::new(replacement);
         Ok(generation)
     }
 
@@ -650,7 +650,7 @@ impl ErasureContainmentGateV1 {
     pub fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
         self.authority
             .read()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .map_err(containment_recovery_failure)?
             .inventory
             .as_ref()
             .map(ErasureVerifiedInventoryV1::generation)
@@ -742,11 +742,11 @@ impl ErasureGate for ErasureContainmentGateV1 {
         let _fence = self
             .fence_lock
             .lock()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+            .map_err(containment_recovery_failure)?;
         let authority = self
             .authority
             .read()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .map_err(containment_recovery_failure)?
             .clone();
         self.authorize_state(timeline, operation, &authority)
     }
@@ -762,7 +762,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
             let authority = self
                 .authority
                 .read()
-                .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+                .map_err(containment_recovery_failure)?
                 .clone();
             self.authorize_state(timeline, operation, &authority)?;
             effect();
@@ -771,11 +771,11 @@ impl ErasureGate for ErasureContainmentGateV1 {
         let _fence = self
             .fence_lock
             .lock()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+            .map_err(containment_recovery_failure)?;
         let authority = self
             .authority
             .read()
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .map_err(containment_recovery_failure)?
             .clone();
         self.authorize_state(timeline, operation, &authority)?;
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
@@ -783,6 +783,10 @@ impl ErasureGate for ErasureContainmentGateV1 {
         effect();
         Ok(())
     }
+}
+
+fn containment_recovery_failure<T>(_error: T) -> ErasureContainmentErrorV1 {
+    ErasureContainmentErrorV1::RecoveryUnavailable
 }
 impl ErasureErrorV1 {
     /// Return the stable V1 error code.
@@ -6279,6 +6283,10 @@ mod coverage_paths {
         )?;
         assert_eq!(empty.request_count(), 0);
         assert_eq!(empty.authorize(affected), Ok(()));
+        assert_eq!(
+            empty.authorize(TimelineId::new()),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
 
         let first = inventory_state(
             reference(41),
@@ -6336,6 +6344,10 @@ mod coverage_paths {
         assert_eq!(
             gate.install_from_verified_inventory_query(&mut query, 4),
             Ok(generation)
+        );
+        assert_eq!(
+            gate.install_from_verified_inventory_query(&mut InventoryQuery(None), 4),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         assert_eq!(gate.inventory_generation(), Ok(generation));
         assert_eq!(

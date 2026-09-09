@@ -506,6 +506,7 @@ mod tests {
         NonemptyInventory,
         MisreportInitialExactRetry,
         MisreportExactRetry,
+        ForkCommit,
         Recovery,
         EventStore,
     }
@@ -615,6 +616,9 @@ mod tests {
             &mut self,
             admission: PreparedErasureForkBatchV1,
         ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+            if self.fault == FaultModeV1::ForkCommit {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
             if self.fault == FaultModeV1::MisreportInitialExactRetry {
                 return Ok(ErasureCasOutcomeV1::ExactRetry);
             }
@@ -1265,6 +1269,30 @@ mod tests {
         assert_eq!(
             sender.commit_fork_admission(batch),
             Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+
+    #[test]
+    fn host_maps_fork_commit_failure_without_payload() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(FaultModeV1::ForkCommit)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let batch = empty_fork_batch(
+            parent.id(),
+            TimelineId::new(),
+            ErasureReferenceV1::from_digest([38; 32]),
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.commit_fork_admission(batch)),
+            Err(ErasureHostErrorV1::Conflict)
         );
     }
 

@@ -4766,13 +4766,15 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(map_erasure_receipt_failure)?;
         let snapshot = sqlite_erasure_inventory_snapshot(&transaction, maximum_requests)?;
-        transaction
-            .commit()
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        transaction.commit().map_err(map_erasure_receipt_failure)?;
         Ok(snapshot)
     }
+}
+
+fn map_erasure_receipt_failure(_error: rusqlite::Error) -> ErasureErrorV1 {
+    ErasureErrorV1::ReceiptCommitFailed
 }
 
 fn sqlite_erasure_inventory_snapshot(
@@ -4789,14 +4791,14 @@ fn sqlite_erasure_inventory_snapshot(
                 "SELECT request_digest, manifest_digest FROM erasure_records
                  ORDER BY request_digest LIMIT ?1",
             )
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(map_erasure_receipt_failure)?;
         let rows = statement
             .query_map(params![request_limit], |row| {
                 Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
             })
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(map_erasure_receipt_failure)?;
         rows.map(|row| {
-            row.map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+            row.map_err(map_erasure_receipt_failure)
                 .and_then(|(request, manifest)| {
                     Ok((reference_from_sql(request)?, reference_from_sql(manifest)?))
                 })
@@ -4809,15 +4811,14 @@ fn sqlite_erasure_inventory_snapshot(
     let topology = {
         let mut statement = conn
             .prepare("SELECT id FROM timelines ORDER BY id LIMIT ?1")
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(map_erasure_receipt_failure)?;
         let rows = statement
             .query_map(params![topology_limit], |row| row.get::<_, String>(0))
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(map_erasure_receipt_failure)?;
         rows.map(|row| {
-            row.map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
-                .and_then(|id| {
-                    parse_timeline_id(&id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
-                })
+            row.map_err(map_erasure_receipt_failure).and_then(|id| {
+                parse_timeline_id(&id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
+            })
         })
         .collect::<Result<Vec<_>, _>>()?
     };
@@ -4834,7 +4835,7 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         self.conn
             .execute_batch(begin_immediate_sql())
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(map_erasure_receipt_failure)?;
         let result = (|| {
             let child = admission.child();
             let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
@@ -4898,7 +4899,7 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                         recovery.receipt_digest().digest().as_slice(),
                     ],
                 )
-                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                .map_err(map_erasure_receipt_failure)?;
             Ok(ErasureCasOutcomeV1::Applied)
         })();
         finish_erasure_transaction(&self.conn, result)
@@ -4920,7 +4921,7 @@ fn sqlite_timeline_exists(conn: &Connection, timeline: TimelineId) -> Result<boo
     )
     .optional()
     .map(|row| row.is_some())
-    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+    .map_err(map_erasure_receipt_failure)
 }
 
 struct SqliteForkAdmissionReceiptV1 {
@@ -5005,7 +5006,7 @@ fn sqlite_fork_admission_receipt(
         },
     )
     .optional()
-    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+    .map_err(map_erasure_receipt_failure)?
     .map(|row| {
         Ok(SqliteForkAdmissionReceiptV1 {
             binding: reference_from_sql(row.binding)?,
@@ -5066,7 +5067,7 @@ fn sqlite_fork_admission_is_exact(
             },
         )
         .optional()
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        .map_err(map_erasure_receipt_failure)?;
     let Some((name, mode, parent, fork_seq, head, stored_chain_head)) = row else {
         return Ok(false);
     };
@@ -5079,7 +5080,7 @@ fn sqlite_fork_admission_is_exact(
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        .map_err(map_erasure_receipt_failure)?;
     let expected_owner = child.owner.map(|value| value.to_string());
     if (
         name.as_ref(),
@@ -5110,7 +5111,7 @@ fn sqlite_fork_admission_is_exact(
                 |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )
             .optional()
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(map_erasure_receipt_failure)?;
         let expected_digest = mutation.next_manifest().digest().digest();
         let exact_manifest = manifest.is_some_and(|(digest, bytes)| {
             (digest.as_slice(), bytes.as_slice())
