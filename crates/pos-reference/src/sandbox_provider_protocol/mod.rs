@@ -17,8 +17,8 @@ mod trust;
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use revocation_update::{
-    RevocationAcknowledgement, RevocationUpdateRequest, SandboxRevocationUpdateError,
-    SelectorRevocationState,
+    RecoveryCancellationContext, RevocationAcknowledgement, RevocationUpdateRequest,
+    SandboxRevocationUpdateError, SelectorRevocationState,
 };
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
