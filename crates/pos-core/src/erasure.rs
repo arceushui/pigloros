@@ -6576,7 +6576,6 @@ mod coverage_paths {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(on))]
     fn authorized_scope_calls_the_verified_state_permission_check() {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let timeline = TimelineId::new();
@@ -6604,7 +6603,6 @@ mod coverage_paths {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(on))]
     fn fork_admission_rejects_missing_predecessor_and_extraneous_request() {
         let parent = TimelineId::new();
         let child = TimelineId::new();
