@@ -931,6 +931,18 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         ),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    let mut root_child = prepared.child().clone();
+    root_child.fork_point = None;
+    assert_eq!(
+        pos_core::ErasureForkRecoveryV1::from_persisted(
+            operation,
+            prepared.binding_digest(),
+            prepared.successor_inventory().generation(),
+            root_child,
+            expected_result.receipt_digest(),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     assert_eq!(
         store.borrow_mut().commit_fork_admission(prepared.clone())?,
         pos_core::ErasureCasOutcomeV1::Applied
