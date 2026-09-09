@@ -1,6 +1,6 @@
 //! Single-owner execution boundary for erasure-protected store operations.
 
-use std::sync::Arc;
+use std::{cell::RefCell, sync::Arc};
 
 use pos_core::{
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
@@ -8,13 +8,24 @@ use pos_core::{
         AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
         PurgeOutcome, SeqRange,
     },
-    ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
-    ErasureForkPersistencePortV1, ErasureForkRecoveryV1, ErasureGate, ErasureHostErrorV1,
-    ErasureInventoryPersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
+    ConsentAppendPermit, CoreError, ErasureAcknowledgementProvenanceV1,
+    ErasureAdministrativeResolutionV1, ErasureAtomicFreezeResultV1,
+    ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1, ErasureCasEffectV1,
+    ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureCoordinatorPortV1,
+    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1,
+    ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureForkPersistencePortV1,
+    ErasureForkRecoveryV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureGate, ErasureHostErrorV1,
+    ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1, ErasurePersistencePortV1,
+    ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1,
+    ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1,
+    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
     ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
-    ErasureVerifiedInventoryV1, Event, EventDraft, EventId, Hash, KeyDestructionBeginOutcomeV1,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyRegistryStateV1, OwnTracksIngressInputV1,
-    PreparedErasureForkBatchV1, PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
+    ErasureVerifiedInventoryV1, ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId,
+    Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
+    Timeline, TimelineId,
 };
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
@@ -44,7 +55,10 @@ impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
 }
 
 trait ErasureHostStore:
-    pos_core::store::EventStore + ErasureInventoryPersistencePortV1 + ErasureForkPersistencePortV1
+    pos_core::store::EventStore
+    + ErasureInventoryPersistencePortV1
+    + ErasureForkPersistencePortV1
+    + ErasurePersistencePortV1
 {
 }
 
@@ -52,7 +66,352 @@ impl<T> ErasureHostStore for T where
     T: pos_core::store::EventStore
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1
+        + ErasurePersistencePortV1
 {
+}
+
+/// Replaceable host authority used by the erasure coordinator.
+///
+/// Implementations are Plugins at the runtime composition boundary: they
+/// authenticate Principal, capability, policy, trust, topology, quota, and
+/// external-destruction evidence, but they never receive or own the durable
+/// [`pos_core::store::EventStore`]. The execution host joins this authority
+/// with its one private adapter when it invokes the core state machine.
+pub trait ErasureCoordinatorAuthorityV1:
+    ErasureFreezeAuthorizationVerifierV1 + ErasureRecoveryAuthorizationVerifierV1 + Send + Sync
+{
+    /// Resolve one manifest revision against the authoritative Timeline/Fork topology.
+    fn verified_topology_observation(
+        &self,
+        request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1>;
+
+    /// Authenticate a newly submitted erasure request.
+    fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1>;
+
+    /// Authenticate an authorization or rejection decision.
+    fn admit_authorization(
+        &self,
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+        decision: ErasureAuthorizationDecisionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Authenticate a corrected request against its rejected predecessor.
+    fn admit_corrected_submission(
+        &self,
+        request: &ErasureRequestV1,
+        correction: &ErasureCorrectionProvenanceV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Resolve and authenticate one atomic access-freeze admission.
+    fn admit_atomic_freeze(
+        &self,
+        request: ErasureReferenceV1,
+        requested: &ErasureStateTransitionV1,
+    ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1>;
+
+    /// Authenticate one future-Fork scope extension.
+    fn admit_scope_extension(
+        &self,
+        extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Authenticate a complete future-Fork admission.
+    fn admit_fork_scope_extension(
+        &self,
+        extension: &ErasureScopeExtensionV1,
+        input: &ErasureForkAdmissionInputV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Authenticate an administrative recovery resolution.
+    fn admit_administrative_resolution(
+        &self,
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Deliver idempotent destruction commands through the selected Plugin.
+    fn dispatch_destruction(
+        &self,
+        request: ErasureReferenceV1,
+        commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Authenticate and reserve quota for one destruction attempt.
+    fn admit_attempt(
+        &self,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1>;
+
+    /// Authenticate an owner acknowledgement and its evidence.
+    fn admit_acknowledgement(
+        &self,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Authenticate receipt policy, trust, and signature commitments.
+    fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1>;
+}
+
+struct HostedCoordinatorPortV1<'host> {
+    store: RefCell<&'host mut dyn ErasureHostStore>,
+    authority: &'host dyn ErasureCoordinatorAuthorityV1,
+}
+
+impl<'host> HostedCoordinatorPortV1<'host> {
+    fn new(
+        store: &'host mut dyn ErasureHostStore,
+        authority: &'host dyn ErasureCoordinatorAuthorityV1,
+    ) -> Self {
+        Self {
+            store: RefCell::new(store),
+            authority,
+        }
+    }
+}
+
+impl ErasureStateResolverV1 for HostedCoordinatorPortV1<'_> {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        self.store.borrow().resolve_state(digest)
+    }
+}
+
+impl ErasurePersistencePortV1 for HostedCoordinatorPortV1<'_> {
+    fn read_manifest(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<StoredErasureManifestV1>, ErasureErrorV1> {
+        self.store.borrow().read_manifest(request)
+    }
+
+    fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+        self.store.borrow().read_object(reference)
+    }
+
+    fn read_effect(
+        &self,
+        manifest: ErasureReferenceV1,
+    ) -> Result<ErasureCasEffectV1, ErasureErrorV1> {
+        self.store.borrow().read_effect(manifest)
+    }
+
+    fn effect_manifest(
+        &self,
+        subject: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().effect_manifest(subject)
+    }
+
+    fn attempt_page_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().attempt_page_ref(request, ordinal)
+    }
+
+    fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        self.store.borrow().attempt_index_count(request)
+    }
+
+    fn scope_node_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().scope_node_ref(request, ordinal)
+    }
+
+    fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        self.store.borrow().scope_index_count(request)
+    }
+
+    fn administrative_resolution_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store
+            .borrow()
+            .administrative_resolution_ref(request, ordinal)
+    }
+
+    fn administrative_resolution_index_count(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<u64, ErasureErrorV1> {
+        self.store
+            .borrow()
+            .administrative_resolution_index_count(request)
+    }
+
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().recovery_error_refs(request)
+    }
+
+    fn append_recovery_error(
+        &mut self,
+        object: PreparedErasureRecoveryErrorV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.store.get_mut().append_recovery_error(object)
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        mutation: PreparedErasureCasV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.store.get_mut().compare_and_swap(mutation)
+    }
+}
+
+impl ErasureFreezeAuthorizationVerifierV1 for HostedCoordinatorPortV1<'_> {
+    fn validate_freeze_authorization(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority
+            .validate_freeze_authorization(admission, authorization)
+    }
+}
+
+impl ErasureRecoveryAuthorizationVerifierV1 for HostedCoordinatorPortV1<'_> {
+    fn validate_scope_extension(
+        &self,
+        extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority.validate_scope_extension(extension)
+    }
+
+    fn validate_administrative_resolution(
+        &self,
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority
+            .validate_administrative_resolution(resolution)
+    }
+}
+
+impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
+    fn complete_erasure_inventory_observation(
+        &self,
+        maximum_requests: usize,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
+        let snapshot = self
+            .store
+            .borrow_mut()
+            .complete_erasure_inventory_snapshot(maximum_requests)?;
+        let request_topology = snapshot
+            .request_heads()
+            .iter()
+            .map(|(request, manifest)| {
+                self.authority
+                    .verified_topology_observation(*request, *manifest)?
+                    .map(|topology| (*request, topology))
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ErasureInventoryObservationV1::new(
+            snapshot.request_heads().to_vec(),
+            snapshot.topology().to_vec(),
+            request_topology,
+        ))
+    }
+
+    fn verified_topology_observation(
+        &self,
+        request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        self.authority
+            .verified_topology_observation(request, manifest_digest)
+    }
+
+    fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        self.authority.authenticate(request)
+    }
+
+    fn admit_authorization(
+        &self,
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+        decision: ErasureAuthorizationDecisionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority
+            .admit_authorization(request, provenance, decision)
+    }
+
+    fn admit_corrected_submission(
+        &self,
+        request: &ErasureRequestV1,
+        correction: &ErasureCorrectionProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority
+            .admit_corrected_submission(request, correction)
+    }
+
+    fn admit_atomic_freeze(
+        &self,
+        request: ErasureReferenceV1,
+        requested: &ErasureStateTransitionV1,
+    ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+        self.authority.admit_atomic_freeze(request, requested)
+    }
+
+    fn admit_scope_extension(
+        &self,
+        extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority.admit_scope_extension(extension)
+    }
+
+    fn admit_fork_scope_extension(
+        &self,
+        extension: &ErasureScopeExtensionV1,
+        input: &ErasureForkAdmissionInputV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority.admit_fork_scope_extension(extension, input)
+    }
+
+    fn admit_administrative_resolution(
+        &self,
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority.admit_administrative_resolution(resolution)
+    }
+
+    fn dispatch_destruction(
+        &self,
+        request: ErasureReferenceV1,
+        commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority.dispatch_destruction(request, commands)
+    }
+
+    fn admit_attempt(
+        &self,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+        self.authority.admit_attempt(admission)
+    }
+
+    fn admit_acknowledgement(
+        &self,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.authority.admit_acknowledgement(acknowledgement)
+    }
+
+    fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        self.authority.admit_receipt(input)
+    }
 }
 
 trait ErasureGatewayHostStore:
@@ -121,6 +480,8 @@ fn open_gateway_host_store(
 pub struct ErasureExecutionHostV1 {
     store: OwnedErasureStoreV1,
     gate: Arc<ErasureContainmentGateV1>,
+    authority: Option<Arc<dyn ErasureCoordinatorAuthorityV1>>,
+    coordinator: Option<ErasureReferenceV1>,
     inventory: Option<ErasureVerifiedInventoryV1>,
     state: HostStateV1,
     #[cfg(test)]
@@ -164,6 +525,8 @@ impl ErasureExecutionHostV1 {
         Ok(Self {
             store,
             gate,
+            authority: None,
+            coordinator: None,
             inventory: None,
             state: HostStateV1::Closed,
             #[cfg(test)]
@@ -216,6 +579,53 @@ impl ErasureExecutionHostV1 {
         Self::recover_from_verified_query(store, query, maximum_requests)
     }
 
+    /// Open and recover an exclusively owned store with one replaceable
+    /// coordinator authority Plugin.
+    ///
+    /// Unlike [`Self::open_from_verified_query`], this constructor creates the
+    /// core coordinator over the exact adapter retained by this host. It can
+    /// therefore recover a non-empty durable request set without accepting an
+    /// inventory assembled by a different composition root.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, authority, topology, or recovery error before
+    /// any protected sender is issued.
+    pub fn open_with_coordinator_authority(
+        config: StoreConfig,
+        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+        coordinator: ErasureReferenceV1,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        let mut host = Self::new_closed(store)?;
+        host.authority = Some(authority);
+        host.coordinator = Some(coordinator);
+        host.install_inventory_from_coordinator(maximum_requests)?;
+        Ok(host)
+    }
+
+    /// Open an existing read-only `SQLite` store with one replaceable
+    /// coordinator authority Plugin.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, authority, topology, or recovery error before
+    /// any protected sender is issued.
+    pub fn open_read_only_with_coordinator_authority(
+        path: &str,
+        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+        coordinator: ErasureReferenceV1,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
+            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        let mut host = Self::new_closed(store)?;
+        host.authority = Some(authority);
+        host.coordinator = Some(coordinator);
+        host.install_inventory_from_coordinator(maximum_requests)?;
+        Ok(host)
+    }
+
     /// Open and recover a Gateway-capable exclusively owned store only when
     /// its durable erasure inventory is verified empty.
     ///
@@ -243,6 +653,27 @@ impl ErasureExecutionHostV1 {
         let store =
             open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         Self::recover_gateway_from_verified_query(store, query, maximum_requests)
+    }
+
+    /// Open and recover a Gateway-capable store with one replaceable
+    /// coordinator authority Plugin composed over the same owned adapter.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, authority, topology, or recovery error before
+    /// any protected sender is issued.
+    pub fn open_gateway_with_coordinator_authority(
+        config: StoreConfig,
+        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+        coordinator: ErasureReferenceV1,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store =
+            open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        let mut host = Self::new_gateway_closed(store)?;
+        host.authority = Some(authority);
+        host.coordinator = Some(coordinator);
+        host.install_inventory_from_coordinator(maximum_requests)?;
+        Ok(host)
     }
 
     /// Clone the host's read-only containment view for consumers sequenced by
@@ -293,6 +724,29 @@ impl ErasureExecutionHostV1 {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         self.publish_inventory(inventory, maximum_requests)
+    }
+
+    fn install_inventory_from_coordinator(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        let authority = self
+            .authority
+            .as_ref()
+            .cloned()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let coordinator = self
+            .coordinator
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let inventory = {
+            let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
+            let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
+            state_machine
+                .verified_inventory(maximum_requests)
+                .map_err(map_erasure_error)?
+        };
+        let mut query = OneShotInventoryV1(Some(inventory));
+        self.install_inventory(&mut query, maximum_requests)
     }
 
     fn verify_current_inventory(
