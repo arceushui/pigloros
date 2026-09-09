@@ -22,6 +22,7 @@ pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
 pub mod profile;
+pub mod root_selector;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;

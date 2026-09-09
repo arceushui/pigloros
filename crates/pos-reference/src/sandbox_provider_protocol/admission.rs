@@ -506,13 +506,40 @@ impl RootSelectorAdmission {
         result_bytes: &[u8],
         audit_records: &[Vec<u8>],
     ) -> Result<AuthenticatedSandboxExecution, SandboxAdmissionError> {
-        let grant = self.provider.authenticate_grant(
+        let grant = self.authenticate_grant(request, grant_bytes)?;
+        self.authenticate_after_grant(request, grant, receipt_bytes, result_bytes, audit_records)
+    }
+
+    /// Authenticate AGR1 before consuming any post-admission evidence.
+    ///
+    /// # Errors
+    /// Rejects a forged grant or any mismatch with the admitted selector session.
+    pub fn authenticate_grant(
+        &self,
+        request: &SandboxExecuteRequest,
+        grant_bytes: &[u8],
+    ) -> Result<AdmissionGrant, SandboxAdmissionError> {
+        self.provider.authenticate_grant(
             grant_bytes,
             request,
             &self.image,
             &self.launch,
             &self.grant_expectations,
-        )?;
+        )
+    }
+
+    /// Authenticate SPR1, SPY1, and the complete SAU1 chain after AGR1.
+    ///
+    /// # Errors
+    /// Rejects malformed, forged, substituted, incomplete, or inconsistent evidence.
+    pub fn authenticate_after_grant(
+        &self,
+        request: &SandboxExecuteRequest,
+        grant: AdmissionGrant,
+        receipt_bytes: &[u8],
+        result_bytes: &[u8],
+        audit_records: &[Vec<u8>],
+    ) -> Result<AuthenticatedSandboxExecution, SandboxAdmissionError> {
         let receipt = self.provider.authenticate_receipt(receipt_bytes, &grant)?;
         let result =
             self.provider
@@ -526,6 +553,59 @@ impl RootSelectorAdmission {
             result,
             audit,
         })
+    }
+
+    /// Authenticate a signed provider terminal emitted before AGR1 admission.
+    ///
+    /// # Errors
+    /// Rejects post-admission outcomes, substituted identities, or a forged runtime signature.
+    pub fn authenticate_pre_admission_result(
+        &self,
+        request: &SandboxExecuteRequest,
+        result_bytes: &[u8],
+    ) -> Result<SandboxProviderResult, SandboxAdmissionError> {
+        let result = SandboxProviderResult::from_canonical_cbor(result_bytes)?;
+        if result.runtime_attestation_key_id != self.provider.manifest.runtime_attestation_key_id
+            || result.request_id != request.request.request_id
+            || result.attempt_id != request.attempt_id
+            || !matches!(
+                result.outcome,
+                SandboxTerminalOutcome::UnavailableBeforeAdmission
+                    | SandboxTerminalOutcome::Rejected
+            )
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        result.verify_signature(&self.provider.runtime_key)?;
+        Ok(result)
+    }
+
+    /// Authenticate a signed provider error against the selected execution request.
+    ///
+    /// # Errors
+    /// Rejects a foreign runtime key, forged signature, or any present substituted identity.
+    pub fn authenticate_provider_error(
+        &self,
+        request: &SandboxExecuteRequest,
+        error_bytes: &[u8],
+    ) -> Result<super::SandboxProviderError, SandboxAdmissionError> {
+        let error = super::SandboxProviderError::from_canonical_cbor(error_bytes)?;
+        if error.runtime_attestation_key_id != self.provider.manifest.runtime_attestation_key_id
+            || error.operation.is_some_and(|operation| operation != 1)
+            || error
+                .request_id
+                .is_some_and(|request_id| request_id != request.request.request_id)
+            || error
+                .request_digest
+                .is_some_and(|digest| digest != request.request_digest)
+            || error
+                .attempt_id
+                .is_some_and(|attempt_id| attempt_id != request.attempt_id)
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        error.verify_signature(&self.provider.runtime_key)?;
+        Ok(error)
     }
 
     /// Exact launch policy retained by this admitted selector session.

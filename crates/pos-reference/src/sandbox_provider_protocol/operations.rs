@@ -1,9 +1,9 @@
 use ciborium::value::Value;
 
 use super::codec::{
-    array, bool_value, bytes_value, decode_document, digest32, id16, key_id, optional_digest,
-    optional_id16, optional_text, require_signature, self_digested, signed, text_value, uint,
-    uint_value, valid_key_id, validate_magic, verify_digest, verify_signature,
+    array, bool_value, bytes_value, decode_document, digest32, encode, id16, key_id,
+    optional_digest, optional_id16, optional_text, require_signature, self_digested, signed,
+    text_value, uint, uint_value, valid_key_id, validate_magic, verify_digest, verify_signature,
     MAX_SAFE_DETAIL_BYTES,
 };
 use super::SandboxProviderProtocolError;
@@ -26,6 +26,15 @@ impl SandboxProviderOperation {
             .and_then(|index| Self::VALUES.get(index))
             .copied()
             .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+    }
+
+    const fn code(self) -> u64 {
+        match self {
+            Self::Describe => 0,
+            Self::Execute => 1,
+            Self::Cancel => 2,
+            Self::Reconcile => 3,
+        }
     }
 }
 
@@ -63,6 +72,20 @@ impl SandboxLocalErrorCode {
             .copied()
             .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
     }
+
+    const fn code(self) -> u64 {
+        match self {
+            Self::ProviderUnavailable => 0,
+            Self::ProviderIdentityInvalid => 1,
+            Self::PolicyUnavailable => 2,
+            Self::ControlChannelUnavailable => 3,
+            Self::InvalidSelectorRequest => 4,
+            Self::RequestAuthorityMismatch => 5,
+            Self::PayloadLimitExceeded => 6,
+            Self::ProviderTerminalUnavailable => 7,
+            Self::ProviderEvidenceInvalid => 8,
+        }
+    }
 }
 
 /// Closed point in selector processing at which a local failure occurred.
@@ -80,6 +103,14 @@ impl SandboxLocalErrorPhase {
             1 => Ok(Self::AfterSpx1BeforeAdmission),
             2 => Ok(Self::AfterAdmission),
             _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
+        }
+    }
+
+    const fn code(self) -> u64 {
+        match self {
+            Self::BeforeSpx1 => 0,
+            Self::AfterSpx1BeforeAdmission => 1,
+            Self::AfterAdmission => 2,
         }
     }
 }
@@ -108,6 +139,28 @@ impl SandboxLocalError {
         let error = decode_local_error(fields)?;
         validate_local_error_shape(&error)?;
         Ok(error)
+    }
+
+    /// Encode this validated selector-local failure in preferred deterministic CBOR.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error when the phase/code/nullability algebra is invalid.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        validate_local_error_shape(self)?;
+        encode(&Value::Array(vec![
+            text_value("SLE1"),
+            uint_value(1),
+            uint_value(self.phase.code()),
+            self.operation
+                .map_or(Value::Null, |operation| uint_value(operation.code())),
+            self.request_id.as_ref().map_or(Value::Null, bytes_value),
+            self.attempt_id.as_ref().map_or(Value::Null, bytes_value),
+            self.agr1_digest.as_ref().map_or(Value::Null, bytes_value),
+            uint_value(self.code.code()),
+            self.safe_detail
+                .as_ref()
+                .map_or(Value::Null, |detail| text_value(detail)),
+        ]))
     }
 }
 
@@ -224,7 +277,7 @@ pub(super) fn validate_request_authority(
     }
 }
 
-fn request_authority_value(value: &RequestAuthority) -> Value {
+pub(super) fn request_authority_value(value: &RequestAuthority) -> Value {
     Value::Array(vec![
         bytes_value(&value.request_id),
         bytes_value(&value.apt1_digest),

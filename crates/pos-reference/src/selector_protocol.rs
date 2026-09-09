@@ -2,7 +2,7 @@
 
 use ciborium::value::Value;
 
-use crate::adapter_transport::{read_observation, write_attempt};
+use crate::adapter_transport::{read_attempt, read_observation, write_attempt};
 use crate::evaluator::{
     AdapterError, CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult,
 };
@@ -17,6 +17,7 @@ use crate::sandbox_provider_protocol::{
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
+const SANDBOX_PAYLOAD_LIMIT: u64 = 128 * 1024 * 1024;
 const INPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxInputBytes.v1\0";
 const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
@@ -30,10 +31,33 @@ pub(crate) struct EncodedSelectorRequest {
     pub(crate) digest: [u8; 32],
 }
 
+pub(crate) struct DecodedSelectorRequest {
+    pub(crate) evaluation: EvaluationRequest,
+    pub(crate) attempt: CaseAttempt,
+    pub(crate) ordinal: u16,
+    pub(crate) encoded: EncodedSelectorRequest,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct DecodedSelectorReply {
     pub(crate) observation: Result<SubjectObservation, AdapterError>,
     pub(crate) provenance: Option<[u8; 32]>,
+}
+
+pub(crate) enum AuthenticatedSelectorTerminal<'a> {
+    ProviderResult {
+        result: &'a [u8],
+        grant: Option<&'a [u8]>,
+        receipt: Option<&'a [u8]>,
+        audit: &'a [Vec<u8>],
+    },
+    ProviderError(&'a [u8]),
+}
+
+pub(crate) struct AuthenticatedSelectorReply<'a> {
+    pub(crate) execute_request: &'a [u8],
+    pub(crate) terminal: AuthenticatedSelectorTerminal<'a>,
+    pub(crate) output_stream: Option<&'a [u8]>,
 }
 
 pub(crate) fn encode_request(
@@ -42,8 +66,14 @@ pub(crate) fn encode_request(
     attempt: &CaseAttempt,
     ordinal: u16,
 ) -> Result<EncodedSelectorRequest, AdapterError> {
+    let mut sandbox_attempt = attempt.clone();
+    sandbox_attempt.transport_caps.max_attempt_bytes = sandbox_attempt
+        .transport_caps
+        .max_attempt_bytes
+        .min(SANDBOX_PAYLOAD_LIMIT);
     let mut attempt_stream = Vec::new();
-    write_attempt(&mut attempt_stream, attempt).map_err(|_| AdapterError::ProtocolFailure)?;
+    write_attempt(&mut attempt_stream, &sandbox_attempt)
+        .map_err(|_| AdapterError::ProtocolFailure)?;
     let provider_request_id = derived_id(request.request_id, ordinal);
     let attempt_id = derived_id(request.request_id, ordinal ^ 0x8000);
     let input_digest = domain_digest(INPUT_DOMAIN, &attempt_stream);
@@ -72,6 +102,67 @@ pub(crate) fn encode_request(
     })
 }
 
+pub(crate) fn decode_request(
+    control: &[u8],
+    attempt_stream: &[u8],
+) -> Result<DecodedSelectorRequest, AdapterError> {
+    if attempt_stream.len() as u64 > SANDBOX_PAYLOAD_LIMIT {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
+        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let wrapper = array(&value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
+    let fields = array(&wrapper[0], 6).map_err(|_| AdapterError::ProtocolFailure)?;
+    if text(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != "SLX1"
+        || uint(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)? != 1
+    {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    let provider_request_id =
+        fixed_bytes::<16>(&fields[2]).map_err(|_| AdapterError::ProtocolFailure)?;
+    let attempt_id = fixed_bytes::<16>(&fields[3]).map_err(|_| AdapterError::ProtocolFailure)?;
+    let request_bytes = bytes(&fields[4])?;
+    let evaluation = EvaluationRequest::from_canonical_cbor(request_bytes)
+        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let ordinal = u16::from_be_bytes(
+        provider_request_id[14..]
+            .try_into()
+            .map_err(|_| AdapterError::ProtocolFailure)?,
+    );
+    if provider_request_id != derived_id(evaluation.request_id, ordinal)
+        || attempt_id != derived_id(evaluation.request_id, ordinal ^ 0x8000)
+    {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    let descriptor = array(&fields[5], 2).map_err(|_| AdapterError::ProtocolFailure)?;
+    if uint(&descriptor[0]).map_err(|_| AdapterError::ProtocolFailure)?
+        != attempt_stream.len() as u64
+        || fixed_bytes::<32>(&descriptor[1]).map_err(|_| AdapterError::ProtocolFailure)?
+            != domain_digest(INPUT_DOMAIN, attempt_stream)
+    {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    let unsigned =
+        encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
+    let digest = fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?;
+    if digest != domain_digest(SLX1_DOMAIN, &unsigned) {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    let attempt = read_attempt(attempt_stream).map_err(|_| AdapterError::ProtocolFailure)?;
+    Ok(DecodedSelectorRequest {
+        evaluation,
+        attempt,
+        ordinal,
+        encoded: EncodedSelectorRequest {
+            control: control.to_vec(),
+            attempt_stream: attempt_stream.to_vec(),
+            provider_request_id,
+            attempt_id,
+            digest,
+        },
+    })
+}
+
 pub(crate) fn decode_reply(
     control: &[u8],
     trailing: &[u8],
@@ -85,6 +176,58 @@ pub(crate) fn decode_reply(
         return decode_local_error(control, trailing);
     }
     decode_selector_reply(&value, trailing, request, evr1_digest, output_limit)
+}
+
+pub(crate) fn encode_authenticated_reply(
+    request: &EncodedSelectorRequest,
+    reply: AuthenticatedSelectorReply<'_>,
+) -> Result<(Vec<u8>, Vec<u8>), AdapterError> {
+    let (terminal_kind, terminal, grant, receipt, audit) = match reply.terminal {
+        AuthenticatedSelectorTerminal::ProviderResult {
+            result,
+            grant,
+            receipt,
+            audit,
+        } => (
+            0_u64,
+            result,
+            grant.map_or(Value::Null, |bytes| Value::Bytes(bytes.to_vec())),
+            receipt.map_or(Value::Null, |bytes| Value::Bytes(bytes.to_vec())),
+            audit
+                .iter()
+                .map(|record| Value::Bytes(record.clone()))
+                .collect::<Vec<_>>(),
+        ),
+        AuthenticatedSelectorTerminal::ProviderError(error) => {
+            (1_u64, error, Value::Null, Value::Null, Vec::new())
+        }
+    };
+    let output = reply.output_stream.map_or(Value::Null, |bytes| {
+        descriptor(bytes, domain_digest(OUTPUT_DOMAIN, bytes))
+    });
+    let unsigned = Value::Array(vec![
+        Value::Text("SLY1".to_owned()),
+        integer(1),
+        Value::Bytes(request.provider_request_id.to_vec()),
+        Value::Bytes(request.attempt_id.to_vec()),
+        Value::Bytes(request.digest.to_vec()),
+        Value::Bytes(reply.execute_request.to_vec()),
+        integer(terminal_kind),
+        Value::Bytes(terminal.to_vec()),
+        grant,
+        receipt,
+        Value::Array(audit),
+        output,
+    ]);
+    let unsigned_bytes =
+        encode_with_limit(&unsigned, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
+    let digest = domain_digest(SLY1_DOMAIN, &unsigned_bytes);
+    let control = encode_with_limit(
+        &Value::Array(vec![unsigned, Value::Bytes(digest.to_vec())]),
+        CONTROL_LIMIT,
+    )
+    .map_err(|_| AdapterError::ProtocolFailure)?;
+    Ok((control, reply.output_stream.unwrap_or_default().to_vec()))
 }
 
 fn decode_local_error(
@@ -385,7 +528,7 @@ fn is_magic(value: &Value, magic: &str) -> bool {
 mod tests {
     use std::collections::HashSet;
 
-    use crate::adapter_transport::write_observation;
+    use crate::adapter_transport::{read_attempt, write_observation};
     use crate::evaluator::{AttemptArtifact, AttemptTransportCaps};
     use crate::evaluator_protocol::{ImplementationIdentity, OutputCapability, SubjectAdapterKind};
     use crate::profile::DeterministicBudget;
@@ -470,18 +613,47 @@ mod tests {
 
     #[test]
     fn slx1_binds_exact_request_attempt_and_stream() -> Result<(), AdapterError> {
-        let encoded = encode_request(&request(), b"evr1", &attempt(), 7)?;
+        let mut expected_request = request();
+        expected_request.output_capability.capability_digest = expected_request
+            .expected_output_capability_digest()
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        expected_request.request_digest = expected_request
+            .digest()
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let request_bytes = expected_request
+            .to_canonical_cbor()
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let encoded = encode_request(&expected_request, &request_bytes, &attempt(), 7)?;
         assert_eq!(&encoded.provider_request_id[14..], &7_u16.to_be_bytes());
         assert_eq!(&encoded.attempt_id[14..], &(7_u16 ^ 0x8000).to_be_bytes());
         let value = decode_canonical_with_limit(&encoded.control, CONTROL_LIMIT)
             .map_err(|_| AdapterError::ProtocolFailure)?;
         let wrapper = array(&value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
         let fields = array(&wrapper[0], 6).map_err(|_| AdapterError::ProtocolFailure)?;
-        assert_eq!(bytes(&fields[4])?, b"evr1");
+        assert_eq!(bytes(&fields[4])?, request_bytes);
         assert!(!encoded.attempt_stream.is_empty());
         assert_eq!(
             fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?,
             encoded.digest
+        );
+        let decoded = decode_request(&encoded.control, &encoded.attempt_stream)?;
+        assert_eq!(decoded.evaluation, expected_request);
+        assert_eq!(decoded.attempt, attempt());
+        assert_eq!(decoded.ordinal, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn slx1_applies_the_sandbox_aggregate_ceiling_before_materialization(
+    ) -> Result<(), AdapterError> {
+        let mut unbounded = attempt();
+        unbounded.transport_caps.max_attempt_bytes = 1024 * 1024 * 1024;
+        let encoded = encode_request(&request(), b"evr1", &unbounded, 7)?;
+        let decoded = read_attempt(encoded.attempt_stream.as_slice())
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        assert_eq!(
+            decoded.transport_caps.max_attempt_bytes,
+            SANDBOX_PAYLOAD_LIMIT
         );
         Ok(())
     }

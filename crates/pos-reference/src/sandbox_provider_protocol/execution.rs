@@ -2,14 +2,16 @@ use ciborium::value::Value;
 
 use super::codec::{
     array, bounded_array, byte_string, bytes_value, decode_digest_list, decode_document,
-    decode_identifiers, decode_u8_list, digest32, digest_list_value, id16, identifier,
+    decode_identifiers, decode_u8_list, digest32, digest_list_value, encode, id16, identifier,
     invalid_digest_list, key_id, nonzero_optional, optional_bytes_value, optional_digest,
-    optional_digest_value, optional_id16, optional_text, optional_u8, require_signature,
-    self_digested, signed, text_value, uint, uint_value, valid_key_id, validate_identifier_order,
-    validate_magic, verify_digest, verify_digest_with_domain, verify_signature,
-    MAX_INPUT_BYTES_U64, MAX_LIST_ENTRIES, MAX_SAFE_DETAIL_BYTES,
+    optional_digest_value, optional_id16, optional_text, optional_u8, record_digest,
+    require_signature, self_digested, signed, text_value, uint, uint_value, valid_key_id,
+    validate_identifier_order, validate_magic, verify_digest, verify_digest_with_domain,
+    verify_signature, MAX_INPUT_BYTES_U64, MAX_LIST_ENTRIES, MAX_SAFE_DETAIL_BYTES,
 };
-use super::operations::{decode_request_authority, validate_request_authority, RequestAuthority};
+use super::operations::{
+    decode_request_authority, request_authority_value, validate_request_authority, RequestAuthority,
+};
 use super::SandboxProviderProtocolError;
 
 const PAYLOAD_CHUNK_BYTES: usize = 1024 * 1024;
@@ -274,6 +276,33 @@ pub struct SandboxExecuteRequest {
 }
 
 impl SandboxExecuteRequest {
+    /// Construct the exact SPX1 selected by a root-selector admission decision.
+    ///
+    /// # Errors
+    /// Rejects invalid, unordered, oversized, or inconsistent selector-owned fields.
+    pub fn for_selector(
+        request: RequestAuthority,
+        attempt_id: [u8; 16],
+        authority: ExecuteAuthority,
+        capability_ids: Vec<String>,
+        adapter_input: PayloadDescriptor,
+        network_plans: Vec<NetworkExchangePlan>,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        let mut value = Self {
+            request,
+            attempt_id,
+            authority,
+            capability_ids,
+            adapter_input,
+            network_plans,
+            request_digest: [0; 32],
+        };
+        let unsigned = value.unsigned_value();
+        value.request_digest = record_digest("SPX1", &Value::Array(unsigned.to_vec()))?;
+        value.validate(&value.unsigned_value())?;
+        Ok(value)
+    }
+
     /// Decode and fully validate exact canonical SPX1 bytes.
     ///
     /// # Errors
@@ -307,6 +336,57 @@ impl SandboxExecuteRequest {
         validate_identifier_order(&self.capability_ids)?;
         validate_network_plans(&self.network_plans)?;
         verify_digest("SPX1", unsigned, self.request_digest)
+    }
+
+    /// Encode this validated SPX1 in preferred deterministic CBOR.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error when the in-memory record is invalid.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        let unsigned = self.unsigned_value();
+        self.validate(&unsigned)?;
+        encode(&Value::Array(vec![
+            Value::Array(unsigned.to_vec()),
+            bytes_value(&self.request_digest),
+        ]))
+    }
+
+    fn unsigned_value(&self) -> [Value; 22] {
+        let authority = self.authority.digests();
+        [
+            text_value("SPX1"),
+            uint_value(1),
+            request_authority_value(&self.request),
+            bytes_value(&self.attempt_id),
+            bytes_value(&authority[0]),
+            bytes_value(&authority[1]),
+            bytes_value(&authority[2]),
+            bytes_value(&authority[3]),
+            bytes_value(&authority[4]),
+            bytes_value(&authority[5]),
+            bytes_value(&authority[6]),
+            bytes_value(&authority[7]),
+            bytes_value(&authority[8]),
+            bytes_value(&authority[9]),
+            bytes_value(&authority[10]),
+            bytes_value(&authority[11]),
+            bytes_value(&authority[12]),
+            bytes_value(&authority[13]),
+            bytes_value(&authority[14]),
+            Value::Array(
+                self.capability_ids
+                    .iter()
+                    .map(|id| text_value(id))
+                    .collect(),
+            ),
+            output_value(&self.adapter_input),
+            Value::Array(
+                self.network_plans
+                    .iter()
+                    .map(|plan| Value::Array(network_plan_value(plan).to_vec()))
+                    .collect(),
+            ),
+        ]
     }
 }
 
