@@ -3943,39 +3943,6 @@ pub trait ErasureForkPersistencePortV1 {
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1>;
 }
 
-/// `EventStore` adapter capability owned exclusively by the erasure execution host.
-///
-/// This marker joins protected Event operations with the complete-inventory
-/// snapshot port without exposing either raw capability to Gateway, Replay, or
-/// Plugin callers. `MemoryStore` and `SQLite` are the two production adapters at
-/// this seam.
-pub trait ErasureHostStoreV1:
-    crate::store::EventStore + ErasureInventoryPersistencePortV1 + ErasureForkPersistencePortV1
-{
-}
-
-impl<T> ErasureHostStoreV1 for T where
-    T: crate::store::EventStore + ErasureInventoryPersistencePortV1 + ErasureForkPersistencePortV1
-{
-}
-
-/// Optional Gateway ingress capabilities composed with the exclusive erasure host store.
-///
-/// This trait does not grant erasure publication authority. It only preserves
-/// the existing minimized geographic and `OwnTracks` adapter operations after
-/// the concrete store moves behind the runtime's host-owned composition boundary.
-pub trait ErasureGatewayHostStoreV1:
-    ErasureHostStoreV1 + crate::geo_admission::GeoLocationAdmissionStore + crate::OwnTracksIngressStore
-{
-}
-
-impl<T> ErasureGatewayHostStoreV1 for T where
-    T: ErasureHostStoreV1
-        + crate::geo_admission::GeoLocationAdmissionStore
-        + crate::OwnTracksIngressStore
-{
-}
-
 /// One adapter-snapshot observation of every erasure head and Timeline/Fork.
 ///
 /// This is untrusted recovery input, not runtime authority. Core checks every
