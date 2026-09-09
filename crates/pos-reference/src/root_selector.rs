@@ -484,59 +484,10 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 },
             ),
             RootSelectorProviderReply::BeforeAdmission { result } => {
-                if context
-                    .admission
-                    .authenticate_pre_admission_result(context.request, &result)
-                    .is_err()
-                {
-                    return Self::write_local_error(
-                        stream,
-                        context.decoded,
-                        SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
-                        SandboxLocalErrorCode::ProviderEvidenceInvalid,
-                        None,
-                    );
-                }
-                Self::write_authenticated_reply(
-                    stream,
-                    context.decoded,
-                    &AuthenticatedSelectorReply {
-                        execute_request: context.request_bytes,
-                        terminal: AuthenticatedSelectorTerminal::ProviderResult {
-                            result: &result,
-                            grant: None,
-                            receipt: None,
-                            audit: &[],
-                        },
-                        output: None,
-                    },
-                    None,
-                )
+                Self::write_pre_admission_result(stream, &context, &result)
             }
             RootSelectorProviderReply::Error { error } => {
-                if context
-                    .admission
-                    .authenticate_provider_error(context.request, &error)
-                    .is_err()
-                {
-                    return Self::write_local_error(
-                        stream,
-                        context.decoded,
-                        SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
-                        SandboxLocalErrorCode::ProviderEvidenceInvalid,
-                        None,
-                    );
-                }
-                Self::write_authenticated_reply(
-                    stream,
-                    context.decoded,
-                    &AuthenticatedSelectorReply {
-                        execute_request: context.request_bytes,
-                        terminal: AuthenticatedSelectorTerminal::ProviderError(&error),
-                        output: None,
-                    },
-                    None,
-                )
+                Self::write_pre_admission_error(stream, &context, &error)
             }
             RootSelectorProviderReply::Incomplete { agr1_digest } => Self::write_local_error(
                 stream,
@@ -561,6 +512,71 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 agr1_digest,
             ),
         }
+    }
+
+    fn write_pre_admission_result(
+        stream: &mut UnixStream,
+        context: &ProviderResponseContext<'_>,
+        result: &[u8],
+    ) -> Result<(), RootSelectorServiceError> {
+        if context
+            .admission
+            .authenticate_pre_admission_result(context.request, result)
+            .is_err()
+        {
+            return Self::write_local_error(
+                stream,
+                context.decoded,
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                None,
+            );
+        }
+        Self::write_authenticated_reply(
+            stream,
+            context.decoded,
+            &AuthenticatedSelectorReply {
+                execute_request: context.request_bytes,
+                terminal: AuthenticatedSelectorTerminal::ProviderResult {
+                    result,
+                    grant: None,
+                    receipt: None,
+                    audit: &[],
+                },
+                output: None,
+            },
+            None,
+        )
+    }
+
+    fn write_pre_admission_error(
+        stream: &mut UnixStream,
+        context: &ProviderResponseContext<'_>,
+        error: &[u8],
+    ) -> Result<(), RootSelectorServiceError> {
+        if context
+            .admission
+            .authenticate_provider_error(context.request, error)
+            .is_err()
+        {
+            return Self::write_local_error(
+                stream,
+                context.decoded,
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                None,
+            );
+        }
+        Self::write_authenticated_reply(
+            stream,
+            context.decoded,
+            &AuthenticatedSelectorReply {
+                execute_request: context.request_bytes,
+                terminal: AuthenticatedSelectorTerminal::ProviderError(error),
+                output: None,
+            },
+            None,
+        )
     }
 
     fn write_admitted_reply(
