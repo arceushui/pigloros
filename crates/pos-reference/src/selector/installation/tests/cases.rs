@@ -109,6 +109,40 @@ fn installed_authority_reconstructs_the_signed_selected_case() -> CaseTestResult
 }
 
 #[test]
+fn installed_case_rejects_retained_archive_and_policy_length_changes() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let request = corpus_request(&corpus)?;
+    for code in [14, 15] {
+        for grow in [false, true] {
+            let (fixture, authority) =
+                install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
+            let object = if code == 14 {
+                &corpus.archive
+            } else {
+                &corpus.trust_policy
+            };
+            let kind = InstallationObjectKind::from_code(code)?;
+            let path = fixture
+                .directory
+                .path()
+                .join(kind.directory())
+                .join(digest_name(*blake3::hash(object).as_bytes()));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let mut changed = object.clone();
+            if grow {
+                changed.push(0);
+            } else {
+                changed.truncate(changed.len() / 2);
+            }
+            std::fs::write(&path, changed)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(kind.mode()))?;
+            assert!(authority.resolve_installed_case(&request, 0).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn installed_authority_rejects_missing_or_swapped_cfb1_and_tps1() -> CaseTestResult {
     let corpus = load_corpus("valid")?;
     let request = corpus_request(&corpus)?;
