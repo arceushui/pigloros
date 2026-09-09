@@ -68,12 +68,12 @@ impl TestAuthority {
                 timelines
                     .into_iter()
                     .map(|(timeline, child_scope)| {
-                        (
-                            timeline,
-                            (child_scope == reference(9))
-                                .then_some(scope.reference())
-                                .unwrap_or(child_scope),
-                        )
+                        let resolved_scope = if child_scope == reference(9) {
+                            scope.reference()
+                        } else {
+                            child_scope
+                        };
+                        (timeline, resolved_scope)
                     })
                     .collect(),
                 Vec::new(),

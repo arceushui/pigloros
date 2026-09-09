@@ -2128,6 +2128,102 @@ mod tests {
         }
     }
 
+    impl pos_core::ErasureStateResolverV1 for FaultStoreV1 {
+        fn resolve_state(
+            &self,
+            digest: ErasureReferenceV1,
+        ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
+            self.inner.resolve_state(digest)
+        }
+    }
+
+    impl pos_core::ErasurePersistencePortV1 for FaultStoreV1 {
+        fn read_manifest(
+            &self,
+            request: ErasureReferenceV1,
+        ) -> Result<Option<pos_core::StoredErasureManifestV1>, ErasureErrorV1> {
+            self.inner.read_manifest(request)
+        }
+
+        fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+            self.inner.read_object(reference)
+        }
+
+        fn read_effect(
+            &self,
+            manifest: ErasureReferenceV1,
+        ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+            self.inner.read_effect(manifest)
+        }
+
+        fn effect_manifest(
+            &self,
+            subject: ErasureReferenceV1,
+        ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+            self.inner.effect_manifest(subject)
+        }
+
+        fn attempt_page_ref(
+            &self,
+            request: ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+            self.inner.attempt_page_ref(request, ordinal)
+        }
+
+        fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+            self.inner.attempt_index_count(request)
+        }
+
+        fn scope_node_ref(
+            &self,
+            request: ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+            self.inner.scope_node_ref(request, ordinal)
+        }
+
+        fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+            self.inner.scope_index_count(request)
+        }
+
+        fn administrative_resolution_ref(
+            &self,
+            request: ErasureReferenceV1,
+            ordinal: u64,
+        ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+            self.inner.administrative_resolution_ref(request, ordinal)
+        }
+
+        fn administrative_resolution_index_count(
+            &self,
+            request: ErasureReferenceV1,
+        ) -> Result<u64, ErasureErrorV1> {
+            self.inner.administrative_resolution_index_count(request)
+        }
+
+        fn recovery_error_refs(
+            &self,
+            request: ErasureReferenceV1,
+        ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+            self.inner.recovery_error_refs(request)
+        }
+
+        fn append_recovery_error(
+            &mut self,
+            object: pos_core::PreparedErasureRecoveryErrorV1,
+        ) -> Result<(), ErasureErrorV1> {
+            self.inner.append_recovery_error(object)
+        }
+
+        fn compare_and_swap(
+            &mut self,
+            mutation: pos_core::PreparedErasureCasV1,
+        ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+            self.inner.compare_and_swap(mutation)
+        }
+    }
+
     fn fault_store(fault: FaultModeV1) -> FaultStoreV1 {
         FaultStoreV1 {
             inner: MemoryStore::new().without_erasure_gate(),
