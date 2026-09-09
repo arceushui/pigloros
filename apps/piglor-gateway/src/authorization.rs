@@ -536,6 +536,20 @@ impl GatewayAuthorization {
     /// Retain one accepted action's minimized authorization audit.
     pub(crate) async fn record_audit(&self, audit: GatewayAuthorizationAudit) {
         let mut audits = self.audits.lock().await;
+        Self::retain_audit(&mut audits, audit);
+    }
+
+    /// Retain an accepted action audit from the dedicated synchronous host
+    /// command thread before that command releases its result.
+    pub(crate) fn record_audit_blocking(&self, audit: GatewayAuthorizationAudit) {
+        let mut audits = self.audits.blocking_lock();
+        Self::retain_audit(&mut audits, audit);
+    }
+
+    fn retain_audit(
+        audits: &mut VecDeque<GatewayAuthorizationAudit>,
+        audit: GatewayAuthorizationAudit,
+    ) {
         if audits.len() >= MAX_AUTHORIZATION_AUDITS {
             audits.pop_front();
         }

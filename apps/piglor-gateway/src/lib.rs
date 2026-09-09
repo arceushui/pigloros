@@ -2126,7 +2126,7 @@ impl Gateway {
             Ok(decision) => decision,
             Err(error) => return Err(error),
         };
-        let (event, decision) = match self
+        let (event, _decision) = match self
             .store
             .submit_action(
                 timeline,
@@ -2134,6 +2134,7 @@ impl Gateway {
                 proposal,
                 Arc::clone(&authorization),
                 decision,
+                self.bus.clone(),
                 self.limits.max_events_per_timeline,
             )
             .await
@@ -2148,11 +2149,7 @@ impl Gateway {
             }
             Err(error) => return Err(error.into()),
         };
-        self.publish_event_notice(timeline, &event);
         drop(fence);
-        authorization
-            .record_audit(decision.audit().with_event_id(event.id))
-            .await;
         Ok(event)
     }
 
@@ -2273,7 +2270,7 @@ impl Gateway {
             Err(error) => return Err(error.into()),
         };
         let identity = ingress_identity(timeline, entity, ingress_id);
-        let (result, decision) = match self
+        let (result, _decision) = match self
             .store
             .submit_identified_action(
                 timeline,
@@ -2281,6 +2278,7 @@ impl Gateway {
                 proposal,
                 Arc::clone(&authorization),
                 decision,
+                self.bus.clone(),
                 identity,
                 self.limits.max_events_per_timeline,
             )
@@ -2296,13 +2294,7 @@ impl Gateway {
             }
             Err(error) => return Err(error.into()),
         };
-        if !result.duplicate {
-            self.publish_event_notice(timeline, &result.event);
-        }
         drop(fence);
-        authorization
-            .record_audit(decision.audit().with_event_id(result.event.id))
-            .await;
         Ok(result)
     }
 

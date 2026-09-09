@@ -7,7 +7,7 @@ use crate::{
     authorization::{
         GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
     },
-    IdentifiedAppend,
+    EventNotice, IdentifiedAppend,
 };
 use pos_core::{
     clock::WallTime,
@@ -38,7 +38,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 
 pub(crate) const QUEUE_CAPACITY: usize = 64;
 pub(crate) const RESERVED_WRITE_CAPACITY: usize = 8;
@@ -235,6 +235,7 @@ enum ActionCommand {
         proposal: ProposedAction,
         authorization: Arc<GatewayAuthorization>,
         decision: GatewayAuthorizationDecision,
+        bus: broadcast::Sender<EventNotice>,
         maximum: u64,
         reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
     },
@@ -244,6 +245,7 @@ enum ActionCommand {
         proposal: ProposedAction,
         authorization: Arc<GatewayAuthorization>,
         decision: GatewayAuthorizationDecision,
+        bus: broadcast::Sender<EventNotice>,
         identity: AppendIdentity,
         maximum: u64,
         reply: oneshot::Sender<
@@ -276,6 +278,7 @@ impl ActionCommand {
                 proposal,
                 authorization,
                 decision,
+                bus,
                 maximum,
                 reply,
             } => execute_submit_action_command(
@@ -286,6 +289,7 @@ impl ActionCommand {
                     proposal: &proposal,
                     authorization: authorization.as_ref(),
                     decision: &decision,
+                    bus: &bus,
                     maximum,
                 },
                 reply,
@@ -296,6 +300,7 @@ impl ActionCommand {
                 proposal,
                 authorization,
                 decision,
+                bus,
                 identity,
                 maximum,
                 reply,
@@ -307,6 +312,7 @@ impl ActionCommand {
                     proposal: &proposal,
                     authorization: authorization.as_ref(),
                     decision: &decision,
+                    bus: &bus,
                     maximum,
                 },
                 identity,
@@ -762,6 +768,7 @@ struct ActionCommandContext<'a> {
     proposal: &'a ProposedAction,
     authorization: &'a GatewayAuthorization,
     decision: &'a GatewayAuthorizationDecision,
+    bus: &'a broadcast::Sender<EventNotice>,
     maximum: u64,
 }
 
@@ -1470,6 +1477,7 @@ impl StoreExecutor {
         proposal: ProposedAction,
         authorization: Arc<GatewayAuthorization>,
         decision: GatewayAuthorizationDecision,
+        bus: broadcast::Sender<EventNotice>,
         maximum: u64,
     ) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
         let deadline = Instant::now() + self.command_deadline();
@@ -1482,6 +1490,7 @@ impl StoreExecutor {
                 proposal,
                 authorization,
                 decision,
+                bus,
                 maximum,
                 reply,
             })),
@@ -1500,6 +1509,7 @@ impl StoreExecutor {
         proposal: ProposedAction,
         authorization: Arc<GatewayAuthorization>,
         decision: GatewayAuthorizationDecision,
+        bus: broadcast::Sender<EventNotice>,
         identity: AppendIdentity,
         maximum: u64,
     ) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
@@ -1513,6 +1523,7 @@ impl StoreExecutor {
                 proposal,
                 authorization,
                 decision,
+                bus,
                 identity,
                 maximum,
                 reply,
@@ -2284,14 +2295,17 @@ fn execute_submit_action_command(
     context: &ActionCommandContext<'_>,
     reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
 ) {
-    let result = match &mut state.store {
-        ExecutorStore::Host(host) => execute_host_action(host, context),
+    match &mut state.store {
+        ExecutorStore::Host(host) => execute_host_action(host, context, reply),
         #[cfg(test)]
-        ExecutorStore::Generic(store) => execute_test_store_action(store.as_mut(), context),
+        ExecutorStore::Generic(store) => {
+            drop(reply.send(execute_test_store_action(store.as_mut(), context)));
+        }
         #[cfg(test)]
-        ExecutorStore::Gateway(store) => execute_test_store_action(store.event_store(), context),
-    };
-    drop(reply.send(result));
+        ExecutorStore::Gateway(store) => {
+            drop(reply.send(execute_test_store_action(store.event_store(), context)));
+        }
+    }
 }
 
 fn execute_submit_identified_action_command(
@@ -2302,30 +2316,39 @@ fn execute_submit_identified_action_command(
         Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
     >,
 ) {
-    let result = match &mut state.store {
-        ExecutorStore::Host(host) => execute_host_identified_action(host, context, identity),
+    match &mut state.store {
+        ExecutorStore::Host(host) => execute_host_identified_action(host, context, identity, reply),
         #[cfg(test)]
         ExecutorStore::Generic(store) => {
-            execute_test_store_identified_action(store.as_mut(), context, identity)
+            drop(reply.send(execute_test_store_identified_action(
+                store.as_mut(),
+                context,
+                identity,
+            )));
         }
         #[cfg(test)]
         ExecutorStore::Gateway(store) => {
-            execute_test_store_identified_action(store.event_store(), context, identity)
+            drop(reply.send(execute_test_store_identified_action(
+                store.event_store(),
+                context,
+                identity,
+            )));
         }
-    };
-    drop(reply.send(result));
+    }
 }
 
 fn execute_host_action(
     host: &mut ErasureExecutionHostV1,
     context: &ActionCommandContext<'_>,
-) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
-    host.command_sender()
+    reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
+) {
+    let mut reply = Some(reply);
+    let outcome = host
+        .command_sender()
         .map_err(host_action_error)
         .and_then(|mut sender| {
-            let mut result = None;
             let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
-                result = Some(prepare_and_append_action(
+                let result = prepare_and_append_action(
                     sender.timeline(context.timeline).map_err(host_action_error),
                     |draft| {
                         sender
@@ -2341,7 +2364,16 @@ fn execute_host_action(
                     context.proposal,
                     context.authorization,
                     context.decision,
-                ));
+                );
+                if let Ok((event, decision)) = &result {
+                    context
+                        .authorization
+                        .record_audit_blocking(decision.audit().with_event_id(event.id));
+                    publish_action_notice(context.bus, context.timeline, event);
+                }
+                if let Some(reply) = reply.take() {
+                    drop(reply.send(result));
+                }
             };
             sender
                 .with_protected_effect_fence(
@@ -2350,56 +2382,67 @@ fn execute_host_action(
                     &mut effect,
                 )
                 .map_err(host_action_error)
-                .and_then(|()| {
-                    result.unwrap_or_else(|| {
-                        Err(ActionCommandError::Executor(StoreExecutorError::Unhealthy))
-                    })
-                })
-        })
+        });
+    if let (Err(error), Some(reply)) = (outcome, reply) {
+        drop(reply.send(Err(error)));
+    }
 }
 
 fn execute_host_identified_action(
     host: &mut ErasureExecutionHostV1,
     context: &ActionCommandContext<'_>,
     identity: AppendIdentity,
-) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
-    host.command_sender()
+    reply: oneshot::Sender<
+        Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+    >,
+) {
+    let mut reply = Some(reply);
+    let outcome = host
+        .command_sender()
         .map_err(host_action_error)
         .and_then(|mut sender| {
-            let mut result = None;
             let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
-                result = Some(
-                    prepare_action(
-                        sender.timeline(context.timeline).map_err(host_action_error),
-                        context.timeline,
-                        context.registry,
-                        context.proposal,
-                        context.authorization,
-                        context.decision,
-                    )
-                    .and_then(|(decision, draft)| {
-                        sender
-                            .append_intent_or_duplicate_bounded(
-                                context.timeline,
-                                identity,
-                                AppendIntent::new(&draft),
-                                context.maximum,
+                let result = prepare_action(
+                    sender.timeline(context.timeline).map_err(host_action_error),
+                    context.timeline,
+                    context.registry,
+                    context.proposal,
+                    context.authorization,
+                    context.decision,
+                )
+                .and_then(|(decision, draft)| {
+                    sender
+                        .append_intent_or_duplicate_bounded(
+                            context.timeline,
+                            identity,
+                            AppendIntent::new(&draft),
+                            context.maximum,
+                        )
+                        .map_err(host_action_error)
+                        .and_then(|outcome| outcome.ok_or_else(event_limit_reached))
+                        .and_then(|outcome| {
+                            resolve_identified_outcome(
+                                outcome,
+                                |event| {
+                                    sender
+                                        .event_by_id(context.timeline, event)
+                                        .map_err(host_action_error)
+                                },
+                                decision,
                             )
-                            .map_err(host_action_error)
-                            .and_then(|outcome| outcome.ok_or_else(event_limit_reached))
-                            .and_then(|outcome| {
-                                resolve_identified_outcome(
-                                    outcome,
-                                    |event| {
-                                        sender
-                                            .event_by_id(context.timeline, event)
-                                            .map_err(host_action_error)
-                                    },
-                                    decision,
-                                )
-                            })
-                    }),
-                );
+                        })
+                });
+                if let Ok((result, decision)) = &result {
+                    context
+                        .authorization
+                        .record_audit_blocking(decision.audit().with_event_id(result.event.id));
+                    if !result.duplicate {
+                        publish_action_notice(context.bus, context.timeline, &result.event);
+                    }
+                }
+                if let Some(reply) = reply.take() {
+                    drop(reply.send(result));
+                }
             };
             sender
                 .with_protected_effect_fence(
@@ -2408,12 +2451,24 @@ fn execute_host_identified_action(
                     &mut effect,
                 )
                 .map_err(host_action_error)
-                .and_then(|()| {
-                    result.unwrap_or_else(|| {
-                        Err(ActionCommandError::Executor(StoreExecutorError::Unhealthy))
-                    })
-                })
-        })
+        });
+    if let (Err(error), Some(reply)) = (outcome, reply) {
+        drop(reply.send(Err(error)));
+    }
+}
+
+fn publish_action_notice(
+    bus: &broadcast::Sender<EventNotice>,
+    timeline: TimelineId,
+    event: &Event,
+) {
+    drop(bus.send(EventNotice {
+        timeline_id: timeline.to_string(),
+        event_id: event.id.to_string(),
+        entity_id: event.entity.to_string(),
+        event_type: event.event_type.as_str().to_owned(),
+        seq: event.seq.as_u64(),
+    }));
 }
 
 #[cfg(test)]
@@ -3772,6 +3827,7 @@ mod tests {
                 proposal: proposal.clone(),
                 authorization: Arc::clone(&authorization),
                 decision: decision.clone(),
+                bus: broadcast::channel(1).0,
                 maximum: 1,
                 reply,
             })),
@@ -3786,6 +3842,7 @@ mod tests {
                 proposal,
                 authorization,
                 decision,
+                bus: broadcast::channel(1).0,
                 identity: AppendIdentity::new(
                     AppendDedupKey::from_keyed_hash([7; 32]),
                     AppendDedupScope::from_keyed_hash([8; 32]),
@@ -3876,6 +3933,7 @@ mod tests {
                 proposal.clone(),
                 Arc::clone(&authorization),
                 decision.clone(),
+                broadcast::channel(1).0,
                 1,
             )
             .await;
@@ -3888,6 +3946,7 @@ mod tests {
                 proposal,
                 authorization,
                 decision,
+                broadcast::channel(1).0,
                 AppendIdentity::new(
                     AppendDedupKey::from_keyed_hash([9; 32]),
                     AppendDedupScope::from_keyed_hash([10; 32]),
