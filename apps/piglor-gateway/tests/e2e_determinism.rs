@@ -24,7 +24,7 @@ use pos_runtime::{
     Driver, ErasureExecutionHostV1, ObservationView, ProjectionKey, RuntimeError, StepOutput,
 };
 use pos_state::{EntityStateProjection, ProjectionRegistry};
-use pos_store::{open_erasure_host_store, open_store, SeqRange, StoreConfig};
+use pos_store::{open_store, SeqRange, StoreConfig};
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
@@ -462,8 +462,8 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let address = listener.local_addr().test_ok()?;
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
-    let host = ErasureExecutionHostV1::recover_verified_empty(
-        open_erasure_host_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+    let host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Sqlite { path: path.clone() },
         ERASURE_MAX_INVENTORY_REQUESTS,
     )
     .test_ok()?;
@@ -1008,8 +1008,8 @@ async fn gateway_reloads_durable_consent_before_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let database = tempfile::NamedTempFile::new().test_ok()?;
     let path = database.path().to_str().test_ok()?.to_owned();
-    let first_host = ErasureExecutionHostV1::recover_verified_empty(
-        open_erasure_host_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+    let first_host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Sqlite { path: path.clone() },
         ERASURE_MAX_INVENTORY_REQUESTS,
     )
     .test_ok()?;
@@ -1037,8 +1037,8 @@ async fn gateway_reloads_durable_consent_before_revocation(
         .test_ok()?;
     drop(first_gateway);
 
-    let recovered_host = ErasureExecutionHostV1::recover_verified_empty(
-        open_erasure_host_store(StoreConfig::Sqlite { path }).test_ok()?,
+    let recovered_host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Sqlite { path },
         ERASURE_MAX_INVENTORY_REQUESTS,
     )
     .test_ok()?;
@@ -1083,8 +1083,8 @@ async fn gateway_reloads_durable_consent_before_revocation(
 #[tokio::test]
 async fn gateway_rejects_geo_admission_after_consent_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let host = ErasureExecutionHostV1::recover_verified_empty_gateway(
-        Box::new(pos_store::memory::MemoryStore::new().without_erasure_gate()),
+    let host = ErasureExecutionHostV1::open_gateway_verified_empty(
+        StoreConfig::Memory,
         ERASURE_MAX_INVENTORY_REQUESTS,
     )
     .test_ok()?;
@@ -1145,8 +1145,8 @@ async fn gateway_rejects_geo_admission_after_consent_revocation(
 #[tokio::test]
 async fn gateway_shutdown_drains_an_empty_executor(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let host = ErasureExecutionHostV1::recover_verified_empty(
-        open_erasure_host_store(StoreConfig::Memory).test_ok()?,
+    let host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
         ERASURE_MAX_INVENTORY_REQUESTS,
     )
     .test_ok()?;

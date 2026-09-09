@@ -114,8 +114,8 @@ mod lifecycle_coverage_tests {
     #[test]
     fn test_gate_binding_and_host_error_mapping_cover_every_variant(
     ) -> Result<(), ErasureHostErrorV1> {
-        let host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
             ERASURE_MAX_INVENTORY_REQUESTS,
         )?;
         for mut store in [
@@ -155,22 +155,12 @@ mod lifecycle_coverage_tests {
             );
         }
 
-        let closed = ErasureExecutionHostV1::new_closed(Box::new(
-            MemoryStore::new().without_erasure_gate(),
-        ))?;
-        assert!(StoreExecutor::new_with_erasure_host(
-            closed,
-            ConsentAuthority::new().append_permit(),
-        )
-        .is_err());
-
-        let closed_gateway = ErasureExecutionHostV1::new_gateway_closed(Box::new(
-            MemoryStore::new().without_erasure_gate(),
-        ))?;
-        assert!(StoreExecutor::new_with_owntracks_erasure_host(
-            closed_gateway,
-            [0; 32],
-            ConsentAuthority::new().append_permit(),
+        assert!(
+            ErasureExecutionHostV1::open_verified_empty(pos_store::StoreConfig::Memory, 0).is_err()
+        );
+        assert!(ErasureExecutionHostV1::open_gateway_verified_empty(
+            pos_store::StoreConfig::Memory,
+            0,
         )
         .is_err());
         Ok(())
@@ -2479,8 +2469,8 @@ mod tests {
                 if message == "ordinary append must not be called when a ceiling is supplied"
         ));
 
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
             ERASURE_MAX_INVENTORY_REQUESTS,
         )?;
         let hosted_timeline = host
@@ -5619,8 +5609,8 @@ mod tests {
 
     async fn owntracks_executor_dispatches_geo_admission_commands_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let host = ErasureExecutionHostV1::recover_verified_empty_gateway(
-            Box::new(MemoryStore::new().without_erasure_gate()),
+        let host = ErasureExecutionHostV1::open_gateway_verified_empty(
+            pos_store::StoreConfig::Memory,
             ERASURE_MAX_INVENTORY_REQUESTS,
         )?;
         let executor = super::StoreExecutor::new_with_owntracks_erasure_host(

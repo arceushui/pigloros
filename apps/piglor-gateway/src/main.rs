@@ -26,7 +26,7 @@ use piglor_gateway::{
 use piglor_ledger::LedgerView;
 use pos_core::{ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
 use pos_runtime::ErasureExecutionHostV1;
-use pos_store::{open_erasure_host_store, StoreConfig};
+use pos_store::StoreConfig;
 use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -201,19 +201,19 @@ fn gateway_for_startup(
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
     match (owntracks_owner_key, sqlite_path) {
         (Some(owner_key), Some(path)) => {
-            let host = ErasureExecutionHostV1::recover_verified_empty_gateway(
-                Box::new(pos_store::sqlite::SqliteStore::open(path)?),
+            let host = ErasureExecutionHostV1::open_gateway_verified_empty(
+                StoreConfig::Sqlite {
+                    path: path.to_owned(),
+                },
                 ERASURE_MAX_INVENTORY_REQUESTS,
             )
             .map_err(erasure_host_recovery_error)?;
             Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
         }
         (None, _) => {
-            let host = ErasureExecutionHostV1::recover_verified_empty(
-                open_erasure_host_store(config)?,
-                ERASURE_MAX_INVENTORY_REQUESTS,
-            )
-            .map_err(erasure_host_recovery_error)?;
+            let host =
+                ErasureExecutionHostV1::open_verified_empty(config, ERASURE_MAX_INVENTORY_REQUESTS)
+                    .map_err(erasure_host_recovery_error)?;
             Gateway::new_with_erasure_host(host).map_err(Into::into)
         }
         (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),

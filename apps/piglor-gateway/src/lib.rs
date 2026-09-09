@@ -6411,7 +6411,7 @@ mod coverage_entrypoints {
     use super::*;
     use pos_core::{ErasureContainmentGateV1, ERASURE_MAX_INVENTORY_REQUESTS};
     use pos_runtime::ErasureExecutionHostV1;
-    use pos_store::{open_erasure_host_store, open_store, StoreConfig};
+    use pos_store::{open_store, StoreConfig};
     use std::error::Error;
     use std::sync::Arc;
 
@@ -6441,8 +6441,8 @@ mod coverage_entrypoints {
     #[tokio::test]
     async fn host_owned_gateway_sequences_the_complete_generic_store_surface(
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let host = ErasureExecutionHostV1::recover_verified_empty(
-            open_erasure_host_store(StoreConfig::Memory)?,
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
             ERASURE_MAX_INVENTORY_REQUESTS,
         )?;
         let gateway = Gateway::new_with_erasure_host(host)?;

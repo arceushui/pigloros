@@ -9,11 +9,12 @@ use pos_core::{
         PurgeOutcome, SeqRange,
     },
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
-    ErasureForkRecoveryV1, ErasureGate, ErasureGatewayHostStoreV1, ErasureHostErrorV1,
-    ErasureHostStoreV1, ErasureReferenceV1, ErasureVerifiedInventoryQueryV1,
+    ErasureForkPersistencePortV1, ErasureForkRecoveryV1, ErasureGate, ErasureHostErrorV1,
+    ErasureInventoryPersistencePortV1, ErasureReferenceV1, ErasureVerifiedInventoryQueryV1,
     ErasureVerifiedInventoryV1, Event, EventDraft, EventId, OwnTracksIngressInputV1,
     PreparedErasureForkBatchV1, PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
 };
+use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,24 +41,72 @@ impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
     }
 }
 
+trait ErasureHostStore:
+    pos_core::store::EventStore + ErasureInventoryPersistencePortV1 + ErasureForkPersistencePortV1
+{
+}
+
+impl<T> ErasureHostStore for T where
+    T: pos_core::store::EventStore
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1
+{
+}
+
+trait ErasureGatewayHostStore:
+    ErasureHostStore
+    + pos_core::geo_admission::GeoLocationAdmissionStore
+    + pos_core::OwnTracksIngressStore
+{
+}
+
+impl<T> ErasureGatewayHostStore for T where
+    T: ErasureHostStore
+        + pos_core::geo_admission::GeoLocationAdmissionStore
+        + pos_core::OwnTracksIngressStore
+{
+}
+
 enum OwnedErasureStoreV1 {
-    Standard(Box<dyn ErasureHostStoreV1>),
-    Gateway(Box<dyn ErasureGatewayHostStoreV1>),
+    Standard(Box<dyn ErasureHostStore>),
+    Gateway(Box<dyn ErasureGatewayHostStore>),
 }
 
 impl OwnedErasureStoreV1 {
-    fn host_store(&mut self) -> &mut dyn ErasureHostStoreV1 {
+    fn host_store(&mut self) -> &mut dyn ErasureHostStore {
         match self {
             Self::Standard(store) => store.as_mut(),
             Self::Gateway(store) => store.as_mut(),
         }
     }
 
-    fn gateway_store(&mut self) -> Result<&mut dyn ErasureGatewayHostStoreV1, ErasureHostErrorV1> {
+    fn gateway_store(&mut self) -> Result<&mut dyn ErasureGatewayHostStore, ErasureHostErrorV1> {
         match self {
             Self::Gateway(store) => Ok(store.as_mut()),
             Self::Standard(_) => Err(ErasureHostErrorV1::AuthorizationDenied),
         }
+    }
+}
+
+fn open_host_store(config: StoreConfig) -> Result<Box<dyn ErasureHostStore>, CoreError> {
+    match config {
+        StoreConfig::Memory => Ok(Box::new(pos_store::memory::MemoryStore::new())),
+        StoreConfig::Sqlite { path } => pos_store::sqlite::SqliteStore::open(&path)
+            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>),
+        StoreConfig::SqliteInMemory => pos_store::sqlite::SqliteStore::open_in_memory()
+            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>),
+    }
+}
+
+fn open_gateway_host_store(
+    config: StoreConfig,
+) -> Result<Box<dyn ErasureGatewayHostStore>, CoreError> {
+    match config {
+        StoreConfig::Memory => Ok(Box::new(pos_store::memory::MemoryStore::new())),
+        StoreConfig::Sqlite { path } => pos_store::sqlite::SqliteStore::open(&path)
+            .map(|store| Box::new(store) as Box<dyn ErasureGatewayHostStore>),
+        StoreConfig::SqliteInMemory => pos_store::sqlite::SqliteStore::open_in_memory()
+            .map(|store| Box::new(store) as Box<dyn ErasureGatewayHostStore>),
     }
 }
 
@@ -82,7 +131,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns [`ErasureHostErrorV1::AdapterFailure`] when the adapter refuses
     /// the unique host gate binding.
-    pub fn new_closed(store: Box<dyn ErasureHostStoreV1>) -> Result<Self, ErasureHostErrorV1> {
+    fn new_closed(store: Box<dyn ErasureHostStore>) -> Result<Self, ErasureHostErrorV1> {
         Self::new_closed_store(OwnedErasureStoreV1::Standard(store))
     }
 
@@ -91,8 +140,8 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns [`ErasureHostErrorV1::AdapterFailure`] when the adapter refuses
     /// the unique host gate binding.
-    pub fn new_gateway_closed(
-        store: Box<dyn ErasureGatewayHostStoreV1>,
+    fn new_gateway_closed(
+        store: Box<dyn ErasureGatewayHostStore>,
     ) -> Result<Self, ErasureHostErrorV1> {
         Self::new_closed_store(OwnedErasureStoreV1::Gateway(store))
     }
@@ -112,6 +161,65 @@ impl ErasureExecutionHostV1 {
             #[cfg(test)]
             fail_inventory_publication: false,
         })
+    }
+
+    /// Open and recover an exclusively owned store only when its durable
+    /// erasure inventory is verified empty.
+    ///
+    /// The adapter never crosses this boundary as an `EventStore`; callers
+    /// receive only the recovered host and its bounded command capabilities.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_verified_empty(
+        config: StoreConfig,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_verified_empty(store, maximum_requests)
+    }
+
+    /// Open and recover an exclusively owned store from one independently
+    /// verified complete inventory.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+        config: StoreConfig,
+        query: &mut Q,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_from_verified_query(store, query, maximum_requests)
+    }
+
+    /// Open and recover a Gateway-capable exclusively owned store only when
+    /// its durable erasure inventory is verified empty.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_gateway_verified_empty(
+        config: StoreConfig,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store =
+            open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_verified_empty_gateway(store, maximum_requests)
+    }
+
+    /// Open and recover a Gateway-capable exclusively owned store from one
+    /// independently verified complete inventory.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+        config: StoreConfig,
+        query: &mut Q,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store =
+            open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_gateway_from_verified_query(store, query, maximum_requests)
     }
 
     /// Clone the host's read-only containment view for consumers sequenced by
@@ -270,7 +378,7 @@ impl ErasureExecutionHostV1 {
 
     fn apply_empty_topology_change(
         &mut self,
-        change: impl FnOnce(&mut dyn ErasureHostStoreV1) -> Result<Timeline, CoreError>,
+        change: impl FnOnce(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let HostStateV1::Ready {
             maximum_requests,
@@ -340,10 +448,10 @@ impl ErasureExecutionHostV1 {
     ///
     /// # Errors
     /// A non-empty request set, failed adapter snapshot, or rejected gate
-    /// binding fails closed. Production recovery for a non-empty set must use
-    /// [`Self::recover_from_verified_query`].
-    pub fn recover_verified_empty(
-        mut store: Box<dyn ErasureHostStoreV1>,
+    /// binding fails closed. Production recovery for a non-empty set enters
+    /// through [`Self::open_from_verified_query`].
+    fn recover_verified_empty(
+        mut store: Box<dyn ErasureHostStore>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         let inventory = store
@@ -366,8 +474,8 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed recovery or adapter error when gate binding, inventory
     /// verification, current-store matching, or publication fails.
-    pub fn recover_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
-        store: Box<dyn ErasureHostStoreV1>,
+    fn recover_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+        store: Box<dyn ErasureHostStore>,
         query: &mut Q,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -381,8 +489,8 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// A non-empty request set, failed adapter snapshot, or rejected gate
     /// binding fails closed.
-    pub fn recover_verified_empty_gateway(
-        mut store: Box<dyn ErasureGatewayHostStoreV1>,
+    fn recover_verified_empty_gateway(
+        mut store: Box<dyn ErasureGatewayHostStore>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         let inventory = store
@@ -399,9 +507,9 @@ impl ErasureExecutionHostV1 {
     ///
     /// # Errors
     /// Returns a closed recovery or adapter error under the same current-store
-    /// generation checks as [`Self::recover_from_verified_query`].
-    pub fn recover_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
-        store: Box<dyn ErasureGatewayHostStoreV1>,
+    /// generation checks as [`Self::open_from_verified_query`].
+    fn recover_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+        store: Box<dyn ErasureGatewayHostStore>,
         query: &mut Q,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -1654,7 +1762,7 @@ mod tests {
         assert_eq!(reader.logical_head(timeline.id()), Ok(Seq::from_u64(2)));
     }
 
-    fn assert_empty_topology_changes(store: Box<dyn ErasureHostStoreV1>) {
+    fn assert_empty_topology_changes(store: Box<dyn ErasureHostStore>) {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(store, 4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let (first, second, child) = host
