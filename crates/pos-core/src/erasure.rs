@@ -6496,6 +6496,7 @@ mod coverage_paths {
 
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let generation = inventory.generation();
+        let transition_inventory = inventory.clone();
         let mut query = InventoryQuery(Some(inventory));
         assert_eq!(
             gate.install_from_verified_inventory_query(&mut query, 4),
@@ -6514,6 +6515,33 @@ mod coverage_paths {
             gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
             Ok(())
         );
+        let mut successor = Some(transition_inventory);
+        assert_eq!(
+            gate.install_from_verified_inventory_transition(&mut || {
+                successor.take().ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
+            .map(|inventory| inventory.generation()),
+            Ok(generation)
+        );
+        assert_eq!(
+            gate.install_from_verified_inventory_transition(&mut || {
+                Err(ErasureErrorV1::PolicyConflict)
+            }),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(gate.inventory_generation(), Ok(generation));
+
+        let poisoned = ErasureContainmentGateV1::new_fail_closed();
+        poisoned.poison();
+        let mut called = false;
+        assert_eq!(
+            poisoned.install_from_verified_inventory_transition(&mut || {
+                called = true;
+                Err(ErasureErrorV1::ProvenanceMissing)
+            }),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert!(!called);
         Ok(())
     }
 
