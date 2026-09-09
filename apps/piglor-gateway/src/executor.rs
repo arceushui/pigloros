@@ -112,12 +112,12 @@ mod lifecycle_coverage_tests {
     }
 
     #[test]
-    fn test_gate_binding_and_host_error_mapping_cover_every_variant() {
+    fn test_gate_binding_and_host_error_mapping_cover_every_variant(
+    ) -> Result<(), ErasureHostErrorV1> {
         let host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             ERASURE_MAX_INVENTORY_REQUESTS,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        )?;
         for mut store in [
             ExecutorStore::Host(host),
             ExecutorStore::Generic(Box::new(MemoryStore::new())),
@@ -127,30 +127,33 @@ mod lifecycle_coverage_tests {
             store.bind_test_erasure_gate();
         }
 
-        assert!(matches!(
-            host_error_to_core(ErasureHostErrorV1::AccessFrozen),
-            CoreError::ErasureAccessFrozen
-        ));
+        assert_eq!(
+            std::mem::discriminant(&host_error_to_core(ErasureHostErrorV1::AccessFrozen)),
+            std::mem::discriminant(&CoreError::ErasureAccessFrozen),
+        );
         for error in [
             ErasureHostErrorV1::RecoveryUnavailable,
             ErasureHostErrorV1::StaleGeneration,
         ] {
-            assert!(matches!(
-                host_error_to_core(error),
-                CoreError::ErasureContainmentUnavailable
-            ));
+            assert_eq!(
+                std::mem::discriminant(&host_error_to_core(error)),
+                std::mem::discriminant(&CoreError::ErasureContainmentUnavailable),
+            );
         }
         for error in [
             ErasureHostErrorV1::AuthorizationDenied,
             ErasureHostErrorV1::Conflict,
             ErasureHostErrorV1::AdapterFailure,
         ] {
-            assert!(matches!(host_error_to_core(error), CoreError::Storage(_)));
+            assert_eq!(
+                std::mem::discriminant(&host_error_to_core(error)),
+                std::mem::discriminant(&CoreError::Storage(String::new())),
+            );
         }
 
-        let closed =
-            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let closed = ErasureExecutionHostV1::new_closed(Box::new(
+            MemoryStore::new().without_erasure_gate(),
+        ))?;
         assert!(StoreExecutor::new_with_erasure_host(
             closed,
             ConsentAuthority::new().append_permit(),
@@ -159,14 +162,14 @@ mod lifecycle_coverage_tests {
 
         let closed_gateway = ErasureExecutionHostV1::new_gateway_closed(Box::new(
             MemoryStore::new().without_erasure_gate(),
-        ))
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        ))?;
         assert!(StoreExecutor::new_with_owntracks_erasure_host(
             closed_gateway,
             [0; 32],
             ConsentAuthority::new().append_permit(),
         )
         .is_err());
+        Ok(())
     }
 
     #[test]
