@@ -6752,6 +6752,75 @@ mod coverage_paths {
         let block_authority = Arc::new(ErasureContainmentGateV1::new());
         poison_authority(&block_authority);
         block_authority.block_timeline(TimelineId::new());
+
+        let state = coverage_state(reference(6));
+        let timeline = TimelineId::new();
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(7))],
+            Vec::new(),
+        );
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![timeline], 1)
+                .unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("inventory failed: {error:?}")))
+                });
+
+        let poisoned_fence = Arc::new(ErasureContainmentGateV1::new());
+        poison_fence(&poisoned_fence);
+        assert_eq!(
+            poisoned_fence.bind_timeline(timeline, reference(7)),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_fence.install_verified_state_with_topology(&state, &proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_fence.install_from_verified_inventory_query(
+                &mut InventoryQuery(Some(inventory.clone())),
+                1,
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_fence.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        let mut effect = || {};
+        assert_eq!(
+            poisoned_fence.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect,),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let poisoned_authority = Arc::new(ErasureContainmentGateV1::new());
+        poison_authority(&poisoned_authority);
+        assert_eq!(
+            poisoned_authority.bind_timeline(timeline, reference(7)),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority.install_verified_state_with_topology(&state, &proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority
+                .install_from_verified_inventory_query(&mut InventoryQuery(Some(inventory)), 1,),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority.inventory_generation(),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority
+                .with_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect,),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
     }
 
     #[test]

@@ -1318,14 +1318,16 @@ impl<P: ErasureCoordinatorPortV1> ErasureVerifiedInventoryQueryV1
             .port
             .complete_erasure_inventory_observation(maximum_requests)?;
         let (request_heads, topology, request_topology) = observation.into_parts();
-        if maximum_requests == 0
-            || maximum_requests > super::ERASURE_MAX_INVENTORY_REQUESTS
-            || request_heads.len() > maximum_requests
-            || request_heads.len() != request_topology.len()
-            || request_heads.windows(2).any(|pair| pair[0].0 >= pair[1].0)
-            || request_topology
+        if (
+            maximum_requests != 0,
+            maximum_requests <= super::ERASURE_MAX_INVENTORY_REQUESTS,
+            request_heads.len() <= maximum_requests,
+            request_heads.len() == request_topology.len(),
+            request_heads.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            request_topology
                 .windows(2)
-                .any(|pair| pair[0].0 >= pair[1].0)
+                .all(|pair| pair[0].0 < pair[1].0),
+        ) != (true, true, true, true, true, true)
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }

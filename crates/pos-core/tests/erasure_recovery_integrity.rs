@@ -1554,6 +1554,55 @@ fn coordinator_rejects_incomplete_or_stale_inventory_observations() -> Result<()
     );
     assert_eq!(
         verify(
+            ErasureInventoryObservationV1::new(Vec::new(), Vec::new(), Vec::new()),
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS + 1,
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(reference(1), manifest), (reference(2), manifest)],
+                vec![timeline],
+                vec![
+                    topology(reference(1), manifest),
+                    topology(reference(2), manifest)
+                ],
+            ),
+            1,
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(reference(2), manifest), (reference(1), manifest)],
+                vec![timeline],
+                vec![
+                    topology(reference(1), manifest),
+                    topology(reference(2), manifest)
+                ],
+            ),
+            4,
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(reference(1), manifest), (reference(2), manifest)],
+                vec![timeline],
+                vec![
+                    topology(reference(2), manifest),
+                    topology(reference(1), manifest)
+                ],
+            ),
+            4,
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        verify(
             ErasureInventoryObservationV1::new(
                 vec![(request, manifest)],
                 vec![timeline],

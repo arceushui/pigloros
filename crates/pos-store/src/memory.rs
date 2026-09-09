@@ -1419,13 +1419,16 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
 
         if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
             let exact_child = self.timelines.get(&child.id).is_some_and(|state| {
-                state.timeline.meta == child
-                    && state.timeline.head == Seq::ZERO
-                    && state.events.is_empty()
-                    && state.chain_head == chain_head
+                (
+                    &state.timeline.meta,
+                    state.timeline.head,
+                    state.events.is_empty(),
+                    state.chain_head,
+                ) == (&child, Seq::ZERO, true, chain_head)
             });
             let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
-            return (stored_result.binding_digest() == binding && exact_child && exact_manifest)
+            return ((stored_result.binding_digest(), exact_child, exact_manifest)
+                == (binding, true, true))
                 .then_some(ErasureCasOutcomeV1::ExactRetry)
                 .ok_or(ErasureErrorV1::PolicyConflict);
         }
@@ -1433,8 +1436,10 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         let generation = self
             .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
             .generation();
-        if generation != admission.expected_inventory_generation()
-            || self.timelines.contains_key(&child.id)
+        if (
+            generation == admission.expected_inventory_generation(),
+            self.timelines.contains_key(&child.id),
+        ) != (true, false)
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }

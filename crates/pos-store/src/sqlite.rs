@@ -4858,8 +4858,10 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             let generation =
                 sqlite_erasure_inventory_snapshot(&self.conn, ERASURE_MAX_INVENTORY_REQUESTS)?
                     .generation();
-            if generation != admission.expected_inventory_generation()
-                || sqlite_timeline_exists(&self.conn, child.id)?
+            if (
+                generation == admission.expected_inventory_generation(),
+                sqlite_timeline_exists(&self.conn, child.id)?,
+            ) != (true, false)
             {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
@@ -5079,14 +5081,23 @@ fn sqlite_fork_admission_is_exact(
         .optional()
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
     let expected_owner = child.owner.map(|value| value.to_string());
-    if name != child.name
-        || mode != mode_str(child.mode)
-        || parent != expected_parent
-        || fork_seq != expected_fork
-        || head != 0
-        || stored_chain_head.as_slice() != chain_head.as_bytes()
-        || owner != expected_owner
-    {
+    if (
+        name.as_ref(),
+        mode.as_str(),
+        parent.as_ref(),
+        fork_seq,
+        head,
+        stored_chain_head.as_slice(),
+        owner.as_ref(),
+    ) != (
+        child.name.as_ref(),
+        mode_str(child.mode),
+        expected_parent.as_ref(),
+        expected_fork,
+        0,
+        chain_head.as_bytes(),
+        expected_owner.as_ref(),
+    ) {
         return Ok(false);
     }
     for prepared in admission.admissions() {
@@ -5101,8 +5112,11 @@ fn sqlite_fork_admission_is_exact(
             .optional()
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
         let exact_manifest = manifest.is_some_and(|(digest, bytes)| {
-            digest.as_slice() == mutation.next_manifest().digest().digest()
-                && bytes.as_slice() == mutation.next_manifest().canonical_cbor()
+            (digest.as_slice(), bytes.as_slice())
+                == (
+                    mutation.next_manifest().digest().digest(),
+                    mutation.next_manifest().canonical_cbor(),
+                )
         });
         if !exact_manifest || !sqlite_mutation_is_exact(conn, mutation)? {
             return Ok(false);

@@ -1429,6 +1429,37 @@ fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::erro
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std::error::Error>> {
+    for assignment in [
+        "binding_digest='not-a-blob'",
+        "child_id=X'00'",
+        "child_name=X'00'",
+        "child_mode=X'00'",
+        "parent_id=X'00'",
+        "fork_seq=X'00'",
+        "owner_id=X'00'",
+        "successor_generation='not-a-blob'",
+        "receipt_digest='not-a-blob'",
+    ] {
+        assert_sqlite_fork_retry_corruption_error(
+            |connection, prepared| {
+                connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                connection.execute(
+                    &format!(
+                        "UPDATE erasure_fork_admissions SET {assignment} \
+                         WHERE operation_digest=?1"
+                    ),
+                    rusqlite::params![prepared.operation().digest().as_slice()],
+                )
+            },
+            ErasureErrorV1::ReceiptCommitFailed,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_complete_inventory_rejects_oversized_topology() -> Result<(), Box<dyn std::error::Error>>
 {
     let database = tempfile::NamedTempFile::new()?;
@@ -1457,6 +1488,51 @@ fn sqlite_complete_inventory_rejects_oversized_topology() -> Result<(), Box<dyn 
         Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_inventory_rejects_sql(
+    sql: &str,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let mut store = SqliteStore::open(path)?;
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+    connection.execute_batch(sql)?;
+    drop(connection);
+    assert_eq!(
+        store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS),
+        Err(expected)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_complete_inventory_rejects_mistyped_rows() -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_inventory_rejects_sql(
+        "INSERT INTO erasure_records (request_digest, manifest_digest, manifest_cbor)
+         VALUES (printf('%032d', 0), zeroblob(32), X'00')",
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_inventory_rejects_sql(
+        "INSERT INTO erasure_records (request_digest, manifest_digest, manifest_cbor)
+         VALUES (zeroblob(32), printf('%032d', 0), X'00')",
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_inventory_rejects_sql(
+        "INSERT INTO timelines (id, mode, chain_head) VALUES (X'00', 'live', zeroblob(32))",
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_inventory_rejects_sql(
+        "INSERT INTO timelines (id, mode, chain_head) VALUES ('not-a-ulid', 'live', zeroblob(32))",
+        ErasureErrorV1::ProvenanceMissing,
+    )
 }
 
 #[cfg(feature = "sqlite")]
@@ -1519,6 +1595,40 @@ fn sqlite_fork_retry_rejects_corrupted_child() -> Result<(), Box<dyn std::error:
             rusqlite::params![prepared.child().id.to_string()],
         )
     })
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_retry_rejects_mistyped_child_fields() -> Result<(), Box<dyn std::error::Error>> {
+    for assignment in [
+        "name=X'00'",
+        "mode=X'00'",
+        "parent_id=X'00'",
+        "fork_seq=X'00'",
+        "head_seq=X'00'",
+        "chain_head='not-a-blob'",
+    ] {
+        assert_sqlite_fork_retry_corruption_error(
+            |connection, prepared| {
+                connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                connection.execute(
+                    &format!("UPDATE timelines SET {assignment} WHERE id=?1"),
+                    rusqlite::params![prepared.child().id.to_string()],
+                )
+            },
+            ErasureErrorV1::ReceiptCommitFailed,
+        )?;
+    }
+    assert_sqlite_fork_retry_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timeline_owners SET owner_id=X'00' WHERE timeline_id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )
 }
 
 #[cfg(feature = "sqlite")]
