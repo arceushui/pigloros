@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rustix::fd::AsFd;
@@ -248,6 +248,16 @@ impl SelectorAdapter {
         request: &EncodedSelectorRequest,
         evr1_digest: [u8; 32],
     ) -> Result<crate::selector_protocol::DecodedSelectorReply, AdapterError> {
+        if socket_path == Path::new(SANDBOX_SELECTOR_SOCKET) {
+            // Root may administer these directories (including 0755), but an
+            // unprivileged evaluator must not be able to replace their entries.
+            let root = File::open("/").map_err(|_| AdapterError::Unavailable)?;
+            let parent = socket_path
+                .parent()
+                .and_then(|parent| parent.strip_prefix("/").ok())
+                .ok_or(AdapterError::Unavailable)?;
+            validate_socket_directory(&root, parent, 0).map_err(|_| AdapterError::Unavailable)?;
+        }
         let mut stream =
             connect_at(socket_path, expected_uid).map_err(|_| AdapterError::Unavailable)?;
         let deadline = AttemptDeadline::new(attempt.watchdog_ms)?;
@@ -406,6 +416,39 @@ fn digest_name(digest: [u8; 32]) -> String {
 
 fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoundaryError> {
     connect_at_with(path, expected_uid, connect_unix)
+}
+
+fn validate_socket_directory(
+    root: &File,
+    relative: &Path,
+    expected_uid: u32,
+) -> Result<(), SelectorBoundaryError> {
+    let mut directory = root
+        .try_clone()
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    for component in std::iter::once(Component::CurDir).chain(relative.components()) {
+        if component != Component::CurDir {
+            let Component::Normal(name) = component else {
+                return Err(SelectorBoundaryError::ArtifactInvalid);
+            };
+            directory = openat2(
+                &directory,
+                name,
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+            )
+            .map(File::from)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        }
+        let metadata = directory
+            .metadata()
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        if !metadata.is_dir() || metadata.uid() != expected_uid || metadata.mode() & 0o022 != 0 {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+    }
+    Ok(())
 }
 
 fn connect_unix(path: &Path) -> std::io::Result<UnixStream> {
@@ -809,6 +852,92 @@ mod tests {
             ImmutableSandboxArtifact::open(SandboxArtifactKind::Provider, [0; 32]).map(|_| ()),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
+    }
+
+    #[test]
+    fn selector_directory_accepts_owner_writable_ancestry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temporary = tempfile::tempdir()?;
+        let ancestor = temporary.path().join("run");
+        let parent = ancestor.join("pigloros");
+        std::fs::create_dir_all(&parent)?;
+        let root = File::open(temporary.path())?;
+        let uid = root.metadata()?.uid();
+        for mode in [0o700, 0o755, 0o555] {
+            for directory in [temporary.path(), ancestor.as_path(), parent.as_path()] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode))?;
+            }
+            assert_eq!(
+                validate_socket_directory(&root, Path::new("run/pigloros"), uid),
+                Ok(())
+            );
+        }
+        for directory in [temporary.path(), ancestor.as_path(), parent.as_path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selector_directory_rejects_writable_ancestry_and_wrong_owner(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let ancestor = temporary.path().join("run");
+        let parent = ancestor.join("pigloros");
+        std::fs::create_dir_all(&parent)?;
+        let root = File::open(temporary.path())?;
+        let uid = root.metadata()?.uid();
+        for directory in [temporary.path(), ancestor.as_path(), parent.as_path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        for directory in [temporary.path(), ancestor.as_path(), parent.as_path()] {
+            for mode in [0o720, 0o702, 0o1777] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode))?;
+                assert_eq!(
+                    validate_socket_directory(&root, Path::new("run/pigloros"), uid),
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                );
+            }
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        assert_eq!(
+            validate_socket_directory(&root, Path::new("run/pigloros"), uid.wrapping_add(1)),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selector_directory_rejects_symlinks_and_invalid_components(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let ancestor = temporary.path().join("run");
+        let parent = ancestor.join("pigloros");
+        std::fs::create_dir_all(&parent)?;
+        let root = File::open(temporary.path())?;
+        let uid = root.metadata()?.uid();
+        std::os::unix::fs::symlink("run", temporary.path().join("linked-run"))?;
+        std::os::unix::fs::symlink("pigloros", ancestor.join("linked-parent"))?;
+        std::fs::write(temporary.path().join("regular"), b"not a directory")?;
+        for relative in [
+            "linked-run/pigloros",
+            "run/linked-parent",
+            "missing",
+            "regular",
+            "../run",
+            "/run",
+        ] {
+            assert_eq!(
+                validate_socket_directory(&root, Path::new(relative), uid),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+        let regular = File::open(temporary.path().join("regular"))?;
+        assert_eq!(
+            validate_socket_directory(&regular, Path::new(""), uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
     }
 
     #[test]
