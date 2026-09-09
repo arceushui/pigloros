@@ -3132,10 +3132,11 @@ mod tests {
     #[test]
     fn default_store_is_fail_closed_in_test_builds_too() {
         let mut store = MemoryStore::new();
-        let error = store.create_timeline("unbound").test_err();
-        assert!(
-            matches!(error, CoreError::Storage(message) if message.contains("erasure containment"))
-        );
+        let timeline = store.create_timeline("unbound").test_ok();
+        let error = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
+            .test_err();
+        assert!(matches!(error, CoreError::ErasureAccessFrozen));
     }
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
