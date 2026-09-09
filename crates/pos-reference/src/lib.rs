@@ -11,9 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(test)]
-extern crate self as pos_reference;
-
 mod non_interference_report;
 
 pub use non_interference_report::{
