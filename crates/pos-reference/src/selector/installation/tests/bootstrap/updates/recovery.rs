@@ -140,6 +140,30 @@ fn recovery_loader_rejects_malformed_truncated_and_tampered_sir1() -> TestResult
 }
 
 #[test]
+fn recovery_loader_rejects_wrong_envelope_tags_versions_and_member_types() -> TestResult {
+    for (index, replacement) in [
+        (0, Value::Text("SIC1".to_owned())),
+        (1, Value::Integer(2_u64.into())),
+        (2, Value::Null),
+        (3, Value::Null),
+        (4, Value::Null),
+    ] {
+        let (installation, _, _, _) = commit_recovery()?;
+        let path = installation
+            .directory
+            .path()
+            .join("installation-update.cbor");
+        let document = decode_canonical(&std::fs::read(&path)?)?;
+        let mut fields = array(&document, 5)?.to_vec();
+        fields[index] = replacement;
+        replace_recovery(&installation, &encode(&Value::Array(fields))?)?;
+        assert!(installation.load()?.load_pending_recovery().is_err());
+        assert!(path.exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn recovery_loader_rejects_unsafe_recovery_file_metadata() -> TestResult {
     for alteration in 0..3 {
         let (installation, _, _, _) = commit_recovery()?;
