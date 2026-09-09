@@ -14,21 +14,25 @@ use pos_core::{
     ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureCoordinatorPortV1,
     ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1,
     ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureForkPersistencePortV1,
-    ErasureForkRecoveryV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureGate, ErasureHostErrorV1,
-    ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1, ErasurePersistencePortV1,
-    ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
-    ErasureVerifiedInventoryV1, ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId,
-    Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    ErasureForkRecoveryV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureGate,
+    ErasureHostErrorV1, ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1,
+    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReceiptInputV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedEmptyInventoryQueryV1,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1,
+    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
+    KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1,
     PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
-    Timeline, TimelineId,
+    Timeline, TimelineId, TimelineMeta,
 };
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
+
+#[cfg(test)]
+use pos_core::PreparedErasureForkBatchV1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HostStateV1 {
@@ -145,6 +149,26 @@ pub trait ErasureCoordinatorAuthorityV1:
         extension: &ErasureScopeExtensionV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1>;
+
+    /// Resolve the canonical scope reference assigned to a preallocated child.
+    ///
+    /// # Errors
+    /// Returns a closed lineage, scope, policy, trust, or provenance error.
+    fn resolve_fork_child_scope(
+        &self,
+        parent: TimelineId,
+        child: &TimelineMeta,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1>;
+
+    /// Construct one authority-owned ERSE1 candidate for a verified request.
+    ///
+    /// # Errors
+    /// Returns a closed lineage, scope, authorization, or provenance error.
+    fn resolve_fork_scope_extension(
+        &self,
+        requirement: ErasureForkScopeRequirementV1,
+        input: &ErasureForkAdmissionInputV1,
+    ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1>;
 
     /// Authenticate an administrative recovery resolution.
     ///
@@ -945,6 +969,7 @@ impl ErasureExecutionHostV1 {
             .map(|generation| (timeline, generation))
     }
 
+    #[cfg(test)]
     fn apply_fork_batch(
         &mut self,
         admission: PreparedErasureForkBatchV1,
@@ -973,6 +998,112 @@ impl ErasureExecutionHostV1 {
                 Err(ErasureHostErrorV1::RecoveryUnavailable)
             }
         }
+    }
+
+    fn apply_identified_fork(
+        &mut self,
+        operation: ErasureReferenceV1,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
+        let current_generation = self.ready_generation()?;
+        let maximum_requests = self.maximum_requests()?;
+        let current_inventory = self
+            .inventory
+            .clone()
+            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+        let authority = self
+            .authority
+            .clone()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let coordinator = self
+            .coordinator
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let child = TimelineMeta::forked_from(parent, at_seq, name);
+        let gate = Arc::clone(&self.gate);
+        let mut fork_result = None;
+        let mut transition_error = None;
+        let publication = {
+            let mut fenced_transition = || {
+                let transition = (|| {
+                    if let Some(recovered) =
+                        self.store.host_store().recover_fork_admission(operation)?
+                    {
+                        if recovered.successor_generation() != current_generation {
+                            return Err(ErasureErrorV1::PolicyConflict);
+                        }
+                        fork_result = Some(Timeline::new(recovered.child().clone()));
+                        return Ok(current_inventory.clone());
+                    }
+                    let requirements = current_inventory.fork_scope_requirements(parent)?;
+                    let child_scope = authority.resolve_fork_child_scope(parent, &child)?;
+                    let input = ErasureForkAdmissionInputV1 {
+                        operation,
+                        expected_inventory_generation: current_generation,
+                        child_scope,
+                        child: child.clone(),
+                    };
+                    let admissions = {
+                        let port = HostedCoordinatorPortV1::new(
+                            self.store.host_store(),
+                            authority.as_ref(),
+                        );
+                        let mut state_machine =
+                            ErasureCoordinatorStateMachineV1::new(port, coordinator);
+                        requirements
+                            .into_iter()
+                            .map(|requirement| {
+                                authority
+                                    .resolve_fork_scope_extension(requirement, &input)
+                                    .and_then(|extension| {
+                                        state_machine.prepare_fork_admission(
+                                            requirement.request(),
+                                            extension,
+                                            input.clone(),
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    let batch = current_inventory
+                        .clone()
+                        .prepare_fork_batch(input, admissions)?;
+                    let successor = batch.successor_inventory().clone();
+                    match self.store.host_store().commit_fork_admission(batch)? {
+                        ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
+                            fork_result = Some(Timeline::new(child.clone()));
+                            Ok(successor)
+                        }
+                    }
+                })();
+                if let Err(error) = transition {
+                    transition_error = Some(error);
+                }
+                transition
+            };
+            gate.install_from_verified_inventory_transition(&mut fenced_transition)
+        };
+        let inventory = match publication {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                self.poison();
+                return Err(transition_error.map_or_else(|| error.into(), map_erasure_error));
+            }
+        };
+        let timeline = fork_result.ok_or_else(|| {
+            self.poison();
+            ErasureHostErrorV1::RecoveryUnavailable
+        })?;
+        let generation = inventory.generation();
+        let request_count = inventory.request_count();
+        self.inventory = Some(inventory);
+        self.state = HostStateV1::Ready {
+            generation,
+            maximum_requests,
+            request_count,
+        };
+        Ok((timeline, generation))
     }
 
     fn apply_coordinator_command(
@@ -1255,6 +1386,34 @@ impl ErasureCommandSenderV1<'_> {
         Ok(timeline)
     }
 
+    /// Create or exactly recover one identified Fork while atomically
+    /// extending every applicable active erasure scope.
+    ///
+    /// The host derives the complete extension requirement set from its opaque
+    /// verified inventory. Its configured authority Plugin resolves child
+    /// scope and ERSE1 candidates, the core coordinator validates every
+    /// candidate, and the adapter commits the child plus all extensions in one
+    /// transaction before the successor fence becomes visible.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, lineage, scope, conflict,
+    /// adapter, or recovery error. An uncertain commit/publication result
+    /// permanently poisons this host instance.
+    pub fn fork_timeline_identified(
+        &mut self,
+        operation: ErasureReferenceV1,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (timeline, generation) = self
+            .host
+            .apply_identified_fork(operation, parent, at_seq, name)?;
+        self.generation = generation;
+        Ok(timeline)
+    }
+
     /// Commit a complete-set future-Fork batch and publish its successor fence.
     ///
     /// The adapter persists every required ERSE1 mutation and the child under
@@ -1265,7 +1424,8 @@ impl ErasureCommandSenderV1<'_> {
     /// # Errors
     /// Returns a payload-free stale, conflict, recovery, or adapter error. A
     /// post-commit publication failure permanently poisons this host instance.
-    pub fn commit_fork_admission(
+    #[cfg(test)]
+    pub(crate) fn commit_fork_admission(
         &mut self,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<Timeline, ErasureHostErrorV1> {

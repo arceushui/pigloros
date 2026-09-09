@@ -4243,6 +4243,51 @@ impl ErasureVerifiedInventoryV1 {
         self.request_heads.len()
     }
 
+    /// Derive the complete set of active requests which require an ERSE1
+    /// extension before a child Fork may become visible.
+    ///
+    /// Requests which positively exclude the parent, or whose immutable scope
+    /// has no future-Fork lineage rule, require no mutation and remain
+    /// unaffected in the successor inventory.
+    ///
+    /// # Errors
+    /// Returns a closed provenance error when the parent is absent from the
+    /// verified topology or an included request lacks its verified scope.
+    pub fn fork_scope_requirements(
+        &self,
+        parent: TimelineId,
+    ) -> Result<Vec<ErasureForkScopeRequirementV1>, ErasureErrorV1> {
+        let classifications = self
+            .classifications
+            .get(&parent)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        self.members
+            .iter()
+            .zip(classifications)
+            .filter_map(|((state, _), classification)| {
+                let request = state.request().reference();
+                if classification.request != request {
+                    return Some(Err(ErasureErrorV1::ProvenanceMissing));
+                }
+                classification.membership.included_scope()?;
+                let Some(scope) = state.scope() else {
+                    return Some(Err(ErasureErrorV1::ProvenanceMissing));
+                };
+                scope.lineage_rule().map(|lineage_rule| {
+                    Ok(ErasureForkScopeRequirementV1 {
+                        request,
+                        scope_commitment: scope.reference(),
+                        lineage_rule,
+                        predecessor_extension: state
+                            .scope_extensions()
+                            .last()
+                            .map(ErasureScopeExtensionV1::reference),
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// Prepare the complete successor inventory for one future-Fork command.
     ///
     /// Every active request whose verified parent membership carries a
@@ -4991,6 +5036,46 @@ pub struct ErasureForkAdmissionInputV1 {
     pub child_scope: ErasureReferenceV1,
     /// Preallocated child metadata, including parent and Fork position.
     pub child: crate::TimelineMeta,
+}
+
+/// Payload-free host input for one future-Fork scope-extension decision.
+///
+/// The complete verified inventory derives these fields from recovered ERCRP1
+/// state. An authority Plugin may use them to construct an ERSE1 candidate,
+/// but the core coordinator still authenticates and validates that candidate
+/// before any adapter mutation is prepared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureForkScopeRequirementV1 {
+    request: ErasureReferenceV1,
+    scope_commitment: ErasureReferenceV1,
+    lineage_rule: ErasureReferenceV1,
+    predecessor_extension: Option<ErasureReferenceV1>,
+}
+
+impl ErasureForkScopeRequirementV1 {
+    /// Return the durable ERQ1 identity requiring extension.
+    #[must_use]
+    pub const fn request(self) -> ErasureReferenceV1 {
+        self.request
+    }
+
+    /// Return the immutable initial scope commitment.
+    #[must_use]
+    pub const fn scope_commitment(self) -> ErasureReferenceV1 {
+        self.scope_commitment
+    }
+
+    /// Return the lineage rule authorizing future-Fork expansion.
+    #[must_use]
+    pub const fn lineage_rule(self) -> ErasureReferenceV1 {
+        self.lineage_rule
+    }
+
+    /// Return the current ERSE1 chain head, if one exists.
+    #[must_use]
+    pub const fn predecessor_extension(self) -> Option<ErasureReferenceV1> {
+        self.predecessor_extension
+    }
 }
 
 /// Durable, payload-free result of one committed future-Fork operation.
@@ -6371,6 +6456,40 @@ mod coverage_paths {
         }
     }
 
+    fn assert_inventory_transition_fence(
+        gate: &ErasureContainmentGateV1,
+        inventory: ErasureVerifiedInventoryV1,
+    ) {
+        let generation = inventory.generation();
+        let mut successor = Some(inventory);
+        assert_eq!(
+            gate.install_from_verified_inventory_transition(&mut || {
+                successor.take().ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
+            .map(|inventory| inventory.generation()),
+            Ok(generation)
+        );
+        assert_eq!(
+            gate.install_from_verified_inventory_transition(&mut || {
+                Err(ErasureErrorV1::PolicyConflict)
+            }),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(gate.inventory_generation(), Ok(generation));
+
+        let poisoned = ErasureContainmentGateV1::new_fail_closed();
+        poisoned.poison();
+        let mut called = false;
+        assert_eq!(
+            poisoned.install_from_verified_inventory_transition(&mut || {
+                called = true;
+                Err(ErasureErrorV1::ProvenanceMissing)
+            }),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert!(!called);
+    }
+
     #[test]
     fn explicit_gate_poison_is_irreversible_across_publication_and_nested_fences(
     ) -> Result<(), ErasureErrorV1> {
@@ -6515,33 +6634,7 @@ mod coverage_paths {
             gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
             Ok(())
         );
-        let mut successor = Some(transition_inventory);
-        assert_eq!(
-            gate.install_from_verified_inventory_transition(&mut || {
-                successor.take().ok_or(ErasureErrorV1::ProvenanceMissing)
-            })
-            .map(|inventory| inventory.generation()),
-            Ok(generation)
-        );
-        assert_eq!(
-            gate.install_from_verified_inventory_transition(&mut || {
-                Err(ErasureErrorV1::PolicyConflict)
-            }),
-            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
-        );
-        assert_eq!(gate.inventory_generation(), Ok(generation));
-
-        let poisoned = ErasureContainmentGateV1::new_fail_closed();
-        poisoned.poison();
-        let mut called = false;
-        assert_eq!(
-            poisoned.install_from_verified_inventory_transition(&mut || {
-                called = true;
-                Err(ErasureErrorV1::ProvenanceMissing)
-            }),
-            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
-        );
-        assert!(!called);
+        assert_inventory_transition_fence(&gate, transition_inventory);
         Ok(())
     }
 
@@ -6555,6 +6648,40 @@ mod coverage_paths {
             reference(63),
             ErasureLifecycleV1::Authorized,
         )?;
+        let scope_commitment = state
+            .scope()
+            .map(ErasureScopeCommitmentV1::reference)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let included = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![(
+                state.clone(),
+                ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                    state.manifest_digest(),
+                    vec![(parent, reference(63))],
+                    Vec::new(),
+                ),
+            )],
+            vec![parent],
+            4,
+        )?;
+        let requirement = included
+            .fork_scope_requirements(parent)?
+            .pop()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        assert_eq!(requirement.request(), reference(61));
+        assert_eq!(requirement.scope_commitment(), scope_commitment);
+        assert_eq!(requirement.lineage_rule(), reference(28));
+        assert_eq!(requirement.predecessor_extension(), None);
+        assert_eq!(
+            included.fork_scope_requirements(TimelineId::new()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut missing_scope = included;
+        missing_scope.members[0].0.scope = None;
+        assert_eq!(
+            missing_scope.fork_scope_requirements(parent),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             state.manifest_digest(),
             Vec::new(),
@@ -6565,6 +6692,7 @@ mod coverage_paths {
             vec![parent],
             4,
         )?;
+        assert!(inventory.fork_scope_requirements(parent)?.is_empty());
         let input = ErasureForkAdmissionInputV1 {
             operation: reference(64),
             expected_inventory_generation: inventory.generation(),
@@ -6585,6 +6713,10 @@ mod coverage_paths {
             .and_then(|classifications| classifications.first_mut())
             .ok_or(ErasureErrorV1::ProvenanceMissing)?
             .request = reference(66);
+        assert_eq!(
+            mismatched_classification.fork_scope_requirements(parent),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         assert_eq!(
             mismatched_classification
                 .clone()

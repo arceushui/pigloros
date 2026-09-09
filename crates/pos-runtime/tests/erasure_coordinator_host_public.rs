@@ -11,19 +11,20 @@ use pos_core::{
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
-    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureHostErrorV1, ErasureLifecycleV1,
-    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureHostErrorV1,
+    ErasureLifecycleV1, ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateTransitionV1,
-    ErasureVerifiedTopologyObservationV1, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
+    ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
-mod erasure_support;
+pub mod erasure_support;
 
 use erasure_support::{
     freeze_evidence_fixture, obligation, persistence_request, persistence_target, reference,
@@ -204,7 +205,30 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         _extension: &ErasureScopeExtensionV1,
         _input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::Unauthorized)
+        Ok(())
+    }
+
+    fn resolve_fork_child_scope(
+        &self,
+        _parent: TimelineId,
+        _child: &pos_core::TimelineMeta,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        Ok(reference(19))
+    }
+
+    fn resolve_fork_scope_extension(
+        &self,
+        requirement: ErasureForkScopeRequirementV1,
+        input: &ErasureForkAdmissionInputV1,
+    ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: requirement.request(),
+            scope_commitment: requirement.scope_commitment(),
+            fork: input.child_scope,
+            lineage_rule: requirement.lineage_rule(),
+            predecessor_extension: requirement.predecessor_extension(),
+            admission_provenance: reference(20),
+        })
     }
 
     fn admit_administrative_resolution(
@@ -288,6 +312,28 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
     assert_eq!(
         commands.timeline(timeline.id()),
         Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    let operation = reference(40);
+    let child = commands.fork_timeline_identified(
+        operation,
+        timeline.id(),
+        pos_core::Seq::ZERO,
+        "frozen-child",
+    )?;
+    assert_eq!(
+        commands.timeline(child.id()),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    assert_eq!(
+        commands
+            .fork_timeline_identified(
+                operation,
+                timeline.id(),
+                pos_core::Seq::ZERO,
+                "ignored-on-retry"
+            )?
+            .id(),
+        child.id()
     );
     Ok(())
 }
