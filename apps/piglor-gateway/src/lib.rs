@@ -1438,46 +1438,6 @@ impl Gateway {
         .schedule_startup_consent_cleanup()
     }
 
-    /// Construct the geographic-admission Gateway with a host-owned erasure
-    /// containment gate.
-    ///
-    /// # Errors
-    /// Returns a store error when the supplied gate cannot be bound before the
-    /// Gateway executor starts.
-    #[cfg(test)]
-    pub(crate) fn new_with_geo_location_admission_and_erasure_gate<S>(
-        mut store: S,
-        gate: Arc<dyn ErasureGate>,
-    ) -> Result<Self, GatewayError>
-    where
-        S: EventStore + GeoLocationAdmissionStore + 'static,
-    {
-        store.bind_erasure_gate(Arc::clone(&gate))?;
-        let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
-        let consent_authority = ConsentAuthority::new();
-        Ok(Self {
-            store: executor::StoreExecutor::new_with_geo_location_admission(
-                store,
-                consent_authority.append_permit(),
-            ),
-            bus,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
-                std::iter::empty(),
-                Some(consent_authority.clone()),
-                gate,
-            ),
-            consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: None,
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
-    }
-
     /// Construct the Gateway shape that accepts authenticated local `OwnTracks` ingress.
     ///
     /// This does not register an HTTP route. The private executor performs

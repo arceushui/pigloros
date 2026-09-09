@@ -9,8 +9,8 @@ use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Hash,
-    Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime, ERASURE_MAX_INVENTORY_REQUESTS,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Hash, Plugin, PluginId,
+    PrincipalRefV1, Seq, TimelineId, WallTime, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
