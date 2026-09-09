@@ -1,8 +1,9 @@
 use pos_core::{
     CanonicalBytes, EntityId, ErasureErrorV1, ErasureHostErrorV1,
     ErasurePersistenceInventorySnapshotV1, ErasureProtectedOperationV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, EventDraft, EventReadBounds, Kind,
-    SeqRange, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, EventDraft, EventReadBounds, Kind, SeqRange,
+    ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::StoreConfig;
@@ -26,10 +27,8 @@ fn empty_inventory() -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
         ERASURE_MAX_INVENTORY_REQUESTS,
     )
     .and_then(|snapshot| {
-        ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
-            snapshot,
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        )
+        ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+            .verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)
     })
 }
 

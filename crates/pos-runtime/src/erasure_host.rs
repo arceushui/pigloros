@@ -11,10 +11,10 @@ use pos_core::{
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
     ErasureForkPersistencePortV1, ErasureForkRecoveryV1, ErasureGate, ErasureHostErrorV1,
     ErasureInventoryPersistencePortV1, ErasureProtectedOperationV1, ErasureReferenceV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event, EventDraft, EventId, Hash,
-    KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureForkBatchV1,
-    PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
+    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, Event, EventDraft, EventId, Hash, KeyDestructionBeginOutcomeV1,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyRegistryStateV1, OwnTracksIngressInputV1,
+    PreparedErasureForkBatchV1, PreparedOwnTracksIngressV1, Seq, Timeline, TimelineId,
 };
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
@@ -437,7 +437,8 @@ impl ErasureExecutionHostV1 {
             .host_store()
             .complete_erasure_inventory_snapshot(maximum_requests)
             .and_then(|snapshot| {
-                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+                ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+                    .verified_inventory(maximum_requests)
             })
         else {
             self.poison();
@@ -498,7 +499,8 @@ impl ErasureExecutionHostV1 {
         let inventory = store
             .complete_erasure_inventory_snapshot(maximum_requests)
             .and_then(|snapshot| {
-                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+                ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+                    .verified_inventory(maximum_requests)
             })
             .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
         let mut query = OneShotInventoryV1(Some(inventory));
@@ -537,7 +539,8 @@ impl ErasureExecutionHostV1 {
         let inventory = store
             .complete_erasure_inventory_snapshot(maximum_requests)
             .and_then(|snapshot| {
-                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+                ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+                    .verified_inventory(maximum_requests)
             })
             .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
         let mut query = OneShotInventoryV1(Some(inventory));
@@ -1178,6 +1181,13 @@ mod tests {
     };
     use pos_store::memory::MemoryStore;
 
+    fn verified_empty_inventory(
+        snapshot: ErasurePersistenceInventorySnapshotV1,
+        maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        ErasureVerifiedEmptyInventoryQueryV1::new(snapshot).verified_inventory(maximum_requests)
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FaultModeV1 {
         BindGate,
@@ -1521,7 +1531,7 @@ mod tests {
 
     #[test]
     fn one_shot_inventory_cannot_be_replayed() {
-        let inventory = ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
+        let inventory = verified_empty_inventory(
             ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).unwrap_or_else(
                 |error| std::panic::resume_unwind(Box::new(format!("snapshot failed: {error:?}"))),
             ),
@@ -2062,7 +2072,7 @@ mod tests {
         child: TimelineId,
         operation: ErasureReferenceV1,
     ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
-        let inventory = ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
+        let inventory = verified_empty_inventory(
             ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![parent], 4)?,
             4,
         )?;
@@ -2087,7 +2097,7 @@ mod tests {
     fn empty_inventory_rejects_invalid_fork_batch_shapes() {
         let parent = TimelineId::new();
         let child = TimelineId::new();
-        let inventory = ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
+        let inventory = verified_empty_inventory(
             ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![parent], 4)
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
             4,

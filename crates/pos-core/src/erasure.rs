@@ -4100,16 +4100,7 @@ pub struct ErasureVerifiedInventoryV1 {
 }
 
 impl ErasureVerifiedInventoryV1 {
-    /// Verify the positive empty-request case from one complete adapter snapshot.
-    ///
-    /// This is not a fallback for failed recovery: the adapter snapshot must
-    /// exist and its durable request-head set must be exactly empty. Non-empty
-    /// snapshots must pass through [`ErasureVerifiedInventoryQueryV1`] so core
-    /// revalidates every request graph and topology classification.
-    ///
-    /// # Errors
-    /// Returns [`ErasureErrorV1::PolicyConflict`] for a non-empty durable set.
-    pub fn from_verified_empty_snapshot(
+    fn from_verified_empty_snapshot(
         snapshot: ErasurePersistenceInventorySnapshotV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureErrorV1> {
@@ -4349,6 +4340,41 @@ pub trait ErasureVerifiedInventoryQueryV1 {
         &mut self,
         maximum_requests: usize,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1>;
+}
+
+/// One-shot verifier for the positive empty-request recovery case.
+///
+/// The input remains a raw adapter observation rather than runtime authority.
+/// Calling [`ErasureVerifiedInventoryQueryV1::verified_inventory`] verifies
+/// that its complete durable request-head set is empty and consumes the
+/// observation. A host must still compare the returned generation with a
+/// fresh snapshot from the exact adapter it owns before publishing access.
+pub struct ErasureVerifiedEmptyInventoryQueryV1 {
+    snapshot: Option<ErasurePersistenceInventorySnapshotV1>,
+}
+
+impl ErasureVerifiedEmptyInventoryQueryV1 {
+    /// Retain one complete adapter observation for one verification attempt.
+    #[must_use]
+    pub const fn new(snapshot: ErasurePersistenceInventorySnapshotV1) -> Self {
+        Self {
+            snapshot: Some(snapshot),
+        }
+    }
+}
+
+impl ErasureVerifiedInventoryQueryV1 for ErasureVerifiedEmptyInventoryQueryV1 {
+    fn verified_inventory(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        self.snapshot
+            .take()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|snapshot| {
+                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+            })
+    }
 }
 
 /// Public recovery/query seam for consumers that enforce erasure containment.
@@ -6552,16 +6578,19 @@ mod coverage_paths {
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
-        assert_eq!(
-            ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
-                ErasurePersistenceInventorySnapshotV1::new(
-                    vec![(reference(1), reference(2))],
-                    Vec::new(),
-                    4,
-                )?,
+        let mut nonempty_query =
+            ErasureVerifiedEmptyInventoryQueryV1::new(ErasurePersistenceInventorySnapshotV1::new(
+                vec![(reference(1), reference(2))],
+                Vec::new(),
                 4,
-            ),
+            )?);
+        assert_eq!(
+            nonempty_query.verified_inventory(4),
             Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            nonempty_query.verified_inventory(4),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
         let state = inventory_state(
             reference(51),
