@@ -5,13 +5,15 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustix::fd::AsFd;
 use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
 use rustix::net::sockopt::socket_peercred;
 
-use crate::evaluator::{AdapterError, CaseAttempt, SubjectAdapter, SubjectObservation};
+use crate::evaluator::{
+    AdapterError, AuthenticatedSandboxProvenance, CaseAttempt, SubjectAdapter, SubjectObservation,
+};
 use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
 use crate::selector_protocol::{decode_reply, encode_request, EncodedSelectorRequest};
 
@@ -24,6 +26,93 @@ const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const FORBIDDEN_WRITE_MODE: u32 = 0o222;
 const SELECTOR_SOCKET_MODE: u32 = 0o600;
 const MAX_SELECTOR_TRAILING_BYTES: u64 = 129 * 1024 * 1024;
+
+struct AttemptDeadline {
+    expires_at: Instant,
+}
+
+impl AttemptDeadline {
+    fn new(watchdog_ms: u64) -> Result<Self, AdapterError> {
+        let expires_at = Instant::now()
+            .checked_add(Duration::from_millis(watchdog_ms))
+            .ok_or(AdapterError::ProtocolFailure)?;
+        Ok(Self { expires_at })
+    }
+
+    fn remaining(&self) -> Result<Duration, AdapterError> {
+        self.expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(AdapterError::WatchdogExpired)
+    }
+
+    fn write_all(&self, stream: &mut UnixStream, mut bytes: &[u8]) -> Result<(), AdapterError> {
+        while !bytes.is_empty() {
+            stream
+                .set_write_timeout(Some(self.remaining()?))
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            let written = stream.write(bytes).map_err(|error| map_timed_io(&error))?;
+            if written == 0 {
+                return Err(AdapterError::ProtocolFailure);
+            }
+            bytes = &bytes[written..];
+        }
+        Ok(())
+    }
+
+    fn read_exact(
+        &self,
+        stream: &mut UnixStream,
+        mut bytes: &mut [u8],
+    ) -> Result<(), AdapterError> {
+        while !bytes.is_empty() {
+            stream
+                .set_read_timeout(Some(self.remaining()?))
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            let read = stream.read(bytes).map_err(|error| map_timed_io(&error))?;
+            if read == 0 {
+                return Err(AdapterError::ProtocolFailure);
+            }
+            bytes = &mut bytes[read..];
+        }
+        Ok(())
+    }
+
+    fn read_to_end_bounded(
+        &self,
+        stream: &mut UnixStream,
+        maximum: u64,
+    ) -> Result<Vec<u8>, AdapterError> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            stream
+                .set_read_timeout(Some(self.remaining()?))
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            let read = stream
+                .read(&mut chunk)
+                .map_err(|error| map_timed_io(&error))?;
+            if read == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if bytes.len() as u64 > maximum {
+                return Err(AdapterError::ProtocolFailure);
+            }
+        }
+    }
+}
+
+fn map_timed_io(error: &std::io::Error) -> AdapterError {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        AdapterError::WatchdogExpired
+    } else {
+        AdapterError::ProtocolFailure
+    }
+}
 
 /// Closed classes in the immutable sandbox artifact store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,7 +196,7 @@ pub struct SelectorAdapter {
     request: EvaluationRequest,
     request_bytes: Vec<u8>,
     next_case_ordinal: Option<u16>,
-    provenance: Option<[u8; 32]>,
+    provenance: Option<AuthenticatedSandboxProvenance>,
 }
 
 impl SelectorAdapter {
@@ -146,7 +235,9 @@ impl SelectorAdapter {
             &request,
             self.request.request_digest,
         )?;
-        self.provenance = reply.provenance;
+        self.provenance = reply
+            .provenance
+            .and_then(AuthenticatedSandboxProvenance::from_validated_receipt);
         reply.observation
     }
 
@@ -159,44 +250,25 @@ impl SelectorAdapter {
     ) -> Result<crate::selector_protocol::DecodedSelectorReply, AdapterError> {
         let mut stream =
             connect_at(socket_path, expected_uid).map_err(|_| AdapterError::Unavailable)?;
-        let watchdog = Duration::from_millis(attempt.watchdog_ms);
-        stream
-            .set_read_timeout(Some(watchdog))
-            .and_then(|()| stream.set_write_timeout(Some(watchdog)))
-            .map_err(|_| AdapterError::Unavailable)?;
+        let deadline = AttemptDeadline::new(attempt.watchdog_ms)?;
         let control_length =
             u32::try_from(request.control.len()).map_err(|_| AdapterError::ProtocolFailure)?;
-        stream
-            .write_all(&control_length.to_be_bytes())
-            .and_then(|()| stream.write_all(&request.control))
-            .and_then(|()| stream.write_all(&request.attempt_stream))
-            .map_err(|_| AdapterError::ProtocolFailure)?;
+        deadline.write_all(&mut stream, &control_length.to_be_bytes())?;
+        deadline.write_all(&mut stream, &request.control)?;
+        deadline.write_all(&mut stream, &request.attempt_stream)?;
         stream
             .shutdown(std::net::Shutdown::Write)
             .map_err(|_| AdapterError::ProtocolFailure)?;
         let mut prefix = [0; 4];
-        stream
-            .read_exact(&mut prefix)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
+        deadline.read_exact(&mut stream, &mut prefix)?;
         let length = usize::try_from(u32::from_be_bytes(prefix))
             .map_err(|_| AdapterError::ProtocolFailure)?;
         if length == 0 || length > 16 * 1024 * 1024 {
             return Err(AdapterError::ProtocolFailure);
         }
         let mut control = vec![0; length];
-        stream
-            .read_exact(&mut control)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
-        let mut trailing = Vec::new();
-        stream
-            .take(MAX_SELECTOR_TRAILING_BYTES + 1)
-            .read_to_end(&mut trailing)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
-        if u64::try_from(trailing.len()).map_err(|_| AdapterError::ProtocolFailure)?
-            > MAX_SELECTOR_TRAILING_BYTES
-        {
-            return Err(AdapterError::ProtocolFailure);
-        }
+        deadline.read_exact(&mut stream, &mut control)?;
+        let trailing = deadline.read_to_end_bounded(&mut stream, MAX_SELECTOR_TRAILING_BYTES)?;
         decode_reply(
             &control,
             &trailing,
@@ -224,7 +296,7 @@ impl SubjectAdapter for SelectorAdapter {
         self.invoke(attempt)
     }
 
-    fn take_execution_provenance_digest(&mut self) -> Option<[u8; 32]> {
+    fn take_execution_provenance(&mut self) -> Option<AuthenticatedSandboxProvenance> {
         self.provenance.take()
     }
 }
@@ -249,7 +321,19 @@ fn open_under(
     digest: [u8; 32],
     expected_uid: u32,
 ) -> Result<ImmutableSandboxArtifact, SelectorBoundaryError> {
-    let root = File::open(root).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let relative_root = root
+        .strip_prefix(Path::new("/"))
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let filesystem_root = File::open("/").map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let root = openat2(
+        &filesystem_root,
+        relative_root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map(File::from)
+    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     validate_owned_directory(&root, expected_uid)?;
     let directory = openat2(
         &root,
@@ -557,6 +641,16 @@ mod tests {
         let uid = std::fs::metadata(root)?.uid();
         assert_eq!(
             open_under(
+                Path::new("relative-root"),
+                SandboxArtifactKind::Authority,
+                [1; 32],
+                uid
+            )
+            .map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            open_under(
                 &root.join("missing"),
                 SandboxArtifactKind::Authority,
                 [1; 32],
@@ -605,6 +699,79 @@ mod tests {
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o700))?;
         std::fs::remove_dir(&digest_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selector_deadline_rejects_oversized_trailing_bytes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut reader, mut writer) = UnixStream::pair()?;
+        writer.write_all(b"too large")?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+
+        let deadline = AttemptDeadline::new(1_000)?;
+        assert_eq!(
+            deadline.read_to_end_bounded(&mut reader, 1),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selector_deadline_propagates_each_expired_io_phase() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut stream, _peer) = UnixStream::pair()?;
+        let expired = AttemptDeadline {
+            expires_at: Instant::now(),
+        };
+        assert_eq!(
+            expired.write_all(&mut stream, b"request"),
+            Err(AdapterError::WatchdogExpired)
+        );
+        assert_eq!(
+            expired.read_exact(&mut stream, &mut [0]),
+            Err(AdapterError::WatchdogExpired)
+        );
+        assert_eq!(
+            expired.read_to_end_bounded(&mut stream, 1),
+            Err(AdapterError::WatchdogExpired)
+        );
+
+        let (mut closed_stream, peer) = UnixStream::pair()?;
+        drop(peer);
+        assert_eq!(
+            AttemptDeadline::new(1_000)?.write_all(&mut closed_stream, b"request"),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn immutable_artifact_rejects_a_symlinked_store_root() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let target = tempfile::tempdir()?;
+        let authority = target.path().join("authority");
+        std::fs::create_dir(&authority)?;
+        let payload = b"authority";
+        let digest = *blake3::hash(payload).as_bytes();
+        let artifact = authority.join(digest_name(digest));
+        std::fs::write(&artifact, payload)?;
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o400))?;
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o500))?;
+        std::fs::set_permissions(target.path(), std::fs::Permissions::from_mode(0o500))?;
+        let uid = std::fs::metadata(target.path())?.uid();
+
+        let parent = tempfile::tempdir()?;
+        let linked_root = parent.path().join("sandbox");
+        std::os::unix::fs::symlink(target.path(), &linked_root)?;
+        assert_eq!(
+            open_under(&linked_root, SandboxArtifactKind::Authority, digest, uid).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        std::fs::set_permissions(target.path(), std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600))?;
         Ok(())
     }
 
@@ -752,6 +919,41 @@ mod tests {
     }
 
     #[test]
+    fn selector_watchdog_is_one_absolute_exchange_deadline(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request)?;
+            for byte in 1_u32.to_be_bytes() {
+                if stream.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(())
+        });
+        let request = selector_request();
+        let mut attempt = selector_attempt();
+        attempt.watchdog_ms = 35;
+        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
+        assert_eq!(
+            SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
+            Err(AdapterError::WatchdogExpired)
+        );
+        server.join().map_err(|_| AdapterError::ProtocolFailure)??;
+        Ok(())
+    }
+
+    #[test]
     fn selector_transport_rejects_a_peer_that_never_finishes_its_reply(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
@@ -779,7 +981,7 @@ mod tests {
         let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
         assert_eq!(
             SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::WatchdogExpired)
         );
         server.join().map_err(|_| AdapterError::ProtocolFailure)??;
         Ok(())
@@ -805,7 +1007,7 @@ mod tests {
             adapter.invoke_with_selector(&invalid, Path::new("/missing"), 0),
             Err(AdapterError::ProtocolFailure)
         );
-        assert_eq!(adapter.take_execution_provenance_digest(), None);
+        assert_eq!(adapter.take_execution_provenance(), None);
     }
 
     #[test]
@@ -845,7 +1047,7 @@ mod tests {
             adapter.invoke_with_selector(&attempt, &socket, uid),
             Err(AdapterError::Unavailable)
         );
-        assert_eq!(adapter.take_execution_provenance_digest(), None);
+        assert_eq!(adapter.take_execution_provenance(), None);
         server.join().map_err(|_| AdapterError::ProtocolFailure)??;
         Ok(())
     }

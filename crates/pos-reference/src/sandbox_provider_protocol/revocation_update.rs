@@ -30,6 +30,12 @@ pub enum SandboxRevocationUpdateError {
     /// Another revocation update is awaiting acknowledgement.
     #[error("sandbox revocation update is already in flight")]
     UpdateInFlight,
+    /// An overdue provider and its attempts must be terminated before admission reopens.
+    #[error("sandbox provider termination is required before revocation admission reopens")]
+    ProviderTerminationRequired,
+    /// Recovery did not confirm the exact mandatory termination set.
+    #[error("sandbox revocation recovery does not match the mandatory termination set")]
+    RecoveryMismatch,
     /// The provider did not acknowledge cancellation before the deadline.
     #[error("sandbox revocation acknowledgement deadline expired")]
     AcknowledgementDeadline,
@@ -183,19 +189,38 @@ impl CompletedRevocationUpdate {
 #[derive(Clone, Debug)]
 pub struct SelectorRevocationState {
     current: SandboxRevocationSnapshot,
+    runtime_key_id: String,
+    runtime_key: ed25519_dalek::VerifyingKey,
     pending: Option<PendingRevocationUpdate>,
+    recovery_required: Option<Vec<[u8; 16]>>,
     completed: BTreeMap<[u8; 16], CompletedRevocationUpdate>,
 }
 
 impl SelectorRevocationState {
-    /// Start with the selector's authenticated current RVS1.
-    #[must_use]
-    pub const fn new(current: SandboxRevocationSnapshot) -> Self {
-        Self {
+    /// Start with the selector's authenticated current RVS1 and resolve the
+    /// provider runtime authority from that snapshot.
+    ///
+    /// # Errors
+    /// Rejects an unknown, revoked, or incorrectly role-bound runtime key.
+    pub fn new(
+        current: SandboxRevocationSnapshot,
+        trust: &SandboxTrustSnapshot,
+        runtime_key_id: impl Into<String>,
+    ) -> Result<Self, SandboxRevocationUpdateError> {
+        let runtime_key_id = runtime_key_id.into();
+        let runtime_key = current.active_key(
+            trust,
+            &runtime_key_id,
+            SandboxTrustRole::ProviderRuntimeAttestation,
+        )?;
+        Ok(Self {
             current,
+            runtime_key_id,
+            runtime_key,
             pending: None,
+            recovery_required: None,
             completed: BTreeMap::new(),
-        }
+        })
     }
 
     /// Authenticate and retain one in-flight RCU1 transition.
@@ -214,6 +239,9 @@ impl SelectorRevocationState {
         now_ms: u64,
     ) -> Result<(), SandboxRevocationUpdateError> {
         validate_cancelled_attempts(&expected_cancelled_attempt_ids)?;
+        if self.recovery_required.is_some() {
+            return Err(SandboxRevocationUpdateError::ProviderTerminationRequired);
+        }
         let identity = request_identity(bytes)?;
         if let Some(completed) = self.completed.get(&identity.request_id) {
             return if completed.matches_request(identity) {
@@ -254,12 +282,13 @@ impl SelectorRevocationState {
     pub fn acknowledge(
         &mut self,
         bytes: &[u8],
-        runtime_key_id: &str,
-        runtime_key: &ed25519_dalek::VerifyingKey,
         now_ms: u64,
     ) -> Result<(), SandboxRevocationUpdateError> {
-        let acknowledgement =
-            RevocationAcknowledgement::authenticate(bytes, runtime_key_id, runtime_key)?;
+        let acknowledgement = RevocationAcknowledgement::authenticate(
+            bytes,
+            &self.runtime_key_id,
+            &self.runtime_key,
+        )?;
         if let Some(completed) = self.completed.get(&acknowledgement.request_id) {
             return if completed.acknowledgement == acknowledgement.acknowledgement_digest {
                 Ok(())
@@ -294,6 +323,51 @@ impl SelectorRevocationState {
                 acknowledgement: acknowledgement.acknowledgement_digest,
             },
         );
+        Ok(())
+    }
+
+    /// Abandon an overdue transition and return the attempts whose provider
+    /// resources must be terminated before admission can reopen.
+    ///
+    /// The returned identities are the mandatory kill set. The root selector
+    /// must terminate the selected provider and these attempts before beginning
+    /// another update. A transition at or before its deadline remains pending.
+    #[must_use]
+    pub fn expire_overdue(&mut self, now_ms: u64) -> Option<Vec<[u8; 16]>> {
+        if let Some(required) = &self.recovery_required {
+            return Some(required.clone());
+        }
+        let overdue = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| now_ms > pending.deadline_ms);
+        overdue.then(|| {
+            let required = self
+                .pending
+                .take()
+                .map_or_else(Vec::new, |pending| pending.expected_cancelled_attempt_ids);
+            self.recovery_required = Some(required.clone());
+            required
+        })
+    }
+
+    /// Confirm root-owned termination of the exact overdue provider attempt set.
+    ///
+    /// # Errors
+    /// Rejects confirmation when no recovery is pending or when the confirmed
+    /// identities differ from the mandatory kill set.
+    pub fn complete_recovery(
+        &mut self,
+        terminated_attempt_ids: &[[u8; 16]],
+    ) -> Result<(), SandboxRevocationUpdateError> {
+        let required = self
+            .recovery_required
+            .as_ref()
+            .ok_or(SandboxRevocationUpdateError::RecoveryMismatch)?;
+        if required.as_slice() != terminated_attempt_ids {
+            return Err(SandboxRevocationUpdateError::RecoveryMismatch);
+        }
+        self.recovery_required = None;
         Ok(())
     }
 

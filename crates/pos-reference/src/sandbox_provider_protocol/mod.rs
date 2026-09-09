@@ -23,8 +23,10 @@ pub use revocation_update::{
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use admission::{
-    AdmittedSandboxImage, AdmittedSandboxProvider, HostCapabilityProfile, HostFeatureProof,
-    ProviderConformanceReport, SandboxAdmissionError, SandboxProviderAdmissionInputs,
+    AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedSandboxExecution,
+    HostCapabilityProfile, HostFeatureProof, ProviderConformanceReport, RootSelectorAdmission,
+    RootSelectorAdmissionInputs, SandboxAdmissionError, SandboxGrantExpectations,
+    SandboxProviderAdmissionInputs,
 };
 pub use audit::SandboxAuditRecord;
 pub use authority::{

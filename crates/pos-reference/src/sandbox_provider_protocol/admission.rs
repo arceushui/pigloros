@@ -14,11 +14,30 @@ use super::{
     ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxExecuteRequest,
     SandboxProviderManifest, SandboxProviderProtocolError, SandboxProviderReceipt,
     SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome,
-    SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
+    SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot, SelectorRevocationState,
+    SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
 const REQUIRED_FEATURE_SET_DOMAIN: &[u8] = b"PiglorOS.RequiredHostFeatureSet.v1\0";
+const REQUIRED_HCP1_FEATURE_IDS: [&str; 16] = [
+    "cgroup-v2-cpu",
+    "cgroup-v2-memory",
+    "cgroup-v2-pids",
+    "cgroup-kill",
+    "managed-attempt-exec",
+    "process-isolation-controls",
+    "signed-root-image",
+    "mount-namespace",
+    "pid-namespace",
+    "ipc-namespace",
+    "uts-namespace",
+    "user-namespace",
+    "network-namespace",
+    "nftables-atomic",
+    "broker-lifecycle",
+    "limit-observation",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProviderSelectionBinding {
@@ -48,6 +67,8 @@ struct GrantBinding {
     input: [u8; 32],
     exchange_plans: Vec<[u8; 32]>,
     launch_policy: [u8; 32],
+    effective_limits: [u8; 32],
+    readback_set: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,6 +189,14 @@ impl HostCapabilityProfile {
             .contains(&[0; 32])
             || self.feature_proofs.iter().any(|proof| {
                 !valid_identifier(&proof.feature_id) || proof.evidence_digest == [0; 32]
+            })
+            || self.feature_proofs.len() != REQUIRED_HCP1_FEATURE_IDS.len()
+            || self.feature_proofs.iter().any(|proof| !proof.passed)
+            || REQUIRED_HCP1_FEATURE_IDS.iter().any(|required| {
+                !self
+                    .feature_proofs
+                    .iter()
+                    .any(|proof| proof.feature_id == *required)
             })
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
@@ -350,6 +379,176 @@ pub struct SandboxProviderAdmissionInputs<'a> {
     pub syscall_set: &'a [u8],
     /// Canonically ordered installed host-feature identifiers.
     pub required_features: &'a [String],
+}
+
+/// Selector-derived authority that an AGR1 must reproduce exactly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxGrantExpectations {
+    /// Exact provider capability selected by EVR1.
+    pub required_provider_capability: RequiredProviderCapability,
+    /// Exact selector-derived ELM1 digest.
+    pub effective_limits_digest: [u8; 32],
+    /// Exact selector-derived readback-set digest.
+    pub expected_readback_set_digest: [u8; 32],
+}
+
+/// Exact root-owned inputs used to establish one executable selector session.
+#[derive(Clone, Debug)]
+pub struct RootSelectorAdmissionInputs<'a> {
+    /// Provider, conformance, host, and syscall artifacts selected by APT1.
+    pub provider: SandboxProviderAdmissionInputs<'a>,
+    /// Canonical signed SIM1 bytes.
+    pub image_manifest: &'a [u8],
+    /// Exact immutable root-image bytes selected by SIM1.
+    pub root_image: &'a [u8],
+    /// Exact immutable subject executable bytes selected by SIM1 and EVR1.
+    pub executable: &'a [u8],
+    /// EVR1 subject artifact digest that must identify `executable`.
+    pub subject_artifact_digest: [u8; 32],
+    /// Canonical selected LPS1 bytes.
+    pub launch_policy: &'a [u8],
+    /// Selector-derived capability and effective-limit bindings for AGR1.
+    pub grant_expectations: SandboxGrantExpectations,
+}
+
+/// Root-selector authority after provider, image, launch, and host admission.
+///
+/// Keeping these values together prevents execution evidence from being
+/// authenticated against independently selected or caller-substituted state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RootSelectorAdmission {
+    provider: AdmittedSandboxProvider,
+    image: AdmittedSandboxImage,
+    launch: LaunchPolicy,
+    grant_expectations: SandboxGrantExpectations,
+}
+
+/// Complete provider lifecycle evidence released by root-selector admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedSandboxExecution {
+    grant: AdmissionGrant,
+    receipt: SandboxProviderReceipt,
+    result: SandboxProviderResult,
+    audit: Vec<super::SandboxAuditRecord>,
+}
+
+impl AuthenticatedSandboxExecution {
+    /// Authenticated admission grant for the selected attempt.
+    #[must_use]
+    pub const fn grant(&self) -> &AdmissionGrant {
+        &self.grant
+    }
+
+    /// Authenticated terminal provider result.
+    #[must_use]
+    pub const fn result(&self) -> &SandboxProviderResult {
+        &self.result
+    }
+
+    /// Authenticated receipt whose digest is the CNR1 provenance identity.
+    #[must_use]
+    pub const fn receipt(&self) -> &SandboxProviderReceipt {
+        &self.receipt
+    }
+
+    /// Complete authenticated audit chain.
+    #[must_use]
+    pub fn audit(&self) -> &[super::SandboxAuditRecord] {
+        &self.audit
+    }
+
+    /// Exact authenticated SPR1 self-digest for CNR1 case provenance.
+    #[must_use]
+    pub const fn provenance_digest(&self) -> [u8; 32] {
+        self.receipt.receipt_digest
+    }
+}
+
+impl RootSelectorAdmission {
+    /// Establish one root-owned session from an exact, immutable authority set.
+    ///
+    /// # Errors
+    /// Fails closed unless provider, image, executable, launch policy, trust,
+    /// revocation, conformance, host, capability, and architecture bindings all
+    /// identify the same selected execution authority.
+    pub fn establish(
+        policy: &SandboxAdministratorPolicy,
+        trust: &SandboxTrustSnapshot,
+        revocation: &SandboxRevocationSnapshot,
+        inputs: RootSelectorAdmissionInputs<'_>,
+    ) -> Result<Self, SandboxAdmissionError> {
+        let provider = AdmittedSandboxProvider::admit(policy, trust, revocation, inputs.provider)?;
+        let image = provider.admit_image(
+            inputs.image_manifest,
+            inputs.root_image,
+            inputs.executable,
+            inputs.subject_artifact_digest,
+        )?;
+        let launch = provider.admit_launch_policy(inputs.launch_policy, &image)?;
+        Ok(Self {
+            provider,
+            image,
+            launch,
+            grant_expectations: inputs.grant_expectations,
+        })
+    }
+
+    /// Authenticate the entire post-admission provider lifecycle atomically.
+    ///
+    /// # Errors
+    /// Rejects any malformed, forged, substituted, incomplete, or
+    /// inconsistently bound SPX1/AGR1/SPR1/SPY1/SAU1 evidence.
+    pub fn authenticate_execution(
+        &self,
+        request: &SandboxExecuteRequest,
+        grant_bytes: &[u8],
+        receipt_bytes: &[u8],
+        result_bytes: &[u8],
+        audit_records: &[Vec<u8>],
+    ) -> Result<AuthenticatedSandboxExecution, SandboxAdmissionError> {
+        let grant = self.provider.authenticate_grant(
+            grant_bytes,
+            request,
+            &self.image,
+            &self.launch,
+            &self.grant_expectations,
+        )?;
+        let receipt = self.provider.authenticate_receipt(receipt_bytes, &grant)?;
+        let result =
+            self.provider
+                .authenticate_terminal_result(result_bytes, request, &grant, &receipt)?;
+        let audit = self
+            .provider
+            .authenticate_audit_chain(audit_records, &receipt, &result)?;
+        Ok(AuthenticatedSandboxExecution {
+            grant,
+            receipt,
+            result,
+            audit,
+        })
+    }
+
+    /// Exact launch policy retained by this admitted selector session.
+    #[must_use]
+    pub const fn launch_policy(&self) -> &LaunchPolicy {
+        &self.launch
+    }
+
+    /// Create revocation state bound to this admitted provider's authenticated
+    /// runtime key, rather than to a key supplied at acknowledgement time.
+    ///
+    /// # Errors
+    /// Fails if the retained runtime authority no longer resolves from the
+    /// admitted trust and revocation snapshots.
+    pub fn revocation_state(
+        &self,
+    ) -> Result<SelectorRevocationState, super::SandboxRevocationUpdateError> {
+        SelectorRevocationState::new(
+            self.provider.revocation.clone(),
+            &self.provider.trust,
+            self.provider.manifest.runtime_attestation_key_id.clone(),
+        )
+    }
 }
 
 /// A provider released only after every selector-owned admission check succeeds.
@@ -567,6 +766,7 @@ impl AdmittedSandboxProvider {
         manifest_bytes: &[u8],
         root_image: &[u8],
         executable: &[u8],
+        subject_artifact_digest: [u8; 32],
     ) -> Result<AdmittedSandboxImage, SandboxAdmissionError> {
         let image = SignedImageManifest::from_canonical_cbor(manifest_bytes)?;
         if !self.policy.accepts_image(&image.manifest_digest) {
@@ -588,11 +788,11 @@ impl AdmittedSandboxProvider {
         if image.image_trust_epoch != self.trust.trust_epoch() {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        let image_length =
-            u64::try_from(root_image.len()).map_err(|_| SandboxAdmissionError::ArtifactMismatch)?;
+        let image_length = root_image.len() as u64;
         if image.root_image_length != image_length
             || image.root_image_blake3_digest != digest_bytes(root_image)
             || image.executable_blake3_digest != digest_bytes(executable)
+            || image.executable_blake3_digest != subject_artifact_digest
         {
             return Err(SandboxAdmissionError::ArtifactMismatch);
         }
@@ -643,6 +843,7 @@ impl AdmittedSandboxProvider {
         request: &SandboxExecuteRequest,
         image: &AdmittedSandboxImage,
         launch: &LaunchPolicy,
+        expectations: &SandboxGrantExpectations,
     ) -> Result<AdmissionGrant, SandboxAdmissionError> {
         self.validate_execute_authority(request, image, launch)?;
         let grant = AdmissionGrant::from_canonical_cbor(bytes)?;
@@ -669,6 +870,8 @@ impl AdmittedSandboxProvider {
             input: grant.input_digest,
             exchange_plans: grant.exchange_plan_digests.clone(),
             launch_policy: grant.expected_launch_policy_digest,
+            effective_limits: grant.elm1_digest,
+            readback_set: grant.expected_readback_set_digest,
         };
         let expected = GrantBinding {
             request_id: request.request.request_id,
@@ -696,8 +899,16 @@ impl AdmittedSandboxProvider {
             input: request.adapter_input.digest,
             exchange_plans: expected_plans,
             launch_policy: launch.policy_digest,
+            effective_limits: expectations.effective_limits_digest,
+            readback_set: expectations.expected_readback_set_digest,
         };
-        if actual != expected || !self.supports_capabilities(&request.capability_ids) {
+        if actual != expected
+            || !request
+                .capability_ids
+                .contains(&expectations.required_provider_capability.capability_id)
+            || !self.supports_capabilities(&request.capability_ids)
+            || !self.supports_required_capability(&expectations.required_provider_capability)
+        {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
         Ok(grant)
@@ -847,7 +1058,7 @@ impl AdmittedSandboxProvider {
     /// Decide whether SPM1 exposes the exact requested capability version at
     /// no less than the requested minimum strength.
     #[must_use]
-    pub fn supports_required_capability(&self, required: &RequiredProviderCapability) -> bool {
+    fn supports_required_capability(&self, required: &RequiredProviderCapability) -> bool {
         self.manifest.capabilities.iter().any(|available| {
             available.capability_id == required.capability_id
                 && available.capability_version == required.capability_version

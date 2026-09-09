@@ -97,6 +97,28 @@ pub struct SubjectObservation {
     pub usage: ResourceUsage,
 }
 
+/// Provider provenance released only by the crate's authenticated selector client.
+///
+/// The digest is intentionally not publicly constructible: arbitrary
+/// `SubjectAdapter` implementations must not be able to mint authenticated
+/// Sandbox Provider evidence for CNR1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedSandboxProvenance([u8; 32]);
+
+impl AuthenticatedSandboxProvenance {
+    pub(crate) fn from_validated_receipt(digest: [u8; 32]) -> Option<Self> {
+        if digest == [0; 32] {
+            None
+        } else {
+            Some(Self(digest))
+        }
+    }
+
+    const fn digest(self) -> [u8; 32] {
+        self.0
+    }
+}
+
 /// Public-only subject seam. Implementations may speak the exported-artifact,
 /// Gateway, or Plugin protocol, but receive no private Rust or storage handle.
 pub trait SubjectAdapter {
@@ -123,7 +145,7 @@ pub trait SubjectAdapter {
     ///
     /// Sandbox Provider adapters return the validated SPR1 self-digest. Other
     /// adapters and attempts that ended before provider admission return none.
-    fn take_execution_provenance_digest(&mut self) -> Option<[u8; 32]> {
+    fn take_execution_provenance(&mut self) -> Option<AuthenticatedSandboxProvenance> {
         None
     }
 }
@@ -369,7 +391,12 @@ fn evaluate_case_with_provenance(
         &observation,
         profile.evaluator_hard_caps.max_coordinate_bytes,
     )?;
-    let provenance_digest = case_provenance(request, fixture, &observation, provider_provenance)?;
+    let provenance_digest = case_provenance(
+        request.sandbox_requirement.is_some(),
+        fixture.provenance_digest,
+        &observation,
+        provider_provenance,
+    )?;
     Ok(case_outcome(
         fixture,
         bundle.mode,
@@ -378,14 +405,17 @@ fn evaluate_case_with_provenance(
     ))
 }
 
-type AdapterExecution = (Result<SubjectObservation, AdapterError>, Option<[u8; 32]>);
+type AdapterExecution = (
+    Result<SubjectObservation, AdapterError>,
+    Option<AuthenticatedSandboxProvenance>,
+);
 
 fn execute_case(
     adapter: &mut impl SubjectAdapter,
     attempt: &CaseAttempt,
 ) -> Result<AdapterExecution, EvaluatorError> {
     let observation = adapter.execute(attempt);
-    let provider_provenance = adapter.take_execution_provenance_digest();
+    let provider_provenance = adapter.take_execution_provenance();
     if observation == Err(AdapterError::AuthenticatedEvidenceFailure) {
         Err(EvaluatorError::AdapterIdentity)
     } else {
@@ -393,26 +423,24 @@ fn execute_case(
     }
 }
 
-fn case_provenance(
-    request: &EvaluationRequest,
-    fixture: &Fixture,
+const fn case_provenance(
+    sandbox_required: bool,
+    fixture_provenance: [u8; 32],
     observation: &Result<SubjectObservation, AdapterError>,
-    provider_provenance: Option<[u8; 32]>,
+    provider_provenance: Option<AuthenticatedSandboxProvenance>,
 ) -> Result<[u8; 32], EvaluatorError> {
-    if request.sandbox_requirement.is_none() {
-        return Ok(fixture.provenance_digest);
+    if !sandbox_required {
+        return Ok(fixture_provenance);
     }
-    if let Some(digest) = provider_provenance {
-        return (digest != [0; 32])
-            .then_some(digest)
-            .ok_or(EvaluatorError::AdapterIdentity);
+    if let Some(provenance) = provider_provenance {
+        return Ok(provenance.digest());
     }
     match observation {
         Err(_)
         | Ok(SubjectObservation {
             result: SubjectResult::Unavailable,
             ..
-        }) => Ok(fixture.provenance_digest),
+        }) => Ok(fixture_provenance),
         Ok(_) => Err(EvaluatorError::AdapterIdentity),
     }
 }
@@ -656,4 +684,39 @@ fn hexadecimal(bytes: &[u8]) -> String {
         value.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     value
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{
+        case_provenance, AuthenticatedSandboxProvenance, ResourceUsage, SubjectObservation,
+        SubjectResult,
+    };
+
+    #[test]
+    fn authenticated_sandbox_provenance_requires_a_nonzero_receipt_digest() {
+        assert_eq!(
+            AuthenticatedSandboxProvenance::from_validated_receipt([0; 32]),
+            None
+        );
+        assert_eq!(
+            AuthenticatedSandboxProvenance::from_validated_receipt([7; 32])
+                .map(AuthenticatedSandboxProvenance::digest),
+            Some([7; 32])
+        );
+        let observation = Ok(SubjectObservation {
+            result: SubjectResult::Output(Vec::new()),
+            usage: ResourceUsage::default(),
+        });
+        assert_eq!(
+            case_provenance(
+                true,
+                [1; 32],
+                &observation,
+                AuthenticatedSandboxProvenance::from_validated_receipt([7; 32]),
+            ),
+            Ok([7; 32])
+        );
+    }
 }

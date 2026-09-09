@@ -101,7 +101,7 @@ pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<()
             Value::Array(vec![
                 text_value("EIC1"),
                 unsigned(1),
-                unsigned(as_u64(index)?),
+                unsigned(index as u64),
                 text_value(capability),
             ]),
             &mut transcript,
@@ -110,7 +110,7 @@ pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<()
     write_artifact(&mut writer, &mut transcript, 0, 0, &attempt.schema)?;
     write_artifact(&mut writer, &mut transcript, 1, 0, &attempt.payload)?;
     for (index, artifact) in attempt.auxiliary.iter().enumerate() {
-        write_artifact(&mut writer, &mut transcript, 2, as_u64(index)?, artifact)?;
+        write_artifact(&mut writer, &mut transcript, 2, index as u64, artifact)?;
     }
     write_attempt_footer(&mut writer, &transcript)?;
     writer.flush().map_err(io_error)
