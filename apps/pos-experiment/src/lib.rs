@@ -1586,7 +1586,20 @@ impl ExperimentSession {
         &mut self,
         proposal: &pos_core::ProposedAction,
     ) -> Result<u64, ExperimentError> {
-        let draft = self.registry.submit_action(proposal)?;
+        let draft = self
+            .registry
+            .submit_action(self.timeline.id(), proposal)
+            .map_err(|error| match error {
+                pos_runtime::ActionSubmissionError::Rejected(error) => {
+                    ExperimentError::ActionRejected(error)
+                }
+                pos_runtime::ActionSubmissionError::ErasureOperationUnavailable => {
+                    ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureOperationUnavailable)
+                }
+                pos_runtime::ActionSubmissionError::ErasureContainment(error) => {
+                    ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureContainment(error))
+                }
+            })?;
         let Some(token) = self.operation_token.clone() else {
             return self.append_events(std::slice::from_ref(&draft));
         };

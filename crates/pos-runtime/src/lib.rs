@@ -44,7 +44,7 @@ pub use driver::{
     RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
 };
 pub use erasure_host::{ErasureCommandSenderV1, ErasureExecutionHostV1, ErasureReadSenderV1};
-pub use error::RuntimeError;
+pub use error::{ActionSubmissionError, RuntimeError};
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
 pub use scheduler::TickScheduler;

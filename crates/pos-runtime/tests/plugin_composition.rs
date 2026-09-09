@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use pos_core::{
-    ActionApprover, ActionRejected, CanonicalBytes, Capability, EntityId, EventDraft, Hash, Kind,
-    Plugin, PluginId, ProposedAction, Seq, TimelineId,
+    ActionApprover, ActionRejected, CanonicalBytes, Capability, EntityId, ErasureContainmentGateV1,
+    EventDraft, Hash, Kind, Plugin, PluginId, ProposedAction, Seq, TimelineId,
 };
 use pos_runtime::{
     DomainImplementationKindV1, Driver, ObservationView, PluginAvailabilityV1,
@@ -607,7 +607,8 @@ fn pinned_action_policy_retains_the_single_approver_route() {
         PluginIsolationV1::OperatorTrustedNative,
         &["domain-action-policy"],
     );
-    let mut registry = PluginRegistry::new();
+    let mut registry =
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
     registry
         .register_pinned_with_approver(
             &action,
@@ -627,12 +628,15 @@ fn pinned_action_policy_retains_the_single_approver_route() {
 
     let actor = EntityId::new();
     let draft = registry
-        .submit_action(&ProposedAction::new(
-            Kind::new("world.action"),
-            actor,
-            CanonicalBytes::from_static(b"walk"),
-            Kind::new("world.action.submit"),
-        ))
+        .submit_action(
+            TimelineId::new(),
+            &ProposedAction::new(
+                Kind::new("world.action"),
+                actor,
+                CanonicalBytes::from_static(b"walk"),
+                Kind::new("world.action.submit"),
+            ),
+        )
         .test_ok();
     assert_eq!(draft.entity, actor);
     assert_eq!(draft.event_type.as_str(), "world.action");

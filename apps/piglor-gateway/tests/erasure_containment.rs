@@ -1,90 +1,23 @@
 use axum::{http::StatusCode, response::IntoResponse};
 use piglor_gateway::{Gateway, GatewayError, OwnTracksOwnerKey};
-use pos_core::store::EventStore;
-use pos_core::{
-    CoreError, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
-    ErasureProtectedOperationV1, TimelineId,
-};
+use pos_core::{CoreError, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS};
 use pos_runtime::ErasureExecutionHostV1;
-use pos_store::{open_store, StoreConfig};
-use std::sync::{Arc, Mutex};
-
-struct SelectiveGate {
-    blocked: Mutex<Vec<ErasureProtectedOperationV1>>,
-}
-
-impl SelectiveGate {
-    fn block(&self, operation: ErasureProtectedOperationV1) {
-        let mut blocked = self
-            .blocked
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !blocked.contains(&operation) {
-            blocked.push(operation);
-        }
-    }
-
-    fn authorize_operation(
-        &self,
-        operation: ErasureProtectedOperationV1,
-    ) -> Result<(), ErasureContainmentErrorV1> {
-        if self
-            .blocked
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&operation)
-        {
-            Err(ErasureContainmentErrorV1::AccessFrozen)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl ErasureGate for SelectiveGate {
-    fn authorize(
-        &self,
-        _timeline: TimelineId,
-        operation: ErasureProtectedOperationV1,
-    ) -> Result<(), ErasureContainmentErrorV1> {
-        self.authorize_operation(operation)
-    }
-
-    fn with_fence(
-        &self,
-        timeline: TimelineId,
-        operation: ErasureProtectedOperationV1,
-        effect: &mut dyn FnMut(),
-    ) -> Result<(), ErasureContainmentErrorV1> {
-        self.authorize(timeline, operation)?;
-        effect();
-        Ok(())
-    }
-}
+use pos_store::{open_erasure_host_store, StoreConfig};
 
 #[tokio::test]
-async fn one_host_gate_covers_gateway_store_boundary(
+async fn host_owned_gateway_covers_store_boundary(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let gate = Arc::new(SelectiveGate {
-        blocked: Mutex::new(Vec::new()),
-    });
-    let gateway = Gateway::new_with_erasure_gate(
-        open_store(StoreConfig::Memory)?,
-        Arc::clone(&gate) as Arc<dyn ErasureGate>,
+    let host = ErasureExecutionHostV1::recover_verified_empty(
+        open_erasure_host_store(StoreConfig::Memory)?,
+        ERASURE_MAX_INVENTORY_REQUESTS,
     )?;
+    let gateway = Gateway::new_with_erasure_host(host)?;
     let timeline = gateway.create_timeline("shared-gate").await?;
-
-    gate.block(ErasureProtectedOperationV1::Read);
-    let Err(read_error) = gateway
+    assert!(gateway
         .read_events_page(&timeline.id().to_string(), 0, 1)
-        .await
-    else {
-        return Err("the shared gate must fence EventStore reads".into());
-    };
-    assert!(matches!(
-        read_error,
-        GatewayError::Store(pos_core::CoreError::ErasureAccessFrozen)
-    ));
+        .await?
+        .events
+        .is_empty());
 
     gateway.shutdown().await?;
     drop(gateway);
@@ -119,10 +52,11 @@ fn gateway_maps_erasure_store_errors_to_http_statuses() {
 #[tokio::test]
 async fn specialized_gate_gateway_constructors_bind_and_shutdown(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let geo_gateway = Gateway::new_with_geo_location_admission_and_erasure_gate(
-        pos_store::memory::MemoryStore::default(),
-        Arc::new(ErasureContainmentGateV1::new()),
+    let geo_host = ErasureExecutionHostV1::recover_verified_empty_gateway(
+        Box::new(pos_store::memory::MemoryStore::new().without_erasure_gate()),
+        ERASURE_MAX_INVENTORY_REQUESTS,
     )?;
+    let geo_gateway = Gateway::new_with_erasure_host(geo_host)?;
     geo_gateway.shutdown().await?;
     drop(geo_gateway);
 
@@ -146,29 +80,12 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
     ))?;
     assert!(Gateway::new_with_owntracks_erasure_host(closed_owntracks_host, &owner_key).is_err());
 
-    let owntracks_gateway = Gateway::new_with_owntracks_ingress_and_erasure_gate(
-        pos_store::sqlite::SqliteStore::open_in_memory()?,
-        &owner_key,
-        Arc::new(ErasureContainmentGateV1::new()),
+    let owntracks_host = ErasureExecutionHostV1::recover_verified_empty_gateway(
+        Box::new(pos_store::sqlite::SqliteStore::open_in_memory()?.without_erasure_gate()),
+        ERASURE_MAX_INVENTORY_REQUESTS,
     )?;
+    let owntracks_gateway = Gateway::new_with_owntracks_erasure_host(owntracks_host, &owner_key)?;
     owntracks_gateway.shutdown().await?;
     drop(owntracks_gateway);
-
-    let mut prebound_geo_store = pos_store::memory::MemoryStore::default();
-    drop(prebound_geo_store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
-    assert!(Gateway::new_with_geo_location_admission_and_erasure_gate(
-        prebound_geo_store,
-        Arc::new(ErasureContainmentGateV1::new()),
-    )
-    .is_err());
-
-    let mut prebound_owntracks_store = pos_store::sqlite::SqliteStore::open_in_memory()?;
-    drop(prebound_owntracks_store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
-    assert!(Gateway::new_with_owntracks_ingress_and_erasure_gate(
-        prebound_owntracks_store,
-        &owner_key,
-        Arc::new(ErasureContainmentGateV1::new()),
-    )
-    .is_err());
     Ok(())
 }

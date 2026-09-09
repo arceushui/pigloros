@@ -10,8 +10,8 @@ use pos_core::{
     ProposedAction, Reducer, State,
 };
 use pos_runtime::{
-    Driver, ObservationView, PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput,
-    TimelineHistorySegment,
+    ActionSubmissionError, Driver, ObservationView, PluginRegistry as RuntimePluginRegistry,
+    RuntimeError, StepOutput, TimelineHistorySegment,
 };
 use pos_store::{open_store, EventStore, StoreConfig};
 use std::{
@@ -1296,8 +1296,50 @@ fn public_registry_rejects_oversized_actions() {
         Kind::new("action.type.submit"),
     );
     assert!(matches!(
-        action_registry.submit_action(&oversized),
-        Err(ActionRejected::PayloadTooLarge { .. })
+        action_registry.submit_action(TimelineId::new(), &oversized),
+        Err(ActionSubmissionError::Rejected(
+            ActionRejected::PayloadTooLarge { .. }
+        ))
+    ));
+}
+
+#[test]
+fn public_registry_fails_closed_before_action_approval() {
+    let action_plugin = configured_plugin("fenced-action", &["action.type"], false, false);
+    let proposal = ProposedAction::new(
+        Kind::new("action.type"),
+        EntityId::new(),
+        CanonicalBytes::from_static(b"payload"),
+        Kind::new("action.type.submit"),
+    );
+    let timeline = TimelineId::new();
+
+    let mut unavailable = RuntimePluginRegistry::new();
+    test_ok(unavailable.register_with_approver(
+        &action_plugin,
+        None,
+        None,
+        Some(Box::new(AcceptingApprover)),
+        [Kind::new("action.type")],
+    ));
+    assert!(matches!(
+        unavailable.submit_action(timeline, &proposal),
+        Err(ActionSubmissionError::ErasureContainment(
+            pos_core::ErasureContainmentErrorV1::RecoveryUnavailable
+        ))
+    ));
+
+    let mut missing = RuntimePluginRegistry::new().without_erasure_gate();
+    test_ok(missing.register_with_approver(
+        &action_plugin,
+        None,
+        None,
+        Some(Box::new(AcceptingApprover)),
+        [Kind::new("action.type")],
+    ));
+    assert!(matches!(
+        missing.submit_action(timeline, &proposal),
+        Err(ActionSubmissionError::ErasureOperationUnavailable)
     ));
 }
 
@@ -1310,13 +1352,20 @@ fn public_registry_rejects_unknown_actions_in_live_and_replay_modes() {
         CanonicalBytes::from_static(b"unknown"),
         Kind::new("unknown.type.submit"),
     );
+    let timeline = TimelineId::new();
     assert!(matches!(
-        PluginRegistry::new().submit_action(&unknown),
-        Err(ActionRejected::UnknownEventType)
+        PluginRegistry::new().submit_action(timeline, &unknown),
+        Err(ActionSubmissionError::Rejected(
+            ActionRejected::UnknownEventType
+        ))
     ));
     assert!(matches!(
-        PluginRegistry::new_replay().submit_action(&unknown),
-        Err(ActionRejected::UnknownEventType)
+        PluginRegistry::new_replay()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .submit_action(timeline, &unknown),
+        Err(ActionSubmissionError::Rejected(
+            ActionRejected::UnknownEventType
+        ))
     ));
 }
 

@@ -1099,7 +1099,7 @@ impl Gateway {
     /// Human action submission is intentionally disabled until the host supplies
     /// both a World body catalogue and a provider-neutral [`GatewayAuthorization`].
     #[must_use]
-    pub fn new(store: Box<dyn EventStore>) -> Self {
+    pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
         #[cfg(test)]
         let mut store = store;
         #[cfg(test)]
@@ -1137,7 +1137,7 @@ impl Gateway {
     /// # Errors
     /// Returns a store error when the supplied gate cannot be bound before the
     /// Gateway executor starts.
-    pub fn new_with_erasure_gate(
+    pub(crate) fn new_with_erasure_gate(
         mut store: Box<dyn EventStore>,
         gate: Arc<dyn ErasureGate>,
     ) -> Result<Self, GatewayError> {
@@ -1203,6 +1203,47 @@ impl Gateway {
         .schedule_startup_consent_cleanup())
     }
 
+    /// Construct an action-capable Gateway over one recovered erasure host.
+    ///
+    /// The host remains the exclusive owner of the `EventStore`; the action
+    /// registry receives only the same read-only containment gate used by the
+    /// host command stream. Provider authentication and ADR-059 authorization
+    /// therefore cannot enable a proposed action outside ADR-060 containment.
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot bind the Gateway's
+    /// independently owned consent authority.
+    pub fn new_with_erasure_host_and_authorization(
+        host: ErasureExecutionHostV1,
+        bodies: impl IntoIterator<Item = EntityId>,
+        authorization: GatewayAuthorization,
+    ) -> Result<Self, GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let store = executor::StoreExecutor::new_with_erasure_host(
+            host,
+            consent_authority.append_permit(),
+        )?;
+        Ok(Self {
+            store,
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                bodies,
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: Some(Arc::new(authorization)),
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
     /// Construct authenticated local `OwnTracks` ingress behind one recovered
     /// host-owned Gateway store and erasure containment gate.
     ///
@@ -1242,7 +1283,7 @@ impl Gateway {
 
     /// Wrap a store and configure the World body catalogue used for actions.
     #[must_use]
-    pub fn new_with_world_bodies(
+    pub(crate) fn new_with_world_bodies(
         store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
     ) -> Self {
@@ -1276,14 +1317,12 @@ impl Gateway {
 
     #[cfg(test)]
     fn new_with_world_bodies_and_principal_for_test(
-        store: Box<dyn EventStore>,
+        mut store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
         principal: ActionPrincipal,
     ) -> Self {
-        #[cfg(test)]
-        let mut store = store;
-        #[cfg(test)]
-        Self::bind_test_erasure_gate(store.as_mut());
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        drop(store.bind_erasure_gate(Arc::clone(&gate)));
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1294,9 +1333,10 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
                 bodies,
                 Some(consent_authority.clone()),
+                gate,
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
@@ -1314,13 +1354,28 @@ impl Gateway {
     /// the Gateway never receives credentials or turns adapter output into
     /// policy.  Proposed actions and configured protected reads use this seam.
     #[must_use]
-    pub fn new_with_world_bodies_and_authorization(
+    pub(crate) fn new_with_world_bodies_and_authorization(
         store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
     ) -> Self {
+        #[cfg(test)]
+        let mut store = store;
+        #[cfg(test)]
+        let test_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        #[cfg(test)]
+        drop(store.bind_erasure_gate(Arc::clone(&test_gate)));
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
+        #[cfg(test)]
+        let action_registry = gateway_action_registry_with_authority_and_erasure_gate(
+            bodies,
+            Some(consent_authority.clone()),
+            test_gate,
+        );
+        #[cfg(not(test))]
+        let action_registry =
+            gateway_action_registry_with_authority(bodies, Some(consent_authority.clone()));
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(
                 store,
@@ -1329,10 +1384,7 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority(
-                bodies,
-                Some(consent_authority.clone()),
-            ),
+            action_registry,
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
@@ -1348,7 +1400,7 @@ impl Gateway {
     /// This does not register an HTTP route or widen generic ingress. Callers
     /// must already hold a backend implementing the dedicated core capability.
     #[must_use]
-    pub fn new_with_geo_location_admission<S>(store: S) -> Self
+    pub(crate) fn new_with_geo_location_admission<S>(store: S) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
@@ -1386,7 +1438,7 @@ impl Gateway {
     /// # Errors
     /// Returns a store error when the supplied gate cannot be bound before the
     /// Gateway executor starts.
-    pub fn new_with_geo_location_admission_and_erasure_gate<S>(
+    pub(crate) fn new_with_geo_location_admission_and_erasure_gate<S>(
         mut store: S,
         gate: Arc<dyn ErasureGate>,
     ) -> Result<Self, GatewayError>
@@ -1424,7 +1476,7 @@ impl Gateway {
     /// This does not register an HTTP route. The private executor performs
     /// authentication, rate limiting, and geographic admission in one queue turn.
     #[must_use]
-    pub fn new_with_owntracks_ingress(
+    pub(crate) fn new_with_owntracks_ingress(
         store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,
     ) -> Self {
@@ -1463,7 +1515,7 @@ impl Gateway {
     /// # Errors
     /// Returns a store error when the host-owned erasure gate cannot be bound
     /// to the supplied `SQLite` store.
-    pub fn new_with_owntracks_ingress_and_erasure_gate(
+    pub(crate) fn new_with_owntracks_ingress_and_erasure_gate(
         mut store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,
         gate: Arc<dyn ErasureGate>,
@@ -2082,7 +2134,7 @@ impl Gateway {
         if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
             return Err(error);
         }
-        let draft = match self.submit_action_draft(&proposal) {
+        let draft = match self.submit_action_draft(timeline, &proposal) {
             Ok(draft) => draft,
             Err(error) => return Err(error),
         };
@@ -2108,7 +2160,7 @@ impl Gateway {
         principal.authorizes(&proposal)?;
         let timeline = parse_timeline_id(timeline_id)?;
         self.ensure_timeline_exists(timeline).await?;
-        let draft = self.submit_action_draft(&proposal)?;
+        let draft = self.submit_action_draft(timeline, &proposal)?;
         self.append_draft(timeline, draft).await
     }
 
@@ -2214,7 +2266,7 @@ impl Gateway {
             Ok(proposal) => proposal,
             Err(error) => return Err(error.into()),
         };
-        let draft = match self.submit_action_draft(&proposal) {
+        let draft = match self.submit_action_draft(timeline, &proposal) {
             Ok(draft) => draft,
             Err(error) => return Err(error),
         };
@@ -2256,7 +2308,7 @@ impl Gateway {
             Err(error) => return Err(error.into()),
         };
         principal.authorizes(&proposal)?;
-        let draft = self.submit_action_draft(&proposal)?;
+        let draft = self.submit_action_draft(timeline, &proposal)?;
         drop(proposal);
         self.append_identified_draft(timeline, draft, ingress_id)
             .await
@@ -2270,10 +2322,23 @@ impl Gateway {
         }
     }
 
-    fn submit_action_draft(&self, proposal: &ProposedAction) -> Result<EventDraft, GatewayError> {
-        match self.action_registry.submit_action(proposal) {
+    fn submit_action_draft(
+        &self,
+        timeline: TimelineId,
+        proposal: &ProposedAction,
+    ) -> Result<EventDraft, GatewayError> {
+        match self.action_registry.submit_action(timeline, proposal) {
             Ok(draft) => Ok(draft),
-            Err(error) => Err(error.into()),
+            Err(pos_runtime::ActionSubmissionError::Rejected(error)) => Err(error.into()),
+            Err(pos_runtime::ActionSubmissionError::ErasureContainment(
+                pos_core::ErasureContainmentErrorV1::AccessFrozen,
+            )) => Err(CoreError::ErasureAccessFrozen.into()),
+            Err(
+                pos_runtime::ActionSubmissionError::ErasureOperationUnavailable
+                | pos_runtime::ActionSubmissionError::ErasureContainment(
+                    pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
+                ),
+            ) => Err(CoreError::ErasureContainmentUnavailable.into()),
         }
     }
 

@@ -29,7 +29,7 @@ use crate::{
         Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey, SnapshotAnchor,
         StepOutput, TimelineHistorySegment,
     },
-    error::RuntimeError,
+    error::{ActionSubmissionError, RuntimeError},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -2322,14 +2322,40 @@ impl PluginRegistry {
 
     /// Submit a proposed action through the capability-checked envelope (ADR-057).
     ///
-    /// Routes to the approver registered for `proposal.event_type`. This is a
-    /// live-only boundary: replay accepts a [`pos_state::ProjectionRegistry`]
-    /// and never receives a [`PluginRegistry`], so replay cannot submit actions.
+    /// The complete capability, payload, and approver invocation runs inside
+    /// the Timeline's ADR-060 `ProposedAction` fence. This is a live-only
+    /// boundary: replay accepts a [`pos_state::ProjectionRegistry`] and never
+    /// receives a [`PluginRegistry`], so replay cannot submit actions.
     ///
     /// # Errors
-    /// Returns [`ActionRejected`] if the payload is too large, no approver is registered
-    /// for the event type, or domain validation fails.
-    pub fn submit_action(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+    /// Returns a closed erasure error when the host fence is unavailable or
+    /// frozen, or [`ActionSubmissionError::Rejected`] when capability,
+    /// payload, ownership, or domain validation fails.
+    pub fn submit_action(
+        &self,
+        timeline: pos_core::ids::TimelineId,
+        proposal: &ProposedAction,
+    ) -> Result<EventDraft, ActionSubmissionError> {
+        let gate = self
+            .erasure_gate
+            .as_ref()
+            .ok_or(ActionSubmissionError::ErasureOperationUnavailable)?;
+        let mut result = Err(ActionSubmissionError::ErasureOperationUnavailable);
+        let mut approve = || {
+            result = self
+                .approve_action(proposal)
+                .map_err(ActionSubmissionError::from);
+        };
+        gate.with_fence(
+            timeline,
+            ErasureProtectedOperationV1::ProposedAction,
+            &mut approve,
+        )
+        .map_err(ActionSubmissionError::from)?;
+        result
+    }
+
+    fn approve_action(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
         if self.run_mode == RunMode::Replay {
             return Err(ActionRejected::UnknownEventType);
         }
@@ -4908,6 +4934,112 @@ mod tests {
         }
     }
 
+    struct CountingActionApprover(Arc<Mutex<usize>>);
+
+    impl ActionApprover for CountingActionApprover {
+        fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            Ok(EventDraft::new(
+                proposal.actor_entity_id,
+                proposal.event_type.clone(),
+                proposal.payload.clone(),
+            ))
+        }
+    }
+
+    struct FrozenActionGate;
+
+    impl ErasureGate for FrozenActionGate {
+        fn authorize(
+            &self,
+            _timeline: TimelineId,
+            _operation: ErasureProtectedOperationV1,
+        ) -> Result<(), ErasureContainmentErrorV1> {
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        }
+
+        fn with_fence(
+            &self,
+            timeline: TimelineId,
+            operation: ErasureProtectedOperationV1,
+            _effect: &mut dyn FnMut(),
+        ) -> Result<(), ErasureContainmentErrorV1> {
+            self.authorize(timeline, operation)
+        }
+    }
+
+    #[test]
+    fn proposed_action_fence_rejects_before_plugin_invocation() {
+        let plugin = plugin_with_caps("fenced_approver", &["action.type"], false, false);
+        let invocations = Arc::new(Mutex::new(0));
+        let proposal = ProposedAction::new(
+            Kind::new("action.type"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"payload"),
+            Kind::new("action.type.submit"),
+        );
+        let timeline = TimelineId::new();
+
+        let mut unavailable = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        unavailable
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(CountingActionApprover(Arc::clone(&invocations)))),
+                [Kind::new("action.type")],
+            )
+            .test_ok();
+        assert!(matches!(
+            unavailable.submit_action(timeline, &proposal),
+            Err(ActionSubmissionError::ErasureContainment(
+                ErasureContainmentErrorV1::RecoveryUnavailable
+            ))
+        ));
+
+        let mut missing = PluginRegistry::new().without_erasure_gate();
+        missing
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(CountingActionApprover(Arc::clone(&invocations)))),
+                [Kind::new("action.type")],
+            )
+            .test_ok();
+        assert!(matches!(
+            missing.submit_action(timeline, &proposal),
+            Err(ActionSubmissionError::ErasureOperationUnavailable)
+        ));
+
+        let mut frozen = PluginRegistry::new().with_erasure_gate(Arc::new(FrozenActionGate));
+        frozen
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(CountingActionApprover(Arc::clone(&invocations)))),
+                [Kind::new("action.type")],
+            )
+            .test_ok();
+        assert!(matches!(
+            frozen.submit_action(timeline, &proposal),
+            Err(ActionSubmissionError::ErasureContainment(
+                ErasureContainmentErrorV1::AccessFrozen
+            ))
+        ));
+        assert_eq!(
+            *invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            0
+        );
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_registry_registers_approver_and_submits_action() {
@@ -4963,7 +5095,8 @@ mod tests {
             CanonicalBytes::from_vec(b"ok_payload".to_vec()),
             Kind::new("action.type.submit"),
         );
-        let draft = reg.submit_action(&valid).test_ok();
+        let action_timeline = TimelineId::new();
+        let draft = reg.submit_action(action_timeline, &valid).test_ok();
         assert_eq!(draft.entity, actor);
         assert_eq!(draft.event_type.as_str(), "action.type");
 
@@ -4974,10 +5107,12 @@ mod tests {
             CanonicalBytes::from_vec(b"ok_payload".to_vec()),
             Kind::new("action.type.read"),
         );
-        assert_eq!(
-            reg.submit_action(&wrong_capability),
-            Err(ActionRejected::CapabilityNotGranted)
-        );
+        assert!(matches!(
+            reg.submit_action(action_timeline, &wrong_capability),
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::CapabilityNotGranted
+            ))
+        ));
 
         // Payload too large (>4096)
         let too_large = ProposedAction::new(
@@ -4986,13 +5121,15 @@ mod tests {
             CanonicalBytes::from_vec(vec![0u8; 5000]),
             Kind::new("action.type.submit"),
         );
-        assert_eq!(
-            reg.submit_action(&too_large),
-            Err(ActionRejected::PayloadTooLarge {
-                size: 5000,
-                max: 4096
-            })
-        );
+        assert!(matches!(
+            reg.submit_action(action_timeline, &too_large),
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::PayloadTooLarge {
+                    size: 5000,
+                    max: 4096
+                }
+            ))
+        ));
 
         // Unknown event type
         let unknown = ProposedAction::new(
@@ -5001,10 +5138,12 @@ mod tests {
             CanonicalBytes::from_vec(b"ok".to_vec()),
             Kind::new("unknown.type.submit"),
         );
-        assert_eq!(
-            reg.submit_action(&unknown),
-            Err(ActionRejected::UnknownEventType)
-        );
+        assert!(matches!(
+            reg.submit_action(action_timeline, &unknown),
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::UnknownEventType
+            ))
+        ));
 
         // Domain validation failure
         let rejected = ProposedAction::new(
@@ -5013,18 +5152,20 @@ mod tests {
             CanonicalBytes::from_vec(b"reject_me".to_vec()),
             Kind::new("action.type.submit"),
         );
-        assert_eq!(
-            reg.submit_action(&rejected),
-            Err(ActionRejected::DomainValidationFailed(
-                "rejected".to_owned()
-            ))
-        );
+        assert!(matches!(
+            reg.submit_action(action_timeline, &rejected),
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::DomainValidationFailed(reason)
+            )) if reason == "rejected"
+        ));
 
         let replay = PluginRegistry::new_replay();
-        assert_eq!(
-            replay.submit_action(&valid),
-            Err(ActionRejected::UnknownEventType)
-        );
+        assert!(matches!(
+            replay.submit_action(action_timeline, &valid),
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::UnknownEventType
+            ))
+        ));
     }
 
     #[test]
@@ -5054,12 +5195,13 @@ mod tests {
                 [event_type.clone()],
             )
             .test_ok();
-        assert_eq!(
-            actor_registry.submit_action(&proposal),
-            Err(ActionRejected::DomainValidationFailed(
-                "approver returned an event for a different actor".to_owned(),
-            ))
-        );
+        let action_timeline = TimelineId::new();
+        assert!(matches!(
+            actor_registry.submit_action(action_timeline, &proposal),
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::DomainValidationFailed(reason)
+            )) if reason == "approver returned an event for a different actor"
+        ));
 
         let forged_event_type = Kind::new("other.action.type");
         let plugin = plugin_with_caps("forged_event_type", &["action.type"], false, false);
@@ -5076,12 +5218,12 @@ mod tests {
                 [event_type],
             )
             .test_ok();
-        assert_eq!(
-            event_type_registry.submit_action(&proposal),
-            Err(ActionRejected::DomainValidationFailed(
-                "approver returned an event for a different event type".to_owned(),
-            ))
-        );
+        assert!(matches!(
+            event_type_registry.submit_action(action_timeline, &proposal),
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::DomainValidationFailed(reason)
+            )) if reason == "approver returned an event for a different event type"
+        ));
     }
 
     #[test]
@@ -5101,10 +5243,12 @@ mod tests {
             CanonicalBytes::from_static(b"coverage"),
             Kind::new("replay.event.submit"),
         );
-        assert_eq!(
-            PluginRegistry::new_replay().submit_action(&proposal),
-            Err(ActionRejected::UnknownEventType)
-        );
+        assert!(matches!(
+            PluginRegistry::new_replay().submit_action(TimelineId::new(), &proposal),
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::UnknownEventType
+            ))
+        ));
     }
 }
 

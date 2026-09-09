@@ -10,7 +10,7 @@ use pos_core::{
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Hash,
-    Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -20,9 +20,11 @@ use pos_plugin_agent::{
 use pos_plugin_society::{
     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 };
-use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
+use pos_runtime::{
+    Driver, ErasureExecutionHostV1, ObservationView, ProjectionKey, RuntimeError, StepOutput,
+};
 use pos_state::{EntityStateProjection, ProjectionRegistry};
-use pos_store::{open_store, SeqRange, StoreConfig};
+use pos_store::{open_erasure_host_store, open_store, SeqRange, StoreConfig};
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
@@ -460,17 +462,18 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let address = listener.local_addr().test_ok()?;
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
-    let erasure_gate: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
-    let mut gateway_store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?;
-    gateway_store
-        .bind_erasure_gate(Arc::clone(&erasure_gate))
-        .test_ok()?;
+    let host = ErasureExecutionHostV1::recover_verified_empty(
+        open_erasure_host_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let erasure_gate = host.containment_gate();
     let state = AppState {
-        gateway: Gateway::new_with_world_bodies_and_authorization(
-            gateway_store,
+        gateway: Gateway::new_with_erasure_host_and_authorization(
+            host,
             [human_body],
             gateway_authorization_for(human_entity)?,
-        ),
+        )?,
         ledger_view: LedgerView::default(),
         ledger_write: LedgerWriteMode::Disabled,
     };
@@ -1005,10 +1008,12 @@ async fn gateway_reloads_durable_consent_before_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let database = tempfile::NamedTempFile::new().test_ok()?;
     let path = database.path().to_str().test_ok()?.to_owned();
-    let first_gateway = Gateway::new_with_erasure_gate(
-        open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
-        Arc::new(ErasureContainmentGateV1::new()),
-    )?;
+    let first_host = ErasureExecutionHostV1::recover_verified_empty(
+        open_erasure_host_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let first_gateway = Gateway::new_with_erasure_host(first_host)?;
     let timeline = first_gateway
         .create_timeline("consent-recovery")
         .await
@@ -1032,10 +1037,12 @@ async fn gateway_reloads_durable_consent_before_revocation(
         .test_ok()?;
     drop(first_gateway);
 
-    let recovered_gateway = Gateway::new_with_erasure_gate(
-        open_store(StoreConfig::Sqlite { path }).test_ok()?,
-        Arc::new(ErasureContainmentGateV1::new()),
-    )?;
+    let recovered_host = ErasureExecutionHostV1::recover_verified_empty(
+        open_erasure_host_store(StoreConfig::Sqlite { path }).test_ok()?,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let recovered_gateway = Gateway::new_with_erasure_host(recovered_host)?;
     let unknown_error = recovered_gateway
         .issue_consent_revocation(
             &timeline.id().to_string(),
@@ -1076,10 +1083,12 @@ async fn gateway_reloads_durable_consent_before_revocation(
 #[tokio::test]
 async fn gateway_rejects_geo_admission_after_consent_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let gateway = Gateway::new_with_geo_location_admission_and_erasure_gate(
-        pos_store::memory::MemoryStore::default(),
-        Arc::new(ErasureContainmentGateV1::new()),
-    )?;
+    let host = ErasureExecutionHostV1::recover_verified_empty_gateway(
+        Box::new(pos_store::memory::MemoryStore::new().without_erasure_gate()),
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let gateway = Gateway::new_with_erasure_host(host)?;
     let timeline = gateway
         .create_timeline("geo-revocation-fence")
         .await
@@ -1136,10 +1145,12 @@ async fn gateway_rejects_geo_admission_after_consent_revocation(
 #[tokio::test]
 async fn gateway_shutdown_drains_an_empty_executor(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let gateway = Gateway::new_with_erasure_gate(
-        open_store(StoreConfig::Memory).test_ok()?,
-        Arc::new(ErasureContainmentGateV1::new()),
-    )?;
+    let host = ErasureExecutionHostV1::recover_verified_empty(
+        open_erasure_host_store(StoreConfig::Memory).test_ok()?,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let gateway = Gateway::new_with_erasure_host(host)?;
     gateway.shutdown().await.test_ok()?;
     drop(gateway);
     Ok(())
