@@ -9,7 +9,7 @@
 //! projections on each tick until a [`StopCondition`] is met.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-mod host_store;
+include!("host_store.rs");
 
 #[cfg(test)]
 use pos_core::ErasureContainmentGateV1;
@@ -18,7 +18,9 @@ use pos_core::{
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ErasureGate, ReproManifest, Timeline,
+    store::{EventReadBounds, EventStore, SeqRange},
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureGate,
+    ErasureHostErrorV1, Event, ReproManifest, Seq, Timeline,
 };
 use pos_runtime::PluginRegistry;
 use pos_store::StoreConfig;
@@ -1138,8 +1140,8 @@ impl Experiment {
     /// opened or cannot create the Timeline.
     pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let store = host_store::HostedExperimentStore::open(store_config.clone())
-            .map_err(hosted_store_error)?;
+        let store =
+            HostedExperimentStore::open(store_config.clone()).map_err(hosted_store_error)?;
         self.start_with_hosted_store_and_recipe(store, Some(store_config))
     }
 
@@ -1201,7 +1203,7 @@ impl Experiment {
 
     fn start_with_hosted_store_and_recipe(
         mut self,
-        store: host_store::HostedExperimentStore,
+        store: HostedExperimentStore,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         bind_registry_to_host_gate(&mut self.registry, store.containment_gate())?;
@@ -1226,8 +1228,8 @@ impl Experiment {
         timeline_id: pos_core::ids::TimelineId,
     ) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let store = host_store::HostedExperimentStore::open(store_config.clone())
-            .map_err(hosted_store_error)?;
+        let store =
+            HostedExperimentStore::open(store_config.clone()).map_err(hosted_store_error)?;
         bind_registry_to_host_gate(&mut self.registry, store.containment_gate())?;
         self.resume_with_store_and_recipe(timeline_id, Box::new(store), Some(store_config))
     }
@@ -2426,7 +2428,7 @@ impl BacktestRunner {
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] or [`ExperimentError::Store`] on failure.
     pub fn run(self) -> Result<BacktestResult, ExperimentError> {
-        let mut store = host_store::HostedExperimentStore::open(self.config.store_config.clone())
+        let mut store = HostedExperimentStore::open(self.config.store_config.clone())
             .map_err(hosted_store_error)?;
         let host_gate = store.containment_gate();
         if self
