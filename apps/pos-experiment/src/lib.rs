@@ -4902,6 +4902,7 @@ mod tests {
     }
 
     fn transaction_registry(
+        path: TransactionHostPath,
         case: TransactionCase,
         state: &Arc<Mutex<HostTransactionState>>,
         failing_state: &Arc<Mutex<HostTransactionState>>,
@@ -4918,7 +4919,10 @@ mod tests {
                 (&["host.transaction"], Some("host.transaction"))
             }
         };
-        let mut registry = test_registry();
+        let mut registry = PluginRegistry::new();
+        if matches!(path, TransactionHostPath::AdvanceTick) {
+            bind_test_erasure_gate(&mut registry);
+        }
         registry
             .register(
                 &make_plugin("host-transaction", owned_event_types),
@@ -4987,7 +4991,7 @@ mod tests {
     ) -> HostCaseResult {
         let state = Arc::new(Mutex::new(HostTransactionState::default()));
         let failing_state = Arc::new(Mutex::new(HostTransactionState::default()));
-        let registry = transaction_registry(case, &state, &failing_state);
+        let registry = transaction_registry(path, case, &state, &failing_state);
 
         let (timeline, result) = match path {
             TransactionHostPath::AdvanceTick => {

@@ -137,7 +137,7 @@ mod host_store_tests {
                 .read_bounded(
                     parent.id(),
                     SeqRange::all(),
-                    EventReadBounds::new(16, 16, 4, 4),
+                    EventReadBounds::new(16, 32, 4, 4),
                 )?
                 .len(),
             1
