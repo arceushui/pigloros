@@ -30,9 +30,9 @@ use pos_reference::sandbox_provider_protocol::{
     RootSelectorAdmissionInputs, SandboxAdministratorPolicy, SandboxAdmissionError,
     SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest, SandboxGrantExpectations,
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxPayloadChunk,
-    SandboxProviderAdmissionInputs, SandboxProviderOperation, SandboxProviderProtocolError,
-    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTerminalOutcome,
-    SandboxTrustSnapshot,
+    SandboxProviderAdmissionInputs, SandboxProviderError, SandboxProviderErrorCode,
+    SandboxProviderOperation, SandboxProviderProtocolError, SandboxProviderReceipt,
+    SandboxRevocationSnapshot, SandboxTerminalOutcome, SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -1838,6 +1838,102 @@ fn provider_execute_error(
         ]),
         &fixture.authority.runtime,
     )
+}
+
+#[test]
+fn provider_error_decoder_closes_each_error_code_identity_class() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+    let codes = [
+        (0, SandboxProviderErrorCode::InvalidEncoding),
+        (1, SandboxProviderErrorCode::UnsupportedVersion),
+        (2, SandboxProviderErrorCode::FieldOutOfBounds),
+        (3, SandboxProviderErrorCode::NonCanonicalOrder),
+        (4, SandboxProviderErrorCode::DigestMismatch),
+        (5, SandboxProviderErrorCode::SignatureInvalid),
+        (6, SandboxProviderErrorCode::TrustRevoked),
+        (7, SandboxProviderErrorCode::AuthorityMismatch),
+        (8, SandboxProviderErrorCode::ProviderCapabilityMissing),
+        (9, SandboxProviderErrorCode::ImageIdentityMismatch),
+        (10, SandboxProviderErrorCode::SelfTestFailed),
+        (11, SandboxProviderErrorCode::SandboxUnavailable),
+        (12, SandboxProviderErrorCode::AdmissionBusy),
+        (13, SandboxProviderErrorCode::AuditUnavailable),
+        (14, SandboxProviderErrorCode::CleanupFailed),
+        (15, SandboxProviderErrorCode::UnknownAttempt),
+        (16, SandboxProviderErrorCode::RequestIdentityConflict),
+        (17, SandboxProviderErrorCode::PayloadTransferTimeout),
+    ];
+
+    for (code, expected) in codes {
+        let authenticated = code >= 6;
+        let operation = if code == 0 {
+            Value::Null
+        } else if authenticated {
+            integer(1)
+        } else {
+            integer(0)
+        };
+        let record = sign_record(
+            "SPE1",
+            Value::Array(vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                operation,
+                authenticated
+                    .then(|| Value::Bytes(request.request.request_id.to_vec()))
+                    .unwrap_or(Value::Null),
+                authenticated
+                    .then(|| bytes(request.request_digest))
+                    .unwrap_or(Value::Null),
+                authenticated
+                    .then(|| Value::Bytes(request.attempt_id.to_vec()))
+                    .unwrap_or(Value::Null),
+                integer(code),
+                Value::Null,
+                Value::Text("runtime".to_owned()),
+            ]),
+            &fixture.authority.runtime,
+        )?;
+        let error = SandboxProviderError::from_canonical_cbor(&record)?;
+        assert_eq!(error.code, expected);
+        assert_eq!(
+            error.operation,
+            (code != 0).then_some(if authenticated { 1 } else { 0 })
+        );
+        error.verify_signature(&fixture.authority.runtime.verifying_key())?;
+    }
+
+    for (code, operation, request_id, request_digest, attempt_id) in [
+        (18, integer(1), Value::Null, Value::Null, Value::Null),
+        (
+            17,
+            integer(0),
+            Value::Bytes(request.request.request_id.to_vec()),
+            bytes(request.request_digest),
+            Value::Null,
+        ),
+        (6, integer(1), Value::Null, Value::Null, Value::Null),
+    ] {
+        let record = sign_record(
+            "SPE1",
+            Value::Array(vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                operation,
+                request_id,
+                request_digest,
+                attempt_id,
+                integer(code),
+                Value::Null,
+                Value::Text("runtime".to_owned()),
+            ]),
+            &fixture.authority.runtime,
+        )?;
+        assert!(SandboxProviderError::from_canonical_cbor(&record).is_err());
+    }
+    Ok(())
 }
 
 #[test]
