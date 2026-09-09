@@ -3261,7 +3261,7 @@ fn root_selector_distinguishes_declared_ceiling_from_descriptor_mismatch() -> Te
 
 #[test]
 fn root_selector_rejects_an_actual_payload_stream_over_the_hard_limit() -> TestResult {
-    const CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
+    static CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
     let fixture = Fixture::new()?;
     let request = selector_evaluation_request(&fixture)?;
     let attempt = selector_case_attempt();
