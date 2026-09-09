@@ -2871,24 +2871,28 @@ mod tests {
     }
 
     use super::{
-        execute_append_command, execute_append_consent_revocation_command,
-        prepare_owntracks_ingress, Command, ExecutorState, ExecutorStore, GatewayExecutorStore,
-        OwnTracksRateLimiter,
+        empty_action_append, event_limit_reached, execute_append_command,
+        execute_append_consent_revocation_command, missing_duplicate_event,
+        prepare_owntracks_ingress, resolve_identified_outcome, ActionCommandError, Command,
+        ExecutorState, ExecutorStore, GatewayExecutorStore, OwnTracksRateLimiter,
+    };
+    use crate::authorization::{
+        test_authorization_for, GatewayAuthorizationDecision, GatewayAuthorizationRequest,
     };
     use pos_core::{
         clock::WallTime,
         event::{Event, EventDraft},
         geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1},
         store::{
-            AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, EventReadBounds,
-            EventStore, SeqRange,
+            AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent,
+            AppendOrDuplicateOutcome, EventReadBounds, EventStore, SeqRange,
         },
         timeline::Timeline,
         CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1, ConsentRevokedV1,
-        CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, TimelineId,
+        CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, ProposedAction, TimelineId,
         ERASURE_MAX_INVENTORY_REQUESTS,
     };
-    use pos_runtime::ErasureExecutionHostV1;
+    use pos_runtime::{ErasureExecutionHostV1, PluginRegistry};
     use pos_store::memory::MemoryStore;
     use std::{
         collections::HashMap,
@@ -3552,6 +3556,47 @@ mod tests {
         ));
     }
 
+    fn assert_expired_action<T>(
+        command: Command,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, ActionCommandError>>,
+    ) {
+        super::expire_command(command);
+        assert!(matches!(
+            receiver.blocking_recv().test_value(),
+            Err(ActionCommandError::Executor(
+                super::StoreExecutorError::DeadlineExceeded
+            ))
+        ));
+    }
+
+    fn action_fixture(
+        timeline: TimelineId,
+    ) -> Result<
+        (
+            Arc<crate::authorization::GatewayAuthorization>,
+            GatewayAuthorizationDecision,
+            ProposedAction,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let actor = EntityId::new();
+        let authorization = Arc::new(test_authorization_for(actor));
+        let decision = authorization.authorize(GatewayAuthorizationRequest::action(
+            actor,
+            timeline,
+            "world.action",
+            "world.action.submit",
+            WallTime::now(),
+        ))?;
+        let proposal = ProposedAction::new(
+            Kind::new("world.action"),
+            actor,
+            CanonicalBytes::from_static(b"payload"),
+            Kind::new("world.action.submit"),
+        );
+        Ok((authorization, decision, proposal))
+    }
+
     #[test]
     fn expired_admission_commands_reply() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
@@ -3690,6 +3735,147 @@ mod tests {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::PanicRead { reply }, receiver);
 
+        Ok(())
+    }
+
+    #[test]
+    fn expired_action_commands_reply() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let timeline = TimelineId::new();
+        let (authorization, decision, proposal) = action_fixture(timeline)?;
+        let registry = Arc::new(PluginRegistry::new());
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired_action(
+            Command::SubmitAction {
+                timeline,
+                registry: Arc::clone(&registry),
+                proposal: proposal.clone(),
+                authorization: Arc::clone(&authorization),
+                decision: decision.clone(),
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired_action(
+            Command::SubmitIdentifiedAction {
+                timeline,
+                registry,
+                proposal,
+                authorization,
+                decision,
+                identity: AppendIdentity::new(
+                    AppendDedupKey::from_keyed_hash([7; 32]),
+                    AppendDedupScope::from_keyed_hash([8; 32]),
+                ),
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identified_action_outcome_and_error_helpers_cover_fail_closed_results(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        assert!(matches!(
+            ActionCommandError::from(super::StoreExecutorError::Unhealthy),
+            ActionCommandError::Executor(super::StoreExecutorError::Unhealthy)
+        ));
+        for error in [
+            event_limit_reached(),
+            empty_action_append(),
+            missing_duplicate_event(),
+        ] {
+            assert!(matches!(
+                error,
+                ActionCommandError::Executor(super::StoreExecutorError::Store(CoreError::Storage(
+                    _
+                )))
+            ));
+        }
+
+        let timeline = TimelineId::new();
+        let (_, decision, _) = action_fixture(timeline)?;
+        assert!(matches!(
+            resolve_identified_outcome(
+                AppendOrDuplicateOutcome::Conflict,
+                |_| Ok(None),
+                decision.clone(),
+            ),
+            Err(ActionCommandError::IngressConflict)
+        ));
+        let duplicate_id = EventId::new();
+        assert!(matches!(
+            resolve_identified_outcome(
+                AppendOrDuplicateOutcome::Duplicate {
+                    event_id: duplicate_id,
+                },
+                |_| Ok(None),
+                decision.clone(),
+            ),
+            Err(ActionCommandError::Executor(
+                super::StoreExecutorError::Store(CoreError::Storage(_))
+            ))
+        ));
+        assert!(matches!(
+            resolve_identified_outcome(
+                AppendOrDuplicateOutcome::Duplicate {
+                    event_id: duplicate_id,
+                },
+                |_| {
+                    Err(ActionCommandError::Executor(
+                        super::StoreExecutorError::Unhealthy,
+                    ))
+                },
+                decision,
+            ),
+            Err(ActionCommandError::Executor(
+                super::StoreExecutorError::Unhealthy
+            ))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stopped_executor_rejects_both_action_command_shapes(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        executor.shutdown().await.test_ok()?;
+        let timeline = TimelineId::new();
+        let (authorization, decision, proposal) = action_fixture(timeline)?;
+        let registry = Arc::new(PluginRegistry::new());
+
+        let ordinary = executor
+            .submit_action(
+                timeline,
+                Arc::clone(&registry),
+                proposal.clone(),
+                Arc::clone(&authorization),
+                decision.clone(),
+                1,
+            )
+            .await;
+        assert!(matches!(ordinary, Err(ActionCommandError::Executor(_))));
+
+        let identified = executor
+            .submit_identified_action(
+                timeline,
+                registry,
+                proposal,
+                authorization,
+                decision,
+                AppendIdentity::new(
+                    AppendDedupKey::from_keyed_hash([9; 32]),
+                    AppendDedupScope::from_keyed_hash([10; 32]),
+                ),
+                1,
+            )
+            .await;
+        assert!(matches!(identified, Err(ActionCommandError::Executor(_))));
+        drop(executor);
         Ok(())
     }
 

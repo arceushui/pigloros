@@ -3545,6 +3545,66 @@ mod tests {
         drop(gateway);
     }
 
+    #[tokio::test]
+    async fn authorized_action_commands_preserve_the_event_ceiling_error() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_for(actor);
+        let audit_host = authorization.clone();
+        let mut gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            authorization,
+        );
+        gateway.limits.max_events_per_timeline = 0;
+        let timeline = gateway
+            .create_timeline("action-event-ceiling")
+            .await
+            .test_ok();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+
+        let ordinary = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            ordinary,
+            GatewayError::EventLimitReached { maximum: 0 }
+        ));
+        let identified = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "event-ceiling",
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            identified,
+            GatewayError::EventLimitReached { maximum: 0 }
+        ));
+        assert!(audit_host.audits().await.is_empty());
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
     async fn assert_authority_proposed_action_boundaries(
         gateway: &Gateway,
         timeline_id: &str,
