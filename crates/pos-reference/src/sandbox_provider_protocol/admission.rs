@@ -978,6 +978,7 @@ impl AdmittedSandboxProvider {
             .iter()
             .map(|plan| plan.plan_digest)
             .collect::<Vec<_>>();
+        let network_plans_match = expected_plans == commitment.network_plan_digests;
         let actual = GrantBinding {
             request_id: grant.request_id,
             attempt_id: grant.attempt_id,
@@ -1027,7 +1028,7 @@ impl AdmittedSandboxProvider {
             || request_authority.execution_profile_digest != commitment.execution_profile_digest
             || request_authority.fixture_digest != commitment.fixture_digest
             || request.capability_ids != commitment.capability_ids
-            || expected_plans != commitment.network_plan_digests
+            || !network_plans_match
             || !request
                 .capability_ids
                 .contains(&commitment.required_provider_capability.capability_id)
