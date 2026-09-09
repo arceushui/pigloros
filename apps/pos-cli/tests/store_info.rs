@@ -28,15 +28,16 @@ fn store_timeline_id(connection: &Connection) -> Result<String, Box<dyn std::err
 }
 
 #[test]
-fn healthy_store_info_requires_a_host_gate() -> Result<(), Box<dyn std::error::Error>> {
+fn healthy_store_info_uses_the_production_host_gate() -> Result<(), Box<dyn std::error::Error>> {
     let (_directory, path) = initialized_store()?;
 
     let output = run_pos(&["store", "info", &path])?;
 
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8(output.stderr)?.contains("erasure containment boundary is unavailable")
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "Timelines: 1\nTotal events: 0\n"
     );
     Ok(())
 }
@@ -57,10 +58,8 @@ fn corrupt_timeline_listing_fails_without_partial_stdout() -> Result<(), Box<dyn
         stderr.contains("failed to list Timelines while calculating store information"),
         "unexpected stderr: {stderr}"
     );
-    assert!(
-        stderr.contains("Invalid column type"),
-        "missing root cause in stderr: {stderr}"
-    );
+    assert!(stderr.contains("erasure host rejected CLI operation"));
+    assert!(!stderr.contains("Invalid column type"));
     Ok(())
 }
 
@@ -89,8 +88,13 @@ fn corrupt_timeline_events_fail_without_partial_stdout() -> Result<(), Box<dyn s
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(
-        stderr.contains("erasure containment boundary is unavailable"),
-        "missing fail-closed reason in stderr: {stderr}"
+        stderr.contains(&format!(
+            "failed to read Timeline {timeline_id} while calculating store information"
+        )),
+        "missing operation context in stderr: {stderr}"
     );
+    assert!(stderr.contains("erasure host rejected CLI operation"));
+    assert!(!stderr.contains("serialization"));
+    assert!(!stderr.contains("hash"));
     Ok(())
 }
