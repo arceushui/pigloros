@@ -84,6 +84,17 @@ fn backtest_runner_on_store(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn start_with_fixture_store(
+    experiment: Experiment,
+    mut store: Box<dyn pos_core::store::EventStore>,
+) -> Result<ExperimentSession, ExperimentError> {
+    let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    experiment.with_erasure_gate(gate).start_with_store(store)
+}
+
+#[cfg(test)]
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
@@ -95,10 +106,6 @@ fn open_store_with_gate(
     gate: Option<Arc<dyn ErasureGate>>,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
     let mut store = pos_store::open_store(config)?;
-    #[cfg(test)]
-    if gate.is_none() {
-        drop(bind_test_store_gate(store.as_mut()));
-    }
     if let Some(gate) = gate {
         store.bind_erasure_gate(gate)?;
     }
@@ -1170,12 +1177,6 @@ impl Experiment {
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let registry = self.registry;
-        #[cfg(test)]
-        let registry = {
-            let mut registry = registry;
-            bind_test_erasure_gate(&mut registry);
-            registry
-        };
         let parent_composition = registry.composition();
         let timeline = bind_registry_erasure_gate(store.as_mut(), &registry)
             .and_then(|()| store.create_timeline(&self.config.name))?;
@@ -1257,13 +1258,11 @@ impl Experiment {
     }
 
     fn resume_with_store_and_recipe(
-        mut self,
+        self,
         timeline_id: pos_core::ids::TimelineId,
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
-        #[cfg(test)]
-        bind_test_erasure_gate(&mut self.registry);
         let parent_composition = self.registry.composition();
         let timeline = bind_registry_erasure_gate(store.as_mut(), &self.registry)
             .and_then(|()| store.get_timeline(timeline_id))
@@ -3316,14 +3315,16 @@ mod tests {
                 [Kind::new("submit.event")],
             )
             .test_ok();
-        let mut session = experiment
-            .start_with_store(Box::new(CaptureAwareStore {
+        let mut session = start_with_fixture_store(
+            experiment,
+            Box::new(CaptureAwareStore {
                 base: Box::new(pos_store::memory::MemoryStore::new()),
                 state: Arc::new(Mutex::new(HostTransactionState::default())),
                 fail_append: true,
                 fail_post_step_capture: false,
-            }))
-            .test_ok();
+            }),
+        )
+        .test_ok();
         let proposal = ProposedAction::new(
             Kind::new("submit.event"),
             EntityId::new(),
@@ -6170,9 +6171,9 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        let session = experiment
-            .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
-            .test_ok();
+        let session =
+            start_with_fixture_store(experiment, Box::new(pos_store::memory::MemoryStore::new()))
+                .test_ok();
         assert!(session.source_events().test_ok().is_empty());
         let result = session.run_to_completion().test_ok();
         assert!(result.store_config.is_none());
@@ -7735,7 +7736,10 @@ mod coverage_entrypoints {
         expect_err(&session.fork("missing-factory"));
 
         let experiment = Experiment::new(config("supplied-store", StopCondition::MaxTicks(1)));
-        let _ = ok(experiment.start_with_store(Box::new(pos_store::memory::MemoryStore::new())));
+        let _ = ok(start_with_fixture_store(
+            experiment,
+            Box::new(pos_store::memory::MemoryStore::new()),
+        ));
 
         let config = BacktestConfig {
             experiment_name: "empty-backtest".to_owned(),
@@ -7795,6 +7799,19 @@ mod coverage_entrypoints {
 
     #[test]
     fn host_gate_binding_and_startup_errors_are_closed() {
+        let mut unbound_store = ok(open_store_with_gate(StoreConfig::Memory, None));
+        assert!(matches!(
+            unbound_store.create_timeline("unbound-store"),
+            Err(pos_core::CoreError::ErasureContainmentUnavailable)
+        ));
+        assert!(matches!(
+            Experiment::new(config("unbound-host-store", StopCondition::MaxTicks(0)))
+                .start_with_store(Box::new(pos_store::memory::MemoryStore::new())),
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
         let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
         let mut registry = PluginRegistry::new();
         ok(bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)));
@@ -8657,9 +8674,11 @@ mod fault_injection_tests {
             calls: Cell::new(0),
             fail_on_call: 1,
         };
-        let session = Experiment::new(config("projection-head-error", StopCondition::MaxTicks(1)))
-            .start_with_store(Box::new(failing_store))
-            .test_ok();
+        let session = start_with_fixture_store(
+            Experiment::new(config("projection-head-error", StopCondition::MaxTicks(1))),
+            Box::new(failing_store),
+        )
+        .test_ok();
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(session.timeline().id(), &export_grant(0));
         assert!(session
@@ -8780,9 +8799,11 @@ mod fault_injection_tests {
             calls: Cell::new(0),
             fail_on_call: 1,
         };
-        let session = Experiment::new(config("fork-head-error", StopCondition::MaxTicks(1)))
-            .start_with_store(Box::new(failing_store))
-            .test_ok();
+        let session = start_with_fixture_store(
+            Experiment::new(config("fork-head-error", StopCondition::MaxTicks(1))),
+            Box::new(failing_store),
+        )
+        .test_ok();
         assert!(session
             .fork_timeline_at("child", pos_core::clock::Seq::ZERO)
             .is_err());
@@ -8792,12 +8813,14 @@ mod fault_injection_tests {
             calls: Cell::new(0),
             fail_on_call: 1,
         };
-        let mut session = Experiment::new(config(
-            "fork-initial-head-error",
-            StopCondition::MaxTicks(1),
-        ))
-        .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
-        .start_with_store(Box::new(failing_store))
+        let mut session = start_with_fixture_store(
+            Experiment::new(config(
+                "fork-initial-head-error",
+                StopCondition::MaxTicks(1),
+            ))
+            .with_fork_registry_factory(|| Ok(PluginRegistry::new())),
+            Box::new(failing_store),
+        )
         .test_ok();
         assert!(session.fork("child").is_err());
     }
