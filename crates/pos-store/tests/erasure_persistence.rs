@@ -1502,7 +1502,7 @@ fn sqlite_fork_retry_rejects_invalid_receipt_values() -> Result<(), Box<dyn std:
                     rusqlite::params![prepared.operation().digest().as_slice()],
                 )
             },
-            ErasureErrorV1::ProvenanceMissing,
+            ErasureErrorV1::PolicyConflict,
         )?;
     }
     Ok(())
