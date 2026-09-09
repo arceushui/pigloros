@@ -35,7 +35,7 @@ fn production_ledger_binary_reports_dispatch_errors() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn public_store_verification_fails_closed_without_host_gate_on_signature_role(
+fn public_store_verification_rejects_invalid_signature_role_through_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
@@ -92,12 +92,12 @@ fn public_store_verification_fails_closed_without_host_gate_on_signature_role(
     };
     assert!(error
         .to_string()
-        .contains("erasure containment boundary is unavailable"));
+        .contains("erasure host rejected ledger operation"));
     Ok(())
 }
 
 #[test]
-fn public_store_verification_fails_closed_without_host_gate_on_invalid_registry_key(
+fn public_store_verification_rejects_invalid_registry_key_through_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
@@ -149,13 +149,12 @@ fn public_store_verification_fails_closed_without_host_gate_on_invalid_registry_
     };
     assert!(error
         .to_string()
-        .contains("erasure containment boundary is unavailable"));
+        .contains("erasure host rejected ledger operation"));
     Ok(())
 }
 
 #[test]
-fn public_store_verification_fails_closed_without_a_host_gate(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_store_command_uses_production_host_gate() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let database_path = directory.path().join("ledger.db");
     let key_path = directory.path().join("signing-key");
@@ -166,7 +165,7 @@ fn public_store_verification_fails_closed_without_a_host_gate(
         "--out".to_owned(),
         key_path.to_string_lossy().into_owned(),
     ])?;
-    let error = run(&[
+    run(&[
         "piglor-ledger".to_owned(),
         "predict".to_owned(),
         "--source".to_owned(),
@@ -187,15 +186,12 @@ fn public_store_verification_fails_closed_without_a_host_gate(
         "2026-08-01".to_owned(),
         "--osf".to_owned(),
         "https://osf.io/example".to_owned(),
-    ])
-    .err()
-    .ok_or("production store command unexpectedly succeeded without a host gate")?;
-    assert!(error.to_string().contains("erasure containment boundary"));
+    ])?;
     Ok(())
 }
 
 #[test]
-fn public_store_verification_fails_closed_without_host_gate_on_rotated_key(
+fn public_store_verification_uses_production_host_gate_with_rotated_keys(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
@@ -270,12 +266,8 @@ fn public_store_verification_fails_closed_without_host_gate_on_rotated_key(
         write!(&mut anchor_two, "{byte:02x}")?;
     }
     let anchors = format!("ledger-owner/2/1={anchor_one},ledger-owner/2/2={anchor_two}");
-    let error = verify_source(&Source::Store(database_path), Some(&anchors), None)
-        .err()
-        .ok_or("production store verification unexpectedly succeeded without a host gate")?;
-    assert!(error
-        .to_string()
-        .contains("erasure containment boundary is unavailable"));
+    let report = verify_source(&Source::Store(database_path), Some(&anchors), None)?;
+    assert_eq!(report.n, 2);
 
     let single_public_key = material_one
         .public_verification_key()
