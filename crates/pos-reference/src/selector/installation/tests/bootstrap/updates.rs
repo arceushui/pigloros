@@ -2,6 +2,8 @@ use super::*;
 use crate::selector::installation::authority::update::InstallationChallenge;
 use crate::selector::installation::authority::InstalledSelectorAuthority;
 
+mod durability;
+
 fn appended_record(
     fixture: &InstallationFixture,
     fields: &mut [Value],
