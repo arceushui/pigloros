@@ -153,9 +153,15 @@ impl SandboxLocalError {
             uint_value(self.phase.code()),
             self.operation
                 .map_or(Value::Null, |operation| uint_value(operation.code())),
-            self.request_id.as_ref().map_or(Value::Null, bytes_value),
-            self.attempt_id.as_ref().map_or(Value::Null, bytes_value),
-            self.agr1_digest.as_ref().map_or(Value::Null, bytes_value),
+            self.request_id
+                .as_ref()
+                .map_or(Value::Null, |request_id| bytes_value(request_id)),
+            self.attempt_id
+                .as_ref()
+                .map_or(Value::Null, |attempt_id| bytes_value(attempt_id)),
+            self.agr1_digest
+                .as_ref()
+                .map_or(Value::Null, |digest| bytes_value(digest)),
             uint_value(self.code.code()),
             self.safe_detail
                 .as_ref()
