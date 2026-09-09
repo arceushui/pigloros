@@ -1,5 +1,7 @@
 //! Root-owned immutable artifact and selector-socket boundary.
 
+pub mod installation;
+
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
