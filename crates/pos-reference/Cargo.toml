@@ -12,6 +12,7 @@ ciborium = { workspace = true }
 ciborium-ll = "0.2.2"
 ed25519-dalek = { workspace = true }
 flate2 = "1"
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -27,9 +28,6 @@ rustix = { version = "1.1.4", default-features = false, features = [
   "process",
   "std",
 ] }
-
-[dev-dependencies]
-rand = { workspace = true }
 
 [lints]
 workspace = true
