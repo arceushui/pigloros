@@ -2850,9 +2850,8 @@ mod tests {
     use super::{
         empty_action_append, event_limit_reached, execute_append_command,
         execute_append_consent_revocation_command, execute_submit_action_command,
-        execute_submit_action_command_from_command, execute_submit_identified_action_command,
-        execute_submit_identified_action_command_from_command, missing_duplicate_event,
-        prepare_owntracks_ingress, resolve_identified_outcome, ActionCommandContext,
+        execute_submit_identified_action_command, missing_duplicate_event,
+        prepare_owntracks_ingress, resolve_identified_outcome, ActionCommand, ActionCommandContext,
         ActionCommandError, Command, ExecutorState, ExecutorStore, GatewayExecutorStore,
         OwnTracksRateLimiter,
     };
@@ -2884,35 +2883,6 @@ mod tests {
     struct RecordingBoundedStore {
         calls: Arc<Mutex<Vec<(TimelineId, usize, u64)>>>,
         outcome: Option<Vec<Event>>,
-    }
-
-    #[test]
-    fn action_command_extractors_ignore_other_command_variants() {
-        let mut state = ExecutorState {
-            store: ExecutorStore::Generic(Box::new(MemoryStore::new())),
-            owntracks_owner_key: None,
-            owntracks_rate_limiter: OwnTracksRateLimiter {
-                buckets: HashMap::new(),
-            },
-        };
-
-        let (reply, _receiver) = tokio::sync::oneshot::channel();
-        execute_submit_action_command_from_command(
-            &mut state,
-            Command::Create {
-                name: "not-an-action-command".to_owned(),
-                reply,
-            },
-        );
-
-        let (reply, _receiver) = tokio::sync::oneshot::channel();
-        execute_submit_identified_action_command_from_command(
-            &mut state,
-            Command::Create {
-                name: "not-an-identified-action-command".to_owned(),
-                reply,
-            },
-        );
     }
 
     #[test]
