@@ -2110,4 +2110,20 @@ mod wave3_tests {
         let diff = reg.diff_against_snapshot(&empty_snap, &[entity]);
         assert!(diff.is_some());
     }
+
+    #[test]
+    fn cloned_erasure_gate_exists_only_after_an_explicit_host_binding() {
+        let mut registry = ProjectionRegistry::new();
+        assert!(registry.clone_erasure_gate().is_none());
+
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        registry.bind_erasure_gate(Arc::clone(&gate));
+        let cloned = registry.clone_erasure_gate();
+        assert!(cloned
+            .as_ref()
+            .is_some_and(|candidate| Arc::ptr_eq(candidate, &gate)));
+
+        let registry = registry.without_erasure_gate();
+        assert!(registry.clone_erasure_gate().is_none());
+    }
 }

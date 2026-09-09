@@ -154,6 +154,7 @@ mod hosted_cli_store_tests {
     use pos_core::store::EventStore;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn delegates_the_cli_store_surface() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = HostedCliStore::open(StoreConfig::Memory)?;
         let gate = std::sync::Arc::clone(&store.gate);
@@ -197,6 +198,7 @@ mod hosted_cli_store_tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn poisoned_host_and_error_mapping_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let store = HostedCliStore::open(StoreConfig::Memory)?;
         drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
