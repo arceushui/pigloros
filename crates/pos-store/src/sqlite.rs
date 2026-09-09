@@ -733,18 +733,8 @@ impl SqliteStore {
         Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Self::require_utf8_encoding(&conn)?;
-        // Source-level adapter tests exercise ordinary Event operations directly;
-        // bind a permissive fixture gate only for those tests. Production and
-        // integration consumers retain the fail-closed composition-root default.
-        #[cfg(test)]
-        let erasure_gate: Option<Arc<dyn ErasureGate>> =
-            Some(Arc::new(ErasureContainmentGateV1::new()));
-        #[cfg(not(test))]
         let erasure_gate: Option<Arc<dyn ErasureGate>> =
             Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
-        #[cfg(test)]
-        let erasure_gate_bound = true;
-        #[cfg(not(test))]
         let erasure_gate_bound = false;
 
         let store = Self {
@@ -6100,7 +6090,27 @@ mod tests {
     }
 
     pub(super) fn new_store() -> SqliteStore {
-        SqliteStore::open_in_memory().test_ok()
+        fixture_store(SqliteStore::open_in_memory().test_ok())
+    }
+
+    fn fixture_store(mut store: SqliteStore) -> SqliteStore {
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
+        store
+    }
+
+    fn open_store_at(path: &str) -> SqliteStore {
+        fixture_store(SqliteStore::open(path).test_ok())
+    }
+
+    #[test]
+    fn default_store_is_fail_closed_in_test_builds_too() {
+        let mut store = SqliteStore::open_in_memory().test_ok();
+        let error = store.create_timeline("unbound").test_err();
+        assert!(
+            matches!(error, CoreError::Storage(message) if message.contains("erasure containment"))
+        );
     }
 
     fn destroy_store(
@@ -6468,13 +6478,15 @@ mod tests {
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok())
             .is_err());
 
-        let mut overflow = SqliteStore::open_with_clock(
-            ":memory:",
-            Box::new(pos_core::FixedAdmissionClock(WallTime::from_micros(
-                u64::MAX,
-            ))),
-        )
-        .test_ok();
+        let mut overflow = fixture_store(
+            SqliteStore::open_with_clock(
+                ":memory:",
+                Box::new(pos_core::FixedAdmissionClock(WallTime::from_micros(
+                    u64::MAX,
+                ))),
+            )
+            .test_ok(),
+        );
         let timeline = overflow.create_timeline("overflow").test_ok();
         let intent = AppendIntent::new(&make_draft(EntityId::new(), b"payload"));
         assert!(overflow
@@ -6512,7 +6524,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_clock_and_transactional_fence_failures_are_fail_closed() {
         let mut clock_error =
-            SqliteStore::open_with_clock(":memory:", Box::new(ErrorClock)).test_ok();
+            fixture_store(SqliteStore::open_with_clock(":memory:", Box::new(ErrorClock)).test_ok());
         let timeline = clock_error
             .create_timeline("geographic-clock-error")
             .test_ok();
@@ -6530,13 +6542,15 @@ mod tests {
             .test_ok()
             .is_empty());
 
-        let mut overflow = SqliteStore::open_with_clock(
-            ":memory:",
-            Box::new(pos_core::FixedAdmissionClock(WallTime::from_micros(
-                u64::MAX,
-            ))),
-        )
-        .test_ok();
+        let mut overflow = fixture_store(
+            SqliteStore::open_with_clock(
+                ":memory:",
+                Box::new(pos_core::FixedAdmissionClock(WallTime::from_micros(
+                    u64::MAX,
+                ))),
+            )
+            .test_ok(),
+        );
         let timeline = overflow
             .create_timeline("geographic-expiry-overflow")
             .test_ok();
@@ -6556,11 +6570,13 @@ mod tests {
 
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok().to_owned();
-        let mut store = SqliteStore::open_with_clock(
-            &path,
-            Box::new(FenceDroppingClock { path: path.clone() }),
-        )
-        .test_ok();
+        let mut store = fixture_store(
+            SqliteStore::open_with_clock(
+                &path,
+                Box::new(FenceDroppingClock { path: path.clone() }),
+            )
+            .test_ok(),
+        );
         let timeline = store.create_timeline("transactional-fence-read").test_ok();
         let entity = EntityId::new();
         store
@@ -6638,11 +6654,13 @@ mod tests {
     fn geographic_admission_rechecks_a_revoked_fence_in_the_transaction() {
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok().to_owned();
-        let mut store = SqliteStore::open_with_clock(
-            &path,
-            Box::new(FenceRevokingClock { path: path.clone() }),
-        )
-        .test_ok();
+        let mut store = fixture_store(
+            SqliteStore::open_with_clock(
+                &path,
+                Box::new(FenceRevokingClock { path: path.clone() }),
+            )
+            .test_ok(),
+        );
         let timeline = store.create_timeline("revoked-fence").test_ok();
         let entity = EntityId::new();
         store
@@ -6923,11 +6941,13 @@ mod tests {
     #[test]
     fn store_owned_clock_intent_and_bounded_cleanup_contract() {
         let admission = WallTime::from_micros(pos_core::APPEND_IDENTITY_RETENTION_MICROS + 42);
-        let mut store = SqliteStore::open_with_clock(
-            ":memory:",
-            Box::new(pos_core::FixedAdmissionClock(admission)),
-        )
-        .test_ok();
+        let mut store = fixture_store(
+            SqliteStore::open_with_clock(
+                ":memory:",
+                Box::new(pos_core::FixedAdmissionClock(admission)),
+            )
+            .test_ok(),
+        );
         let timeline = store.create_timeline("clock").test_ok();
         let draft = make_draft(EntityId::new(), b"payload");
         let intent = AppendIntent::new(&draft);
@@ -7955,7 +7975,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().test_ok();
         let path = file.path().to_str().test_ok();
         let timeline_id = {
-            let mut store = SqliteStore::open(path).test_ok();
+            let mut store = open_store_at(path);
             let timeline = store.create_timeline("offline-gap").test_ok();
             let entity = EntityId::new();
             store
@@ -7989,7 +8009,7 @@ mod tests {
         let type_path = type_file.path().to_str().test_ok();
         let entity = EntityId::new();
         let timeline_id = {
-            let mut store = SqliteStore::open(type_path).test_ok();
+            let mut store = open_store_at(type_path);
             let timeline = store.create_timeline("offline-type").test_ok();
             store
                 .append(
@@ -8273,7 +8293,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_str().test_ok().to_owned();
         // Keep the file alive through the temp binding; open with path.
-        let mut store = SqliteStore::open(&path).test_ok();
+        let mut store = open_store_at(&path);
         let tl = store.create_timeline("persistent").test_ok();
         let entity = EntityId::new();
         store
@@ -8527,7 +8547,7 @@ mod tests {
 
     #[test]
     fn schema_validation_rejects_missing_erasure_and_authority_constraints() {
-        let store = SqliteStore::open_in_memory().test_ok();
+        let store = new_store();
         let records = ERASURE_SCHEMA_TABLES
             .iter()
             .find(|table| table.name == "erasure_records")
@@ -8566,7 +8586,7 @@ mod tests {
 
     #[test]
     fn complete_inventory_rejects_truncating_durable_requests() {
-        let mut store = SqliteStore::open_in_memory().test_ok();
+        let mut store = new_store();
         for discriminator in [1_u8, 2] {
             store
                 .conn
@@ -8590,7 +8610,7 @@ mod tests {
 
     #[test]
     fn authority_reader_rejects_an_unknown_schema_version() {
-        let store = SqliteStore::open_in_memory().test_ok();
+        let store = new_store();
         store
             .conn
             .execute_batch("PRAGMA ignore_check_constraints=ON")
@@ -8733,15 +8753,16 @@ mod tests {
         assert!(!missing.exists());
 
         let path = directory.path().join("ledger.db");
-        let mut writable = SqliteStore::open(path.to_str().test_ok()).test_ok();
+        let mut writable = open_store_at(path.to_str().test_ok());
         writable.create_timeline("ledger").test_ok();
         drop(writable);
 
-        let readonly = SqliteStore::open_read_only(path.to_str().test_ok()).test_ok();
+        let readonly =
+            fixture_store(SqliteStore::open_read_only(path.to_str().test_ok()).test_ok());
         assert_eq!(readonly.list_timelines().test_ok().len(), 1);
 
         let uri = format!("file:{}?mode=ro", path.to_str().test_ok());
-        let readonly_uri = SqliteStore::open_read_only(&uri).test_ok();
+        let readonly_uri = fixture_store(SqliteStore::open_read_only(&uri).test_ok());
         assert_eq!(readonly_uri.list_timelines().test_ok().len(), 1);
     }
 
@@ -9485,12 +9506,12 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let tl_id = {
-            let mut store = SqliteStore::open(path.to_str().test_ok()).test_ok();
+            let mut store = open_store_at(path.to_str().test_ok());
             let tl = store.create_timeline("main").test_ok();
             tl.id()
         };
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = SqliteStore::open(path.to_str().test_ok()).test_ok();
+        let mut store = open_store_at(path.to_str().test_ok());
         let entity = EntityId::new();
         let result = store.append(tl_id, &[make_draft(entity, b"x")]);
         assert_storage_err(result.map(|_| ()));
@@ -9912,14 +9933,14 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let tl_id = {
-            let mut store = SqliteStore::open(path.to_str().test_ok()).test_ok();
+            let mut store = open_store_at(path.to_str().test_ok());
             let tl = store.create_timeline("main").test_ok();
             let entity = EntityId::new();
             store.append(tl.id(), &[make_draft(entity, b"x")]).test_ok();
             tl.id()
         };
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = SqliteStore::open(path.to_str().test_ok()).test_ok();
+        let mut store = open_store_at(path.to_str().test_ok());
         assert_storage_err(store.fork(tl_id, Seq::from_u64(1), "branch").map(|_| ()));
         drop(std::fs::set_permissions(
             &path,
@@ -9996,12 +10017,12 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let (tl_id, entity) = {
-            let mut store = SqliteStore::open(path.to_str().test_ok()).test_ok();
+            let mut store = open_store_at(path.to_str().test_ok());
             let tl = store.create_timeline("main").test_ok();
             (tl.id(), EntityId::new())
         };
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = SqliteStore::open(path.to_str().test_ok()).test_ok();
+        let mut store = open_store_at(path.to_str().test_ok());
         assert_storage_err(store.append(tl_id, &[make_draft(entity, b"x")]).map(|_| ()));
         drop(std::fs::set_permissions(
             &path,
@@ -10087,7 +10108,7 @@ mod tests {
     fn append_fails_when_database_is_locked() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_str().test_ok().to_owned();
-        let mut store = SqliteStore::open(&path).test_ok();
+        let mut store = open_store_at(&path);
         let tl = store.create_timeline("main").test_ok();
         let locker = Connection::open(&path).test_ok();
         locker.execute("BEGIN IMMEDIATE", []).test_ok();
@@ -10215,12 +10236,12 @@ mod tests {
 
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok().to_owned();
-        let mut store_a = SqliteStore::open(&path).test_ok();
+        let mut store_a = open_store_at(&path);
         let timeline = store_a.create_timeline("contended").test_ok();
         store_a
             .append(timeline.id(), &[make_draft(EntityId::new(), b"a")])
             .test_ok();
-        let mut store_b = SqliteStore::open(&path).test_ok();
+        let mut store_b = open_store_at(&path);
 
         let blocker = Connection::open(&path).test_ok();
         blocker
@@ -10248,7 +10269,7 @@ mod tests {
         );
         worker.join().test_ok();
 
-        let store = SqliteStore::open(&path).test_ok();
+        let store = open_store_at(&path);
         let events = store.read(timeline.id(), SeqRange::all()).test_ok();
         assert_eq!(
             events.iter().map(|event| event.seq).collect::<Vec<_>>(),
@@ -11139,13 +11160,13 @@ mod tests {
         let path = dir.path().join("db.sqlite");
         let path_s = path.to_str().test_ok();
         {
-            let mut store = SqliteStore::open(path_s).test_ok();
+            let mut store = open_store_at(path_s);
             let _ = store.create_timeline("seed").test_ok();
         }
         let mut perms = std::fs::metadata(&path).test_ok().permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(&path, perms).test_ok();
-        let mut store = SqliteStore::open(path_s).test_ok();
+        let mut store = open_store_at(path_s);
         let err = store
             .create_timeline_with_meta(TimelineMeta::root("x"))
             .test_err();
@@ -11576,7 +11597,7 @@ mod tests {
             ))
             .test_ok();
 
-        let mut setup = SqliteStore::open(path).test_ok();
+        let mut setup = open_store_at(path);
         setup.save_key_registry(&registry).test_ok();
         let timeline = setup.create_timeline("destruction-first").test_ok();
         let timeline_id = timeline.id();
@@ -11585,8 +11606,8 @@ mod tests {
             .test_ok();
         drop(setup);
 
-        let mut destruction_store = SqliteStore::open(path).test_ok();
-        let mut signing_store = SqliteStore::open(path).test_ok();
+        let mut destruction_store = open_store_at(path);
+        let mut signing_store = open_store_at(path);
         signing_store.conn.busy_timeout(Duration::ZERO).test_ok();
         let request =
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32]));
@@ -11631,7 +11652,7 @@ mod tests {
         ));
         assert!(callback_called_rx.try_recv().is_err());
 
-        let verify = SqliteStore::open(path).test_ok();
+        let verify = open_store_at(path);
         assert_eq!(verify.read(timeline_id, SeqRange::all()).test_ok().len(), 1);
         assert!(verify
             .load_key_registry()
@@ -12131,9 +12152,10 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_in_memory_with_hasher_uses_custom_hasher() {
-        let mut store =
+        let mut store = fixture_store(
             SqliteStore::open_in_memory_with_hasher(Box::new(pos_crypto::chain::Blake3Hasher))
-                .test_ok();
+                .test_ok(),
+        );
         let tl = store.create_timeline("hasher-test").test_ok();
         let drafts = [make_draft(EntityId::new(), b"payload")];
         let events = store.append(tl.id(), &drafts).test_ok();
@@ -14037,6 +14059,12 @@ pub(super) mod key_registry_coverage {
         PublicKey,
     };
 
+    fn open_store() -> Result<SqliteStore, CoreError> {
+        let mut store = SqliteStore::open_in_memory()?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        Ok(store)
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn registered_state(
     ) -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
@@ -14070,7 +14098,7 @@ pub(super) mod key_registry_coverage {
     #[cfg(test)]
     mod sqlite_key_registry_failure_paths {
         use super::{
-            CoreError, Event, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
+            open_store, CoreError, Event, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
             KeyRegistryStateV1, Seq, SqliteStore, TimelineId, FAIL_BEGIN_IMMEDIATE,
         };
 
@@ -14080,7 +14108,7 @@ pub(super) mod key_registry_coverage {
             identity: KeyIdentityV1,
             material_digest: Hash,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            let mut missing_registry = SqliteStore::open_in_memory()?;
+            let mut missing_registry = open_store()?;
             let missing_timeline = missing_registry.create_timeline("missing-registry")?;
             let mut missing_registry_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
                 Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
@@ -14111,7 +14139,7 @@ pub(super) mod key_registry_coverage {
                 Err(CoreError::Storage(_))
             ));
 
-            let mut begin_failure = SqliteStore::open_in_memory()?;
+            let mut begin_failure = open_store()?;
             FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
             let mut begin_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
                 Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
@@ -14134,7 +14162,7 @@ pub(super) mod key_registry_coverage {
             ));
             FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
 
-            let malformed = SqliteStore::open_in_memory()?;
+            let malformed = open_store()?;
             malformed.conn.execute(
                 "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
                 [],
@@ -14151,12 +14179,12 @@ pub(super) mod key_registry_coverage {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn sqlite_key_registry_public_paths_are_exercised() -> Result<(), Box<dyn std::error::Error>> {
         let (registry, identity, material_digest) = registered_state()?;
-        let mut store = SqliteStore::open_in_memory()?;
+        let mut store = open_store()?;
         assert!(store.load_key_registry()?.is_none());
         store.save_key_registry(&registry)?;
         assert_eq!(store.load_key_registry()?, Some(registry.clone()));
 
-        let mut existing_timeline_store = SqliteStore::open_in_memory()?;
+        let mut existing_timeline_store = open_store()?;
         let existing_timeline = existing_timeline_store.create_timeline("existing-ledger")?;
         let initialized_timeline = existing_timeline_store
             .initialize_timeline_with_key_registry("existing-ledger", &KeyRegistryStateV1::new())?;
@@ -14229,27 +14257,27 @@ pub(super) mod key_registry_coverage {
         let request =
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
 
-        let mut save_failure = SqliteStore::open_in_memory()?;
+        let mut save_failure = open_store()?;
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
         let save_result = save_failure.save_key_registry(&registry);
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
         assert!(matches!(save_result, Err(CoreError::Storage(_))));
 
-        let mut initialization_failure = SqliteStore::open_in_memory()?;
+        let mut initialization_failure = open_store()?;
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
         let initialization_result = initialization_failure
             .initialize_timeline_with_key_registry("transaction-failure", &registry);
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
         assert!(matches!(initialization_result, Err(CoreError::Storage(_))));
 
-        let mut completion_begin_failure = SqliteStore::open_in_memory()?;
+        let mut completion_begin_failure = open_store()?;
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
         let completion_result = completion_begin_failure
             .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request));
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
         assert!(matches!(completion_result, Err(CoreError::Storage(_))));
 
-        let mut malformed = SqliteStore::open_in_memory()?;
+        let mut malformed = open_store()?;
         malformed.conn.execute(
             "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
             [],
@@ -14271,7 +14299,7 @@ pub(super) mod key_registry_coverage {
             Err(CoreError::Serialization(_))
         ));
 
-        let mut timeline_failure = SqliteStore::open_in_memory()?;
+        let mut timeline_failure = open_store()?;
         timeline_failure.save_key_registry(&registry)?;
         timeline_failure
             .conn
@@ -14284,7 +14312,7 @@ pub(super) mod key_registry_coverage {
             Err(CoreError::Storage(_))
         ));
 
-        let mut invalid_completion = SqliteStore::open_in_memory()?;
+        let mut invalid_completion = open_store()?;
         invalid_completion.save_key_registry(&registry)?;
         assert!(matches!(
             invalid_completion
@@ -14292,7 +14320,7 @@ pub(super) mod key_registry_coverage {
             Err(CoreError::Storage(_))
         ));
 
-        let mut save_transaction_failure = SqliteStore::open_in_memory()?;
+        let mut save_transaction_failure = open_store()?;
         save_transaction_failure.save_key_registry(&registry)?;
         save_transaction_failure.begin_key_registry_destruction(request)?;
         save_transaction_failure.conn.execute_batch(
