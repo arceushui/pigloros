@@ -629,6 +629,7 @@ fn gateway_action_registry_with_bodies(
     gateway_action_registry_with_authority(bodies, None)
 }
 
+#[cfg(test)]
 fn gateway_action_registry_with_authority(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -1099,6 +1100,7 @@ impl Gateway {
     /// Human action submission is intentionally disabled until the host supplies
     /// both a World body catalogue and a provider-neutral [`GatewayAuthorization`].
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
         #[cfg(test)]
         let mut store = store;
@@ -1137,6 +1139,7 @@ impl Gateway {
     /// # Errors
     /// Returns a store error when the supplied gate cannot be bound before the
     /// Gateway executor starts.
+    #[cfg(test)]
     pub(crate) fn new_with_erasure_gate(
         mut store: Box<dyn EventStore>,
         gate: Arc<dyn ErasureGate>,
@@ -1283,6 +1286,7 @@ impl Gateway {
 
     /// Wrap a store and configure the World body catalogue used for actions.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn new_with_world_bodies(
         store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
@@ -1354,6 +1358,7 @@ impl Gateway {
     /// the Gateway never receives credentials or turns adapter output into
     /// policy.  Proposed actions and configured protected reads use this seam.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn new_with_world_bodies_and_authorization(
         store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
@@ -1400,6 +1405,7 @@ impl Gateway {
     /// This does not register an HTTP route or widen generic ingress. Callers
     /// must already hold a backend implementing the dedicated core capability.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn new_with_geo_location_admission<S>(store: S) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
@@ -1438,6 +1444,7 @@ impl Gateway {
     /// # Errors
     /// Returns a store error when the supplied gate cannot be bound before the
     /// Gateway executor starts.
+    #[cfg(test)]
     pub(crate) fn new_with_geo_location_admission_and_erasure_gate<S>(
         mut store: S,
         gate: Arc<dyn ErasureGate>,
@@ -1476,6 +1483,7 @@ impl Gateway {
     /// This does not register an HTTP route. The private executor performs
     /// authentication, rate limiting, and geographic admission in one queue turn.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn new_with_owntracks_ingress(
         store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,
@@ -1515,6 +1523,7 @@ impl Gateway {
     /// # Errors
     /// Returns a store error when the host-owned erasure gate cannot be bound
     /// to the supplied `SQLite` store.
+    #[cfg(test)]
     pub(crate) fn new_with_owntracks_ingress_and_erasure_gate(
         mut store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,

@@ -5,9 +5,7 @@
 //! dedicated OS thread.
 use pos_core::{
     event::{Event, EventDraft, Kind},
-    geo_admission::{
-        GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
-    },
+    geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EventId, TimelineId},
     store::{
         AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
@@ -16,9 +14,10 @@ use pos_core::{
     timeline::Timeline,
     ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
     CoreError, ErasureHostErrorV1, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
-    OwnTracksIngressStore, PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1,
-    EVENT_TYPE_CONSENT_REVOKED_V1,
+    PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
+#[cfg(test)]
+use pos_core::{GeoLocationAdmissionStore, OwnTracksIngressStore};
 use pos_runtime::ErasureExecutionHostV1;
 use std::{
     collections::HashMap,
@@ -439,22 +438,28 @@ impl SchedulerObserver {
     }
 }
 
+#[cfg(test)]
 trait GeoLocationGatewayStore: EventStore + GeoLocationAdmissionStore {}
 
+#[cfg(test)]
 impl<T> GeoLocationGatewayStore for T where T: EventStore + GeoLocationAdmissionStore {}
 
+#[cfg(test)]
 trait OwnTracksGatewayStore: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore {}
 
+#[cfg(test)]
 impl<T> OwnTracksGatewayStore for T where
     T: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore
 {
 }
 
+#[cfg(test)]
 enum GatewayExecutorStore {
     GeoLocation(Box<dyn GeoLocationGatewayStore>),
     OwnTracks(Box<dyn OwnTracksGatewayStore>),
 }
 
+#[cfg(test)]
 impl GatewayExecutorStore {
     fn event_store(&mut self) -> &mut dyn EventStore {
         match self {
@@ -493,7 +498,9 @@ impl GatewayExecutorStore {
 
 enum ExecutorStore {
     Host(ErasureExecutionHostV1),
+    #[cfg(test)]
     Generic(Box<dyn EventStore>),
+    #[cfg(test)]
     Gateway(GatewayExecutorStore),
 }
 
@@ -520,9 +527,13 @@ impl ExecutorStore {
         host_operation: impl FnOnce(&mut ErasureExecutionHostV1) -> Result<T, ErasureHostErrorV1>,
         store_operation: impl FnOnce(&mut dyn EventStore) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
+        #[cfg(not(test))]
+        let _ = store_operation;
         match self {
             Self::Host(host) => host_operation(host).map_err(host_error_to_core),
+            #[cfg(test)]
             Self::Generic(store) => store_operation(store.as_mut()),
+            #[cfg(test)]
             Self::Gateway(store) => store_operation(store.event_store()),
         }
     }
@@ -533,7 +544,9 @@ impl ExecutorStore {
                 .read_sender()
                 .and_then(|mut sender| sender.protected_logical_head(timeline))
                 .map_err(host_error_to_core),
+            #[cfg(test)]
             Self::Generic(store) => store.logical_head(timeline),
+            #[cfg(test)]
             Self::Gateway(store) => store.protected_logical_head(timeline),
         }
     }
@@ -547,7 +560,9 @@ impl ExecutorStore {
                 .command_sender()
                 .and_then(|mut sender| sender.prepare_owntracks_ingress(input))
                 .map_err(host_error_to_core),
+            #[cfg(test)]
             Self::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            #[cfg(test)]
             Self::Gateway(store) => store.prepare_owntracks_ingress(input),
         }
     }
@@ -561,7 +576,9 @@ impl ExecutorStore {
                 .command_sender()
                 .and_then(|mut sender| sender.admit_geo_location(request))
                 .map_err(host_error_to_core),
+            #[cfg(test)]
             Self::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            #[cfg(test)]
             Self::Gateway(store) => store.admit_geo_location(request),
         }
     }
@@ -804,6 +821,7 @@ impl StoreExecutor {
         Self::spawn(ExecutorStore::Generic(store), None)
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_consent_authority(
         mut store: Box<dyn EventStore>,
         permit: ConsentAppendPermit,
@@ -833,6 +851,7 @@ impl StoreExecutor {
         Ok(Self::spawn(ExecutorStore::Host(host), Some(owner_key)))
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_geo_location_admission<S>(
         mut store: S,
         permit: ConsentAppendPermit,
@@ -849,6 +868,7 @@ impl StoreExecutor {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_owntracks_ingress<S>(
         mut store: S,
         owner_key: [u8; 32],
