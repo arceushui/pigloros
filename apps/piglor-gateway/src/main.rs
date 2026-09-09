@@ -24,8 +24,9 @@ use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
-use pos_core::ErasureContainmentGateV1;
-use pos_store::{open_store, StoreConfig};
+use pos_core::{ErasureContainmentGateV1, ERASURE_MAX_INVENTORY_REQUESTS};
+use pos_runtime::ErasureExecutionHostV1;
+use pos_store::{open_erasure_host_store, StoreConfig};
 use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc};
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -207,7 +208,14 @@ fn gateway_for_startup(
         )
         .map_err(Into::into),
         (None, _) => {
-            Gateway::new_with_erasure_gate(open_store(config)?, erasure_gate).map_err(Into::into)
+            let host = ErasureExecutionHostV1::recover_verified_empty(
+                open_erasure_host_store(config)?,
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("erasure host recovery failed ({})", error.code()))
+            })?;
+            Gateway::new_with_erasure_host(host).map_err(Into::into)
         }
         (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
     }
@@ -1126,8 +1134,8 @@ mod coverage_entrypoints {
 mod erasure_gate_coverage_tests {
     use super::*;
 
-    #[test]
-    fn startup_gateway_constructors_cover_memory_and_sqlite_paths(
+    #[tokio::test]
+    async fn startup_gateway_constructors_cover_memory_and_sqlite_paths(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let memory = gateway_for_startup(
             None,
@@ -1135,6 +1143,16 @@ mod erasure_gate_coverage_tests {
             None,
             Arc::new(ErasureContainmentGateV1::new_fail_closed()),
         )?;
+        let timeline = memory.create_timeline("host-owned-startup").await?;
+        assert!(memory
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await?
+            .events
+            .is_empty());
+        memory
+            .purge_expired_ingress_identities(std::num::NonZeroUsize::MIN)
+            .await?;
+        memory.shutdown().await?;
         drop(memory);
 
         let directory = tempfile::tempdir()?;
@@ -1150,6 +1168,7 @@ mod erasure_gate_coverage_tests {
             Some(&owner_key),
             Arc::new(ErasureContainmentGateV1::new_fail_closed()),
         )?;
+        sqlite.shutdown().await?;
         drop(sqlite);
 
         let invalid_path = directory.path().to_str().ok_or_else(|| {

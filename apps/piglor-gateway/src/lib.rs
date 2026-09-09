@@ -43,7 +43,7 @@ use pos_core::{
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
-use pos_runtime::PluginRegistry;
+use pos_runtime::{ErasureExecutionHostV1, PluginRegistry};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::hash_map::DefaultHasher,
@@ -1148,6 +1148,43 @@ impl Gateway {
                 store,
                 consent_authority.append_permit(),
             ),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
+    /// Construct a Gateway whose executor exclusively owns the recovered
+    /// erasure host and its EventStore adapter.
+    ///
+    /// The Gateway receives only the host's read-only containment view for
+    /// Plugin/action checks. All EventStore effects remain in the host-owned
+    /// single-consumer command stream.
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot bind the Gateway's
+    /// independently owned consent authority.
+    pub fn new_with_erasure_host(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let store = executor::StoreExecutor::new_with_erasure_host(
+            host,
+            consent_authority.append_permit(),
+        )?;
+        Ok(Self {
+            store,
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,

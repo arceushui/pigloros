@@ -3,12 +3,16 @@
 use std::sync::Arc;
 
 use pos_core::{
-    store::{EventReadBounds, SeqRange},
-    CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
+    store::{
+        AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
+        PurgeOutcome, SeqRange,
+    },
+    ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
     ErasureForkRecoveryV1, ErasureGate, ErasureHostErrorV1, ErasureHostStoreV1, ErasureReferenceV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event, EventDraft,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, Event, EventDraft, EventId,
     PreparedErasureForkBatchV1, Seq, Timeline, TimelineId,
 };
+use std::num::NonZeroUsize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HostStateV1 {
@@ -69,6 +73,30 @@ impl ErasureExecutionHostV1 {
             #[cfg(test)]
             fail_inventory_publication: false,
         })
+    }
+
+    /// Clone the host's read-only containment view for consumers sequenced by
+    /// this host. The returned trait object cannot publish or replace gate
+    /// state; the host remains the sole owner of those operations.
+    #[must_use]
+    pub fn containment_gate(&self) -> Arc<dyn ErasureGate> {
+        self.gate.clone()
+    }
+
+    /// Bind the independently owned consent authority before Gateway commands
+    /// enter the host command stream.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error while recovery is unavailable or when
+    /// the owned adapter rejects the authority binding.
+    pub fn bind_consent_authority(
+        &mut self,
+        permit: ConsentAppendPermit,
+    ) -> Result<(), ErasureHostErrorV1> {
+        self.ready_generation()?;
+        self.store
+            .bind_consent_authority(permit)
+            .map_err(|error| map_store_error(&error))
     }
 
     /// Install one complete inventory before any protected sender is granted.
@@ -377,6 +405,123 @@ impl ErasureCommandSenderV1<'_> {
             .append(timeline, drafts)
             .map_err(|error| map_store_error(&error))
     }
+
+    /// Atomically append Events when they fit the owned-event ceiling.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn append_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        maximum: u64,
+    ) -> Result<Option<Vec<Event>>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .append_bounded(timeline, drafts, maximum)
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Append a Gateway-owned consent Event inside the current fence.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn append_consent_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
+        maximum: u64,
+    ) -> Result<Option<Vec<Event>>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .append_consent_bounded(timeline, drafts, permit, maximum)
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Append a consent revocation and its cleanup marker atomically.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn append_consent_revocation_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
+        maximum: u64,
+        cleanup_scope: AppendDedupScope,
+    ) -> Result<Option<Vec<Event>>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .append_consent_revocation_bounded(timeline, drafts, permit, maximum, cleanup_scope)
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Append an identified intent or return its exact prior admission.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn append_intent_or_duplicate_bounded(
+        &mut self,
+        timeline: TimelineId,
+        identity: AppendIdentity,
+        intent: AppendIntent,
+        maximum: u64,
+    ) -> Result<Option<AppendOrDuplicateOutcome>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .append_intent_or_duplicate_bounded(timeline, identity, intent, maximum)
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Remove one bounded batch of expired append identities.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn purge_expired_append_identities_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<PurgeOutcome, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .purge_expired_append_identities_bounded(limit)
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Remove one bounded batch of append identities for a revoked scope.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn remove_append_identities_bounded(
+        &mut self,
+        scope: AppendDedupScope,
+        limit: NonZeroUsize,
+    ) -> Result<PurgeOutcome, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .remove_append_identities_bounded(scope, limit)
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Return the next durable append-identity cleanup marker.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn pending_append_identity_cleanup(
+        &mut self,
+    ) -> Result<Option<AppendDedupScope>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .pending_append_identity_cleanup()
+            .map_err(|error| map_store_error(&error))
+    }
 }
 
 /// Read-only, generation-bound host sender used by Replay and query paths.
@@ -400,6 +545,22 @@ impl ErasureReadSenderV1<'_> {
         self.host
             .store
             .read_bounded(timeline, range, bounds)
+            .map_err(|error| map_store_error(&error))
+    }
+
+    /// Read one Event by its durable identifier under the current generation.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn event_by_id(
+        &mut self,
+        timeline: TimelineId,
+        event: EventId,
+    ) -> Result<Option<Event>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        self.host
+            .store
+            .read_event_by_id(timeline, event)
             .map_err(|error| map_store_error(&error))
     }
 
@@ -493,8 +654,9 @@ const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
 mod tests {
     use super::*;
     use pos_core::{
-        CanonicalBytes, EntityId, ErasureForkAdmissionInputV1,
-        ErasurePersistenceInventorySnapshotV1, Kind, TimelineMeta, TimelineMode,
+        AppendDedupKey, CanonicalBytes, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1,
+        EntityId, ErasureForkAdmissionInputV1, ErasurePersistenceInventorySnapshotV1, Kind,
+        TimelineMeta, TimelineMode, MODALITY_LOCATION,
     };
     use pos_store::memory::MemoryStore;
 
@@ -671,6 +833,10 @@ mod tests {
             closed.read_sender(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
+        assert_eq!(
+            closed.bind_consent_authority(ConsentAuthority::new().append_permit()),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
 
         let mut ready = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
@@ -679,6 +845,131 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(ready.read_sender().is_ok());
         assert!(ready.command_sender().is_ok());
+    }
+
+    #[test]
+    fn gateway_store_operations_share_the_recovered_host_generation() {
+        let authority = ConsentAuthority::new();
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(Arc::ptr_eq(
+            &host.containment_gate(),
+            &host.containment_gate()
+        ));
+        host.bind_consent_authority(authority.append_permit())
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let timeline = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("gateway-host"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let subject = EntityId::new();
+        let ordinary = EventDraft::new(
+            subject,
+            Kind::new("gateway.hosted"),
+            CanonicalBytes::from_vec(vec![1]),
+        );
+        let first = host
+            .command_sender()
+            .and_then(|mut sender| sender.append_bounded(timeline.id(), &[ordinary.clone()], 8))
+            .and_then(|events| events.ok_or(ErasureHostErrorV1::Conflict))
+            .and_then(|mut events| events.pop().ok_or(ErasureHostErrorV1::Conflict))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let identified = EventDraft::new(
+            subject,
+            Kind::new("gateway.identified"),
+            CanonicalBytes::from_vec(vec![2]),
+        );
+        let identity = AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([3; 32]),
+            AppendDedupScope::from_keyed_hash([4; 32]),
+        );
+        assert!(host
+            .command_sender()
+            .and_then(|mut sender| sender.append_intent_or_duplicate_bounded(
+                timeline.id(),
+                identity,
+                AppendIntent::new(&identified),
+                8,
+            ))
+            .is_ok());
+        let grant = ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "host-parity".to_owned(),
+            modalities: MODALITY_LOCATION,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 3,
+        };
+        let grant_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            grant
+                .encode()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+        );
+        assert!(host
+            .command_sender()
+            .and_then(|mut sender| sender.append_consent_bounded(
+                timeline.id(),
+                &[grant_draft],
+                authority.append_permit(),
+                8,
+            ))
+            .is_ok());
+        let revocation = ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 4,
+        };
+        let revocation_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            revocation
+                .encode()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+        );
+        let cleanup_scope = AppendDedupScope::from_keyed_hash([4; 32]);
+        assert!(host
+            .command_sender()
+            .and_then(|mut sender| sender.append_consent_revocation_bounded(
+                timeline.id(),
+                &[revocation_draft],
+                authority.append_permit(),
+                8,
+                cleanup_scope,
+            ))
+            .is_ok());
+        {
+            let mut sender = host
+                .command_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            assert!(sender.pending_append_identity_cleanup().is_ok());
+            assert!(sender
+                .remove_append_identities_bounded(
+                    cleanup_scope,
+                    NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
+                )
+                .is_ok());
+            assert!(sender
+                .purge_expired_append_identities_bounded(
+                    NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
+                )
+                .is_ok());
+        }
+        assert_eq!(
+            host.read_sender()
+                .and_then(|mut sender| sender.event_by_id(timeline.id(), first.id))
+                .map(|event| event.map(|event| event.id)),
+            Ok(Some(first.id))
+        );
     }
 
     #[test]

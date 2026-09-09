@@ -15,9 +15,11 @@ use pos_core::{
     },
     timeline::Timeline,
     ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
-    CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
-    PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    CoreError, ErasureHostErrorV1, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
+    OwnTracksIngressStore, PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1,
 };
+use pos_runtime::ErasureExecutionHostV1;
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -366,6 +368,7 @@ impl<T> OwnTracksGatewayStore for T where
 }
 
 enum ExecutorStore {
+    Host(ErasureExecutionHostV1),
     Generic(Box<dyn EventStore>),
     GeoLocation(Box<dyn GeoLocationGatewayStore>),
     OwnTracks(Box<dyn OwnTracksGatewayStore>),
@@ -374,25 +377,56 @@ enum ExecutorStore {
 impl ExecutorStore {
     #[cfg(test)]
     fn bind_test_erasure_gate(&mut self) {
-        drop(
-            self.event_store()
-                .bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())),
-        );
-    }
-
-    fn event_store(&mut self) -> &mut dyn EventStore {
         match self {
-            Self::Generic(store) => store.as_mut(),
-            Self::GeoLocation(store) => store.as_mut(),
-            Self::OwnTracks(store) => store.as_mut(),
+            Self::Host(_) => {}
+            Self::Generic(store) => {
+                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())))
+            }
+            Self::GeoLocation(store) => {
+                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())))
+            }
+            Self::OwnTracks(store) => {
+                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())))
+            }
         }
     }
 
-    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+    fn execute<T>(
+        &mut self,
+        host_operation: impl FnOnce(&mut ErasureExecutionHostV1) -> Result<T, ErasureHostErrorV1>,
+        store_operation: impl FnOnce(&mut dyn EventStore) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
         match self {
+            Self::Host(host) => host_operation(host).map_err(host_error_to_core),
+            Self::Generic(store) => store_operation(store.as_mut()),
+            Self::GeoLocation(store) => store_operation(store.as_mut()),
+            Self::OwnTracks(store) => store_operation(store.as_mut()),
+        }
+    }
+
+    fn protected_logical_head(&mut self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        match self {
+            Self::Host(host) => host
+                .read_sender()
+                .and_then(|mut sender| sender.logical_head(timeline))
+                .map_err(host_error_to_core),
             Self::Generic(store) => store.logical_head(timeline),
             Self::GeoLocation(store) => store.protected_logical_head(timeline),
             Self::OwnTracks(store) => store.protected_logical_head(timeline),
+        }
+    }
+}
+
+fn host_error_to_core(error: ErasureHostErrorV1) -> CoreError {
+    match error {
+        ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
+        ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
+            CoreError::ErasureContainmentUnavailable
+        }
+        ErasureHostErrorV1::AuthorizationDenied
+        | ErasureHostErrorV1::Conflict
+        | ErasureHostErrorV1::AdapterFailure => {
+            CoreError::Storage("erasure host command rejected".to_owned())
         }
     }
 }
@@ -628,6 +662,15 @@ impl StoreExecutor {
         drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::Generic(store), None)
+    }
+
+    pub(crate) fn new_with_erasure_host(
+        mut host: ErasureExecutionHostV1,
+        permit: ConsentAppendPermit,
+    ) -> Result<Self, CoreError> {
+        host.bind_consent_authority(permit)
+            .map_err(host_error_to_core)?;
+        Ok(Self::spawn(ExecutorStore::Host(host), None))
     }
 
     pub(crate) fn new_with_geo_location_admission<S>(
@@ -1662,16 +1705,26 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         } => {
             send_store_result(
                 reply,
-                state
-                    .store
-                    .event_store()
-                    .remove_append_identities_bounded(scope, limit),
+                state.store.execute(
+                    |host| {
+                        host.command_sender().and_then(|mut sender| {
+                            sender.remove_append_identities_bounded(scope, limit)
+                        })
+                    },
+                    |store| store.remove_append_identities_bounded(scope, limit),
+                ),
             );
         }
         Command::PendingAppendIdentityCleanup { reply } => {
             send_store_result(
                 reply,
-                state.store.event_store().pending_append_identity_cleanup(),
+                state.store.execute(
+                    |host| {
+                        host.command_sender()
+                            .and_then(|mut sender| sender.pending_append_identity_cleanup())
+                    },
+                    EventStore::pending_append_identity_cleanup,
+                ),
             );
         }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),
@@ -1738,7 +1791,9 @@ fn execute_geo_location_command(
     let result = match &mut state.store {
         ExecutorStore::GeoLocation(store) => store.admit_geo_location(request),
         ExecutorStore::OwnTracks(store) => store.admit_geo_location(request),
-        ExecutorStore::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+        ExecutorStore::Host(_) | ExecutorStore::Generic(_) => {
+            Err(CoreError::GeographicAdmissionUnavailable)
+        }
     };
     send_store_result(reply, result);
 }
@@ -1750,10 +1805,13 @@ fn execute_purge_command(
 ) {
     send_store_result(
         reply,
-        state
-            .store
-            .event_store()
-            .purge_expired_append_identities_bounded(limit),
+        state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.purge_expired_append_identities_bounded(limit))
+            },
+            |store| store.purge_expired_append_identities_bounded(limit),
+        ),
     );
 }
 
@@ -1764,10 +1822,13 @@ fn execute_root_count_command(
 ) {
     send_store_result(
         reply,
-        state
-            .store
-            .event_store()
-            .root_timeline_count_bounded(maximum),
+        state.store.execute(
+            |host| {
+                host.read_sender()
+                    .and_then(|mut sender| sender.root_timeline_count_bounded(maximum))
+            },
+            |store| store.root_timeline_count_bounded(maximum),
+        ),
     );
 }
 
@@ -1776,7 +1837,16 @@ fn execute_create_command(
     name: &str,
     reply: oneshot::Sender<Result<Timeline, StoreExecutorError>>,
 ) {
-    send_store_result(reply, state.store.event_store().create_timeline(name));
+    send_store_result(
+        reply,
+        state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.create_timeline(name))
+            },
+            |store| store.create_timeline(name),
+        ),
+    );
 }
 
 fn execute_read_command(
@@ -1788,10 +1858,13 @@ fn execute_read_command(
 ) {
     send_store_result(
         reply,
-        state
-            .store
-            .event_store()
-            .read_bounded(timeline, range, bounds),
+        state.store.execute(
+            |host| {
+                host.read_sender()
+                    .and_then(|mut sender| sender.read_bounded(timeline, range, bounds))
+            },
+            |store| store.read_bounded(timeline, range, bounds),
+        ),
     );
 }
 
@@ -1803,7 +1876,13 @@ fn execute_read_one_command(
 ) {
     send_store_result(
         reply,
-        state.store.event_store().read_event_by_id(timeline, event),
+        state.store.execute(
+            |host| {
+                host.read_sender()
+                    .and_then(|mut sender| sender.event_by_id(timeline, event))
+            },
+            |store| store.read_event_by_id(timeline, event),
+        ),
     );
 }
 
@@ -1814,14 +1893,26 @@ fn execute_append_command(
     maximum: Option<u64>,
     reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
 ) {
-    let store = state.store.event_store();
     let result = match maximum {
-        Some(maximum) => store
-            .append_bounded(timeline, drafts, maximum)
+        Some(maximum) => state
+            .store
+            .execute(
+                |host| {
+                    host.command_sender()
+                        .and_then(|mut sender| sender.append_bounded(timeline, drafts, maximum))
+                },
+                |store| store.append_bounded(timeline, drafts, maximum),
+            )
             .and_then(|events| {
                 events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
             }),
-        None => store.append(timeline, drafts),
+        None => state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.append(timeline, drafts))
+            },
+            |store| store.append(timeline, drafts),
+        ),
     };
     send_store_result(reply, result);
 }
@@ -1835,7 +1926,6 @@ fn execute_append_consent_grant_command(
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {
     let head = state.store.protected_logical_head(timeline);
-    let store = state.store.event_store();
     let result = head
         .and_then(|head| {
             if grant.grant_seq != head.as_u64().saturating_add(1) {
@@ -1848,15 +1938,18 @@ fn execute_append_consent_grant_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            store.append_consent_bounded(
-                timeline,
-                &[EventDraft::new(
-                    grant.subject_id,
-                    Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
-                    payload,
-                )],
-                permit,
-                maximum,
+            let drafts = [EventDraft::new(
+                grant.subject_id,
+                Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                payload,
+            )];
+            state.store.execute(
+                |host| {
+                    host.command_sender().and_then(|mut sender| {
+                        sender.append_consent_bounded(timeline, &drafts, permit, maximum)
+                    })
+                },
+                |store| store.append_consent_bounded(timeline, &drafts, permit, maximum),
             )
         })
         .and_then(|events| {
@@ -1904,7 +1997,6 @@ fn execute_append_consent_revocation_command(
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {
     let head = state.store.protected_logical_head(timeline);
-    let store = state.store.event_store();
     let result = head
         .and_then(|head| {
             if revocation.fence_seq != head.as_u64().saturating_add(1) {
@@ -1917,16 +2009,32 @@ fn execute_append_consent_revocation_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            store.append_consent_revocation_bounded(
-                timeline,
-                &[EventDraft::new(
-                    revocation.subject_id,
-                    Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
-                    payload,
-                )],
-                permit,
-                maximum,
-                cleanup_scope,
+            let drafts = [EventDraft::new(
+                revocation.subject_id,
+                Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
+                payload,
+            )];
+            state.store.execute(
+                |host| {
+                    host.command_sender().and_then(|mut sender| {
+                        sender.append_consent_revocation_bounded(
+                            timeline,
+                            &drafts,
+                            permit,
+                            maximum,
+                            cleanup_scope,
+                        )
+                    })
+                },
+                |store| {
+                    store.append_consent_revocation_bounded(
+                        timeline,
+                        &drafts,
+                        permit,
+                        maximum,
+                        cleanup_scope,
+                    )
+                },
             )
         })
         .and_then(|events| {
@@ -1955,12 +2063,22 @@ fn execute_append_identified_command(
     maximum: u64,
     reply: oneshot::Sender<Result<Option<AppendOrDuplicateOutcome>, StoreExecutorError>>,
 ) {
+    let host_intent = intent.clone();
     send_store_result(
         reply,
-        state
-            .store
-            .event_store()
-            .append_intent_or_duplicate_bounded(timeline, identity, intent, maximum),
+        state.store.execute(
+            |host| {
+                host.command_sender().and_then(|mut sender| {
+                    sender.append_intent_or_duplicate_bounded(
+                        timeline,
+                        identity,
+                        host_intent,
+                        maximum,
+                    )
+                })
+            },
+            |store| store.append_intent_or_duplicate_bounded(timeline, identity, intent, maximum),
+        ),
     );
 }
 
@@ -1969,7 +2087,16 @@ fn execute_get_timeline_command(
     timeline: TimelineId,
     reply: oneshot::Sender<Result<Option<Timeline>, StoreExecutorError>>,
 ) {
-    send_store_result(reply, state.store.event_store().get_timeline(timeline));
+    send_store_result(
+        reply,
+        state.store.execute(
+            |host| {
+                host.read_sender()
+                    .and_then(|mut sender| sender.timeline(timeline))
+            },
+            |store| store.get_timeline(timeline),
+        ),
+    );
 }
 
 #[cfg(test)]
