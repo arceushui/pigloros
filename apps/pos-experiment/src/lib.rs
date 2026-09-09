@@ -1258,7 +1258,7 @@ impl Experiment {
     }
 
     fn resume_with_store_and_recipe(
-        self,
+        mut self,
         timeline_id: pos_core::ids::TimelineId,
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
