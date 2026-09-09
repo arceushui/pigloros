@@ -102,6 +102,26 @@ pub(crate) fn encode_request(
     })
 }
 
+/// Recover identities only from a complete canonical, self-digested SLX1.
+pub(crate) fn request_identities(control: &[u8]) -> Option<([u8; 16], [u8; 16])> {
+    let value = decode_canonical_with_limit(control, CONTROL_LIMIT).ok()?;
+    let wrapper = array(&value, 2).ok()?;
+    let fields = array(&wrapper[0], 6).ok()?;
+    if text(&fields[0]).ok()? != "SLX1" || uint(&fields[1]).ok()? != 1 {
+        return None;
+    }
+    let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT).ok()?;
+    if fixed_bytes::<32>(&wrapper[1]).ok()? != domain_digest(SLX1_DOMAIN, &unsigned) {
+        return None;
+    }
+    let request = fixed_bytes::<16>(&fields[2]).ok()?;
+    let attempt = fixed_bytes::<16>(&fields[3]).ok()?;
+    if request == [0; 16] || attempt == [0; 16] {
+        return None;
+    }
+    Some((request, attempt))
+}
+
 pub(crate) fn decode_request(
     control: &[u8],
     attempt_stream: &[u8],

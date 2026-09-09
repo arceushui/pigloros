@@ -28,8 +28,8 @@ use pos_reference::sandbox_provider_protocol::{
     RootSelectorAdmission, RootSelectorAdmissionInputs, SandboxAdministratorPolicy,
     SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest,
     SandboxGrantExpectations, SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase,
-    SandboxProviderAdmissionInputs, SandboxProviderProtocolError, SandboxProviderReceipt,
-    SandboxRevocationSnapshot, SandboxTrustSnapshot,
+    SandboxProviderAdmissionInputs, SandboxProviderOperation, SandboxProviderProtocolError,
+    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTrustSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -959,6 +959,8 @@ enum SelectorProviderMode {
     Unavailable,
     BeforeAdmission,
     Error,
+    InvalidBeforeAdmission,
+    InvalidError,
     InvalidGrant,
     InvalidReceipt,
     MismatchedOutput,
@@ -978,6 +980,16 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
     ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
         if matches!(self.mode, SelectorProviderMode::Unavailable) {
             return Err(RootSelectorServiceError::ProviderUnavailable);
+        }
+        if matches!(self.mode, SelectorProviderMode::InvalidBeforeAdmission) {
+            return Ok(RootSelectorProviderReply::BeforeAdmission {
+                result: b"not-cbor".to_vec(),
+            });
+        }
+        if matches!(self.mode, SelectorProviderMode::InvalidError) {
+            return Ok(RootSelectorProviderReply::Error {
+                error: b"not-cbor".to_vec(),
+            });
         }
         if matches!(self.mode, SelectorProviderMode::BeforeAdmission) {
             return Ok(RootSelectorProviderReply::BeforeAdmission {
@@ -1011,6 +1023,8 @@ impl RootSelectorProvider for ScenarioSelectorProvider {
                 SelectorProviderMode::Valid
                 | SelectorProviderMode::Unavailable
                 | SelectorProviderMode::BeforeAdmission
+                | SelectorProviderMode::InvalidBeforeAdmission
+                | SelectorProviderMode::InvalidError
                 | SelectorProviderMode::Error => {}
             }
         }
@@ -2152,6 +2166,18 @@ fn exercise_selector_provider_mode(mode: SelectorProviderMode) -> TestResult<Sel
 fn root_selector_server_reports_provider_failure_phases_as_sle1() -> TestResult {
     for (mode, phase, code, has_grant) in [
         (
+            SelectorProviderMode::InvalidBeforeAdmission,
+            SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+            false,
+        ),
+        (
+            SelectorProviderMode::InvalidError,
+            SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+            false,
+        ),
+        (
             SelectorProviderMode::Unavailable,
             SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
             SandboxLocalErrorCode::ProviderUnavailable,
@@ -2305,13 +2331,64 @@ fn root_selector_server_rejects_an_empty_control_frame() -> TestResult {
     client.shutdown(std::net::Shutdown::Write)?;
     let mut response = Vec::new();
     client.read_to_end(&mut response)?;
-    assert!(response.is_empty());
+    let length = u32::from_be_bytes(response[..4].try_into()?);
+    assert_eq!(usize::try_from(length)?, response.len() - 4);
+    let error = SandboxLocalError::from_canonical_cbor(&response[4..])?;
+    assert_eq!(error.phase, SandboxLocalErrorPhase::BeforeSpx1);
+    assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+    assert_eq!(error.request_id, None);
+    assert_eq!(error.attempt_id, None);
     assert_eq!(
         server_thread
             .join()
             .map_err(|_| "root selector thread panicked")?,
-        Err(RootSelectorServiceError::InvalidRequest)
+        Ok(())
     );
+    Ok(())
+}
+
+#[test]
+fn root_selector_reports_truncated_attempt_with_decoded_identities() -> TestResult {
+    let fixture = Fixture::new()?;
+    let request = selector_evaluation_request(&fixture)?;
+    let attempt = selector_case_attempt();
+    let plan = selector_case_plan(&fixture, &request, attempt.clone())?;
+    let launch = LaunchPolicy::from_canonical_cbor(&fixture.lps1)?;
+    let temporary = tempfile::tempdir()?;
+    let socket = temporary.path().join("selector.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let uid = std::fs::metadata(temporary.path())?.uid();
+    let mut server = RootSelectorServer::new(
+        FixedSelectorAuthority { plan },
+        SignedSelectorProvider { fixture, launch },
+        uid,
+        Duration::from_secs(2),
+    );
+    let server_thread = thread::spawn(move || server.serve_once(&listener));
+    let (control, _) = selector_client_request(&request, &attempt, 7)?;
+    let mut client = UnixStream::connect(&socket)?;
+    client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
+    client.write_all(&control)?;
+    client.shutdown(std::net::Shutdown::Write)?;
+    let mut prefix = [0; 4];
+    client.read_exact(&mut prefix)?;
+    let mut response = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
+    client.read_exact(&mut response)?;
+    let error = SandboxLocalError::from_canonical_cbor(&response)?;
+    assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+    assert_eq!(error.operation, Some(SandboxProviderOperation::Execute));
+    let mut request_id = request.request_id;
+    request_id[14..].copy_from_slice(&7_u16.to_be_bytes());
+    let mut attempt_id = request.request_id;
+    attempt_id[14..].copy_from_slice(&(7_u16 ^ 0x8000).to_be_bytes());
+    assert_eq!(error.request_id, Some(request_id));
+    assert_eq!(error.attempt_id, Some(attempt_id));
+    let mut trailing = Vec::new();
+    client.read_to_end(&mut trailing)?;
+    assert!(trailing.is_empty());
+    server_thread
+        .join()
+        .map_err(|_| "selector thread panicked")??;
     Ok(())
 }
 

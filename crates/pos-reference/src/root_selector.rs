@@ -277,7 +277,15 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         &mut self,
         stream: &mut UnixStream,
     ) -> Result<(), RootSelectorServiceError> {
-        let decoded = read_selector_request(stream)?;
+        let decoded = match read_selector_request(stream) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                let control = error
+                    .to_canonical_cbor()
+                    .map_err(|_| RootSelectorServiceError::Io)?;
+                return write_selector_response(stream, &control, &[]);
+            }
+        };
         let Some((plan, admission)) = self.resolve_admission(stream, &decoded)? else {
             return Ok(());
         };
@@ -434,10 +442,19 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 },
             ),
             RootSelectorProviderReply::BeforeAdmission { result } => {
-                context
+                if context
                     .admission
                     .authenticate_pre_admission_result(context.request, &result)
-                    .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
+                    .is_err()
+                {
+                    return Self::write_local_error(
+                        stream,
+                        context.decoded,
+                        SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                        SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                        None,
+                    );
+                }
                 Self::write_authenticated_reply(
                     stream,
                     context.decoded,
@@ -454,10 +471,19 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
                 )
             }
             RootSelectorProviderReply::Error { error } => {
-                context
+                if context
                     .admission
                     .authenticate_provider_error(context.request, &error)
-                    .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
+                    .is_err()
+                {
+                    return Self::write_local_error(
+                        stream,
+                        context.decoded,
+                        SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                        SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                        None,
+                    );
+                }
                 Self::write_authenticated_reply(
                     stream,
                     context.decoded,
@@ -565,29 +591,45 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
 
 fn read_selector_request(
     stream: &mut UnixStream,
-) -> Result<DecodedSelectorRequest, RootSelectorServiceError> {
+) -> Result<DecodedSelectorRequest, SandboxLocalError> {
+    let mut failure = SandboxLocalError {
+        phase: SandboxLocalErrorPhase::BeforeSpx1,
+        operation: None,
+        request_id: None,
+        attempt_id: None,
+        agr1_digest: None,
+        code: SandboxLocalErrorCode::InvalidSelectorRequest,
+        safe_detail: None,
+    };
     let mut prefix = [0_u8; 4];
     stream
         .read_exact(&mut prefix)
-        .map_err(|_| RootSelectorServiceError::Io)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix))
-        .map_err(|_| RootSelectorServiceError::InvalidRequest)?;
+        .map_err(|_| failure.clone())?;
+    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| failure.clone())?;
     if length == 0 || length > CONTROL_LIMIT {
-        return Err(RootSelectorServiceError::InvalidRequest);
+        return Err(failure);
     }
     let mut control = vec![0_u8; length];
     stream
         .read_exact(&mut control)
-        .map_err(|_| RootSelectorServiceError::Io)?;
+        .map_err(|_| failure.clone())?;
+    if let Some((request, attempt)) = crate::selector_protocol::request_identities(&control) {
+        failure.operation = Some(SandboxProviderOperation::Execute);
+        failure.request_id = Some(request);
+        failure.attempt_id = Some(attempt);
+    }
     let mut attempt_stream = Vec::new();
     stream
         .take(SANDBOX_PAYLOAD_LIMIT + 1)
         .read_to_end(&mut attempt_stream)
-        .map_err(|_| RootSelectorServiceError::Io)?;
+        .map_err(|_| failure.clone())?;
     if attempt_stream.len() as u64 > SANDBOX_PAYLOAD_LIMIT {
-        return Err(RootSelectorServiceError::InvalidRequest);
+        if failure.attempt_id.is_some() {
+            failure.code = SandboxLocalErrorCode::PayloadLimitExceeded;
+        }
+        return Err(failure);
     }
-    decode_request(&control, &attempt_stream).map_err(|_| RootSelectorServiceError::InvalidRequest)
+    decode_request(&control, &attempt_stream).map_err(|_| failure)
 }
 
 fn validate_execute_authority(
