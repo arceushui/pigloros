@@ -793,7 +793,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
                 .clone();
             self.authorize_state(timeline, operation, &authority)?;
             effect();
-            return Ok(());
+            return self.ensure_available();
         }
         let _fence = self
             .fence_lock
@@ -809,7 +809,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
         effect();
-        Ok(())
+        self.ensure_available()
     }
 }
 
@@ -6289,6 +6289,79 @@ mod coverage_paths {
         ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
             self.0.take().ok_or(ErasureErrorV1::ProvenanceMissing)
         }
+    }
+
+    struct PoisoningInventoryQuery {
+        gate: Arc<ErasureContainmentGateV1>,
+        inventory: Option<ErasureVerifiedInventoryV1>,
+    }
+
+    impl ErasureVerifiedInventoryQueryV1 for PoisoningInventoryQuery {
+        fn verified_inventory(
+            &mut self,
+            _maximum_requests: usize,
+        ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+            self.gate.poison();
+            self.inventory
+                .take()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
+    #[test]
+    fn explicit_gate_poison_is_irreversible_across_publication_and_nested_fences(
+    ) -> Result<(), ErasureErrorV1> {
+        let timeline = TimelineId::new();
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![timeline], 1)?;
+        let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        gate.poison();
+        assert_eq!(
+            gate.inventory_generation(),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            gate.install_from_verified_inventory_query(
+                &mut InventoryQuery(Some(inventory.clone())),
+                1,
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let publication_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let mut poisoning_query = PoisoningInventoryQuery {
+            gate: Arc::clone(&publication_gate),
+            inventory: Some(inventory),
+        };
+        assert_eq!(
+            publication_gate.install_from_verified_inventory_query(&mut poisoning_query, 1),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let nested_gate = Arc::new(ErasureContainmentGateV1::new());
+        let mut nested_result = None;
+        let mut outer_effect = || {
+            nested_gate.poison();
+            let mut inner_effect = || {};
+            nested_result = Some(nested_gate.with_fence(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                &mut inner_effect,
+            ));
+        };
+        assert_eq!(
+            nested_gate.with_fence(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                &mut outer_effect,
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            nested_result,
+            Some(Err(ErasureContainmentErrorV1::RecoveryUnavailable))
+        );
+        Ok(())
     }
 
     #[test]
