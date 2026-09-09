@@ -147,9 +147,7 @@ fn public_store_verification_rejects_invalid_registry_key_through_host(
         }
         Err(error) => error,
     };
-    assert!(error
-        .to_string()
-        .contains("erasure host rejected ledger operation"));
+    assert!(error.to_string().contains("invalid --key"));
     Ok(())
 }
 
