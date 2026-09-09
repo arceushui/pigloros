@@ -2,7 +2,7 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,9 +14,9 @@ use crate::root_selector::{
     RootSelectorProvider, RootSelectorProviderReply, RootSelectorServiceError,
 };
 use crate::sandbox_provider_protocol::{
-    AdmissionGrant, PayloadDescriptor, PayloadDirection, PayloadStreamValidator,
-    RootSelectorAdmission, SandboxExecuteRequest, SandboxPayloadChunk, SandboxProviderError,
-    SandboxProviderReceipt, SandboxProviderResult, SandboxTerminalOutcome,
+    PayloadDescriptor, PayloadDirection, PayloadStreamValidator, RootSelectorAdmission,
+    SandboxExecuteRequest, SandboxPayloadChunk, SandboxProviderError, SandboxProviderReceipt,
+    SandboxProviderResult, SandboxTerminalOutcome,
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
@@ -594,9 +594,6 @@ fn encode_value(value: &Value) -> Result<Vec<u8>, ReceiveFailure> {
     Ok(bytes)
 }
 
-fn output_digest(bytes: &[u8]) -> [u8; 32] {
-    output_digest_with(b"PiglorOS.SandboxOutputBytes.v1\0", bytes)
-}
 fn output_digest_with(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain);
@@ -633,9 +630,15 @@ fn root_owned_ancestors(path: &Path) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn output_digest(bytes: &[u8]) -> [u8; 32] {
+        output_digest_with(b"PiglorOS.SandboxOutputBytes.v1\0", bytes)
+    }
 
     fn completed(descriptor: PayloadDescriptor) -> SandboxProviderResult {
         SandboxProviderResult {
