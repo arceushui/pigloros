@@ -160,7 +160,10 @@ mod host_store_tests {
         let store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
         drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || {
-                let _guard = store.host.lock().unwrap_or_else(|error| error.into_inner());
+                let _guard = store
+                    .host
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 std::panic::resume_unwind(Box::new("poison hosted experiment store"));
             },
         )));
