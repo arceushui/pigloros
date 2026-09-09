@@ -532,7 +532,7 @@ impl ErasureCommandSenderV1<'_> {
     ///
     /// Nested store and Plugin operations reauthorize against the same gate
     /// state without releasing the outer fence. The callback receives only
-    /// this generation-bound sender, never the owned EventStore adapter.
+    /// this generation-bound sender, never the owned `EventStore` adapter.
     ///
     /// # Errors
     /// Returns a payload-free host error when this sender is stale or the
