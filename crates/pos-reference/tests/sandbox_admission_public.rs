@@ -1945,15 +1945,21 @@ fn provider_error_decoder_closes_each_error_code_identity_class() -> TestResult 
                 Value::Text("SPE1".to_owned()),
                 integer(1),
                 operation,
-                authenticated
-                    .then(|| Value::Bytes(request.request.request_id.to_vec()))
-                    .unwrap_or(Value::Null),
-                authenticated
-                    .then(|| bytes(request.request_digest))
-                    .unwrap_or(Value::Null),
-                authenticated
-                    .then(|| Value::Bytes(request.attempt_id.to_vec()))
-                    .unwrap_or(Value::Null),
+                if authenticated {
+                    Value::Bytes(request.request.request_id.to_vec())
+                } else {
+                    Value::Null
+                },
+                if authenticated {
+                    bytes(request.request_digest)
+                } else {
+                    Value::Null
+                },
+                if authenticated {
+                    Value::Bytes(request.attempt_id.to_vec())
+                } else {
+                    Value::Null
+                },
                 integer(code),
                 Value::Null,
                 Value::Text("runtime".to_owned()),
@@ -1964,7 +1970,7 @@ fn provider_error_decoder_closes_each_error_code_identity_class() -> TestResult 
         assert_eq!(error.code, expected);
         assert_eq!(
             error.operation,
-            (code != 0).then_some(if authenticated { 1 } else { 0 })
+            (code != 0).then_some(u8::from(authenticated))
         );
         error.verify_signature(&fixture.authority.runtime.verifying_key())?;
     }
