@@ -302,6 +302,13 @@ where
     S: ErasurePersistencePortV1,
     H: RetryHook<S>,
 {
+    fn complete_erasure_inventory_observation(
+        &self,
+        _maximum_requests: usize,
+    ) -> Result<pos_core::ErasureInventoryObservationV1, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
     fn verified_topology_observation(
         &self,
         _request: ErasureReferenceV1,
