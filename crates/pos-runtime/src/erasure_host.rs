@@ -689,6 +689,25 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_inventory_cannot_be_replayed() {
+        let inventory = ErasureVerifiedInventoryV1::from_verified_empty_snapshot(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).unwrap_or_else(
+                |error| std::panic::resume_unwind(Box::new(format!("snapshot failed: {error:?}"))),
+            ),
+            1,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("inventory failed: {error:?}")))
+        });
+        let mut query = OneShotInventoryV1(Some(inventory));
+        assert!(query.verified_inventory(1).is_ok());
+        assert_eq!(
+            query.verified_inventory(1),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
     fn empty_recovery_fails_closed_for_unavailable_or_nonempty_request_inventory() {
         assert!(matches!(
             ErasureExecutionHostV1::recover_verified_empty(
@@ -704,6 +723,13 @@ mod tests {
                 4,
             ),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
+        assert!(matches!(
+            ErasureExecutionHostV1::recover_verified_empty(
+                Box::new(fault_store(FaultModeV1::BindGate)),
+                4,
+            ),
+            Err(ErasureHostErrorV1::AdapterFailure)
         ));
     }
 
@@ -805,6 +831,25 @@ mod tests {
             host.maximum_requests(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
+    }
+
+    #[test]
+    fn gate_generation_mismatch_poisons_the_host() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let generation = host
+            .ready_generation()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        assert_eq!(
+            host.ensure_generation(generation),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(host.state, HostStateV1::Poisoned);
+        assert!(host.inventory.is_none());
     }
 
     #[test]

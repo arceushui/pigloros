@@ -1270,6 +1270,17 @@ fn assert_sqlite_fork_retry_corruption(
         &pos_core::PreparedErasureForkBatchV1,
     ) -> rusqlite::Result<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_retry_corruption_error(corrupt, ErasureErrorV1::PolicyConflict)
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_corruption_error(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkBatchV1,
+    ) -> rusqlite::Result<usize>,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
         .path()
@@ -1285,10 +1296,7 @@ fn assert_sqlite_fork_retry_corruption(
     let connection = rusqlite::Connection::open(path)?;
     assert_eq!(corrupt(&connection, &prepared)?, 1);
     drop(connection);
-    assert_eq!(
-        reopened.commit_fork_admission(prepared),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
+    assert_eq!(reopened.commit_fork_admission(prepared), Err(expected));
     Ok(())
 }
 
@@ -1405,6 +1413,15 @@ fn sqlite_fork_retry_rejects_corrupted_child() -> Result<(), Box<dyn std::error:
             rusqlite::params![prepared.child().id.to_string()],
         )
     })?;
+    assert_sqlite_fork_retry_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE timelines SET head_seq='corrupted' WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "UPDATE timelines SET chain_head=zeroblob(32) WHERE id=?1",
