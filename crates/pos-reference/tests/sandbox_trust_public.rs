@@ -1150,7 +1150,12 @@ fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
     )
     .is_err());
     let null_record = encode(&Value::Null)?;
-    for malformed in [b"not-cbor".as_slice(), null_record.as_slice()] {
+    let digest_mismatch = corrupt_signed_digest(&update)?;
+    for malformed in [
+        b"not-cbor".as_slice(),
+        null_record.as_slice(),
+        digest_mismatch.as_slice(),
+    ] {
         assert!(RecoveryCancellationContext::for_committed_recovery(
             [18; 32],
             [19; 32],

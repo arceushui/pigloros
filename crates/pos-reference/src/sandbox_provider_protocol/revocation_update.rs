@@ -75,7 +75,9 @@ impl RecoveryCancellationContext {
         previous_live_attempt_ids: Vec<[u8; 16]>,
         required_cancelled_attempt_ids: Vec<[u8; 16]>,
     ) -> Result<Self, SandboxRevocationUpdateError> {
-        decode_document(rcu1_bytes)?;
+        let document = decode_document(rcu1_bytes)?;
+        let (fields, request_digest, _) = signed::<8>(&document, "RCU1")?;
+        verify_digest("RCU1", fields, request_digest)?;
         let rcu1_wire_digest = wire_digest(rcu1_bytes);
         let mut context = Self {
             sir1_digest,
