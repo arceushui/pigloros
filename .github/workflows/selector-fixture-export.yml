@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/selector-fixture-export.yml
       - crates/pos-reference/tests/evaluator_public/fixture_export.rs
+      - crates/pos-reference/src/selector/installation/authority/update/durability.rs
 
 permissions:
   contents: read
