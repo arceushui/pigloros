@@ -1280,6 +1280,8 @@ fn execute_request(
     capability_ids: &[&str],
 ) -> TestResult<Vec<u8>> {
     let input = b"input";
+    let evaluation = selector_evaluation_request(fixture)?;
+    let attempt = selector_case_attempt();
     self_digested_record(
         "SPX1",
         Value::Array(vec![
@@ -1292,12 +1294,12 @@ fn execute_request(
                 Value::Bytes(vec![32; 16]),
             ]),
             Value::Bytes(vec![33; 16]),
-            bytes([34; 32]),
+            bytes(evaluation.request_digest),
             bytes([35; 32]),
             bytes([36; 32]),
             bytes([37; 32]),
-            bytes([38; 32]),
-            bytes([39; 32]),
+            bytes(attempt.fixture_digest),
+            bytes(evaluation.execution_profile_digest),
             bytes(launch.policy_digest),
             bytes(wrapped_digest(&fixture.sim1)?),
             bytes(fixture.policy.policy_digest()),
