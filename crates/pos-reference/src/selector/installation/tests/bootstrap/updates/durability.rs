@@ -144,7 +144,7 @@ fn live_completion_rejects_late_or_foreign_acknowledgement_and_retains_sir1() ->
         context.previous_provider_binding_digest,
         &rcu,
         context.previous_live_attempt_ids.clone(),
-        context.required_cancelled_attempt_ids.clone(),
+        context.required_cancelled_attempt_ids,
     )?;
     let foreign = recovery_acknowledgement(&changed_context, &rcu)?;
     assert!(committed
