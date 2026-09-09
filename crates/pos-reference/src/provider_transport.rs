@@ -751,7 +751,8 @@ mod tests {
             digest: output_digest(bytes),
         };
         let result = completed(descriptor.clone());
-        let encoded = encode_chunk(result.result_digest, [2; 16], [3; 16], 1, 0, bytes)?;
+        let encoded = encode_chunk(result.result_digest, [2; 16], [3; 16], 1, 0, bytes)
+            .map_err(|failure| format!("chunk encoding failed: {failure:?}"))?;
         let chunk = SandboxPayloadChunk::from_canonical_cbor(&encoded)?;
         let mut file = tempfile::NamedTempFile::new()?;
         file.write_all(bytes)?;
@@ -769,7 +770,8 @@ mod tests {
             byte_length: bytes.len() as u64,
             digest: output_digest(bytes),
         });
-        let encoded = encode_chunk([7; 32], [2; 16], [3; 16], 1, 0, bytes)?;
+        let encoded = encode_chunk([7; 32], [2; 16], [3; 16], 1, 0, bytes)
+            .map_err(|failure| format!("chunk encoding failed: {failure:?}"))?;
         let chunk = SandboxPayloadChunk::from_canonical_cbor(&encoded)?;
         let mut file = tempfile::NamedTempFile::new()?;
         file.write_all(bytes)?;
