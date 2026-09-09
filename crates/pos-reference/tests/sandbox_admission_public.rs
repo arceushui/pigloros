@@ -1840,6 +1840,86 @@ fn provider_execute_error(
     )
 }
 
+#[test]
+fn root_selector_admission_rejects_substituted_pre_admission_evidence() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+    let rejected = pre_admission_result(&fixture, &request)?;
+    assert_eq!(
+        admission
+            .authenticate_pre_admission_result(&request, &rejected)?
+            .outcome,
+        SandboxTerminalOutcome::Rejected
+    );
+
+    let mut completed_records = complete_transport_records(&fixture, &request, &admission)?;
+    let completed = completed_records
+        .pop()
+        .ok_or("completed transport result missing")?;
+    for substituted in [
+        resign_unsigned_field(
+            &rejected,
+            "SPY1",
+            2,
+            Value::Bytes(vec![99; 16]),
+            &fixture.authority.runtime,
+        )?,
+        resign_unsigned_field(
+            &rejected,
+            "SPY1",
+            3,
+            Value::Bytes(vec![98; 16]),
+            &fixture.authority.runtime,
+        )?,
+        completed,
+    ] {
+        assert_eq!(
+            admission
+                .authenticate_pre_admission_result(&request, &substituted)
+                .map(|_| ()),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn root_selector_admission_rejects_substituted_provider_error_identity() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admission = transport_admission(&fixture)?;
+    let request = transport_request(&fixture, &admission)?;
+    let error = provider_execute_error(&fixture, &request)?;
+    assert_eq!(
+        admission
+            .authenticate_provider_error(&request, &error)?
+            .operation,
+        Some(1)
+    );
+
+    for (field, replacement) in [
+        (2, integer(2)),
+        (3, Value::Bytes(vec![99; 16])),
+        (4, bytes([99; 32])),
+        (5, Value::Bytes(vec![98; 16])),
+    ] {
+        let substituted = resign_unsigned_field(
+            &error,
+            "SPE1",
+            field,
+            replacement,
+            &fixture.authority.runtime,
+        )?;
+        assert_eq!(
+            admission
+                .authenticate_provider_error(&request, &substituted)
+                .map(|_| ()),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+    }
+    Ok(())
+}
+
 fn selector_evaluation_request(fixture: &Fixture) -> TestResult<EvaluationRequest> {
     let mut request = EvaluationRequest {
         request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
