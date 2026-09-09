@@ -52,7 +52,7 @@ impl ProviderRuntimeSlot {
     /// # Errors
     /// Rejects an invalid PID. Start-time zero is valid on kernels whose boot
     /// clock observation is zero at process creation.
-    pub fn bind_observed_process(
+    pub const fn bind_observed_process(
         self,
         main_pid: u64,
         main_start_time_ticks: u64,
@@ -189,9 +189,9 @@ impl PreviousProviderBinding {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RecoveryPeerSlot {
-    pub(super) runtime_id: [u8; 16],
-    pub(super) lifecycle_scope_id: [u8; 16],
-    pub(super) endpoint_id: [u8; 16],
+    pub(super) runtime: [u8; 16],
+    pub(super) lifecycle_scope: [u8; 16],
+    pub(super) endpoint: [u8; 16],
 }
 
 impl RecoveryPeerSlot {
@@ -209,22 +209,22 @@ impl RecoveryPeerSlot {
             lifecycle_scope_id,
         ]);
         Self {
-            runtime_id,
-            lifecycle_scope_id,
-            endpoint_id,
+            runtime: runtime_id,
+            lifecycle_scope: lifecycle_scope_id,
+            endpoint: endpoint_id,
         }
     }
 
     pub(super) fn from_value(value: &Value) -> Result<Self, SelectorBoundaryError> {
         let fields = array(value, 3).map_err(invalid)?;
         let slot = Self {
-            runtime_id: nonzero_id(&fields[0])?,
-            lifecycle_scope_id: nonzero_id(&fields[1])?,
-            endpoint_id: nonzero_id(&fields[2])?,
+            runtime: nonzero_id(&fields[0])?,
+            lifecycle_scope: nonzero_id(&fields[1])?,
+            endpoint: nonzero_id(&fields[2])?,
         };
-        if slot.runtime_id == slot.lifecycle_scope_id
-            || slot.runtime_id == slot.endpoint_id
-            || slot.lifecycle_scope_id == slot.endpoint_id
+        if slot.runtime == slot.lifecycle_scope
+            || slot.runtime == slot.endpoint
+            || slot.lifecycle_scope == slot.endpoint
         {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
@@ -233,9 +233,9 @@ impl RecoveryPeerSlot {
 
     pub(super) fn value(&self) -> Value {
         Value::Array(vec![
-            Value::Bytes(self.runtime_id.to_vec()),
-            Value::Bytes(self.lifecycle_scope_id.to_vec()),
-            Value::Bytes(self.endpoint_id.to_vec()),
+            Value::Bytes(self.runtime.to_vec()),
+            Value::Bytes(self.lifecycle_scope.to_vec()),
+            Value::Bytes(self.endpoint.to_vec()),
         ])
     }
 }
@@ -305,9 +305,9 @@ impl InstallationRecoverySnapshot {
         let previous_provider = PreviousProviderBinding::from_value(provider)?;
         let recovery_slot = RecoveryPeerSlot::from_value(slot)?;
         if [
-            recovery_slot.runtime_id,
-            recovery_slot.lifecycle_scope_id,
-            recovery_slot.endpoint_id,
+            recovery_slot.runtime,
+            recovery_slot.lifecycle_scope,
+            recovery_slot.endpoint,
         ]
         .iter()
         .any(|id| {
@@ -411,18 +411,18 @@ impl InstallationRecoverySnapshot {
         &self.required_cancelled_attempt_ids
     }
 
-    pub(crate) fn previous_runtime_ids(&self) -> ([u8; 16], [u8; 16]) {
+    pub(crate) const fn previous_runtime_ids(&self) -> ([u8; 16], [u8; 16]) {
         (
             self.previous_provider.runtime_instance_id,
             self.previous_provider.lifecycle_scope_id,
         )
     }
 
-    pub(crate) fn recovery_slot_ids(&self) -> [[u8; 16]; 3] {
+    pub(crate) const fn recovery_slot_ids(&self) -> [[u8; 16]; 3] {
         [
-            self.recovery_slot.runtime_id,
-            self.recovery_slot.lifecycle_scope_id,
-            self.recovery_slot.endpoint_id,
+            self.recovery_slot.runtime,
+            self.recovery_slot.lifecycle_scope,
+            self.recovery_slot.endpoint,
         ]
     }
 
@@ -506,6 +506,6 @@ fn random_id(excluded: &[[u8; 16]]) -> [u8; 16] {
     }
 }
 
-fn invalid(_: crate::evaluator_protocol::ProtocolError) -> SelectorBoundaryError {
+const fn invalid(_: crate::evaluator_protocol::ProtocolError) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
 }
