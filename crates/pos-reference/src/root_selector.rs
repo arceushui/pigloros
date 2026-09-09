@@ -19,7 +19,7 @@ use crate::sandbox_provider_protocol::{
     SandboxTerminalOutcome, SandboxTrustSnapshot,
 };
 use crate::selector_protocol::{
-    decode_request, encode_authenticated_reply, AuthenticatedSelectorReply,
+    decode_request, derived_id, encode_authenticated_reply, AuthenticatedSelectorReply,
     AuthenticatedSelectorTerminal, DecodedSelectorRequest,
 };
 
@@ -349,10 +349,8 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         decoded: &DecodedSelectorRequest,
     ) -> Result<Option<(RootSelectorCasePlan, RootSelectorAdmission)>, RootSelectorServiceError>
     {
-        let mut expected_request = decoded.evaluation.request_id;
-        expected_request[14..].copy_from_slice(&decoded.ordinal.to_be_bytes());
-        let mut expected_attempt = decoded.evaluation.request_id;
-        expected_attempt[14..].copy_from_slice(&(decoded.ordinal ^ 0x8000).to_be_bytes());
+        let expected_request = derived_id(decoded.evaluation.request_id, decoded.ordinal);
+        let expected_attempt = derived_id(decoded.evaluation.request_id, decoded.ordinal ^ 0x8000);
         if decoded.encoded.provider_request_id != expected_request
             || decoded.encoded.attempt_id != expected_attempt
         {
