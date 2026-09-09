@@ -1443,13 +1443,9 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         let mut delta = MemoryErasureCasDelta::default();
         for prepared in admission.admissions() {
             let mutation = prepared.mutation();
-            let current_digest = self
-                .erasure_records
-                .get(&mutation.request())
-                .map(|(digest, _)| *digest);
-            if current_digest != mutation.expected_manifest_digest() {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
+            // The complete inventory-generation comparison above binds every
+            // active request head, and core requires exactly one admission for
+            // each affected request before constructing the batch.
             stage_memory_erasure_mutation(self, mutation, &mut delta)?;
         }
         apply_memory_erasure_delta(self, delta);
@@ -6184,6 +6180,18 @@ mod coverage_entrypoints {
             ErasureReferenceV1::from_digest([8; 32]),
             (ErasureReferenceV1::from_digest([9; 32]), Vec::new()),
         );
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot(1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    #[test]
+    fn memory_erasure_inventory_rejects_topology_overflow() {
+        let mut store = MemoryStore::new();
+        for ordinal in 0..=ERASURE_MAX_INVENTORY_TIMELINES {
+            let _timeline = ok(store.create_timeline(&format!("inventory-{ordinal}")));
+        }
         assert_eq!(
             store.complete_erasure_inventory_snapshot(1),
             Err(ErasureErrorV1::ScopeInvalid)

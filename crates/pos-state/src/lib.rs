@@ -517,10 +517,8 @@ impl ProjectionRegistry {
         let Some(participant_id) = request.participant_id() else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
-        let Some(plugin_id) = request.plugin_id() else {
-            return Err(AuthorityErrorV1::UnauthorizedSource);
-        };
-        let Some(installation_id) = request.installation_id() else {
+        let Some((plugin_id, installation_id)) = request.plugin_id().zip(request.installation_id())
+        else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
         let Some(slot) = self
@@ -1193,6 +1191,45 @@ mod tests {
         ))
     }
 
+    fn projection_request(
+        base: &AuthorizationRequestV1,
+        subject_id: Option<EntityId>,
+        participant_id: Option<EntityId>,
+        plugin_context: Option<(PluginId, [u8; 16])>,
+    ) -> AuthorizationRequestV1 {
+        let (plugin_id, installation_id) = plugin_context.unzip();
+        test_ok(AuthorizationRequestV1::try_from_draft(
+            AuthorizationRequestDraftV1 {
+                authenticated: base.authenticated().clone(),
+                actor_entity_id: base.actor_entity_id(),
+                subject_id,
+                participant_id,
+                plugin_id,
+                installation_id,
+                principal_role: base.principal_role(),
+                resource: "projection.missing-reducer".to_owned(),
+                data_category: base.data_category().to_owned(),
+                action: base.action().to_owned(),
+                purpose: base.purpose().to_owned(),
+                audience: base.audience().to_owned(),
+                at_time: base.at_time(),
+                authority_timeline: base.authority_timeline(),
+                at_position: base.at_position(),
+                consent_timeline: subject_id.map(|_| base.authority_timeline()),
+                consent_at_position: subject_id.map(|_| base.at_position()),
+                use_count: base.use_count(),
+                budget: base.budget(),
+                consent_policy_revision: base.consent_policy_revision(),
+                capability_policy_revision: base.capability_policy_revision(),
+                revocation_epoch: base.revocation_epoch(),
+                revocation_state_current: base.revocation_state_current(),
+                authority_registry_digest: base.authority_registry_digest(),
+                consent: base.consent().clone(),
+                environment_constraints: base.environment_constraints().to_vec(),
+            },
+        ))
+    }
+
     fn decision_with_capability_trust(
         authority_timeline: TimelineId,
         grant_id: Hash,
@@ -1848,6 +1885,62 @@ mod tests {
                 &context,
             ),
             Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    #[test]
+    fn projection_materialization_requires_every_subject_and_plugin_binding() {
+        let fixture = active_decision(TimelineId::new());
+        let context = ProjectionObservationContextV1 {
+            timeline_id: fixture.request.authority_timeline(),
+            observed_through: Seq::ZERO,
+            reducer: "missing-reducer".to_owned(),
+            prior_snapshot_digest: None,
+        };
+        let registry = ProjectionRegistry::new();
+        let subject = EntityId::new();
+        let participant = EntityId::new();
+        let plugin = PluginId::new();
+
+        let missing_subject = projection_request(
+            &fixture.request,
+            None,
+            Some(participant),
+            Some((plugin, [1; 16])),
+        );
+        assert_eq!(
+            registry.materialize_authorized_projection(
+                &missing_subject,
+                &fixture.decision,
+                &context,
+            ),
+            Err(AuthorityErrorV1::ConsentMissing)
+        );
+
+        let missing_participant = projection_request(
+            &fixture.request,
+            Some(subject),
+            None,
+            Some((plugin, [1; 16])),
+        );
+        assert_eq!(
+            registry.materialize_authorized_projection(
+                &missing_participant,
+                &fixture.decision,
+                &context,
+            ),
+            Err(AuthorityErrorV1::UnauthorizedSource)
+        );
+
+        let missing_plugin =
+            projection_request(&fixture.request, Some(subject), Some(participant), None);
+        assert_eq!(
+            registry.materialize_authorized_projection(
+                &missing_plugin,
+                &fixture.decision,
+                &context,
+            ),
+            Err(AuthorityErrorV1::UnauthorizedSource)
         );
     }
 }
