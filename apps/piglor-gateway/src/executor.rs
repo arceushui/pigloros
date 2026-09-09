@@ -178,6 +178,19 @@ mod lifecycle_coverage_tests {
     }
 
     #[test]
+    fn geographic_only_store_rejects_owntracks_capability() {
+        let mut store = GatewayExecutorStore::GeoLocation(Box::new(MemoryStore::new()));
+        let result = store.prepare_owntracks_ingress(pos_core::OwnTracksIngressInputV1::new(
+            [0; 32],
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            pos_core::CanonicalBytes::from_static(b"payload"),
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn worker_draining_processes_already_queued_work() {
         let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
         let (sender, mut receiver) = mpsc::channel(1);
