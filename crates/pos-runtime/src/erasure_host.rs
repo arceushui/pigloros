@@ -1224,6 +1224,38 @@ impl ErasureExecutionHostV1 {
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let child = TimelineMeta::forked_from(parent, at_seq, name);
+        let (inventory, timeline) = self.apply_identified_fork_transition(
+            operation,
+            parent,
+            child,
+            current_generation,
+            current_inventory,
+            authority,
+            coordinator,
+            maximum_requests,
+        )?;
+        let generation = inventory.generation();
+        let request_count = inventory.request_count();
+        self.inventory = Some(inventory);
+        self.state = HostStateV1::Ready {
+            generation,
+            maximum_requests,
+            request_count,
+        };
+        Ok((timeline, generation))
+    }
+
+    fn apply_identified_fork_transition(
+        &mut self,
+        operation: ErasureReferenceV1,
+        parent: TimelineId,
+        child: TimelineMeta,
+        current_generation: ErasureReferenceV1,
+        current_inventory: ErasureVerifiedInventoryV1,
+        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+        coordinator: ErasureReferenceV1,
+        maximum_requests: usize,
+    ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureHostErrorV1> {
         let gate = Arc::clone(&self.gate);
         let mut transition_error = None;
         let publication = {
@@ -1287,7 +1319,7 @@ impl ErasureExecutionHostV1 {
             };
             gate.install_from_verified_inventory_transition(&mut fenced_transition)
         };
-        let (inventory, timeline) = match publication {
+        match publication {
             Ok(publication) => publication,
             Err(error) => {
                 let mapped = transition_error.map_or_else(|| error.into(), map_erasure_error);
@@ -1299,18 +1331,9 @@ impl ErasureExecutionHostV1 {
                     return Err(mapped);
                 }
                 self.poison();
-                return Err(mapped);
+                Err(mapped)
             }
-        };
-        let generation = inventory.generation();
-        let request_count = inventory.request_count();
-        self.inventory = Some(inventory);
-        self.state = HostStateV1::Ready {
-            generation,
-            maximum_requests,
-            request_count,
-        };
-        Ok((timeline, generation))
+        }
     }
 
     fn apply_coordinator_transition<T>(

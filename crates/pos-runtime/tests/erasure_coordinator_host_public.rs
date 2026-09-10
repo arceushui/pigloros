@@ -38,6 +38,7 @@ struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
     frozen: AtomicBool,
     deny_authentication: AtomicBool,
+    deny_topology: AtomicBool,
     allow_rejection: AtomicBool,
     allow_attempt: AtomicBool,
     allow_dispatch: AtomicBool,
@@ -67,6 +68,9 @@ impl TestAuthority {
         _request: ErasureReferenceV1,
         manifest: ErasureReferenceV1,
     ) -> Result<ErasureVerifiedTopologyObservationV1, ErasureErrorV1> {
+        if self.deny_topology.load(Ordering::Acquire) {
+            return Err(ErasureErrorV1::TrustSnapshotInvalid);
+        }
         let timelines = self
             .timelines
             .lock()
@@ -856,7 +860,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         (parent.id(), child.id())
     };
     {
-        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
+        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
         let mut recovered = test_stage(
             "reopen persistent coordinator host",
             ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
@@ -873,6 +877,16 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         );
         assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
     }
+    authority.deny_topology.store(true, Ordering::Release);
+    assert!(matches!(
+        ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+            &path_text,
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    ));
     for candidate in [
         path,
         std::path::PathBuf::from(format!("{path_text}-wal")),

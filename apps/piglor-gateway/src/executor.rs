@@ -1945,66 +1945,72 @@ fn select_pending_index(pending: &[CommandEnvelope], reads_since_write: u8) -> u
 }
 
 fn expire_command(command: Command) {
-    match command {
-        Command::PrepareOwnTracksIngress { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::AdmitGeoLocation { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::Purge { reply, .. } | Command::RemoveAppendIdentitiesBounded { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::PendingAppendIdentityCleanup { reply } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::RootCount { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::Create { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::Read { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        #[cfg(test)]
-        Command::ReadOne { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::Append { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::Action(command) => (*command).expire(),
-        Command::AppendConsentGrant { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::AppendConsentRevocation {
-            reservation, reply, ..
-        } => {
-            let _was_pending = reservation.abort_durable();
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        #[cfg(test)]
-        Command::AppendIdentified { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        #[cfg(test)]
-        Command::GetTimeline { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::ProtectedLogicalHead { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::ErasureStatus { reply } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        #[cfg(test)]
-        Command::Panic { reply } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        #[cfg(test)]
-        Command::PanicRead { reply } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    command.expire();
+}
+
+impl Command {
+    fn expire(self) {
+        match self {
+            Command::PrepareOwnTracksIngress { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::AdmitGeoLocation { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::Purge { reply, .. } | Command::RemoveAppendIdentitiesBounded { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::PendingAppendIdentityCleanup { reply } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::RootCount { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::Create { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::Read { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            #[cfg(test)]
+            Command::ReadOne { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::Append { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::Action(command) => (*command).expire(),
+            Command::AppendConsentGrant { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::AppendConsentRevocation {
+                reservation, reply, ..
+            } => {
+                let _was_pending = reservation.abort_durable();
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            #[cfg(test)]
+            Command::AppendIdentified { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            #[cfg(test)]
+            Command::GetTimeline { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::ProtectedLogicalHead { reply, .. } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            Command::ErasureStatus { reply } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            #[cfg(test)]
+            Command::Panic { reply } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
+            #[cfg(test)]
+            Command::PanicRead { reply } => {
+                drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+            }
         }
     }
 }
@@ -2100,86 +2106,98 @@ enum CommandExecution {
 }
 
 fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
-    match command {
-        Command::PrepareOwnTracksIngress {
-            basic_handle,
-            basic_secret,
-            payload,
-            reply,
-        } => {
-            send_store_result(
+    command.execute(state)
+}
+
+impl Command {
+    fn execute(self, state: &mut ExecutorState) -> CommandExecution {
+        match self {
+            Command::PrepareOwnTracksIngress {
+                basic_handle,
+                basic_secret,
+                payload,
                 reply,
-                prepare_owntracks_ingress(state, basic_handle, basic_secret, payload),
-            );
+            } => {
+                send_store_result(
+                    reply,
+                    prepare_owntracks_ingress(state, basic_handle, basic_secret, payload),
+                );
+            }
+            Command::AdmitGeoLocation { request, reply } => {
+                execute_geo_location_command(state, request, reply);
+            }
+            Command::Purge { limit, reply } => execute_purge_command(state, limit, reply),
+            Command::RemoveAppendIdentitiesBounded {
+                scope,
+                limit,
+                reply,
+            } => execute_remove_append_identities_command(state, scope, limit, reply),
+            Command::PendingAppendIdentityCleanup { reply } => {
+                execute_pending_append_identity_cleanup_command(state, reply);
+            }
+            Command::RootCount { maximum, reply } => {
+                execute_root_count_command(state, maximum, reply)
+            }
+            Command::Create { name, reply } => execute_create_command(state, &name, reply),
+            Command::Read {
+                timeline,
+                range,
+                bounds,
+                reply,
+            } => execute_read_command(state, timeline, range, bounds, reply),
+            #[cfg(test)]
+            Command::ReadOne {
+                timeline,
+                event,
+                reply,
+            } => execute_read_one_command(state, timeline, event, reply),
+            Command::Append {
+                timeline,
+                drafts,
+                maximum,
+                reply,
+            } => execute_append_command(state, timeline, &drafts, maximum, reply),
+            Command::Action(command) => (*command).execute(state),
+            Command::AppendConsentGrant {
+                timeline,
+                grant,
+                permit,
+                maximum,
+                reply,
+            } => execute_append_consent_grant_command(
+                state, timeline, &grant, permit, maximum, reply,
+            ),
+            command @ Command::AppendConsentRevocation { .. } => {
+                execute_append_consent_revocation_command_from_command(state, command);
+            }
+            #[cfg(test)]
+            Command::AppendIdentified {
+                timeline,
+                identity,
+                intent,
+                maximum,
+                reply,
+            } => {
+                execute_append_identified_command(state, timeline, identity, intent, maximum, reply)
+            }
+            #[cfg(test)]
+            Command::GetTimeline { timeline, reply } => {
+                execute_get_timeline_command(state, timeline, reply);
+            }
+            Command::ProtectedLogicalHead { timeline, reply } => {
+                send_store_result(reply, state.store.protected_logical_head(timeline));
+            }
+            Command::ErasureStatus { reply } => {
+                drop(reply.send(Ok(state.store.erasure_status())));
+            }
+            #[cfg(test)]
+            Command::Panic { reply } | Command::PanicRead { reply } => {
+                drop(reply.send(Err(StoreExecutorError::Unhealthy)));
+                std::panic::resume_unwind(Box::new("test store executor worker panic"));
+            }
         }
-        Command::AdmitGeoLocation { request, reply } => {
-            execute_geo_location_command(state, request, reply);
-        }
-        Command::Purge { limit, reply } => execute_purge_command(state, limit, reply),
-        Command::RemoveAppendIdentitiesBounded {
-            scope,
-            limit,
-            reply,
-        } => execute_remove_append_identities_command(state, scope, limit, reply),
-        Command::PendingAppendIdentityCleanup { reply } => {
-            execute_pending_append_identity_cleanup_command(state, reply);
-        }
-        Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),
-        Command::Create { name, reply } => execute_create_command(state, &name, reply),
-        Command::Read {
-            timeline,
-            range,
-            bounds,
-            reply,
-        } => execute_read_command(state, timeline, range, bounds, reply),
-        #[cfg(test)]
-        Command::ReadOne {
-            timeline,
-            event,
-            reply,
-        } => execute_read_one_command(state, timeline, event, reply),
-        Command::Append {
-            timeline,
-            drafts,
-            maximum,
-            reply,
-        } => execute_append_command(state, timeline, &drafts, maximum, reply),
-        Command::Action(command) => (*command).execute(state),
-        Command::AppendConsentGrant {
-            timeline,
-            grant,
-            permit,
-            maximum,
-            reply,
-        } => execute_append_consent_grant_command(state, timeline, &grant, permit, maximum, reply),
-        command @ Command::AppendConsentRevocation { .. } => {
-            execute_append_consent_revocation_command_from_command(state, command);
-        }
-        #[cfg(test)]
-        Command::AppendIdentified {
-            timeline,
-            identity,
-            intent,
-            maximum,
-            reply,
-        } => execute_append_identified_command(state, timeline, identity, intent, maximum, reply),
-        #[cfg(test)]
-        Command::GetTimeline { timeline, reply } => {
-            execute_get_timeline_command(state, timeline, reply);
-        }
-        Command::ProtectedLogicalHead { timeline, reply } => {
-            send_store_result(reply, state.store.protected_logical_head(timeline));
-        }
-        Command::ErasureStatus { reply } => {
-            drop(reply.send(Ok(state.store.erasure_status())));
-        }
-        #[cfg(test)]
-        Command::Panic { reply } | Command::PanicRead { reply } => {
-            drop(reply.send(Err(StoreExecutorError::Unhealthy)));
-            std::panic::resume_unwind(Box::new("test store executor worker panic"));
-        }
+        CommandExecution::Completed
     }
-    CommandExecution::Completed
 }
 
 fn execute_geo_location_command(
