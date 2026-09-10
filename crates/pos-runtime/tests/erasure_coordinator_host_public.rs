@@ -35,6 +35,7 @@ use erasure_support::{
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
     frozen: AtomicBool,
+    fail_fork_scope_extension: AtomicBool,
 }
 
 impl TestAuthority {
@@ -216,6 +217,9 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+        if self.fail_fork_scope_extension.load(Ordering::Acquire) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
             request: requirement.request(),
             scope_commitment: requirement.scope_commitment(),
@@ -365,6 +369,60 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
 fn memory_host_freezes_access_at_the_coordinator_cas_boundary(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_atomic_freeze_parity(StoreConfig::Memory)
+}
+
+#[test]
+fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open fork failure host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage("open fork failure sender", host.command_sender())?;
+    let parent = test_stage(
+        "create fork failure parent",
+        commands.create_timeline("fork-scope-authority-failure"),
+    )?;
+    test_stage(
+        "publish fork failure topology",
+        authority.set_timeline(parent.id()),
+    )?;
+    let request = test_stage("construct fork failure request", persistence_request())?;
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    test_stage(
+        "submit fork failure request",
+        commands.submit_erasure_request(request, request_provenance),
+    )?;
+    test_stage(
+        "authorize fork failure request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze fork failure request",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+    authority
+        .fail_fork_scope_extension
+        .store(true, Ordering::Release);
+
+    assert_eq!(
+        commands.fork_timeline_identified(
+            reference(40),
+            parent.id(),
+            pos_core::Seq::ZERO,
+            "rejected-fork-scope",
+        ),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
 }
 
 #[test]

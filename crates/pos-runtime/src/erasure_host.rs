@@ -857,17 +857,30 @@ impl ErasureExecutionHostV1 {
     }
 
     fn ready_generation(&self) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
-        let HostStateV1::Ready { generation, .. } = self.state else {
+        self.ready_state().map(|(generation, _, _)| generation)
+    }
+
+    fn ready_state(
+        &self,
+    ) -> Result<(ErasureReferenceV1, usize, ErasureVerifiedInventoryV1), ErasureHostErrorV1> {
+        let HostStateV1::Ready {
+            generation,
+            maximum_requests,
+            ..
+        } = self.state
+        else {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         if self.gate.inventory_generation() != Ok(generation) {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         }
-        self.inventory
+        let inventory = self
+            .inventory
             .as_ref()
             .filter(|inventory| inventory.generation() == generation)
-            .map(|_| generation)
-            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)
+            .cloned()
+            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+        Ok((generation, maximum_requests, inventory))
     }
 
     fn ensure_generation(
@@ -1007,12 +1020,7 @@ impl ErasureExecutionHostV1 {
         at_seq: Seq,
         name: &str,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
-        let current_generation = self.ready_generation()?;
-        let maximum_requests = self.maximum_requests()?;
-        let current_inventory = self
-            .inventory
-            .clone()
-            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+        let (current_generation, maximum_requests, current_inventory) = self.ready_state()?;
         let authority = self
             .authority
             .clone()
@@ -1106,8 +1114,7 @@ impl ErasureExecutionHostV1 {
         &mut self,
         command: HostedCoordinatorCommandV1,
     ) -> Result<(ErasureStateV1, ErasureReferenceV1), ErasureHostErrorV1> {
-        self.ready_generation()?;
-        let maximum_requests = self.maximum_requests()?;
+        let (_, maximum_requests, _) = self.ready_state()?;
         let authority = self
             .authority
             .clone()
