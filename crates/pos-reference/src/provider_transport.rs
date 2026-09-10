@@ -1370,7 +1370,7 @@ mod coverage_tests {
                 .is_err_and(|error| error == RootSelectorServiceError::ProviderEvidence)
         );
         let mut writer = FailingWriter;
-        assert_eq!(writer.flush(), Ok(()));
+        writer.flush()?;
         assert_eq!(
             staged.copy_to(&mut writer),
             Err(RootSelectorServiceError::Io)
