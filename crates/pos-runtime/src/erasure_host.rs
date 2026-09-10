@@ -2783,6 +2783,126 @@ mod tests {
         })
     }
 
+    fn lifecycle_correction(
+        request: ErasureReferenceV1,
+        seed: u8,
+    ) -> Result<ErasureCorrectionProvenanceV1, ErasureErrorV1> {
+        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request,
+            rejected_terminal_state: reference(seed),
+            correction_reason: reference(seed.wrapping_add(1)),
+            authorization_provenance: reference(seed.wrapping_add(2)),
+        })
+    }
+
+    fn lifecycle_admission(
+        request: ErasureReferenceV1,
+        seed: u8,
+    ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+        ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            request,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![reference(seed)],
+            command_identities: vec![reference(seed.wrapping_add(1))],
+            policy: reference(seed.wrapping_add(2)),
+            trust: reference(seed.wrapping_add(3)),
+            admitted_position: 1,
+            deadline_position: 2,
+            authorization_provenance: reference(seed.wrapping_add(4)),
+        })
+    }
+
+    fn lifecycle_acknowledgement(seed: u8) -> ErasureAcknowledgementV1 {
+        let target = pos_core::ErasureRequiredTargetV1 {
+            artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
+            artifact_digest: reference(seed),
+            key_role: pos_core::ErasureKeyRoleV1::DataEncryption,
+            key_digest: reference(seed.wrapping_add(1)),
+            replica_set: reference(seed.wrapping_add(2)),
+            replica_id: reference(seed.wrapping_add(3)),
+        };
+        ErasureAcknowledgementV1 {
+            obligation: reference(seed.wrapping_sub(1)),
+            target,
+            owner: target.replica_id,
+            evidence: reference(seed.wrapping_add(4)),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        }
+    }
+
+    fn lifecycle_extension(
+        request: ErasureReferenceV1,
+        seed: u8,
+    ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: reference(seed),
+            fork: reference(seed.wrapping_add(1)),
+            lineage_rule: reference(seed.wrapping_add(2)),
+            predecessor_extension: None,
+            admission_provenance: reference(seed.wrapping_add(3)),
+        })
+    }
+
+    fn lifecycle_resolution(
+        request: ErasureReferenceV1,
+        seed: u8,
+    ) -> Result<ErasureAdministrativeResolutionV1, ErasureErrorV1> {
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request,
+            affected_digests: vec![reference(seed)],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: reference(seed.wrapping_add(1)),
+            policy: reference(seed.wrapping_add(2)),
+            trust: reference(seed.wrapping_add(3)),
+            principal: reference(seed.wrapping_add(4)),
+            authorization_provenance: reference(seed.wrapping_add(5)),
+            reason: reference(seed.wrapping_add(6)),
+            issue_position: 1,
+            predecessor_resolution: None,
+        })
+    }
+
+    fn lifecycle_receipt(request: ErasureReferenceV1, seed: u8) -> ErasureReceiptInputV1 {
+        ErasureReceiptInputV1 {
+            request,
+            terminal_state: reference(seed),
+            coordinator: reference(seed.wrapping_add(1)),
+            lifecycle: pos_core::ErasureLifecycleV1::Complete,
+            freeze_position: 10,
+            acknowledgements: Vec::new(),
+            frozen_targets: Vec::new(),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            inventories: ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            policy: reference(seed.wrapping_add(2)),
+            trust: reference(seed.wrapping_add(3)),
+            provenance: reference(seed.wrapping_add(4)),
+            issue_position: 1,
+            signature: reference(seed.wrapping_add(5)),
+            receipt_digest: reference(0),
+        }
+    }
+
+    const fn lifecycle_transition(seed: u8) -> ErasureStateTransitionV1 {
+        ErasureStateTransitionV1 {
+            lifecycle: pos_core::ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            provenance: reference(seed),
+        }
+    }
+
     #[test]
     fn hosted_coordinator_commands_reach_each_lifecycle_variant() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
@@ -2790,70 +2910,6 @@ mod tests {
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
         let request = reference(71);
         let request_object = coordinator_request()?;
-        let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-            rejected_request: request,
-            rejected_terminal_state: reference(72),
-            correction_reason: reference(73),
-            authorization_provenance: reference(74),
-        })?;
-        let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
-            request,
-            attempt_ordinal: 0,
-            source_receipt: None,
-            unresolved_obligations: vec![reference(75)],
-            command_identities: vec![reference(76)],
-            policy: reference(77),
-            trust: reference(78),
-            admitted_position: 1,
-            deadline_position: 2,
-            authorization_provenance: reference(79),
-        })?;
-        let acknowledgement = ErasureAcknowledgementV1 {
-            obligation: reference(75),
-            target: pos_core::ErasureRequiredTargetV1 {
-                artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
-                artifact_digest: reference(80),
-                key_role: pos_core::ErasureKeyRoleV1::DataEncryption,
-                key_digest: reference(81),
-                replica_set: reference(82),
-                replica_id: reference(83),
-            },
-            owner: reference(83),
-            evidence: reference(84),
-            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-        };
-        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
-            request,
-            scope_commitment: reference(83),
-            fork: reference(84),
-            lineage_rule: reference(85),
-            predecessor_extension: None,
-            admission_provenance: reference(86),
-        })?;
-        let resolution =
-            ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
-                request,
-                affected_digests: vec![reference(87)],
-                action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
-                scope_commitment: reference(88),
-                policy: reference(89),
-                trust: reference(90),
-                principal: reference(91),
-                authorization_provenance: reference(92),
-                reason: reference(93),
-                issue_position: 1,
-                predecessor_resolution: None,
-            })?;
-        let transition = ErasureStateTransitionV1 {
-            lifecycle: pos_core::ErasureLifecycleV1::AccessFrozen,
-            freeze_position: Some(10),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
-            provenance: reference(94),
-        };
-
         assert!(HostedCoordinatorCommandV1::Submit {
             request: request_object.clone(),
             provenance: reference(95),
@@ -2868,7 +2924,7 @@ mod tests {
         .is_err());
         assert!(HostedCoordinatorCommandV1::Freeze {
             request,
-            transition: transition.clone(),
+            transition: lifecycle_transition(94),
         }
         .execute(&mut coordinator)
         .is_err());
@@ -2880,29 +2936,31 @@ mod tests {
         .is_err());
         assert!(HostedCoordinatorCommandV1::SubmitCorrected {
             request: request_object,
-            correction,
+            correction: lifecycle_correction(request, 72)?,
         }
         .execute(&mut coordinator)
         .is_err());
-        assert!(
-            HostedCoordinatorCommandV1::DispatchAttempt { request, admission }
-                .execute(&mut coordinator)
-                .is_err()
-        );
+        assert!(HostedCoordinatorCommandV1::DispatchAttempt {
+            request,
+            admission: lifecycle_admission(request, 75)?,
+        }
+        .execute(&mut coordinator)
+        .is_err());
         assert!(HostedCoordinatorCommandV1::Acknowledge {
             request,
-            acknowledgement,
+            acknowledgement: lifecycle_acknowledgement(80),
         }
         .execute(&mut coordinator)
         .is_err());
-        assert!(
-            HostedCoordinatorCommandV1::ScopeExtension { request, extension }
-                .execute(&mut coordinator)
-                .is_err()
-        );
+        assert!(HostedCoordinatorCommandV1::ScopeExtension {
+            request,
+            extension: lifecycle_extension(request, 83)?,
+        }
+        .execute(&mut coordinator)
+        .is_err());
         assert!(HostedCoordinatorCommandV1::AdministrativeResolution {
             request,
-            resolution
+            resolution: lifecycle_resolution(request, 87)?,
         }
         .execute(&mut coordinator)
         .is_err());
@@ -2917,112 +2975,36 @@ mod tests {
             4,
         )?;
         let request = reference(101);
-        let request_object = coordinator_request()?;
-        let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-            rejected_request: request,
-            rejected_terminal_state: reference(102),
-            correction_reason: reference(103),
-            authorization_provenance: reference(104),
-        })?;
-        let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
-            request,
-            attempt_ordinal: 0,
-            source_receipt: None,
-            unresolved_obligations: vec![reference(105)],
-            command_identities: vec![reference(106)],
-            policy: reference(107),
-            trust: reference(108),
-            admitted_position: 1,
-            deadline_position: 2,
-            authorization_provenance: reference(109),
-        })?;
-        let acknowledgement = ErasureAcknowledgementV1 {
-            obligation: reference(105),
-            target: pos_core::ErasureRequiredTargetV1 {
-                artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
-                artifact_digest: reference(110),
-                key_role: pos_core::ErasureKeyRoleV1::DataEncryption,
-                key_digest: reference(111),
-                replica_set: reference(112),
-                replica_id: reference(113),
-            },
-            owner: reference(113),
-            evidence: reference(114),
-            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-        };
-        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
-            request,
-            scope_commitment: reference(115),
-            fork: reference(116),
-            lineage_rule: reference(117),
-            predecessor_extension: None,
-            admission_provenance: reference(118),
-        })?;
-        let resolution =
-            ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
-                request,
-                affected_digests: vec![reference(119)],
-                action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
-                scope_commitment: reference(120),
-                policy: reference(121),
-                trust: reference(122),
-                principal: reference(123),
-                authorization_provenance: reference(124),
-                reason: reference(125),
-                issue_position: 1,
-                predecessor_resolution: None,
-            })?;
-        let receipt = ErasureReceiptInputV1 {
-            request,
-            terminal_state: reference(126),
-            coordinator: reference(127),
-            lifecycle: pos_core::ErasureLifecycleV1::Complete,
-            freeze_position: 10,
-            acknowledgements: Vec::new(),
-            frozen_targets: Vec::new(),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            inventories: ErasureReceiptInventoriesV1 {
-                artifacts: Vec::new(),
-                keys: Vec::new(),
-                replicas: Vec::new(),
-                backups: Vec::new(),
-            },
-            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
-            policy: reference(128),
-            trust: reference(129),
-            provenance: reference(130),
-            issue_position: 1,
-            signature: reference(131),
-            receipt_digest: reference(0),
-        };
         let mut sender = host.command_sender()?;
         assert_eq!(
             sender.reject_erasure_request(request, reference(132)),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(
-            sender.submit_corrected_erasure_request(request_object, correction),
+            sender.submit_corrected_erasure_request(
+                coordinator_request()?,
+                lifecycle_correction(request, 102)?,
+            ),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(
-            sender.dispatch_erasure_destruction(request, &admission),
+            sender.dispatch_erasure_destruction(request, &lifecycle_admission(request, 105)?),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(
-            sender.acknowledge_erasure(request, acknowledgement),
+            sender.acknowledge_erasure(request, lifecycle_acknowledgement(110)),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(
-            sender.append_erasure_scope_extension(request, extension),
+            sender.append_erasure_scope_extension(request, lifecycle_extension(request, 115)?),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(
-            sender.resolve_erasure_administratively(request, &resolution),
+            sender.resolve_erasure_administratively(request, &lifecycle_resolution(request, 119)?),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(
-            sender.finalize_erasure_request(request, receipt),
+            sender.finalize_erasure_request(request, lifecycle_receipt(request, 126)),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         Ok(())
