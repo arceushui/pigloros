@@ -1167,4 +1167,32 @@ mod coverage_tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn selector_response_streams_verified_output_and_closes_on_io_failure() -> TestResult {
+        let payload = b"selector output";
+        let descriptor = PayloadDescriptor {
+            byte_length: u64::try_from(payload.len())?,
+            digest: domain_digest(b"PiglorOS.SandboxOutputBytes.v1\0", payload),
+        };
+        let mut source = payload.as_slice();
+        let mut staged = StagedOutput::stage_verified(&mut source, descriptor)?;
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        write_selector_response(&mut writer, b"control", Some(&mut staged))?;
+        writer.shutdown(Shutdown::Write)?;
+        let mut response = Vec::new();
+        reader.read_to_end(&mut response)?;
+        assert_eq!(
+            response,
+            [7_u32.to_be_bytes().as_slice(), b"control", payload].concat()
+        );
+
+        let (mut writer, reader) = UnixStream::pair()?;
+        drop(reader);
+        assert_eq!(
+            write_selector_response(&mut writer, b"control", None),
+            Err(RootSelectorServiceError::Io)
+        );
+        Ok(())
+    }
 }
