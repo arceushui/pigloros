@@ -1312,7 +1312,7 @@ pub struct ErasureCommandSenderV1<'host> {
 impl ErasureCommandSenderV1<'_> {
     fn apply_state_command(
         &mut self,
-        command: HostedCoordinatorCommandV1,
+        command: &HostedCoordinatorCommandV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
         let (state, generation) = self.host.apply_coordinator_command(&command)?;
@@ -1323,7 +1323,7 @@ impl ErasureCommandSenderV1<'_> {
     fn apply_receipt_command(
         &mut self,
         request: ErasureReferenceV1,
-        input: ErasureReceiptInputV1,
+        input: &ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
         let (receipt, generation) = self.host.apply_finalize_command(request, &input)?;
@@ -1514,7 +1514,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureRequestV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::Submit {
+        self.apply_state_command(&HostedCoordinatorCommandV1::Submit {
             request,
             provenance,
         })
@@ -1531,7 +1531,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::Authorize {
+        self.apply_state_command(&HostedCoordinatorCommandV1::Authorize {
             request,
             provenance,
         })
@@ -1554,7 +1554,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         transition: &ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::Freeze {
+        self.apply_state_command(&HostedCoordinatorCommandV1::Freeze {
             request,
             transition: transition.clone(),
         })
@@ -1574,7 +1574,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::Reject {
+        self.apply_state_command(&HostedCoordinatorCommandV1::Reject {
             request,
             provenance,
         })
@@ -1594,7 +1594,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureRequestV1,
         correction: ErasureCorrectionProvenanceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::SubmitCorrected {
+        self.apply_state_command(&HostedCoordinatorCommandV1::SubmitCorrected {
             request,
             correction,
         })
@@ -1614,7 +1614,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::DispatchAttempt {
+        self.apply_state_command(&HostedCoordinatorCommandV1::DispatchAttempt {
             request,
             admission: admission.clone(),
         })
@@ -1633,7 +1633,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         acknowledgement: ErasureAcknowledgementV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::Acknowledge {
+        self.apply_state_command(&HostedCoordinatorCommandV1::Acknowledge {
             request,
             acknowledgement,
         })
@@ -1652,7 +1652,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         extension: ErasureScopeExtensionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::ScopeExtension { request, extension })
+        self.apply_state_command(&HostedCoordinatorCommandV1::ScopeExtension { request, extension })
     }
 
     /// Append one authenticated administrative recovery resolution.
@@ -1668,7 +1668,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(HostedCoordinatorCommandV1::AdministrativeResolution {
+        self.apply_state_command(&HostedCoordinatorCommandV1::AdministrativeResolution {
             request,
             resolution: resolution.clone(),
         })
@@ -1688,7 +1688,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
-        self.apply_receipt_command(request, input)
+        self.apply_receipt_command(request, &input)
     }
 
     /// Recover the original durable Fork result after a lost reply or restart.
