@@ -902,7 +902,6 @@ impl ErasureExecutionHostV1 {
                 .map_err(ErasureHostErrorV1::from)
         };
         fence_result?;
-        self.ensure_generation(generation)?;
         result.unwrap_or(Err(ErasureHostErrorV1::RecoveryUnavailable))
     }
 
@@ -2352,6 +2351,137 @@ mod tests {
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn resolve_fork_scope_extension(
+            &self,
+            _requirement: ErasureForkScopeRequirementV1,
+            _input: &ErasureForkAdmissionInputV1,
+        ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn dispatch_destruction(
+            &self,
+            _request: ErasureReferenceV1,
+            _commands: &[ErasureDestructionCommandV1],
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_attempt(
+            &self,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_acknowledgement(
+            &self,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+
+    struct ForkChildAuthorityV1;
+
+    impl ErasureFreezeAuthorizationVerifierV1 for ForkChildAuthorityV1 {
+        fn validate_freeze_authorization(
+            &self,
+            _admission: &ErasureFreezeAdmissionEvidenceV1,
+            _authorization: &ErasureFreezeAuthorizationEvidenceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+
+    impl ErasureRecoveryAuthorizationVerifierV1 for ForkChildAuthorityV1 {
+        fn validate_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+
+    impl ErasureCoordinatorAuthorityV1 for ForkChildAuthorityV1 {
+        fn verified_topology_observation(
+            &self,
+            _request: ErasureReferenceV1,
+            _manifest_digest: ErasureReferenceV1,
+        ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_authorization(
+            &self,
+            _request: ErasureReferenceV1,
+            _provenance: ErasureReferenceV1,
+            _decision: ErasureAuthorizationDecisionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_corrected_submission(
+            &self,
+            _request: &ErasureRequestV1,
+            _correction: &ErasureCorrectionProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_atomic_freeze(
+            &self,
+            _request: ErasureReferenceV1,
+            _requested: &ErasureStateTransitionV1,
+        ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_fork_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+            _input: &ErasureForkAdmissionInputV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn resolve_fork_child_scope(
+            &self,
+            _parent: TimelineId,
+            _child: &TimelineMeta,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Ok(ErasureReferenceV1::from_digest([128; 32]))
         }
 
         fn resolve_fork_scope_extension(
@@ -4031,6 +4161,17 @@ mod tests {
                 .freeze_access(ErasureReferenceV1::from_digest([126; 32]), &transition,)),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
+
+        let mut closed =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            closed.apply_coordinator_command(HostedCoordinatorCommandV1::Authorize {
+                request: ErasureReferenceV1::from_digest([134; 32]),
+                provenance: ErasureReferenceV1::from_digest([135; 32]),
+            }),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
     }
 
     #[test]
@@ -4118,6 +4259,55 @@ mod tests {
     }
 
     #[test]
+    fn identified_fork_maps_recovery_and_commit_failures_without_payloads() {
+        let mut recovery_failure = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(FaultModeV1::Recovery)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = recovery_failure
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("identified-recovery-failure-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        recovery_failure.authority = Some(Arc::new(ForkChildAuthorityV1));
+        recovery_failure.coordinator = Some(ErasureReferenceV1::from_digest([130; 32]));
+        assert_eq!(
+            recovery_failure
+                .command_sender()
+                .and_then(|mut sender| sender.fork_timeline_identified(
+                    ErasureReferenceV1::from_digest([131; 32]),
+                    parent.id(),
+                    Seq::ZERO,
+                    "identified-recovery-failure",
+                )),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+
+        let mut commit_failure = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(FaultModeV1::ForkCommit)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = commit_failure
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("identified-commit-failure-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        commit_failure.authority = Some(Arc::new(ForkChildAuthorityV1));
+        commit_failure.coordinator = Some(ErasureReferenceV1::from_digest([132; 32]));
+        assert_eq!(
+            commit_failure
+                .command_sender()
+                .and_then(|mut sender| sender.fork_timeline_identified(
+                    ErasureReferenceV1::from_digest([133; 32]),
+                    parent.id(),
+                    Seq::ZERO,
+                    "identified-commit-failure",
+                )),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+    }
+
+    #[test]
     fn read_fence_rejects_a_blocked_timeline() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
@@ -4181,6 +4371,24 @@ mod tests {
                 },
             ),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    #[test]
+    fn host_store_fence_rejects_a_stale_generation_before_fencing() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.with_store_fence(
+                ErasureReferenceV1::from_digest([129; 32]),
+                TimelineId::new(),
+                ErasureProtectedOperationV1::Read,
+                |_| Ok::<(), CoreError>(()),
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
         );
     }
 
