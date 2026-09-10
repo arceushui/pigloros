@@ -2408,6 +2408,16 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn hosted_coordinator_port_fails_closed_for_unverified_request_topology() {
+        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        assert_eq!(
+            port.complete_erasure_inventory_observation(4),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+    }
+
     fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
         ErasureRequestV1::new(pos_core::ErasureRequestInputV1 {
             request: ErasureReferenceV1::from_digest([1; 32]),
@@ -2608,6 +2618,97 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(ready.read_sender().is_ok());
         assert!(ready.command_sender().is_ok());
+    }
+
+    #[test]
+    fn coordinator_constructors_reject_invalid_inventory_and_store_paths() {
+        let authority = Arc::new(UnusedCoordinatorAuthorityV1);
+        let coordinator = ErasureReferenceV1::from_digest([101; 32]);
+        assert_eq!(
+            ErasureExecutionHostV1::open_with_coordinator_authority(
+                StoreConfig::Memory,
+                authority.clone(),
+                coordinator,
+                0,
+            ),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        assert_eq!(
+            ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
+                StoreConfig::Memory,
+                authority.clone(),
+                coordinator,
+                0,
+            ),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        let missing_path = format!(
+            "/tmp/pigloros-ticket-186-missing-parent-{}/store.db",
+            std::process::id()
+        );
+        assert_eq!(
+            ErasureExecutionHostV1::open_with_coordinator_authority(
+                StoreConfig::Sqlite {
+                    path: missing_path.clone(),
+                },
+                authority.clone(),
+                coordinator,
+                4,
+            ),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
+            ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
+                StoreConfig::Sqlite { path: missing_path },
+                authority.clone(),
+                coordinator,
+                4,
+            ),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
+            ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+                "/tmp/pigloros-ticket-186-no-read-only-store.db",
+                authority,
+                coordinator,
+                4,
+            ),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+    }
+
+    #[test]
+    fn coordinator_install_requires_both_authority_and_coordinator() {
+        let mut host =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.install_inventory_from_coordinator(4),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        assert_eq!(
+            host.install_inventory_from_coordinator(4),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+    }
+
+    #[test]
+    fn current_store_inventory_failure_poisons_recovery() {
+        let mut host = ErasureExecutionHostV1::new_closed(Box::new(fault_store(
+            FaultModeV1::InventorySnapshot,
+        )))
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let snapshot = ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let inventory = verified_empty_inventory(snapshot, 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut query = OneShotInventoryV1(Some(inventory));
+        assert_eq!(
+            host.install_inventory(&mut query, 4),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(host.state, HostStateV1::Poisoned);
     }
 
     #[test]
@@ -3015,6 +3116,45 @@ mod tests {
                 sender.append(root.id(), &[]),
                 Err(ErasureHostErrorV1::StaleGeneration)
             );
+            assert_eq!(
+                sender.initialize_timeline_with_key_registry("stale", &KeyRegistryStateV1::new()),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.fork_timeline_identified(
+                    ErasureReferenceV1::from_digest([34; 32]),
+                    root.id(),
+                    Seq::ZERO,
+                    "stale-identified",
+                ),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            let request = coordinator_request()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            assert_eq!(
+                sender.submit_erasure_request(request, ErasureReferenceV1::from_digest([35; 32])),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            assert_eq!(
+                sender.authorize_erasure_request(
+                    ErasureReferenceV1::from_digest([36; 32]),
+                    ErasureReferenceV1::from_digest([37; 32]),
+                ),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
+            let transition = ErasureStateTransitionV1 {
+                lifecycle: pos_core::ErasureLifecycleV1::Rejected,
+                freeze_position: None,
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                acknowledged_targets: Vec::new(),
+                replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+                provenance: ErasureReferenceV1::from_digest([38; 32]),
+            };
+            assert_eq!(
+                sender.freeze_access(ErasureReferenceV1::from_digest([39; 32]), &transition),
+                Err(ErasureHostErrorV1::StaleGeneration)
+            );
         }
 
         let mut reader = host
@@ -3036,6 +3176,14 @@ mod tests {
         );
         assert_eq!(
             reader.logical_head(root.id()),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            reader.event_by_id(root.id(), EventId::new()),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            reader.key_registry(),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
     }
@@ -3605,6 +3753,14 @@ mod tests {
                 Err(ErasureHostErrorV1::AdapterFailure)
             );
             assert_eq!(
+                command.timeline(timeline),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+            assert_eq!(
+                command.event_by_id(timeline, EventId::new()),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+            assert_eq!(
                 command.fork_timeline(timeline, Seq::ZERO, "fault"),
                 Err(ErasureHostErrorV1::AdapterFailure)
             );
@@ -3630,6 +3786,10 @@ mod tests {
             Err(ErasureHostErrorV1::AdapterFailure)
         );
         assert_eq!(
+            reader.event_by_id(timeline, EventId::new()),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
             reader.timeline(timeline),
             Err(ErasureHostErrorV1::AdapterFailure)
         );
@@ -3641,6 +3801,140 @@ mod tests {
         assert_eq!(
             reader.logical_head(timeline),
             Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
+            reader.key_registry(),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+    }
+
+    #[test]
+    fn identified_and_coordinator_transitions_fail_closed_without_plugins() {
+        let mut missing_inventory = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let generation = missing_inventory
+            .ready_generation()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        missing_inventory.inventory = None;
+        assert_eq!(
+            missing_inventory.apply_identified_fork(
+                ErasureReferenceV1::from_digest([111; 32]),
+                TimelineId::new(),
+                Seq::ZERO,
+                "missing-inventory",
+            ),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        missing_inventory.inventory = Some(
+            verified_empty_inventory(
+                ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 4)
+                    .unwrap_or_else(|error| {
+                        std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                    }),
+                4,
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+        );
+        missing_inventory.state = HostStateV1::Ready {
+            generation,
+            maximum_requests: 4,
+            request_count: 0,
+        };
+        assert_eq!(
+            missing_inventory.apply_identified_fork(
+                ErasureReferenceV1::from_digest([112; 32]),
+                TimelineId::new(),
+                Seq::ZERO,
+                "missing-authority",
+            ),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+
+        let mut missing_coordinator = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        missing_coordinator.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        assert_eq!(
+            missing_coordinator.apply_identified_fork(
+                ErasureReferenceV1::from_digest([113; 32]),
+                TimelineId::new(),
+                Seq::ZERO,
+                "missing-coordinator",
+            ),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+
+        let mut rejected_submit = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        rejected_submit.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        rejected_submit.coordinator = Some(ErasureReferenceV1::from_digest([114; 32]));
+        assert_eq!(
+            rejected_submit
+                .command_sender()
+                .and_then(|mut sender| sender.submit_erasure_request(
+                    coordinator_request().unwrap_or_else(|error| {
+                        std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                    }),
+                    ErasureReferenceV1::from_digest([115; 32]),
+                )),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(rejected_submit.state, HostStateV1::Poisoned);
+    }
+
+    #[test]
+    fn identified_fork_authority_failure_poisons_the_host() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("identified-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        host.coordinator = Some(ErasureReferenceV1::from_digest([116; 32]));
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.fork_timeline_identified(
+                    ErasureReferenceV1::from_digest([117; 32]),
+                    parent.id(),
+                    Seq::ZERO,
+                    "identified-child",
+                )),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(host.state, HostStateV1::Poisoned);
+    }
+
+    #[test]
+    fn read_fence_rejects_a_blocked_timeline() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let timeline = TimelineId::new();
+        host.gate.block_timeline(timeline);
+        let mut reader = host
+            .read_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            reader.with_protected_effect_fence(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                &mut || {},
+            ),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
     }
 

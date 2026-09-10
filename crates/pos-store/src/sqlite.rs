@@ -14053,7 +14053,6 @@ mod coverage_entrypoints {
 }
 
 #[cfg(all(test, feature = "sqlite"))]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) mod key_registry_coverage {
     use super::*;
     use pos_core::{
@@ -14061,6 +14060,7 @@ pub(super) mod key_registry_coverage {
         PublicKey,
     };
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_store() -> Result<SqliteStore, CoreError> {
         let mut store = SqliteStore::open_in_memory()?;
         store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
