@@ -94,6 +94,7 @@ fn start_with_fixture_store(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
@@ -101,6 +102,7 @@ fn open_store(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn open_store_with_gate(
     config: StoreConfig,
     gate: Option<Arc<dyn ErasureGate>>,

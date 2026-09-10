@@ -1510,6 +1510,7 @@ impl Gateway {
     /// Returns a store error when the host-owned erasure gate cannot be bound
     /// to the supplied `SQLite` store.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn new_with_owntracks_ingress_and_erasure_gate(
         mut store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,

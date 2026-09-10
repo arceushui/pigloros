@@ -42,6 +42,7 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::host_error_to_core;
     use pos_core::{CoreError, ErasureHostErrorV1};

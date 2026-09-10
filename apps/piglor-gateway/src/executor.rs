@@ -63,6 +63,7 @@ macro_rules! submit {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod lifecycle_coverage_tests {
     use super::{
         host_error_to_core, worker_loop, worker_loop_with_runtime, Command, CommandClass,
