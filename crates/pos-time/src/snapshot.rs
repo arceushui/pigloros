@@ -42,23 +42,31 @@ pub fn snapshot(
 ) -> Result<Snapshot, CoreError> {
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = evaluation
-            .require_authoritative_use(
-                pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-                artifact_digest,
-            )
-            .map_err(|_| CoreError::ArtifactUnavailable)
-            .and_then(|()| {
-                sender
-                    .read_bounded(timeline, SeqRange::all(), unbounded_snapshot_read())
-                    .map_err(crate::host_error_to_core)
-            })
-            .and_then(|events| snapshot_from_events(timeline, registry, &events));
+        outcome = snapshot_effect(sender, timeline, registry, artifact_digest, evaluation);
     };
     sender
         .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut effect)
         .map_err(crate::host_error_to_core)?;
     outcome
+}
+
+fn snapshot_effect(
+    sender: &mut ErasureReadSenderV1<'_>,
+    timeline: TimelineId,
+    registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
+) -> Result<Snapshot, CoreError> {
+    evaluation
+        .require_authoritative_use(
+            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+            artifact_digest,
+        )
+        .map_err(|_| CoreError::ArtifactUnavailable)?;
+    let events = sender
+        .read_bounded(timeline, SeqRange::all(), unbounded_snapshot_read())
+        .map_err(crate::host_error_to_core)?;
+    snapshot_from_events(timeline, registry, &events)
 }
 
 /// Error type for snapshot consistency checks.
@@ -102,28 +110,7 @@ pub fn verify_snapshot_consistency(
 ) -> Result<(), SnapshotError> {
     let mut outcome = Err(SnapshotError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = evaluation
-            .require_authoritative_use(
-                pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-                artifact_digest,
-            )
-            .map_err(|_| SnapshotError::ArtifactUnavailable)
-            .and_then(|()| {
-                let tail_range = SeqRange::from_seq(snap.at_seq.next());
-                sender
-                    .read_bounded(snap.timeline, tail_range, unbounded_snapshot_read())
-                    .map_err(crate::host_error_to_core)
-                    .and_then(|tail_events| {
-                        sender
-                            .read_bounded(snap.timeline, SeqRange::all(), unbounded_snapshot_read())
-                            .map_err(crate::host_error_to_core)
-                            .map(|all_events| (tail_events, all_events))
-                    })
-                    .map_err(SnapshotError::from)
-            })
-            .and_then(|(tail_events, all_events)| {
-                verify_snapshot_event_sets(snap, registry, &tail_events, &all_events)
-            });
+        outcome = verify_snapshot_effect(sender, snap, registry, artifact_digest, evaluation);
     };
     sender
         .with_protected_effect_fence(
@@ -134,6 +121,32 @@ pub fn verify_snapshot_consistency(
         .map_err(crate::host_error_to_core)
         .map_err(SnapshotError::from)?;
     outcome
+}
+
+fn verify_snapshot_effect(
+    sender: &mut ErasureReadSenderV1<'_>,
+    snap: &Snapshot,
+    registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
+) -> Result<(), SnapshotError> {
+    evaluation
+        .require_authoritative_use(
+            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+            artifact_digest,
+        )
+        .map_err(|_| SnapshotError::ArtifactUnavailable)?;
+    let tail_events = sender
+        .read_bounded(
+            snap.timeline,
+            SeqRange::from_seq(snap.at_seq.next()),
+            unbounded_snapshot_read(),
+        )
+        .map_err(crate::host_error_to_core)?;
+    let all_events = sender
+        .read_bounded(snap.timeline, SeqRange::all(), unbounded_snapshot_read())
+        .map_err(crate::host_error_to_core)?;
+    verify_snapshot_event_sets(snap, registry, &tail_events, &all_events)
 }
 
 const fn unbounded_snapshot_read() -> EventReadBounds {

@@ -521,6 +521,21 @@ fn cmd_timeline_compare(
     second_timeline_str: &str,
     fork_seq_str: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let diff = run_timeline_compare(path, first_timeline_str, second_timeline_str, fork_seq_str)?;
+
+    output_stdout!("only_in_a: {}", diff.only_in_a.len());
+    output_stdout!("only_in_b: {}", diff.only_in_b.len());
+    output_stdout!("diverged_entities: {}", diff.diverged_entities.len());
+
+    Ok(())
+}
+
+fn run_timeline_compare(
+    path: &str,
+    first_timeline_str: &str,
+    second_timeline_str: &str,
+    fork_seq_str: &str,
+) -> Result<pos_time::ForkDiff, Box<dyn std::error::Error>> {
     let timeline_a = parse_timeline_id(first_timeline_str)?;
     let timeline_b = parse_timeline_id(second_timeline_str)?;
     let fork_seq = parse_seq(fork_seq_str)?;
@@ -551,11 +566,7 @@ fn cmd_timeline_compare(
         )
     })?;
 
-    output_stdout!("only_in_a: {}", diff.only_in_a.len());
-    output_stdout!("only_in_b: {}", diff.only_in_b.len());
-    output_stdout!("diverged_entities: {}", diff.diverged_entities.len());
-
-    Ok(())
+    Ok(diff)
 }
 
 fn parse_merge_strategy_flag(
