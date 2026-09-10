@@ -1311,6 +1311,27 @@ pub struct ErasureCommandSenderV1<'host> {
 }
 
 impl ErasureCommandSenderV1<'_> {
+    fn apply_state_command(
+        &mut self,
+        command: HostedCoordinatorCommandV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (state, generation) = self.host.apply_coordinator_command(command)?;
+        self.generation = generation;
+        Ok(state)
+    }
+
+    fn apply_receipt_command(
+        &mut self,
+        request: ErasureReferenceV1,
+        input: ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (receipt, generation) = self.host.apply_finalize_command(request, input)?;
+        self.generation = generation;
+        Ok(receipt)
+    }
+
     /// Run one protected effect while retaining the host's current Tick
     /// Boundary fence for its complete execution.
     ///
@@ -1494,15 +1515,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureRequestV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::Submit {
-                    request,
-                    provenance,
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::Submit {
+            request,
+            provenance,
+        })
     }
 
     /// Authenticate and persist an authorization decision through the
@@ -1516,15 +1532,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::Authorize {
-                    request,
-                    provenance,
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::Authorize {
+            request,
+            provenance,
+        })
     }
 
     /// Atomically persist an admitted access freeze and publish the successor
@@ -1544,15 +1555,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         transition: &ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::Freeze {
-                    request,
-                    transition: transition.clone(),
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::Freeze {
+            request,
+            transition: transition.clone(),
+        })
     }
 
     /// Reject one submitted erasure request through the host-owned coordinator.
@@ -1569,15 +1575,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::Reject {
-                    request,
-                    provenance,
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::Reject {
+            request,
+            provenance,
+        })
     }
 
     /// Submit a corrected replacement for a previously rejected request.
@@ -1594,15 +1595,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureRequestV1,
         correction: ErasureCorrectionProvenanceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::SubmitCorrected {
-                    request,
-                    correction,
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::SubmitCorrected {
+            request,
+            correction,
+        })
     }
 
     /// Admit and dispatch one durable destruction attempt.
@@ -1619,15 +1615,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::DispatchAttempt {
-                    request,
-                    admission: admission.clone(),
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::DispatchAttempt {
+            request,
+            admission: admission.clone(),
+        })
     }
 
     /// Persist one owner acknowledgement for the active destruction attempt.
@@ -1643,15 +1634,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         acknowledgement: ErasureAcknowledgementV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::Acknowledge {
-                    request,
-                    acknowledgement,
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::Acknowledge {
+            request,
+            acknowledgement,
+        })
     }
 
     /// Append one authorized future-Fork scope extension to the coordinator.
@@ -1667,15 +1653,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         extension: ErasureScopeExtensionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::ScopeExtension {
-                    request,
-                    extension,
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::ScopeExtension { request, extension })
     }
 
     /// Append one authenticated administrative recovery resolution.
@@ -1691,15 +1669,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) = self.host.apply_coordinator_command(
-            HostedCoordinatorCommandV1::AdministrativeResolution {
-                request,
-                resolution: resolution.clone(),
-            },
-        )?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(HostedCoordinatorCommandV1::AdministrativeResolution {
+            request,
+            resolution: resolution.clone(),
+        })
     }
 
     /// Commit and return one payload-free terminal ERC1 receipt.
@@ -1716,10 +1689,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (receipt, generation) = self.host.apply_finalize_command(request, input)?;
-        self.generation = generation;
-        Ok(receipt)
+        self.apply_receipt_command(request, input)
     }
 
     /// Recover the original durable Fork result after a lost reply or restart.
@@ -2807,6 +2777,251 @@ mod tests {
             horizon_position: 20,
             provenance: ErasureReferenceV1::from_digest([7; 32]),
         })
+    }
+
+    #[test]
+    fn hosted_coordinator_commands_reach_each_lifecycle_variant() -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
+        let request = reference(71);
+        let request_object = coordinator_request()?;
+        let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request,
+            rejected_terminal_state: reference(72),
+            correction_reason: reference(73),
+            authorization_provenance: reference(74),
+        })?;
+        let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            request,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![reference(75)],
+            command_identities: vec![reference(76)],
+            policy: reference(77),
+            trust: reference(78),
+            admitted_position: 1,
+            deadline_position: 2,
+            authorization_provenance: reference(79),
+        })?;
+        let acknowledgement = ErasureAcknowledgementV1 {
+            obligation: reference(75),
+            target: pos_core::ErasureRequiredTargetV1 {
+                artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
+                artifact_digest: reference(80),
+                key_role: pos_core::ErasureKeyRoleV1::DataEncryption,
+                key_digest: reference(81),
+                replica_set: reference(82),
+                replica_id: reference(83),
+            },
+            owner: reference(83),
+            evidence: reference(84),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        };
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: reference(83),
+            fork: reference(84),
+            lineage_rule: reference(85),
+            predecessor_extension: None,
+            admission_provenance: reference(86),
+        })?;
+        let resolution =
+            ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+                request,
+                affected_digests: vec![reference(87)],
+                action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+                scope_commitment: reference(88),
+                policy: reference(89),
+                trust: reference(90),
+                principal: reference(91),
+                authorization_provenance: reference(92),
+                reason: reference(93),
+                issue_position: 1,
+                predecessor_resolution: None,
+            })?;
+        let transition = ErasureStateTransitionV1 {
+            lifecycle: pos_core::ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            provenance: reference(94),
+        };
+
+        assert!(HostedCoordinatorCommandV1::Submit {
+            request: request_object.clone(),
+            provenance: reference(95),
+        }
+        .execute(&mut coordinator)
+        .is_err());
+        assert!(HostedCoordinatorCommandV1::Authorize {
+            request,
+            provenance: reference(96),
+        }
+        .execute(&mut coordinator)
+        .is_err());
+        assert!(HostedCoordinatorCommandV1::Freeze {
+            request,
+            transition: transition.clone(),
+        }
+        .execute(&mut coordinator)
+        .is_err());
+        assert!(HostedCoordinatorCommandV1::Reject {
+            request,
+            provenance: reference(97),
+        }
+        .execute(&mut coordinator)
+        .is_err());
+        assert!(HostedCoordinatorCommandV1::SubmitCorrected {
+            request: request_object,
+            correction,
+        }
+        .execute(&mut coordinator)
+        .is_err());
+        assert!(
+            HostedCoordinatorCommandV1::DispatchAttempt { request, admission }
+                .execute(&mut coordinator)
+                .is_err()
+        );
+        assert!(HostedCoordinatorCommandV1::Acknowledge {
+            request,
+            acknowledgement,
+        }
+        .execute(&mut coordinator)
+        .is_err());
+        assert!(
+            HostedCoordinatorCommandV1::ScopeExtension { request, extension }
+                .execute(&mut coordinator)
+                .is_err()
+        );
+        assert!(HostedCoordinatorCommandV1::AdministrativeResolution {
+            request,
+            resolution
+        }
+        .execute(&mut coordinator)
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_sender_exposes_every_post_freeze_command() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )?;
+        let request = reference(101);
+        let request_object = coordinator_request()?;
+        let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request,
+            rejected_terminal_state: reference(102),
+            correction_reason: reference(103),
+            authorization_provenance: reference(104),
+        })?;
+        let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            request,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![reference(105)],
+            command_identities: vec![reference(106)],
+            policy: reference(107),
+            trust: reference(108),
+            admitted_position: 1,
+            deadline_position: 2,
+            authorization_provenance: reference(109),
+        })?;
+        let acknowledgement = ErasureAcknowledgementV1 {
+            obligation: reference(105),
+            target: pos_core::ErasureRequiredTargetV1 {
+                artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
+                artifact_digest: reference(110),
+                key_role: pos_core::ErasureKeyRoleV1::DataEncryption,
+                key_digest: reference(111),
+                replica_set: reference(112),
+                replica_id: reference(113),
+            },
+            owner: reference(113),
+            evidence: reference(114),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        };
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: reference(115),
+            fork: reference(116),
+            lineage_rule: reference(117),
+            predecessor_extension: None,
+            admission_provenance: reference(118),
+        })?;
+        let resolution =
+            ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+                request,
+                affected_digests: vec![reference(119)],
+                action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+                scope_commitment: reference(120),
+                policy: reference(121),
+                trust: reference(122),
+                principal: reference(123),
+                authorization_provenance: reference(124),
+                reason: reference(125),
+                issue_position: 1,
+                predecessor_resolution: None,
+            })?;
+        let receipt = ErasureReceiptInputV1 {
+            request,
+            terminal_state: reference(126),
+            coordinator: reference(127),
+            lifecycle: pos_core::ErasureLifecycleV1::Complete,
+            freeze_position: 10,
+            acknowledgements: Vec::new(),
+            frozen_targets: Vec::new(),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            inventories: ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            policy: reference(128),
+            trust: reference(129),
+            provenance: reference(130),
+            issue_position: 1,
+            signature: reference(131),
+            receipt_digest: reference(0),
+        };
+        let mut sender = host.command_sender()?;
+        assert_eq!(
+            sender.reject_erasure_request(request, reference(132)),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.submit_corrected_erasure_request(request_object, correction),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.dispatch_erasure_destruction(request, &admission),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.acknowledge_erasure(request, acknowledgement),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.append_erasure_scope_extension(request, extension),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.resolve_erasure_administratively(request, &resolution),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.finalize_erasure_request(request, receipt),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        Ok(())
     }
 
     #[test]
