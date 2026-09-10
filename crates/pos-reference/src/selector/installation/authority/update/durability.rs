@@ -576,6 +576,7 @@ fn verify_recovery_identity(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs::File;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};

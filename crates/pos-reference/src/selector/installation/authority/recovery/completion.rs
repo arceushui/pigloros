@@ -136,6 +136,7 @@ fn random_id() -> [u8; 16] {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
