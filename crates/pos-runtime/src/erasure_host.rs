@@ -2734,7 +2734,7 @@ mod tests {
             .map(|_| ()),
             Err(ErasureHostErrorV1::Conflict)
         );
-        let _ = std::fs::remove_file(path);
+        drop(std::fs::remove_file(path));
     }
 
     #[test]
