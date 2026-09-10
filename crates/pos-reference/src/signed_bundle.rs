@@ -1543,7 +1543,7 @@ mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
-    type ReaderInputs = (Vec<u8>, Vec<u8>, EvaluationRequest);
+    pub(super) type ReaderInputs = (Vec<u8>, Vec<u8>, EvaluationRequest);
 
     struct ChangingReader {
         inner: Cursor<Vec<u8>>,
@@ -1599,7 +1599,7 @@ mod tests {
         }
     }
 
-    fn reader_inputs() -> TestResult<ReaderInputs> {
+    pub(super) fn reader_inputs() -> TestResult<ReaderInputs> {
         let archive =
             include_bytes!("../tests/fixtures/installed-selector/valid/archive.cbor").to_vec();
         let trust_policy =
@@ -1972,5 +1972,16 @@ mod coverage_tests {
             authenticate_reader(&mut Cursor::new(archive), [0; 32]),
             Err(BundleError::DigestMismatch)
         );
+    }
+
+    #[test]
+    fn immutable_reader_reconstructs_the_complete_authenticated_bundle() {
+        let (archive, trust_policy, request) =
+            tests::reader_inputs().expect("valid bundle fixture");
+        let bundle =
+            verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request)
+                .expect("authenticated bundle");
+        assert!(!bundle.members.is_empty());
+        assert!(!bundle.expected_results.is_empty());
     }
 }
