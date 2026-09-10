@@ -1830,7 +1830,7 @@ mod tests {
 
     #[test]
     fn canonical_archive_validator_accepts_bounded_payload_forms() {
-        let mut long_bytes = vec![0x5a, 0, 0, 0x20, 1];
+        let mut long_bytes = vec![0x59, 0x20, 1];
         long_bytes.extend(vec![7; 8193]);
         for bytes in [
             vec![0x40],
