@@ -574,3 +574,147 @@ fn verify_recovery_identity(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::Path;
+
+    use super::*;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn test_root() -> TestResult<(tempfile::TempDir, File, u32)> {
+        let directory = tempfile::tempdir()?;
+        let root = File::open(directory.path())?;
+        let owner = root.metadata()?.uid();
+        Ok((directory, root, owner))
+    }
+
+    fn write_readonly(path: &Path, bytes: &[u8]) -> TestResult {
+        std::fs::write(path, bytes)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_reads_preserve_exact_bytes_and_reject_oversized_files() -> TestResult {
+        let (directory, _, _) = test_root()?;
+        let path = directory.path().join("bounded.cbor");
+        std::fs::write(&path, b"exact")?;
+        assert_eq!(read_bounded(File::open(&path)?, 5)?, b"exact");
+
+        std::fs::write(&path, b"oversized")?;
+        assert_eq!(
+            read_bounded(File::open(&path)?, 8).err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staging_directory_requires_the_private_durable_mode() -> TestResult {
+        let (directory, root, owner) = test_root()?;
+        let staging = open_staging_directory(&root, owner)?;
+        let metadata = staging.metadata()?;
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), owner);
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        drop(staging);
+
+        let reopened = open_staging_directory(&root, owner)?;
+        drop(reopened);
+        let path = directory.path().join(STAGING_NAME);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        assert_eq!(
+            open_staging_directory(&root, owner).err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_write_is_exact_immutable_and_no_replace() -> TestResult {
+        let (directory, root, owner) = test_root()?;
+        let staging = open_staging_directory(&root, owner)?;
+        let bytes = b"exact-sir1-recovery";
+        let recovery = write_recovery(&staging, &root, owner, bytes)?;
+        let path = directory.path().join(RECOVERY_NAME);
+        let metadata = recovery.metadata()?;
+        assert!(metadata.is_file());
+        assert_eq!(metadata.uid(), owner);
+        assert_eq!(metadata.mode() & 0o7777, 0o400);
+        assert_eq!(std::fs::read(&path)?, bytes);
+
+        assert_eq!(
+            write_recovery(&staging, &root, owner, b"replacement").err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(std::fs::read(path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_identity_requires_the_retained_file_and_exact_bytes() -> TestResult {
+        let (directory, root, owner) = test_root()?;
+        let staging = open_staging_directory(&root, owner)?;
+        let expected = b"original-sir1";
+        let retained = write_recovery(&staging, &root, owner, expected)?;
+        verify_recovery_identity(&root, owner, &retained, expected)?;
+
+        let path = directory.path().join(RECOVERY_NAME);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::write(&path, b"altered-sir1!")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+        assert_eq!(
+            verify_recovery_identity(&root, owner, &retained, expected).err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn successor_publication_rejects_an_unrelated_current_generation() -> TestResult {
+        let (directory, root, owner) = test_root()?;
+        let staging = open_staging_directory(&root, owner)?;
+        let recovery_bytes = b"retained-sir1";
+        let retained = write_recovery(&staging, &root, owner, recovery_bytes)?;
+        let manifest = directory.path().join("installation.cbor");
+        write_readonly(&manifest, b"unrelated-generation")?;
+
+        assert_eq!(
+            publish_successor(
+                &root,
+                owner,
+                b"previous-generation",
+                b"next-generation",
+                &retained,
+                recovery_bytes,
+            )
+            .err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(RECOVERY_NAME))?,
+            recovery_bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_values_and_temporary_names_preserve_wire_shape() -> TestResult {
+        assert_eq!(
+            attempt_values(&[[1; 16], [2; 16]]),
+            Value::Array(vec![Value::Bytes(vec![1; 16]), Value::Bytes(vec![2; 16])])
+        );
+
+        let name = temporary_name();
+        assert!(name.starts_with("sir1-"));
+        assert!(name.ends_with(".cbor"));
+        let nonce = &name[5..name.len() - 5];
+        assert_eq!(nonce.len(), 32);
+        let _ = u128::from_str_radix(nonce, 16)?;
+        Ok(())
+    }
+}
