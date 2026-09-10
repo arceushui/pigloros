@@ -1359,9 +1359,16 @@ mod coverage_tests {
         )
         .is_err_and(|error| error == RootSelectorServiceError::ProviderEvidence));
 
+        let trailing_payload = b"provider output";
+        let trailing_descriptor = PayloadDescriptor {
+            byte_length: trailing_payload.len() as u64,
+            digest: output_digest(trailing_payload),
+        };
         let mut trailing = b"provider output!".as_slice();
-        assert!(StagedOutput::stage_verified(&mut trailing, descriptor)
-            .is_err_and(|error| error == RootSelectorServiceError::ProviderEvidence));
+        assert!(
+            StagedOutput::stage_verified(&mut trailing, trailing_descriptor)
+                .is_err_and(|error| error == RootSelectorServiceError::ProviderEvidence)
+        );
         let mut writer = FailingWriter;
         assert_eq!(writer.flush(), Ok(()));
         assert_eq!(
