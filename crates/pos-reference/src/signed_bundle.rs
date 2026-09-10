@@ -1786,6 +1786,31 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_snapshot_rejects_empty_changed_and_unseekable_archives() -> TestResult {
+        assert!(matches!(
+            authenticated_snapshot(&mut Cursor::new(Vec::new()), [0; 32]),
+            Err(BundleError::FieldOutOfBounds)
+        ));
+        assert!(matches!(
+            authenticated_snapshot(&mut Cursor::new(vec![0xf6]), [0; 32]),
+            Err(BundleError::DigestMismatch)
+        ));
+        assert!(matches!(
+            authenticated_snapshot(&mut FailingSeekReader, [0; 32]),
+            Err(BundleError::SnapshotUnavailable)
+        ));
+
+        let bytes = vec![0xf6];
+        let expected = *blake3::hash(&bytes).as_bytes();
+        let (mut snapshot, length) = authenticated_snapshot(&mut Cursor::new(bytes), expected)?;
+        let mut copied = Vec::new();
+        snapshot.read_to_end(&mut copied)?;
+        assert_eq!(length, copied.len() as u64);
+        assert_eq!(copied, vec![0xf6]);
+        Ok(())
+    }
+
+    #[test]
     fn byte_preflight_binds_archive_identity_and_rejects_untrusted_inputs() -> TestResult {
         let (archive, trust_policy, request) = reader_inputs()?;
         let preflight = preflight_signed_bundle_bytes(&archive, &trust_policy, &request)?;
