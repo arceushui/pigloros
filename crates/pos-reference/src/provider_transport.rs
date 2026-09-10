@@ -1425,7 +1425,7 @@ mod coverage_tests {
             Ok(Some(b"provider frame".to_vec()))
         );
 
-        let (mut writer, mut reader) = UnixStream::pair()?;
+        let (writer, mut reader) = UnixStream::pair()?;
         writer.shutdown(Shutdown::Write)?;
         assert_eq!(read_frame(&mut reader, &deadline), Ok(None));
 
@@ -1447,7 +1447,7 @@ mod coverage_tests {
             );
         }
 
-        let (mut writer, mut reader) = UnixStream::pair()?;
+        let (writer, mut reader) = UnixStream::pair()?;
         writer.shutdown(Shutdown::Write)?;
         assert_eq!(ensure_eof(&mut reader, &deadline), Ok(()));
         let (mut writer, mut reader) = UnixStream::pair()?;
