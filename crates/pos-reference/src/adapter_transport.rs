@@ -981,7 +981,6 @@ fn io_error(_: std::io::Error) -> TransportError {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io::Cursor;
 
