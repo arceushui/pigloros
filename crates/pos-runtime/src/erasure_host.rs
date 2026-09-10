@@ -1351,8 +1351,16 @@ impl ErasureExecutionHostV1 {
         let (inventory, result) = match publication {
             Ok(publication) => publication,
             Err(error) => {
+                let mapped = transition_error.map_or_else(|| error.into(), map_erasure_error);
+                if transition_error.is_some_and(is_non_poisoning_transition_error)
+                    && self
+                        .install_inventory_from_coordinator(maximum_requests)
+                        .is_ok()
+                {
+                    return Err(mapped);
+                }
                 self.poison();
-                return Err(transition_error.map_or_else(|| error.into(), map_erasure_error));
+                return Err(mapped);
             }
         };
         let generation = inventory.generation();

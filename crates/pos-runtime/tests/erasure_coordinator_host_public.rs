@@ -36,7 +36,9 @@ use erasure_support::{
 #[derive(Default)]
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
+    frozen_scope: Mutex<Option<ErasureReferenceV1>>,
     frozen: AtomicBool,
+    deny_authentication: AtomicBool,
     allow_rejection: AtomicBool,
     allow_attempt: AtomicBool,
     allow_dispatch: AtomicBool,
@@ -72,9 +74,17 @@ impl TestAuthority {
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .clone();
         if self.frozen.load(Ordering::Acquire) {
+            let scope = self
+                .frozen_scope
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             Ok(ErasureVerifiedTopologyObservationV1::new(
                 manifest,
-                timelines,
+                timelines
+                    .into_iter()
+                    .map(|(timeline, _)| (timeline, scope))
+                    .collect(),
                 Vec::new(),
             ))
         } else {
@@ -126,7 +136,9 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
     }
 
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        (!self.deny_authentication.load(Ordering::Acquire))
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn admit_authorization(
@@ -197,6 +209,10 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             freeze_admission_evidence,
             freeze_authorization_evidence,
         })?;
+        self.frozen_scope
+            .lock()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+            .replace(scope_reference);
         self.frozen.store(true, Ordering::Release);
         Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(admission)))
     }
@@ -904,24 +920,26 @@ fn gateway_host_uses_the_same_coordinator_authority_boundary(
 }
 
 #[test]
-fn rejected_coordinator_command_preserves_a_recovered_host(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
+fn authentication_denial_preserves_a_recovered_host() -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open rejected-command host",
         ErasureExecutionHostV1::open_with_coordinator_authority(
             StoreConfig::Memory,
-            authority,
+            authority_plugin,
             reference(30),
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
     let request = test_stage("construct rejected request", persistence_request())?;
+    let request_provenance = request.provenance();
     {
         let mut commands = test_stage("open rejected-command sender", host.command_sender())?;
+        authority.deny_authentication.store(true, Ordering::Release);
         assert!(matches!(
-            commands.submit_erasure_request(request, reference(99)),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
+            commands.submit_erasure_request(request, request_provenance),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
         ));
     }
     assert!(host.command_sender().is_ok());
@@ -930,7 +948,7 @@ fn rejected_coordinator_command_preserves_a_recovered_host(
 }
 
 #[test]
-fn stale_durable_fork_retry_closes_the_host_without_republishing_old_inventory(
+fn stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
@@ -972,9 +990,7 @@ fn stale_durable_fork_retry_closes_the_host_without_republishing_old_inventory(
             Err(ErasureHostErrorV1::Conflict)
         ));
     }
-    assert!(matches!(
-        host.read_sender(),
-        Err(ErasureHostErrorV1::RecoveryUnavailable)
-    ));
+    assert!(host.read_sender().is_ok());
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     Ok(())
 }
