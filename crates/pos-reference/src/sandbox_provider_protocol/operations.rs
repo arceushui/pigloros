@@ -714,6 +714,7 @@ fn validate_response_identity(
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod local_error_tests {
     use super::*;
