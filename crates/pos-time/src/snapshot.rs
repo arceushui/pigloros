@@ -40,6 +40,16 @@ pub fn snapshot(
     artifact_digest: pos_core::ErasureReferenceV1,
     evaluation: &pos_core::ReplayClaimEvaluationV1,
 ) -> Result<Snapshot, CoreError> {
+    run_snapshot_fence(sender, timeline, registry, artifact_digest, evaluation)
+}
+
+fn run_snapshot_fence(
+    sender: &mut ErasureReadSenderV1<'_>,
+    timeline: TimelineId,
+    registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
+) -> Result<Snapshot, CoreError> {
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
         outcome = snapshot_effect(sender, timeline, registry, artifact_digest, evaluation);
@@ -102,6 +112,16 @@ pub enum SnapshotError {
 /// may no longer be used authoritatively, [`SnapshotError::Store`] on I/O
 /// failure, or [`SnapshotError::Inconsistent`] if the states differ.
 pub fn verify_snapshot_consistency(
+    sender: &mut ErasureReadSenderV1<'_>,
+    snap: &Snapshot,
+    registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
+) -> Result<(), SnapshotError> {
+    run_verification_fence(sender, snap, registry, artifact_digest, evaluation)
+}
+
+fn run_verification_fence(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,
     registry: &mut ProjectionRegistry,
