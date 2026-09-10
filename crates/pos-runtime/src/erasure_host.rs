@@ -2232,7 +2232,7 @@ mod tests {
             _admission: &ErasureFreezeAdmissionEvidenceV1,
             _authorization: &ErasureFreezeAuthorizationEvidenceV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test has no freeze evidence")
+            Err(ErasureErrorV1::Unauthorized)
         }
     }
 
@@ -2241,14 +2241,14 @@ mod tests {
             &self,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test has no scope extension")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn validate_administrative_resolution(
             &self,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test has no resolution")
+            Err(ErasureErrorV1::Unauthorized)
         }
     }
 
@@ -2258,11 +2258,11 @@ mod tests {
             _request: ErasureReferenceV1,
             _manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-            unreachable!("the empty-store delegation test has no request")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test submits no request")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_authorization(
@@ -2271,7 +2271,7 @@ mod tests {
             _provenance: ErasureReferenceV1,
             _decision: ErasureAuthorizationDecisionV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test authorizes no request")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_corrected_submission(
@@ -2279,7 +2279,7 @@ mod tests {
             _request: &ErasureRequestV1,
             _correction: &ErasureCorrectionProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test submits no correction")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_atomic_freeze(
@@ -2287,14 +2287,14 @@ mod tests {
             _request: ErasureReferenceV1,
             _requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
-            unreachable!("the empty-store delegation test admits no freeze")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_scope_extension(
             &self,
             _extension: &ErasureScopeExtensionV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test admits no extension")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_fork_scope_extension(
@@ -2302,7 +2302,7 @@ mod tests {
             _extension: &ErasureScopeExtensionV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test admits no fork")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn resolve_fork_child_scope(
@@ -2310,7 +2310,7 @@ mod tests {
             _parent: TimelineId,
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-            unreachable!("the empty-store delegation test resolves no fork")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn resolve_fork_scope_extension(
@@ -2318,14 +2318,14 @@ mod tests {
             _requirement: ErasureForkScopeRequirementV1,
             _input: &ErasureForkAdmissionInputV1,
         ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
-            unreachable!("the empty-store delegation test resolves no extension")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_administrative_resolution(
             &self,
             _resolution: &ErasureAdministrativeResolutionV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test admits no resolution")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn dispatch_destruction(
@@ -2333,25 +2333,25 @@ mod tests {
             _request: ErasureReferenceV1,
             _commands: &[ErasureDestructionCommandV1],
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test dispatches nothing")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_attempt(
             &self,
             _admission: &ErasureRetryAdmissionV1,
         ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-            unreachable!("the empty-store delegation test admits no attempt")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_acknowledgement(
             &self,
             _acknowledgement: &ErasureAcknowledgementProvenanceV1,
         ) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test admits no acknowledgement")
+            Err(ErasureErrorV1::Unauthorized)
         }
 
         fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-            unreachable!("the empty-store delegation test admits no receipt")
+            Err(ErasureErrorV1::Unauthorized)
         }
     }
 
