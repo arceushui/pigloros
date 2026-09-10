@@ -474,6 +474,7 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     }
 }
 
+#[derive(Clone)]
 enum HostedCoordinatorCommandV1 {
     Submit {
         request: ErasureRequestV1,
@@ -1157,7 +1158,7 @@ impl ErasureExecutionHostV1 {
 
     fn apply_coordinator_transition<T>(
         &mut self,
-        transition: impl FnOnce(
+        mut transition: impl FnMut(
             &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
         ) -> Result<T, ErasureErrorV1>,
     ) -> Result<(T, ErasureReferenceV1), ErasureHostErrorV1> {
@@ -1171,18 +1172,12 @@ impl ErasureExecutionHostV1 {
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let gate = Arc::clone(&self.gate);
         let mut transition_error = None;
-        let mut transition = Some(transition);
         let publication = {
             let mut fenced_transition = || {
                 let port =
                     HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
                 let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
-                match (transition
-                    .take()
-                    .expect("coordinator transition is invoked exactly once"))(
-                    &mut state_machine
-                )
-                .and_then(|result| {
+                match transition(&mut state_machine).and_then(|result| {
                     state_machine
                         .verified_inventory(maximum_requests)
                         .map(|inventory| (result, inventory))
@@ -1218,7 +1213,7 @@ impl ErasureExecutionHostV1 {
         &mut self,
         command: HostedCoordinatorCommandV1,
     ) -> Result<(ErasureStateV1, ErasureReferenceV1), ErasureHostErrorV1> {
-        self.apply_coordinator_transition(|state_machine| command.execute(state_machine))
+        self.apply_coordinator_transition(|state_machine| command.clone().execute(state_machine))
     }
 
     fn apply_finalize_command(
@@ -1226,7 +1221,9 @@ impl ErasureExecutionHostV1 {
         request: ErasureReferenceV1,
         input: ErasureReceiptInputV1,
     ) -> Result<(ErasureReceiptV1, ErasureReferenceV1), ErasureHostErrorV1> {
-        self.apply_coordinator_transition(|state_machine| state_machine.finalize(request, input))
+        self.apply_coordinator_transition(|state_machine| {
+            state_machine.finalize(request, input.clone())
+        })
     }
 
     /// Recover a new store only when its complete durable request set is empty.
