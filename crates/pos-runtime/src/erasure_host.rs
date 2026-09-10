@@ -2937,7 +2937,7 @@ mod tests {
     #[test]
     fn hosted_coordinator_port_delegates_empty_persistence_reads() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let mut port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
         let request = ErasureReferenceV1::from_digest([71; 32]);
         assert_eq!(port.resolve_state(request)?, None);
         assert_eq!(port.read_manifest(request)?, None);
@@ -2957,6 +2957,17 @@ mod tests {
         assert_eq!(port.administrative_resolution_ref(request, 0)?, None);
         assert_eq!(port.administrative_resolution_index_count(request)?, 0);
         assert!(port.recovery_error_refs(request)?.is_empty());
+        let recovery_error = pos_core::ErasureRecoveryErrorV1::new(
+            request,
+            None,
+            request,
+            ErasureErrorV1::ProvenanceMissing,
+        )?;
+        port.append_recovery_error(PreparedErasureRecoveryErrorV1::new(recovery_error)?)?;
+        assert_eq!(
+            port.recovery_error_refs(request)?,
+            vec![recovery_error.reference()]
+        );
         let observation = port.complete_erasure_inventory_observation(1)?;
         assert_eq!(
             observation,
