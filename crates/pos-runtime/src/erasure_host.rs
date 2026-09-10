@@ -476,6 +476,13 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
 
 #[derive(Clone)]
 enum HostedCoordinatorCommandV1 {
+    Submission(HostedSubmissionCommandV1),
+    Retry(HostedRetryCommandV1),
+    Resolution(HostedResolutionCommandV1),
+}
+
+#[derive(Clone)]
+enum HostedSubmissionCommandV1 {
     Submit {
         request: ErasureRequestV1,
         provenance: ErasureReferenceV1,
@@ -488,6 +495,10 @@ enum HostedCoordinatorCommandV1 {
         request: ErasureReferenceV1,
         transition: ErasureStateTransitionV1,
     },
+}
+
+#[derive(Clone)]
+enum HostedRetryCommandV1 {
     Reject {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
@@ -500,6 +511,10 @@ enum HostedCoordinatorCommandV1 {
         request: ErasureReferenceV1,
         admission: ErasureRetryAdmissionV1,
     },
+}
+
+#[derive(Clone)]
+enum HostedResolutionCommandV1 {
     Acknowledge {
         request: ErasureReferenceV1,
         acknowledgement: ErasureAcknowledgementV1,
@@ -515,6 +530,82 @@ enum HostedCoordinatorCommandV1 {
 }
 
 impl HostedCoordinatorCommandV1 {
+    fn submit(request: ErasureRequestV1, provenance: ErasureReferenceV1) -> Self {
+        Self::Submission(HostedSubmissionCommandV1::Submit {
+            request,
+            provenance,
+        })
+    }
+
+    fn authorize(request: ErasureReferenceV1, provenance: ErasureReferenceV1) -> Self {
+        Self::Submission(HostedSubmissionCommandV1::Authorize {
+            request,
+            provenance,
+        })
+    }
+
+    fn freeze(request: ErasureReferenceV1, transition: ErasureStateTransitionV1) -> Self {
+        Self::Submission(HostedSubmissionCommandV1::Freeze {
+            request,
+            transition,
+        })
+    }
+
+    fn reject(request: ErasureReferenceV1, provenance: ErasureReferenceV1) -> Self {
+        Self::Retry(HostedRetryCommandV1::Reject {
+            request,
+            provenance,
+        })
+    }
+
+    fn submit_corrected(
+        request: ErasureRequestV1,
+        correction: ErasureCorrectionProvenanceV1,
+    ) -> Self {
+        Self::Retry(HostedRetryCommandV1::SubmitCorrected {
+            request,
+            correction,
+        })
+    }
+
+    fn dispatch_attempt(request: ErasureReferenceV1, admission: ErasureRetryAdmissionV1) -> Self {
+        Self::Retry(HostedRetryCommandV1::DispatchAttempt { request, admission })
+    }
+
+    fn acknowledge(request: ErasureReferenceV1, acknowledgement: ErasureAcknowledgementV1) -> Self {
+        Self::Resolution(HostedResolutionCommandV1::Acknowledge {
+            request,
+            acknowledgement,
+        })
+    }
+
+    fn scope_extension(request: ErasureReferenceV1, extension: ErasureScopeExtensionV1) -> Self {
+        Self::Resolution(HostedResolutionCommandV1::ScopeExtension { request, extension })
+    }
+
+    fn administrative_resolution(
+        request: ErasureReferenceV1,
+        resolution: ErasureAdministrativeResolutionV1,
+    ) -> Self {
+        Self::Resolution(HostedResolutionCommandV1::AdministrativeResolution {
+            request,
+            resolution,
+        })
+    }
+
+    fn execute(
+        self,
+        coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        match self {
+            Self::Submission(command) => command.execute(coordinator),
+            Self::Retry(command) => command.execute(coordinator),
+            Self::Resolution(command) => command.execute(coordinator),
+        }
+    }
+}
+
+impl HostedSubmissionCommandV1 {
     fn execute(
         self,
         coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
@@ -532,6 +623,16 @@ impl HostedCoordinatorCommandV1 {
                 request,
                 transition,
             } => coordinator.freeze_inventory(request, &transition),
+        }
+    }
+}
+
+impl HostedRetryCommandV1 {
+    fn execute(
+        self,
+        coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        match self {
             Self::Reject {
                 request,
                 provenance,
@@ -543,6 +644,16 @@ impl HostedCoordinatorCommandV1 {
             Self::DispatchAttempt { request, admission } => {
                 coordinator.dispatch_attempt(request, &admission)
             }
+        }
+    }
+}
+
+impl HostedResolutionCommandV1 {
+    fn execute(
+        self,
+        coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        match self {
             Self::Acknowledge {
                 request,
                 acknowledgement,
@@ -1514,10 +1625,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureRequestV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::Submit {
-            request,
-            provenance,
-        })
+        self.apply_state_command(&HostedCoordinatorCommandV1::submit(request, provenance))
     }
 
     /// Authenticate and persist an authorization decision through the
@@ -1531,10 +1639,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::Authorize {
-            request,
-            provenance,
-        })
+        self.apply_state_command(&HostedCoordinatorCommandV1::authorize(request, provenance))
     }
 
     /// Atomically persist an admitted access freeze and publish the successor
@@ -1554,10 +1659,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         transition: &ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::Freeze {
+        self.apply_state_command(&HostedCoordinatorCommandV1::freeze(
             request,
-            transition: transition.clone(),
-        })
+            transition.clone(),
+        ))
     }
 
     /// Reject one submitted erasure request through the host-owned coordinator.
@@ -1574,10 +1679,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::Reject {
-            request,
-            provenance,
-        })
+        self.apply_state_command(&HostedCoordinatorCommandV1::reject(request, provenance))
     }
 
     /// Submit a corrected replacement for a previously rejected request.
@@ -1594,10 +1696,9 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureRequestV1,
         correction: ErasureCorrectionProvenanceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::SubmitCorrected {
-            request,
-            correction,
-        })
+        self.apply_state_command(&HostedCoordinatorCommandV1::submit_corrected(
+            request, correction,
+        ))
     }
 
     /// Admit and dispatch one durable destruction attempt.
@@ -1614,10 +1715,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::DispatchAttempt {
+        self.apply_state_command(&HostedCoordinatorCommandV1::dispatch_attempt(
             request,
-            admission: admission.clone(),
-        })
+            admission.clone(),
+        ))
     }
 
     /// Persist one owner acknowledgement for the active destruction attempt.
@@ -1633,10 +1734,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         acknowledgement: ErasureAcknowledgementV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::Acknowledge {
+        self.apply_state_command(&HostedCoordinatorCommandV1::acknowledge(
             request,
             acknowledgement,
-        })
+        ))
     }
 
     /// Append one authorized future-Fork scope extension to the coordinator.
@@ -1652,7 +1753,9 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         extension: ErasureScopeExtensionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::ScopeExtension { request, extension })
+        self.apply_state_command(&HostedCoordinatorCommandV1::scope_extension(
+            request, extension,
+        ))
     }
 
     /// Append one authenticated administrative recovery resolution.
@@ -1668,10 +1771,10 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::AdministrativeResolution {
+        self.apply_state_command(&HostedCoordinatorCommandV1::administrative_resolution(
             request,
-            resolution: resolution.clone(),
-        })
+            resolution.clone(),
+        ))
     }
 
     /// Commit and return one payload-free terminal ERC1 receipt.
@@ -2909,58 +3012,51 @@ mod tests {
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
         let request = reference(71);
         let request_object = coordinator_request()?;
-        assert!(HostedCoordinatorCommandV1::Submit {
-            request: request_object.clone(),
-            provenance: reference(95),
-        }
+        assert!(
+            HostedCoordinatorCommandV1::submit(request_object.clone(), reference(95))
+                .execute(&mut coordinator)
+                .is_err()
+        );
+        assert!(
+            HostedCoordinatorCommandV1::authorize(request, reference(96))
+                .execute(&mut coordinator)
+                .is_err()
+        );
+        assert!(
+            HostedCoordinatorCommandV1::freeze(request, lifecycle_transition(94))
+                .execute(&mut coordinator)
+                .is_err()
+        );
+        assert!(HostedCoordinatorCommandV1::reject(request, reference(97))
+            .execute(&mut coordinator)
+            .is_err());
+        assert!(HostedCoordinatorCommandV1::submit_corrected(
+            request_object,
+            lifecycle_correction(request, 72)?,
+        )
         .execute(&mut coordinator)
         .is_err());
-        assert!(HostedCoordinatorCommandV1::Authorize {
+        assert!(HostedCoordinatorCommandV1::dispatch_attempt(
             request,
-            provenance: reference(96),
-        }
+            lifecycle_admission(request, 75)?,
+        )
         .execute(&mut coordinator)
         .is_err());
-        assert!(HostedCoordinatorCommandV1::Freeze {
+        assert!(
+            HostedCoordinatorCommandV1::acknowledge(request, lifecycle_acknowledgement(80),)
+                .execute(&mut coordinator)
+                .is_err()
+        );
+        assert!(HostedCoordinatorCommandV1::scope_extension(
             request,
-            transition: lifecycle_transition(94),
-        }
+            lifecycle_extension(request, 83)?,
+        )
         .execute(&mut coordinator)
         .is_err());
-        assert!(HostedCoordinatorCommandV1::Reject {
+        assert!(HostedCoordinatorCommandV1::administrative_resolution(
             request,
-            provenance: reference(97),
-        }
-        .execute(&mut coordinator)
-        .is_err());
-        assert!(HostedCoordinatorCommandV1::SubmitCorrected {
-            request: request_object,
-            correction: lifecycle_correction(request, 72)?,
-        }
-        .execute(&mut coordinator)
-        .is_err());
-        assert!(HostedCoordinatorCommandV1::DispatchAttempt {
-            request,
-            admission: lifecycle_admission(request, 75)?,
-        }
-        .execute(&mut coordinator)
-        .is_err());
-        assert!(HostedCoordinatorCommandV1::Acknowledge {
-            request,
-            acknowledgement: lifecycle_acknowledgement(80),
-        }
-        .execute(&mut coordinator)
-        .is_err());
-        assert!(HostedCoordinatorCommandV1::ScopeExtension {
-            request,
-            extension: lifecycle_extension(request, 83)?,
-        }
-        .execute(&mut coordinator)
-        .is_err());
-        assert!(HostedCoordinatorCommandV1::AdministrativeResolution {
-            request,
-            resolution: lifecycle_resolution(request, 87)?,
-        }
+            lifecycle_resolution(request, 87)?,
+        )
         .execute(&mut coordinator)
         .is_err());
         Ok(())
@@ -4584,10 +4680,10 @@ mod tests {
             ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
-            closed.apply_coordinator_command(&HostedCoordinatorCommandV1::Authorize {
-                request: ErasureReferenceV1::from_digest([134; 32]),
-                provenance: ErasureReferenceV1::from_digest([135; 32]),
-            }),
+            closed.apply_coordinator_command(&HostedCoordinatorCommandV1::authorize(
+                ErasureReferenceV1::from_digest([134; 32]),
+                ErasureReferenceV1::from_digest([135; 32]),
+            )),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
     }
@@ -4639,12 +4735,12 @@ mod tests {
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         poison_fence_mutex(&command.gate, command_timeline.id());
         assert_eq!(
-            command.apply_coordinator_command(&HostedCoordinatorCommandV1::Submit {
-                request: coordinator_request().unwrap_or_else(|error| {
+            command.apply_coordinator_command(&HostedCoordinatorCommandV1::submit(
+                coordinator_request().unwrap_or_else(|error| {
                     std::panic::resume_unwind(Box::new(format!("{error:?}")))
                 }),
-                provenance: ErasureReferenceV1::from_digest([139; 32]),
-            }),
+                ErasureReferenceV1::from_digest([139; 32]),
+            )),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
     }
