@@ -1370,4 +1370,23 @@ mod coverage_tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn selected_endpoint_validation_rejects_untrusted_paths() -> TestResult {
+        assert!(root_owned_ancestors(Path::new("/provider.sock")));
+        for path in [
+            "provider.sock",
+            "/dev/null",
+            "/proc/self/provider.sock",
+            "/proc/self/fd/0/provider.sock",
+        ] {
+            assert!(SelectedProviderEndpoint::validate(Path::new(path)).is_err());
+        }
+
+        let temporary = tempfile::tempdir()?;
+        assert!(
+            SelectedProviderEndpoint::validate(&temporary.path().join("missing.sock")).is_err()
+        );
+        Ok(())
+    }
 }
