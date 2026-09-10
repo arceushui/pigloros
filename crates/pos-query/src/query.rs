@@ -102,8 +102,10 @@ mod tests {
         clock::Seq,
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
+        ErasureContainmentGateV1,
     };
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::{open_store as open_unbound_store, StoreConfig};
+    use std::sync::Arc;
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -136,6 +138,13 @@ mod tests {
             Kind::new(event_type),
             CanonicalBytes::from_vec(vec![]),
         )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
+        let mut store = open_unbound_store(config)?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        Ok(store)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

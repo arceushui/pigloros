@@ -3,11 +3,16 @@
 //! The gateway never holds a synchronous store lock on an async executor
 //! worker.  Commands are linearised by one bounded FIFO and executed by one
 //! dedicated OS thread.
-use pos_core::{
-    event::{Event, EventDraft, Kind},
-    geo_admission::{
-        GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
+use crate::{
+    authorization::{
+        GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
     },
+    EventNotice, IdentifiedAppend,
+};
+use pos_core::{
+    clock::WallTime,
+    event::{Event, EventDraft, Kind},
+    geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EventId, TimelineId},
     store::{
         AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
@@ -15,9 +20,13 @@ use pos_core::{
     },
     timeline::Timeline,
     ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
-    CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
-    PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, OwnTracksIngressInputV1,
+    OwnTracksIngressRateKeyV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
+#[cfg(test)]
+use pos_core::{geo_admission::GeoLocationAdmissionStore, OwnTracksIngressStore};
+use pos_runtime::{ActionSubmissionError, ErasureExecutionHostV1, PluginRegistry};
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -29,7 +38,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 
 pub(crate) const QUEUE_CAPACITY: usize = 64;
 pub(crate) const RESERVED_WRITE_CAPACITY: usize = 8;
@@ -54,11 +63,14 @@ macro_rules! submit {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod lifecycle_coverage_tests {
     use super::{
-        worker_loop, worker_loop_with_runtime, Command, CommandClass, CommandEnvelope,
-        CommandLifecycle, ExecutorStore, LifecycleState,
+        host_error_to_core, worker_loop, worker_loop_with_runtime, Command, CommandClass,
+        CommandEnvelope, CommandLifecycle, ExecutorStore, GatewayExecutorStore, LifecycleState,
     };
+    use pos_core::{CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
+    use pos_runtime::ErasureExecutionHostV1;
     use pos_store::memory::MemoryStore;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -106,6 +118,74 @@ mod lifecycle_coverage_tests {
     }
 
     #[test]
+    fn test_gate_binding_and_host_error_mapping_cover_every_variant(
+    ) -> Result<(), ErasureHostErrorV1> {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        for mut store in [
+            ExecutorStore::Host(Box::new(host)),
+            ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(
+                MemoryStore::new(),
+            ))),
+            ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(
+                Box::new(MemoryStore::new()),
+            )),
+        ] {
+            store.bind_test_erasure_gate();
+        }
+
+        assert_eq!(
+            std::mem::discriminant(&host_error_to_core(ErasureHostErrorV1::AccessFrozen)),
+            std::mem::discriminant(&CoreError::ErasureAccessFrozen),
+        );
+        for error in [
+            ErasureHostErrorV1::RecoveryUnavailable,
+            ErasureHostErrorV1::StaleGeneration,
+        ] {
+            assert_eq!(
+                std::mem::discriminant(&host_error_to_core(error)),
+                std::mem::discriminant(&CoreError::ErasureContainmentUnavailable),
+            );
+        }
+        for error in [
+            ErasureHostErrorV1::AuthorizationDenied,
+            ErasureHostErrorV1::Conflict,
+            ErasureHostErrorV1::AdapterFailure,
+        ] {
+            assert_eq!(
+                std::mem::discriminant(&host_error_to_core(error)),
+                std::mem::discriminant(&CoreError::Storage(String::new())),
+            );
+        }
+
+        assert!(
+            ErasureExecutionHostV1::open_verified_empty(pos_store::StoreConfig::Memory, 0).is_err()
+        );
+        assert!(ErasureExecutionHostV1::open_gateway_verified_empty(
+            pos_store::StoreConfig::Memory,
+            0,
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn geographic_only_store_rejects_owntracks_capability() {
+        let mut store = GatewayExecutorStore::GeoLocation(Box::new(MemoryStore::new()));
+        let result = store.prepare_owntracks_ingress(pos_core::OwnTracksIngressInputV1::new(
+            [0; 32],
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            pos_core::CanonicalBytes::from_static(b"payload"),
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn worker_draining_processes_already_queued_work() {
         let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
         let (sender, mut receiver) = mpsc::channel(1);
@@ -149,6 +229,112 @@ mod lifecycle_coverage_tests {
     }
 }
 
+pub(crate) struct AuthorizedActionContext {
+    authorization: Arc<GatewayAuthorization>,
+    decision: GatewayAuthorizationDecision,
+    bus: broadcast::Sender<EventNotice>,
+}
+
+impl AuthorizedActionContext {
+    pub(crate) const fn new(
+        authorization: Arc<GatewayAuthorization>,
+        decision: GatewayAuthorizationDecision,
+        bus: broadcast::Sender<EventNotice>,
+    ) -> Self {
+        Self {
+            authorization,
+            decision,
+            bus,
+        }
+    }
+}
+
+enum ActionCommand {
+    Submit {
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        authorized: AuthorizedActionContext,
+        maximum: u64,
+        reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
+    },
+    SubmitIdentified {
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        authorized: AuthorizedActionContext,
+        identity: AppendIdentity,
+        maximum: u64,
+        reply: oneshot::Sender<
+            Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+        >,
+    },
+}
+
+impl ActionCommand {
+    fn expire(self) {
+        match self {
+            Self::Submit { reply, .. } => {
+                drop(reply.send(Err(ActionCommandError::Executor(
+                    StoreExecutorError::DeadlineExceeded,
+                ))));
+            }
+            Self::SubmitIdentified { reply, .. } => {
+                drop(reply.send(Err(ActionCommandError::Executor(
+                    StoreExecutorError::DeadlineExceeded,
+                ))));
+            }
+        }
+    }
+
+    fn execute(self, state: &mut ExecutorState) {
+        match self {
+            Self::Submit {
+                timeline,
+                registry,
+                proposal,
+                authorized,
+                maximum,
+                reply,
+            } => execute_submit_action_command(
+                state,
+                &ActionCommandContext {
+                    timeline,
+                    registry: registry.as_ref(),
+                    proposal: &proposal,
+                    authorization: authorized.authorization.as_ref(),
+                    decision: &authorized.decision,
+                    bus: &authorized.bus,
+                    maximum,
+                },
+                reply,
+            ),
+            Self::SubmitIdentified {
+                timeline,
+                registry,
+                proposal,
+                authorized,
+                identity,
+                maximum,
+                reply,
+            } => execute_submit_identified_action_command(
+                state,
+                &ActionCommandContext {
+                    timeline,
+                    registry: registry.as_ref(),
+                    proposal: &proposal,
+                    authorization: authorized.authorization.as_ref(),
+                    decision: &authorized.decision,
+                    bus: &authorized.bus,
+                    maximum,
+                },
+                identity,
+                reply,
+            ),
+        }
+    }
+}
+
 enum Command {
     PrepareOwnTracksIngress {
         basic_handle: [u8; 32],
@@ -186,6 +372,7 @@ enum Command {
         bounds: EventReadBounds,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
+    #[cfg(test)]
     ReadOne {
         timeline: TimelineId,
         event: EventId,
@@ -197,6 +384,7 @@ enum Command {
         maximum: Option<u64>,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
+    Action(Box<ActionCommand>),
     AppendConsentGrant {
         timeline: TimelineId,
         grant: ConsentGrantedV1,
@@ -213,6 +401,7 @@ enum Command {
         reservation: ConsentRevocationReservation,
         reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
     },
+    #[cfg(test)]
     AppendIdentified {
         timeline: TimelineId,
         identity: AppendIdentity,
@@ -220,6 +409,7 @@ enum Command {
         maximum: u64,
         reply: oneshot::Sender<Result<Option<AppendOrDuplicateOutcome>, StoreExecutorError>>,
     },
+    #[cfg(test)]
     GetTimeline {
         timeline: TimelineId,
         reply: oneshot::Sender<Result<Option<Timeline>, StoreExecutorError>>,
@@ -246,26 +436,19 @@ enum CommandClass {
 
 impl Command {
     const fn class(&self) -> CommandClass {
+        if self.is_read() {
+            CommandClass::Read
+        } else {
+            CommandClass::Write
+        }
+    }
+
+    const fn is_read(&self) -> bool {
         match self {
-            Self::RootCount { .. }
-            | Self::Read { .. }
-            | Self::ReadOne { .. }
-            | Self::GetTimeline { .. }
-            | Self::ProtectedLogicalHead { .. } => CommandClass::Read,
-            Self::PrepareOwnTracksIngress { .. }
-            | Self::AdmitGeoLocation { .. }
-            | Self::Purge { .. }
-            | Self::RemoveAppendIdentitiesBounded { .. }
-            | Self::PendingAppendIdentityCleanup { .. }
-            | Self::Create { .. }
-            | Self::Append { .. }
-            | Self::AppendConsentGrant { .. }
-            | Self::AppendConsentRevocation { .. }
-            | Self::AppendIdentified { .. } => CommandClass::Write,
+            Self::RootCount { .. } | Self::Read { .. } | Self::ProtectedLogicalHead { .. } => true,
             #[cfg(test)]
-            Self::Panic { .. } => CommandClass::Write,
-            #[cfg(test)]
-            Self::PanicRead { .. } => CommandClass::Read,
+            Self::ReadOne { .. } | Self::GetTimeline { .. } | Self::PanicRead { .. } => true,
+            _ => false,
         }
     }
 }
@@ -354,27 +537,31 @@ impl SchedulerObserver {
     }
 }
 
+#[cfg(test)]
 trait GeoLocationGatewayStore: EventStore + GeoLocationAdmissionStore {}
 
+#[cfg(test)]
 impl<T> GeoLocationGatewayStore for T where T: EventStore + GeoLocationAdmissionStore {}
 
+#[cfg(test)]
 trait OwnTracksGatewayStore: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore {}
 
+#[cfg(test)]
 impl<T> OwnTracksGatewayStore for T where
     T: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore
 {
 }
 
-enum ExecutorStore {
-    Generic(Box<dyn EventStore>),
+#[cfg(test)]
+enum GatewayExecutorStore {
     GeoLocation(Box<dyn GeoLocationGatewayStore>),
     OwnTracks(Box<dyn OwnTracksGatewayStore>),
 }
 
-impl ExecutorStore {
+#[cfg(test)]
+impl GatewayExecutorStore {
     fn event_store(&mut self) -> &mut dyn EventStore {
         match self {
-            Self::Generic(store) => store.as_mut(),
             Self::GeoLocation(store) => store.as_mut(),
             Self::OwnTracks(store) => store.as_mut(),
         }
@@ -382,9 +569,130 @@ impl ExecutorStore {
 
     fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
         match self {
-            Self::Generic(store) => store.logical_head(timeline),
             Self::GeoLocation(store) => store.protected_logical_head(timeline),
             Self::OwnTracks(store) => store.protected_logical_head(timeline),
+        }
+    }
+
+    fn admit_geo_location(
+        &mut self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, CoreError> {
+        match self {
+            Self::GeoLocation(store) => store.admit_geo_location(request),
+            Self::OwnTracks(store) => store.admit_geo_location(request),
+        }
+    }
+
+    fn prepare_owntracks_ingress(
+        &mut self,
+        input: OwnTracksIngressInputV1,
+    ) -> Result<PreparedOwnTracksIngressV1, CoreError> {
+        match self {
+            Self::GeoLocation(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            Self::OwnTracks(store) => store.prepare_owntracks_ingress(input),
+        }
+    }
+}
+
+enum ExecutorStore {
+    Host(Box<ErasureExecutionHostV1>),
+    #[cfg(test)]
+    Generic(Box<dyn EventStore>),
+    #[cfg(test)]
+    Gateway(GatewayExecutorStore),
+}
+
+impl ExecutorStore {
+    #[cfg(test)]
+    fn bind_test_erasure_gate(&mut self) {
+        match self {
+            Self::Host(_) => {}
+            Self::Generic(store) => {
+                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
+            }
+            Self::Gateway(store) => {
+                drop(
+                    store
+                        .event_store()
+                        .bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())),
+                );
+            }
+        }
+    }
+
+    fn execute<T>(
+        &mut self,
+        host_operation: impl FnOnce(&mut ErasureExecutionHostV1) -> Result<T, ErasureHostErrorV1>,
+        store_operation: impl FnOnce(&mut dyn EventStore) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        #[cfg(not(test))]
+        let _ = store_operation;
+        match self {
+            Self::Host(host) => host_operation(host).map_err(host_error_to_core),
+            #[cfg(test)]
+            Self::Generic(store) => store_operation(store.as_mut()),
+            #[cfg(test)]
+            Self::Gateway(store) => store_operation(store.event_store()),
+        }
+    }
+
+    fn protected_logical_head(&mut self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        match self {
+            Self::Host(host) => host
+                .read_sender()
+                .and_then(|mut sender| sender.protected_logical_head(timeline))
+                .map_err(host_error_to_core),
+            #[cfg(test)]
+            Self::Generic(store) => store.logical_head(timeline),
+            #[cfg(test)]
+            Self::Gateway(store) => store.protected_logical_head(timeline),
+        }
+    }
+
+    fn prepare_owntracks_ingress(
+        &mut self,
+        input: OwnTracksIngressInputV1,
+    ) -> Result<PreparedOwnTracksIngressV1, CoreError> {
+        match self {
+            Self::Host(host) => host
+                .command_sender()
+                .and_then(|mut sender| sender.prepare_owntracks_ingress(input))
+                .map_err(host_error_to_core),
+            #[cfg(test)]
+            Self::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            #[cfg(test)]
+            Self::Gateway(store) => store.prepare_owntracks_ingress(input),
+        }
+    }
+
+    fn admit_geo_location(
+        &mut self,
+        request: GeoLocationAdmissionRequestV1,
+    ) -> Result<GeoLocationAdmissionOutcome, CoreError> {
+        match self {
+            Self::Host(host) => host
+                .command_sender()
+                .and_then(|mut sender| sender.admit_geo_location(request))
+                .map_err(host_error_to_core),
+            #[cfg(test)]
+            Self::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            #[cfg(test)]
+            Self::Gateway(store) => store.admit_geo_location(request),
+        }
+    }
+}
+
+fn host_error_to_core(error: ErasureHostErrorV1) -> CoreError {
+    match error {
+        ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
+        ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
+            CoreError::ErasureContainmentUnavailable
+        }
+        ErasureHostErrorV1::AuthorizationDenied
+        | ErasureHostErrorV1::Conflict
+        | ErasureHostErrorV1::AdapterFailure => {
+            CoreError::Storage("erasure host command rejected".to_owned())
         }
     }
 }
@@ -457,6 +765,30 @@ pub(crate) enum StoreExecutorError {
     DeadlineExceeded,
     Unhealthy,
     Store(CoreError),
+}
+
+#[derive(Debug)]
+pub(crate) enum ActionCommandError {
+    Executor(StoreExecutorError),
+    Submission(ActionSubmissionError),
+    Authorization(GatewayAuthorizationError),
+    IngressConflict,
+}
+
+struct ActionCommandContext<'a> {
+    timeline: TimelineId,
+    registry: &'a PluginRegistry,
+    proposal: &'a ProposedAction,
+    authorization: &'a GatewayAuthorization,
+    decision: &'a GatewayAuthorizationDecision,
+    bus: &'a broadcast::Sender<EventNotice>,
+    maximum: u64,
+}
+
+impl From<StoreExecutorError> for ActionCommandError {
+    fn from(error: StoreExecutorError) -> Self {
+        Self::Executor(error)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -607,18 +939,45 @@ pub(crate) struct StoreExecutor {
 
 impl StoreExecutor {
     #[cfg(test)]
-    pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
+    pub(crate) fn new(mut store: Box<dyn EventStore>) -> Self {
+        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         Self::spawn(ExecutorStore::Generic(store), None)
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_consent_authority(
         mut store: Box<dyn EventStore>,
         permit: ConsentAppendPermit,
     ) -> Self {
+        #[cfg(test)]
+        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::Generic(store), None)
     }
 
+    pub(crate) fn new_with_erasure_host(
+        mut host: ErasureExecutionHostV1,
+        permit: ConsentAppendPermit,
+    ) -> Result<Self, CoreError> {
+        host.bind_consent_authority(permit)
+            .map_err(host_error_to_core)?;
+        Ok(Self::spawn(ExecutorStore::Host(Box::new(host)), None))
+    }
+
+    pub(crate) fn new_with_owntracks_erasure_host(
+        mut host: ErasureExecutionHostV1,
+        owner_key: [u8; 32],
+        permit: ConsentAppendPermit,
+    ) -> Result<Self, CoreError> {
+        host.bind_consent_authority(permit)
+            .map_err(host_error_to_core)?;
+        Ok(Self::spawn(
+            ExecutorStore::Host(Box::new(host)),
+            Some(owner_key),
+        ))
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_with_geo_location_admission<S>(
         mut store: S,
         permit: ConsentAppendPermit,
@@ -626,10 +985,16 @@ impl StoreExecutor {
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
+        #[cfg(test)]
+        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
-        Self::spawn(ExecutorStore::GeoLocation(Box::new(store)), None)
+        Self::spawn(
+            ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store))),
+            None,
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_owntracks_ingress<S>(
         mut store: S,
         owner_key: [u8; 32],
@@ -638,8 +1003,13 @@ impl StoreExecutor {
     where
         S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
     {
+        #[cfg(test)]
+        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
         drop(store.bind_consent_authority(permit));
-        Self::spawn(ExecutorStore::OwnTracks(Box::new(store)), Some(owner_key))
+        Self::spawn(
+            ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(Box::new(store))),
+            Some(owner_key),
+        )
     }
 
     fn spawn(store: ExecutorStore, owntracks_owner_key: Option<[u8; 32]>) -> Self {
@@ -655,18 +1025,20 @@ impl StoreExecutor {
 
     #[cfg(test)]
     fn spawn_with_deadlines_for_test(
-        store: ExecutorStore,
+        mut store: ExecutorStore,
         command_deadline: Duration,
         shutdown_deadline: Duration,
     ) -> Self {
+        store.bind_test_erasure_gate();
         Self::spawn_with_deadlines(store, None, command_deadline, shutdown_deadline, None)
     }
 
     #[cfg(test)]
     fn spawn_with_observer_for_test(
-        store: ExecutorStore,
+        mut store: ExecutorStore,
         observer: Arc<SchedulerObserver>,
     ) -> Self {
+        store.bind_test_erasure_gate();
         Self::spawn_with_deadlines(
             store,
             None,
@@ -1089,6 +1461,7 @@ impl StoreExecutor {
             reply,
         })
     }
+    #[cfg(test)]
     pub(crate) async fn read_one(
         &self,
         timeline: TimelineId,
@@ -1112,6 +1485,64 @@ impl StoreExecutor {
             maximum,
             reply,
         })
+    }
+    pub(crate) async fn submit_action(
+        &self,
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        authorized: AuthorizedActionContext,
+        maximum: u64,
+    ) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
+        let deadline = Instant::now() + self.command_deadline();
+        let lifecycle = Arc::new(CommandLifecycle::new());
+        let (reply, result) = oneshot::channel();
+        let submission = self.try_submit(
+            Command::Action(Box::new(ActionCommand::Submit {
+                timeline,
+                registry,
+                proposal,
+                authorized,
+                maximum,
+                reply,
+            })),
+            deadline,
+            Arc::clone(&lifecycle),
+        );
+        if let Err(error) = submission {
+            return Err(ActionCommandError::Executor(error));
+        }
+        await_command_result(self, result, lifecycle, deadline).await
+    }
+    pub(crate) async fn submit_identified_action(
+        &self,
+        timeline: TimelineId,
+        registry: Arc<PluginRegistry>,
+        proposal: ProposedAction,
+        authorized: AuthorizedActionContext,
+        identity: AppendIdentity,
+        maximum: u64,
+    ) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
+        let deadline = Instant::now() + self.command_deadline();
+        let lifecycle = Arc::new(CommandLifecycle::new());
+        let (reply, result) = oneshot::channel();
+        let submission = self.try_submit(
+            Command::Action(Box::new(ActionCommand::SubmitIdentified {
+                timeline,
+                registry,
+                proposal,
+                authorized,
+                identity,
+                maximum,
+                reply,
+            })),
+            deadline,
+            Arc::clone(&lifecycle),
+        );
+        if let Err(error) = submission {
+            return Err(ActionCommandError::Executor(error));
+        }
+        await_command_result(self, result, lifecycle, deadline).await
     }
     pub(crate) async fn append_consent_grant(
         &self,
@@ -1147,6 +1578,7 @@ impl StoreExecutor {
             reply,
         })
     }
+    #[cfg(test)]
     pub(crate) async fn append_identified(
         &self,
         timeline: TimelineId,
@@ -1162,6 +1594,7 @@ impl StoreExecutor {
             reply,
         })
     }
+    #[cfg(test)]
     pub(crate) async fn timeline(
         &self,
         timeline: TimelineId,
@@ -1179,26 +1612,29 @@ impl StoreExecutor {
     }
 }
 
-async fn await_command_result<T>(
+async fn await_command_result<T, E>(
     executor: &StoreExecutor,
-    mut reply: oneshot::Receiver<Result<T, StoreExecutorError>>,
+    mut reply: oneshot::Receiver<Result<T, E>>,
     lifecycle: Arc<CommandLifecycle>,
     deadline: Instant,
-) -> Result<T, StoreExecutorError> {
+) -> Result<T, E>
+where
+    E: From<StoreExecutorError>,
+{
     let timeout_result =
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut reply).await;
     let result = if let Ok(result) = timeout_result {
         result
     } else {
         if lifecycle.expire_if_queued() {
-            return Err(StoreExecutorError::DeadlineExceeded);
+            return Err(StoreExecutorError::DeadlineExceeded.into());
         }
         reply.await
     };
     match result {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(error),
-        Err(_) => Err(executor.reply_closed_error()),
+        Err(_) => Err(executor.reply_closed_error().into()),
     }
 }
 
@@ -1475,10 +1911,7 @@ fn expire_command(command: Command) {
         Command::AdmitGeoLocation { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::Purge { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
-        Command::RemoveAppendIdentitiesBounded { reply, .. } => {
+        Command::Purge { reply, .. } | Command::RemoveAppendIdentitiesBounded { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::PendingAppendIdentityCleanup { reply } => {
@@ -1493,12 +1926,14 @@ fn expire_command(command: Command) {
         Command::Read { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        #[cfg(test)]
         Command::ReadOne { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::Append { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::Action(command) => (*command).expire(),
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1508,9 +1943,11 @@ fn expire_command(command: Command) {
             let _was_pending = reservation.abort_durable();
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        #[cfg(test)]
         Command::AppendIdentified { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        #[cfg(test)]
         Command::GetTimeline { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1545,14 +1982,11 @@ fn prepare_owntracks_ingress(
     basic_secret: [u8; 32],
     payload: pos_core::CanonicalBytes,
 ) -> Result<PreparedOwnTracksIngressOutcome, CoreError> {
-    let ExecutorStore::OwnTracks(store) = &mut state.store else {
-        return Err(CoreError::GeographicAdmissionUnavailable);
-    };
     let Some(owner_key) = state.owntracks_owner_key else {
         return Err(CoreError::GeographicAdmissionUnavailable);
     };
     let input = owntracks_input(owner_key, basic_handle, basic_secret, payload);
-    let prepared = store.prepare_owntracks_ingress(input)?;
+    let prepared = state.store.prepare_owntracks_ingress(input)?;
     if !state.owntracks_rate_limiter.allow(prepared.rate_key()) {
         return Ok(PreparedOwnTracksIngressOutcome::RateLimited);
     }
@@ -1642,20 +2076,9 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             scope,
             limit,
             reply,
-        } => {
-            send_store_result(
-                reply,
-                state
-                    .store
-                    .event_store()
-                    .remove_append_identities_bounded(scope, limit),
-            );
-        }
+        } => execute_remove_append_identities_command(state, scope, limit, reply),
         Command::PendingAppendIdentityCleanup { reply } => {
-            send_store_result(
-                reply,
-                state.store.event_store().pending_append_identity_cleanup(),
-            );
+            execute_pending_append_identity_cleanup_command(state, reply);
         }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),
         Command::Create { name, reply } => execute_create_command(state, &name, reply),
@@ -1665,6 +2088,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             bounds,
             reply,
         } => execute_read_command(state, timeline, range, bounds, reply),
+        #[cfg(test)]
         Command::ReadOne {
             timeline,
             event,
@@ -1676,6 +2100,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             maximum,
             reply,
         } => execute_append_command(state, timeline, &drafts, maximum, reply),
+        Command::Action(command) => (*command).execute(state),
         Command::AppendConsentGrant {
             timeline,
             grant,
@@ -1686,6 +2111,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         command @ Command::AppendConsentRevocation { .. } => {
             execute_append_consent_revocation_command_from_command(state, command);
         }
+        #[cfg(test)]
         Command::AppendIdentified {
             timeline,
             identity,
@@ -1693,6 +2119,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             maximum,
             reply,
         } => execute_append_identified_command(state, timeline, identity, intent, maximum, reply),
+        #[cfg(test)]
         Command::GetTimeline { timeline, reply } => {
             execute_get_timeline_command(state, timeline, reply);
         }
@@ -1700,14 +2127,9 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             send_store_result(reply, state.store.protected_logical_head(timeline));
         }
         #[cfg(test)]
-        Command::Panic { reply } => {
+        Command::Panic { reply } | Command::PanicRead { reply } => {
             drop(reply.send(Err(StoreExecutorError::Unhealthy)));
             std::panic::resume_unwind(Box::new("test store executor worker panic"));
-        }
-        #[cfg(test)]
-        Command::PanicRead { reply } => {
-            drop(reply.send(Err(StoreExecutorError::Unhealthy)));
-            std::panic::resume_unwind(Box::new("test store executor read worker panic"));
         }
     }
     CommandExecution::Completed
@@ -1718,12 +2140,42 @@ fn execute_geo_location_command(
     request: GeoLocationAdmissionRequestV1,
     reply: oneshot::Sender<Result<GeoLocationAdmissionOutcome, StoreExecutorError>>,
 ) {
-    let result = match &mut state.store {
-        ExecutorStore::GeoLocation(store) => store.admit_geo_location(request),
-        ExecutorStore::OwnTracks(store) => store.admit_geo_location(request),
-        ExecutorStore::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
-    };
+    let result = state.store.admit_geo_location(request);
     send_store_result(reply, result);
+}
+
+fn execute_remove_append_identities_command(
+    state: &mut ExecutorState,
+    scope: AppendDedupScope,
+    limit: NonZeroUsize,
+    reply: oneshot::Sender<Result<PurgeOutcome, StoreExecutorError>>,
+) {
+    send_store_result(
+        reply,
+        state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.remove_append_identities_bounded(scope, limit))
+            },
+            |store| store.remove_append_identities_bounded(scope, limit),
+        ),
+    );
+}
+
+fn execute_pending_append_identity_cleanup_command(
+    state: &mut ExecutorState,
+    reply: oneshot::Sender<Result<Option<AppendDedupScope>, StoreExecutorError>>,
+) {
+    send_store_result(
+        reply,
+        state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.pending_append_identity_cleanup())
+            },
+            |store| store.pending_append_identity_cleanup(),
+        ),
+    );
 }
 
 fn execute_purge_command(
@@ -1733,10 +2185,13 @@ fn execute_purge_command(
 ) {
     send_store_result(
         reply,
-        state
-            .store
-            .event_store()
-            .purge_expired_append_identities_bounded(limit),
+        state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.purge_expired_append_identities_bounded(limit))
+            },
+            |store| store.purge_expired_append_identities_bounded(limit),
+        ),
     );
 }
 
@@ -1747,10 +2202,13 @@ fn execute_root_count_command(
 ) {
     send_store_result(
         reply,
-        state
-            .store
-            .event_store()
-            .root_timeline_count_bounded(maximum),
+        state.store.execute(
+            |host| {
+                host.read_sender()
+                    .and_then(|mut sender| sender.root_timeline_count_bounded(maximum))
+            },
+            |store| store.root_timeline_count_bounded(maximum),
+        ),
     );
 }
 
@@ -1759,7 +2217,16 @@ fn execute_create_command(
     name: &str,
     reply: oneshot::Sender<Result<Timeline, StoreExecutorError>>,
 ) {
-    send_store_result(reply, state.store.event_store().create_timeline(name));
+    send_store_result(
+        reply,
+        state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.create_timeline(name))
+            },
+            |store| store.create_timeline(name),
+        ),
+    );
 }
 
 fn execute_read_command(
@@ -1771,13 +2238,17 @@ fn execute_read_command(
 ) {
     send_store_result(
         reply,
-        state
-            .store
-            .event_store()
-            .read_bounded(timeline, range, bounds),
+        state.store.execute(
+            |host| {
+                host.read_sender()
+                    .and_then(|mut sender| sender.read_bounded(timeline, range, bounds))
+            },
+            |store| store.read_bounded(timeline, range, bounds),
+        ),
     );
 }
 
+#[cfg(test)]
 fn execute_read_one_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
@@ -1786,7 +2257,13 @@ fn execute_read_one_command(
 ) {
     send_store_result(
         reply,
-        state.store.event_store().read_event_by_id(timeline, event),
+        state.store.execute(
+            |host| {
+                host.read_sender()
+                    .and_then(|mut sender| sender.event_by_id(timeline, event))
+            },
+            |store| store.read_event_by_id(timeline, event),
+        ),
     );
 }
 
@@ -1797,16 +2274,419 @@ fn execute_append_command(
     maximum: Option<u64>,
     reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
 ) {
-    let store = state.store.event_store();
     let result = match maximum {
-        Some(maximum) => store
-            .append_bounded(timeline, drafts, maximum)
+        Some(maximum) => state
+            .store
+            .execute(
+                |host| {
+                    host.command_sender()
+                        .and_then(|mut sender| sender.append_bounded(timeline, drafts, maximum))
+                },
+                |store| store.append_bounded(timeline, drafts, maximum),
+            )
             .and_then(|events| {
                 events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
             }),
-        None => store.append(timeline, drafts),
+        None => state.store.execute(
+            |host| {
+                host.command_sender()
+                    .and_then(|mut sender| sender.append(timeline, drafts))
+            },
+            |store| store.append(timeline, drafts),
+        ),
     };
     send_store_result(reply, result);
+}
+
+fn execute_submit_action_command(
+    state: &mut ExecutorState,
+    context: &ActionCommandContext<'_>,
+    reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
+) {
+    match &mut state.store {
+        ExecutorStore::Host(host) => execute_host_action(host, context, reply),
+        #[cfg(test)]
+        ExecutorStore::Generic(store) => {
+            let result = execute_test_store_action(store.as_mut(), context);
+            retain_action_release(context, &result);
+            drop(reply.send(result));
+        }
+        #[cfg(test)]
+        ExecutorStore::Gateway(store) => {
+            let result = execute_test_store_action(store.event_store(), context);
+            retain_action_release(context, &result);
+            drop(reply.send(result));
+        }
+    }
+}
+
+fn execute_submit_identified_action_command(
+    state: &mut ExecutorState,
+    context: &ActionCommandContext<'_>,
+    identity: AppendIdentity,
+    reply: oneshot::Sender<
+        Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+    >,
+) {
+    match &mut state.store {
+        ExecutorStore::Host(host) => execute_host_identified_action(host, context, identity, reply),
+        #[cfg(test)]
+        ExecutorStore::Generic(store) => {
+            let result = execute_test_store_identified_action(store.as_mut(), context, identity);
+            retain_identified_action_release(context, &result);
+            drop(reply.send(result));
+        }
+        #[cfg(test)]
+        ExecutorStore::Gateway(store) => {
+            let result =
+                execute_test_store_identified_action(store.event_store(), context, identity);
+            retain_identified_action_release(context, &result);
+            drop(reply.send(result));
+        }
+    }
+}
+
+fn execute_host_action(
+    host: &mut ErasureExecutionHostV1,
+    context: &ActionCommandContext<'_>,
+    reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
+) {
+    let mut reply = Some(reply);
+    let outcome = host
+        .command_sender()
+        .map_err(host_action_error)
+        .and_then(|mut sender| {
+            let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
+                let result = prepare_and_append_action(
+                    sender.timeline(context.timeline).map_err(host_action_error),
+                    |draft| {
+                        sender
+                            .append_bounded(
+                                context.timeline,
+                                std::slice::from_ref(draft),
+                                context.maximum,
+                            )
+                            .map_err(host_action_error)
+                    },
+                    context.timeline,
+                    context.registry,
+                    context.proposal,
+                    context.authorization,
+                    context.decision,
+                );
+                retain_action_release(context, &result);
+                let release = reply.take();
+                if let Some(reply) = release {
+                    drop(reply.send(result));
+                }
+            };
+            sender
+                .with_protected_effect_fence(
+                    context.timeline,
+                    ErasureProtectedOperationV1::ProposedAction,
+                    &mut effect,
+                )
+                .map_err(host_action_error)
+        });
+    if let (Err(error), Some(reply)) = (outcome, reply) {
+        drop(reply.send(Err(error)));
+    }
+}
+
+fn execute_host_identified_action(
+    host: &mut ErasureExecutionHostV1,
+    context: &ActionCommandContext<'_>,
+    identity: AppendIdentity,
+    reply: oneshot::Sender<
+        Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+    >,
+) {
+    let mut reply = Some(reply);
+    let outcome = host
+        .command_sender()
+        .map_err(host_action_error)
+        .and_then(|mut sender| {
+            let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
+                let result = prepare_action(
+                    sender.timeline(context.timeline).map_err(host_action_error),
+                    context.timeline,
+                    context.registry,
+                    context.proposal,
+                    context.authorization,
+                    context.decision,
+                )
+                .and_then(|(decision, draft)| {
+                    sender
+                        .append_intent_or_duplicate_bounded(
+                            context.timeline,
+                            identity,
+                            AppendIntent::new(&draft),
+                            context.maximum,
+                        )
+                        .map_err(host_action_error)
+                        .and_then(|outcome| outcome.ok_or_else(event_limit_reached))
+                        .and_then(|outcome| {
+                            resolve_identified_outcome(
+                                outcome,
+                                |event| {
+                                    sender
+                                        .event_by_id(context.timeline, event)
+                                        .map_err(host_action_error)
+                                },
+                                decision,
+                            )
+                        })
+                });
+                retain_identified_action_release(context, &result);
+                let release = reply.take();
+                if let Some(reply) = release {
+                    drop(reply.send(result));
+                }
+            };
+            sender
+                .with_protected_effect_fence(
+                    context.timeline,
+                    ErasureProtectedOperationV1::ProposedAction,
+                    &mut effect,
+                )
+                .map_err(host_action_error)
+        });
+    if let (Err(error), Some(reply)) = (outcome, reply) {
+        drop(reply.send(Err(error)));
+    }
+}
+
+fn publish_action_notice(
+    bus: &broadcast::Sender<EventNotice>,
+    timeline: TimelineId,
+    event: &Event,
+) {
+    drop(bus.send(EventNotice {
+        timeline_id: timeline.to_string(),
+        event_id: event.id.to_string(),
+        entity_id: event.entity.to_string(),
+        event_type: event.event_type.as_str().to_owned(),
+        seq: event.seq.as_u64(),
+    }));
+}
+
+fn retain_action_release(
+    context: &ActionCommandContext<'_>,
+    result: &Result<(Event, GatewayAuthorizationDecision), ActionCommandError>,
+) {
+    if let Ok((event, decision)) = result {
+        context
+            .authorization
+            .record_audit_synchronously(decision.audit().with_event_id(event.id));
+        publish_action_notice(context.bus, context.timeline, event);
+    }
+}
+
+fn retain_identified_action_release(
+    context: &ActionCommandContext<'_>,
+    result: &Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
+) {
+    if let Ok((result, decision)) = result {
+        context
+            .authorization
+            .record_audit_synchronously(decision.audit().with_event_id(result.event.id));
+        if !result.duplicate {
+            publish_action_notice(context.bus, context.timeline, &result.event);
+        }
+    }
+}
+
+#[cfg(test)]
+fn execute_test_store_action(
+    store: &mut dyn EventStore,
+    context: &ActionCommandContext<'_>,
+) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
+    prepare_and_append_action(
+        store
+            .get_timeline(context.timeline)
+            .map_err(StoreExecutorError::Store)
+            .map_err(ActionCommandError::Executor),
+        |draft| {
+            store
+                .append_bounded(
+                    context.timeline,
+                    std::slice::from_ref(draft),
+                    context.maximum,
+                )
+                .map_err(StoreExecutorError::Store)
+                .map_err(ActionCommandError::Executor)
+        },
+        context.timeline,
+        context.registry,
+        context.proposal,
+        context.authorization,
+        context.decision,
+    )
+}
+
+#[cfg(test)]
+fn execute_test_store_identified_action(
+    store: &mut dyn EventStore,
+    context: &ActionCommandContext<'_>,
+    identity: AppendIdentity,
+) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
+    prepare_action(
+        store
+            .get_timeline(context.timeline)
+            .map_err(StoreExecutorError::Store)
+            .map_err(ActionCommandError::Executor),
+        context.timeline,
+        context.registry,
+        context.proposal,
+        context.authorization,
+        context.decision,
+    )
+    .and_then(|(decision, draft)| {
+        store
+            .append_intent_or_duplicate_bounded(
+                context.timeline,
+                identity,
+                AppendIntent::new(&draft),
+                context.maximum,
+            )
+            .map_err(StoreExecutorError::Store)
+            .map_err(ActionCommandError::Executor)
+            .and_then(|outcome| outcome.ok_or_else(event_limit_reached))
+            .and_then(|outcome| {
+                resolve_identified_outcome(
+                    outcome,
+                    |event| {
+                        store
+                            .read_event_by_id(context.timeline, event)
+                            .map_err(StoreExecutorError::Store)
+                            .map_err(ActionCommandError::Executor)
+                    },
+                    decision,
+                )
+            })
+    })
+}
+
+fn prepare_and_append_action(
+    timeline_result: Result<Option<Timeline>, ActionCommandError>,
+    append: impl FnOnce(&EventDraft) -> Result<Option<Vec<Event>>, ActionCommandError>,
+    timeline: TimelineId,
+    registry: &PluginRegistry,
+    proposal: &ProposedAction,
+    authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
+) -> Result<(Event, GatewayAuthorizationDecision), ActionCommandError> {
+    prepare_action(
+        timeline_result,
+        timeline,
+        registry,
+        proposal,
+        authorization,
+        decision,
+    )
+    .and_then(|(decision, draft)| append(&draft).map(|events| (decision, events)))
+    .and_then(|(decision, events)| {
+        events
+            .ok_or_else(event_limit_reached)
+            .map(|events| (decision, events))
+    })
+    .and_then(|(decision, mut events)| {
+        events
+            .pop()
+            .ok_or_else(empty_action_append)
+            .map(|event| (event, decision))
+    })
+}
+
+fn resolve_identified_outcome(
+    outcome: AppendOrDuplicateOutcome,
+    read_duplicate: impl FnOnce(EventId) -> Result<Option<Event>, ActionCommandError>,
+    decision: GatewayAuthorizationDecision,
+) -> Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError> {
+    match outcome {
+        AppendOrDuplicateOutcome::Appended(event) => Ok((
+            IdentifiedAppend {
+                event: *event,
+                duplicate: false,
+            },
+            decision,
+        )),
+        AppendOrDuplicateOutcome::Duplicate { event_id } => {
+            read_duplicate(event_id).and_then(|event| {
+                event.ok_or_else(missing_duplicate_event).map(|event| {
+                    (
+                        IdentifiedAppend {
+                            event,
+                            duplicate: true,
+                        },
+                        decision,
+                    )
+                })
+            })
+        }
+        AppendOrDuplicateOutcome::Conflict => Err(ActionCommandError::IngressConflict),
+    }
+}
+
+fn prepare_action(
+    timeline_result: Result<Option<Timeline>, ActionCommandError>,
+    timeline: TimelineId,
+    registry: &PluginRegistry,
+    proposal: &ProposedAction,
+    authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
+) -> Result<(GatewayAuthorizationDecision, EventDraft), ActionCommandError> {
+    reauthorize_action(authorization, decision)
+        .and_then(|decision| timeline_result.map(|metadata| (decision, metadata)))
+        .and_then(|metadata| {
+            metadata.1.map_or_else(
+                || {
+                    Err(ActionCommandError::Executor(StoreExecutorError::Store(
+                        CoreError::TimelineNotFound(timeline),
+                    )))
+                },
+                |_| Ok(metadata.0),
+            )
+        })
+        .and_then(|decision| {
+            registry
+                .submit_action(timeline, proposal)
+                .map_err(ActionCommandError::Submission)
+                .map(|draft| (decision, draft))
+        })
+}
+
+fn reauthorize_action(
+    authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
+) -> Result<GatewayAuthorizationDecision, ActionCommandError> {
+    let mut request = decision.request().clone();
+    request.at_time = WallTime::now();
+    authorization
+        .authorize(request)
+        .map_err(ActionCommandError::Authorization)
+}
+
+fn host_action_error(error: ErasureHostErrorV1) -> ActionCommandError {
+    ActionCommandError::Executor(StoreExecutorError::Store(host_error_to_core(error)))
+}
+
+fn event_limit_reached() -> ActionCommandError {
+    ActionCommandError::Executor(StoreExecutorError::Store(CoreError::Storage(
+        "event limit reached".to_owned(),
+    )))
+}
+
+fn empty_action_append() -> ActionCommandError {
+    ActionCommandError::Executor(StoreExecutorError::Store(CoreError::Storage(
+        "empty append".to_owned(),
+    )))
+}
+
+fn missing_duplicate_event() -> ActionCommandError {
+    ActionCommandError::Executor(StoreExecutorError::Store(CoreError::Storage(
+        "duplicate identity points to a missing Event".to_owned(),
+    )))
 }
 
 fn execute_append_consent_grant_command(
@@ -1818,7 +2698,6 @@ fn execute_append_consent_grant_command(
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {
     let head = state.store.protected_logical_head(timeline);
-    let store = state.store.event_store();
     let result = head
         .and_then(|head| {
             if grant.grant_seq != head.as_u64().saturating_add(1) {
@@ -1831,15 +2710,18 @@ fn execute_append_consent_grant_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            store.append_consent_bounded(
-                timeline,
-                &[EventDraft::new(
-                    grant.subject_id,
-                    Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
-                    payload,
-                )],
-                permit,
-                maximum,
+            let drafts = [EventDraft::new(
+                grant.subject_id,
+                Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                payload,
+            )];
+            state.store.execute(
+                |host| {
+                    host.command_sender().and_then(|mut sender| {
+                        sender.append_consent_bounded(timeline, &drafts, permit, maximum)
+                    })
+                },
+                |store| store.append_consent_bounded(timeline, &drafts, permit, maximum),
             )
         })
         .and_then(|events| {
@@ -1887,7 +2769,6 @@ fn execute_append_consent_revocation_command(
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {
     let head = state.store.protected_logical_head(timeline);
-    let store = state.store.event_store();
     let result = head
         .and_then(|head| {
             if revocation.fence_seq != head.as_u64().saturating_add(1) {
@@ -1900,16 +2781,32 @@ fn execute_append_consent_revocation_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            store.append_consent_revocation_bounded(
-                timeline,
-                &[EventDraft::new(
-                    revocation.subject_id,
-                    Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
-                    payload,
-                )],
-                permit,
-                maximum,
-                cleanup_scope,
+            let drafts = [EventDraft::new(
+                revocation.subject_id,
+                Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
+                payload,
+            )];
+            state.store.execute(
+                |host| {
+                    host.command_sender().and_then(|mut sender| {
+                        sender.append_consent_revocation_bounded(
+                            timeline,
+                            &drafts,
+                            permit,
+                            maximum,
+                            cleanup_scope,
+                        )
+                    })
+                },
+                |store| {
+                    store.append_consent_revocation_bounded(
+                        timeline,
+                        &drafts,
+                        permit,
+                        maximum,
+                        cleanup_scope,
+                    )
+                },
             )
         })
         .and_then(|events| {
@@ -1930,6 +2827,7 @@ fn execute_append_consent_revocation_command(
     }
 }
 
+#[cfg(test)]
 fn execute_append_identified_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
@@ -1938,21 +2836,41 @@ fn execute_append_identified_command(
     maximum: u64,
     reply: oneshot::Sender<Result<Option<AppendOrDuplicateOutcome>, StoreExecutorError>>,
 ) {
+    let host_intent = intent.clone();
     send_store_result(
         reply,
-        state
-            .store
-            .event_store()
-            .append_intent_or_duplicate_bounded(timeline, identity, intent, maximum),
+        state.store.execute(
+            |host| {
+                host.command_sender().and_then(|mut sender| {
+                    sender.append_intent_or_duplicate_bounded(
+                        timeline,
+                        identity,
+                        host_intent,
+                        maximum,
+                    )
+                })
+            },
+            |store| store.append_intent_or_duplicate_bounded(timeline, identity, intent, maximum),
+        ),
     );
 }
 
+#[cfg(test)]
 fn execute_get_timeline_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
     reply: oneshot::Sender<Result<Option<Timeline>, StoreExecutorError>>,
 ) {
-    send_store_result(reply, state.store.event_store().get_timeline(timeline));
+    send_store_result(
+        reply,
+        state.store.execute(
+            |host| {
+                host.read_sender()
+                    .and_then(|mut sender| sender.timeline(timeline))
+            },
+            |store| store.get_timeline(timeline),
+        ),
+    );
 }
 
 #[cfg(test)]
@@ -2010,21 +2928,30 @@ mod tests {
     }
 
     use super::{
-        execute_append_command, execute_append_consent_revocation_command,
-        prepare_owntracks_ingress, Command, ExecutorState, ExecutorStore, OwnTracksRateLimiter,
+        empty_action_append, event_limit_reached, execute_append_command,
+        execute_append_consent_revocation_command, execute_submit_action_command,
+        execute_submit_identified_action_command, missing_duplicate_event,
+        prepare_owntracks_ingress, resolve_identified_outcome, ActionCommand, ActionCommandContext,
+        ActionCommandError, AuthorizedActionContext, Command, ExecutorState, ExecutorStore,
+        GatewayExecutorStore, OwnTracksRateLimiter,
+    };
+    use crate::authorization::{
+        test_authorization_for, GatewayAuthorizationDecision, GatewayAuthorizationRequest,
     };
     use pos_core::{
         clock::WallTime,
         event::{Event, EventDraft},
         geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1},
         store::{
-            AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, EventReadBounds,
-            EventStore, SeqRange,
+            AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent,
+            AppendOrDuplicateOutcome, EventReadBounds, EventStore, SeqRange,
         },
         timeline::Timeline,
         CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1, ConsentRevokedV1,
-        CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, TimelineId,
+        CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, ProposedAction, TimelineId,
+        ERASURE_MAX_INVENTORY_REQUESTS,
     };
+    use pos_runtime::{ErasureExecutionHostV1, PluginRegistry};
     use pos_store::memory::MemoryStore;
     use std::{
         collections::HashMap,
@@ -2032,10 +2959,55 @@ mod tests {
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
+    use tokio::sync::broadcast;
 
     struct RecordingBoundedStore {
         calls: Arc<Mutex<Vec<(TimelineId, usize, u64)>>>,
         outcome: Option<Vec<Event>>,
+    }
+
+    #[test]
+    fn gateway_store_dispatches_both_action_command_shapes(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let timeline = TimelineId::new();
+        let (authorization, decision, proposal) = action_fixture(timeline)?;
+        let registry = PluginRegistry::new();
+        let bus = broadcast::channel(1).0;
+        let context = ActionCommandContext {
+            timeline,
+            registry: &registry,
+            proposal: &proposal,
+            authorization: &authorization,
+            decision: &decision,
+            bus: &bus,
+            maximum: 1,
+        };
+        let mut state = ExecutorState {
+            store: ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(
+                MemoryStore::new(),
+            ))),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_submit_action_command(&mut state, &context, reply);
+        assert!(result.blocking_recv().test_ok()?.is_err());
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_submit_identified_action_command(
+            &mut state,
+            &context,
+            AppendIdentity::new(
+                AppendDedupKey::from_keyed_hash([11; 32]),
+                AppendDedupScope::from_keyed_hash([12; 32]),
+            ),
+            reply,
+        );
+        assert!(result.blocking_recv().test_ok()?.is_err());
+        Ok(())
     }
 
     impl EventStore for RecordingBoundedStore {
@@ -2147,6 +3119,39 @@ mod tests {
         ));
         assert_eq!(*rejected_calls.lock().test_ok()?, vec![(timeline, 1, 23)]);
 
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_append_command(&mut rejected_state, timeline, &drafts[..1], None, reply);
+        assert!(matches!(
+            result.blocking_recv().test_ok()?,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "ordinary append must not be called when a ceiling is supplied"
+        ));
+
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        let hosted_timeline = host
+            .command_sender()?
+            .create_timeline("unbounded-host-append")?
+            .id();
+        let mut hosted_state = ExecutorState {
+            store: ExecutorStore::Host(Box::new(host)),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_append_command(
+            &mut hosted_state,
+            hosted_timeline,
+            &drafts[..1],
+            None,
+            reply,
+        );
+        assert_eq!(result.blocking_recv().test_ok()?.test_ok()?.len(), 1);
+
         Ok(())
     }
 
@@ -2155,6 +3160,7 @@ mod tests {
     fn execute_consent_revocation_reports_a_lost_session_after_append(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new()))?;
         let timeline = store
             .create_timeline("lost-revocation-session")
             .test_ok()?
@@ -2218,6 +3224,13 @@ mod tests {
     }
 
     impl EventStore for BlockingRootCountStore {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<dyn pos_core::ErasureGate>,
+        ) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
         }
@@ -2284,6 +3297,13 @@ mod tests {
     }
 
     impl EventStore for BlockingCreateStore {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<dyn pos_core::ErasureGate>,
+        ) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             if self
                 .create_calls
@@ -2339,6 +3359,13 @@ mod tests {
     }
 
     impl EventStore for OrderedStore {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<dyn pos_core::ErasureGate>,
+        ) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.operations
                 .lock()
@@ -2633,6 +3660,47 @@ mod tests {
         ));
     }
 
+    fn assert_expired_action<T>(
+        command: Command,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, ActionCommandError>>,
+    ) {
+        super::expire_command(command);
+        assert!(matches!(
+            receiver.blocking_recv().test_value(),
+            Err(ActionCommandError::Executor(
+                super::StoreExecutorError::DeadlineExceeded
+            ))
+        ));
+    }
+
+    fn action_fixture(
+        timeline: TimelineId,
+    ) -> Result<
+        (
+            Arc<crate::authorization::GatewayAuthorization>,
+            GatewayAuthorizationDecision,
+            ProposedAction,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let actor = EntityId::new();
+        let authorization = Arc::new(test_authorization_for(actor));
+        let decision = authorization.authorize(GatewayAuthorizationRequest::action(
+            actor,
+            timeline,
+            "world.action",
+            "world.action.submit",
+            WallTime::now(),
+        ))?;
+        let proposal = ProposedAction::new(
+            Kind::new("world.action"),
+            actor,
+            CanonicalBytes::from_static(b"payload"),
+            Kind::new("world.action.submit"),
+        );
+        Ok((authorization, decision, proposal))
+    }
+
     #[test]
     fn expired_admission_commands_reply() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
@@ -2771,6 +3839,155 @@ mod tests {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::PanicRead { reply }, receiver);
 
+        Ok(())
+    }
+
+    #[test]
+    fn expired_action_commands_reply() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let timeline = TimelineId::new();
+        let (authorization, decision, proposal) = action_fixture(timeline)?;
+        let registry = Arc::new(PluginRegistry::new());
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired_action(
+            Command::Action(Box::new(ActionCommand::Submit {
+                timeline,
+                registry: Arc::clone(&registry),
+                proposal: proposal.clone(),
+                authorized: AuthorizedActionContext::new(
+                    Arc::clone(&authorization),
+                    decision.clone(),
+                    broadcast::channel(1).0,
+                ),
+                maximum: 1,
+                reply,
+            })),
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired_action(
+            Command::Action(Box::new(ActionCommand::SubmitIdentified {
+                timeline,
+                registry,
+                proposal,
+                authorized: AuthorizedActionContext::new(
+                    authorization,
+                    decision,
+                    broadcast::channel(1).0,
+                ),
+                identity: AppendIdentity::new(
+                    AppendDedupKey::from_keyed_hash([7; 32]),
+                    AppendDedupScope::from_keyed_hash([8; 32]),
+                ),
+                maximum: 1,
+                reply,
+            })),
+            receiver,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identified_action_outcome_and_error_helpers_cover_fail_closed_results(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        assert!(matches!(
+            ActionCommandError::from(super::StoreExecutorError::Unhealthy),
+            ActionCommandError::Executor(super::StoreExecutorError::Unhealthy)
+        ));
+        for error in [
+            event_limit_reached(),
+            empty_action_append(),
+            missing_duplicate_event(),
+        ] {
+            assert!(matches!(
+                error,
+                ActionCommandError::Executor(super::StoreExecutorError::Store(CoreError::Storage(
+                    _
+                )))
+            ));
+        }
+
+        let timeline = TimelineId::new();
+        let (_, decision, _) = action_fixture(timeline)?;
+        assert!(matches!(
+            resolve_identified_outcome(
+                AppendOrDuplicateOutcome::Conflict,
+                |_| Ok(None),
+                decision.clone(),
+            ),
+            Err(ActionCommandError::IngressConflict)
+        ));
+        let duplicate_id = EventId::new();
+        assert!(matches!(
+            resolve_identified_outcome(
+                AppendOrDuplicateOutcome::Duplicate {
+                    event_id: duplicate_id,
+                },
+                |_| Ok(None),
+                decision.clone(),
+            ),
+            Err(ActionCommandError::Executor(
+                super::StoreExecutorError::Store(CoreError::Storage(_))
+            ))
+        ));
+        assert!(matches!(
+            resolve_identified_outcome(
+                AppendOrDuplicateOutcome::Duplicate {
+                    event_id: duplicate_id,
+                },
+                |_| {
+                    Err(ActionCommandError::Executor(
+                        super::StoreExecutorError::Unhealthy,
+                    ))
+                },
+                decision,
+            ),
+            Err(ActionCommandError::Executor(
+                super::StoreExecutorError::Unhealthy
+            ))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stopped_executor_rejects_both_action_command_shapes(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        executor.shutdown().await.test_ok()?;
+        let timeline = TimelineId::new();
+        let (authorization, decision, proposal) = action_fixture(timeline)?;
+        let registry = Arc::new(PluginRegistry::new());
+
+        let ordinary = executor
+            .submit_action(
+                timeline,
+                Arc::clone(&registry),
+                proposal.clone(),
+                AuthorizedActionContext::new(
+                    Arc::clone(&authorization),
+                    decision.clone(),
+                    broadcast::channel(1).0,
+                ),
+                1,
+            )
+            .await;
+        assert!(matches!(ordinary, Err(ActionCommandError::Executor(_))));
+
+        let identified = executor
+            .submit_identified_action(
+                timeline,
+                registry,
+                proposal,
+                AuthorizedActionContext::new(authorization, decision, broadcast::channel(1).0),
+                AppendIdentity::new(
+                    AppendDedupKey::from_keyed_hash([9; 32]),
+                    AppendDedupScope::from_keyed_hash([10; 32]),
+                ),
+                1,
+            )
+            .await;
+        assert!(matches!(identified, Err(ActionCommandError::Executor(_))));
+        drop(executor);
         Ok(())
     }
 
@@ -3685,12 +4902,14 @@ mod tests {
 
         let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
         let worker_lifecycle = std::sync::Arc::clone(&lifecycle);
+        let mut worker_store = super::ExecutorStore::Generic(Box::new(MemoryStore::new()));
+        worker_store.bind_test_erasure_gate();
         let worker = tokio::task::spawn_blocking(move || {
             super::worker_loop(
                 &worker_lifecycle,
                 std::sync::Arc::new(tokio::sync::Notify::new()),
                 &mut receiver,
-                super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
+                worker_store,
                 None,
                 Some(observer),
             );
@@ -5139,6 +6358,7 @@ mod tests {
     async fn pending_append_identity_cleanup_forwards_durable_marker(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new()))?;
         let timeline = store.create_timeline("pending-cleanup").test_ok()?.id();
         let scope = AppendDedupScope::from_keyed_hash([201; 32]);
         for key in [202, 203] {
@@ -5189,6 +6409,16 @@ mod tests {
         .test_err()?;
         assert!(matches!(error, CoreError::GeographicAdmissionUnavailable));
 
+        state.owntracks_owner_key = Some([3; 32]);
+        let error = prepare_owntracks_ingress(
+            &mut state,
+            [1; 32],
+            [2; 32],
+            CanonicalBytes::from_static(b"payload"),
+        )
+        .test_err()?;
+        assert!(matches!(error, CoreError::GeographicAdmissionUnavailable));
+
         Ok(())
     }
 
@@ -5196,7 +6426,9 @@ mod tests {
     fn owntracks_ingress_requires_an_owner_key(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut state = ExecutorState {
-            store: ExecutorStore::OwnTracks(Box::new(MemoryStore::new())),
+            store: ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(Box::new(
+                MemoryStore::new(),
+            ))),
             owntracks_owner_key: None,
             owntracks_rate_limiter: OwnTracksRateLimiter {
                 buckets: HashMap::new(),
@@ -5225,11 +6457,23 @@ mod tests {
 
     async fn owntracks_executor_dispatches_geo_admission_commands_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let executor = super::StoreExecutor::new_with_owntracks_ingress(
-            MemoryStore::new(),
+        let host = ErasureExecutionHostV1::open_gateway_verified_empty(
+            pos_store::StoreConfig::Memory,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        let executor = super::StoreExecutor::new_with_owntracks_erasure_host(
+            host,
             [0; 32],
             ConsentAuthority::new().append_permit(),
-        );
+        )?;
+        let preparation = executor
+            .prepare_owntracks_ingress([1; 32], [2; 32], CanonicalBytes::from_static(b"payload"))
+            .await;
+        assert!(matches!(
+            preparation,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(_)))
+        ));
+        drop(executor.protected_logical_head(TimelineId::new()).await);
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
             TimelineId::new(),
             EntityId::new(),

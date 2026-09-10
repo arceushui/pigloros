@@ -3,8 +3,9 @@
 //! Replay is projection-only. It has no `PluginRegistry` or action-approval
 //! authority, so replay cannot submit new human actions.
 
-use pos_core::store::{EventStore, SeqRange};
-use pos_core::{CoreError, Seq, TimelineId};
+use pos_core::store::{EventReadBounds, SeqRange};
+use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId};
+use pos_runtime::ErasureReadSenderV1;
 use pos_state::ProjectionRegistry;
 
 /// Replay **all** events on `timeline` through every reducer in `registry`.
@@ -18,22 +19,20 @@ use pos_state::ProjectionRegistry;
 /// Returns [`CoreError::ArtifactUnavailable`] when the Timeline Replay is no
 /// longer authoritative; otherwise propagates [`CoreError`] from the store.
 pub fn replay(
-    store: &dyn EventStore,
+    sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
     artifact_digest: pos_core::ErasureReferenceV1,
     evaluation: &pos_core::ReplayClaimEvaluationV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
-    evaluation
-        .require_authoritative_use(
-            pos_core::ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest,
-        )
-        .map_err(|_| CoreError::ArtifactUnavailable)
-        .and_then(|()| store.read(timeline, SeqRange::all()))
-        .inspect(|events| {
-            registry.fold_events(events);
-        })
+    replay_range(
+        sender,
+        timeline,
+        SeqRange::all(),
+        registry,
+        artifact_digest,
+        evaluation,
+    )
 }
 
 /// Replay events up to and **including** `at_seq` on `timeline`.
@@ -44,21 +43,55 @@ pub fn replay(
 /// Returns [`CoreError::ArtifactUnavailable`] when the Timeline Replay is no
 /// longer authoritative; otherwise propagates [`CoreError`] from the store.
 pub fn replay_at(
-    store: &dyn EventStore,
+    sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
     at_seq: Seq,
     registry: &mut ProjectionRegistry,
     artifact_digest: pos_core::ErasureReferenceV1,
     evaluation: &pos_core::ReplayClaimEvaluationV1,
 ) -> Result<(), CoreError> {
-    evaluation
-        .require_authoritative_use(
-            pos_core::ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest,
-        )
-        .map_err(|_| CoreError::ArtifactUnavailable)
-        .and_then(|()| store.read(timeline, SeqRange::bounded(Seq::ZERO, at_seq)))
-        .map(|events| registry.fold_events(&events))
+    replay_range(
+        sender,
+        timeline,
+        SeqRange::bounded(Seq::ZERO, at_seq),
+        registry,
+        artifact_digest,
+        evaluation,
+    )
+    .map(|_| ())
+}
+
+fn replay_range(
+    sender: &mut ErasureReadSenderV1<'_>,
+    timeline: TimelineId,
+    range: SeqRange,
+    registry: &mut ProjectionRegistry,
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
+) -> Result<Vec<pos_core::Event>, CoreError> {
+    let mut outcome = Err(CoreError::ArtifactUnavailable);
+    let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
+        outcome = evaluation
+            .require_authoritative_use(
+                pos_core::ErasureArtifactClassV1::TimelineReplay,
+                artifact_digest,
+            )
+            .map_err(|_| CoreError::ArtifactUnavailable)
+            .and_then(|()| {
+                sender
+                    .read_bounded(
+                        timeline,
+                        range,
+                        EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                    )
+                    .map_err(crate::host_error_to_core)
+            })
+            .inspect(|events| registry.fold_events(events));
+    };
+    sender
+        .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
+        .map_err(crate::host_error_to_core)?;
+    outcome
 }
 
 #[cfg(test)]
@@ -106,11 +139,12 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
         store::{EventStore, SeqRange},
-        CoreError, Event, Reducer, State,
+        CoreError, ErasureContainmentGateV1, Event, Reducer, State,
     };
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
+    use std::sync::Arc;
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([43; 32]);
@@ -140,13 +174,38 @@ mod tests {
         timeline: TimelineId,
         registry: &mut ProjectionRegistry,
     ) -> Result<Vec<Event>, CoreError> {
-        super::replay(
+        replay_from_store(
             store,
             timeline,
             registry,
             REPLAY_DIGEST,
             &replay_evaluation(pos_core::ArtifactStateV1::Retained),
         )
+    }
+
+    fn replay_from_store(
+        store: &dyn EventStore,
+        timeline: TimelineId,
+        registry: &mut ProjectionRegistry,
+        artifact_digest: pos_core::ErasureReferenceV1,
+        evaluation: &pos_core::ReplayClaimEvaluationV1,
+    ) -> Result<Vec<Event>, CoreError> {
+        evaluation
+            .require_authoritative_use(
+                pos_core::ErasureArtifactClassV1::TimelineReplay,
+                artifact_digest,
+            )
+            .map_err(|_| CoreError::ArtifactUnavailable)
+            .and_then(|()| store.read(timeline, SeqRange::all()))
+            .inspect(|events| registry.fold_events(events))
+    }
+
+    fn open_test_store() -> Box<dyn EventStore> {
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
+        store
     }
 
     fn replay_at(
@@ -155,20 +214,20 @@ mod tests {
         at_seq: Seq,
         registry: &mut ProjectionRegistry,
     ) -> Result<(), CoreError> {
-        super::replay_at(
-            store,
-            timeline,
-            at_seq,
-            registry,
-            REPLAY_DIGEST,
-            &replay_evaluation(pos_core::ArtifactStateV1::Retained),
-        )
+        replay_evaluation(pos_core::ArtifactStateV1::Retained)
+            .require_authoritative_use(
+                pos_core::ErasureArtifactClassV1::TimelineReplay,
+                REPLAY_DIGEST,
+            )
+            .map_err(|_| CoreError::ArtifactUnavailable)
+            .and_then(|()| store.read(timeline, SeqRange::bounded(Seq::ZERO, at_seq)))
+            .map(|events| registry.fold_events(&events))
     }
 
     #[test]
     fn erased_timeline_cannot_be_replayed_as_authoritative_input() {
         let mut registry = ProjectionRegistry::new();
-        let result = super::replay(
+        let result = replay_from_store(
             &ReadFailStore,
             TimelineId::new(),
             &mut registry,
@@ -181,6 +240,58 @@ mod tests {
                 "expected unavailable replay, got {other:?}"
             ))),
         }
+    }
+
+    #[test]
+    fn public_replay_commands_hold_the_host_generation_fence() {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let (timeline, entity, third_seq) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("hosted-replay").test_ok();
+            let entity = EntityId::new();
+            let events = commands
+                .append(
+                    timeline.id(),
+                    &[draft(entity), draft(entity), draft(entity)],
+                )
+                .test_ok();
+            (timeline.id(), entity, events[2].seq)
+        };
+
+        let mut complete = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        complete.register("count", Box::new(CountReducer));
+        let mut partial = ProjectionRegistry::new().with_erasure_gate(gate);
+        partial.register("count", Box::new(CountReducer));
+        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let mut reads = host.read_sender().test_ok();
+        assert_eq!(
+            super::replay(
+                &mut reads,
+                timeline,
+                &mut complete,
+                REPLAY_DIGEST,
+                &evaluation,
+            )
+            .test_ok()
+            .len(),
+            3
+        );
+        super::replay_at(
+            &mut reads,
+            timeline,
+            third_seq,
+            &mut partial,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        assert_eq!(count_for(&complete, &entity), 3);
+        assert_eq!(count_for(&partial, &entity), 3);
     }
 
     struct ReadFailStore;
@@ -282,7 +393,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_empty_timeline_is_noop() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("empty").test_ok();
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
@@ -297,7 +408,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_full_timeline_folds_all_events() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("full").test_ok();
         let entity = EntityId::new();
 
@@ -314,7 +425,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_at_seq_stops_at_boundary() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_test_store();
         let tl = store.create_timeline("partial").test_ok();
         let entity = EntityId::new();
 
@@ -355,7 +466,7 @@ mod tests {
         #[test]
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn replay_is_deterministic(event_count in 0usize..20) {
-            let mut store = open_store(StoreConfig::Memory).test_ok();
+            let mut store = open_test_store();
             let tl = store.create_timeline("det").test_ok();
             let entity = EntityId::new();
 

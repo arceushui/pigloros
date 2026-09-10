@@ -6,6 +6,7 @@
 
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
+    sync::Arc,
     time::Instant,
 };
 
@@ -45,10 +46,13 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureErrorV1, ErasureIndexInsertV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
-    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
+    ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
+    ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
+    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -154,6 +158,11 @@ pub struct MemoryStore {
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
     /// Trusted Gateway authority bound to this adapter's protected append port.
     consent_authority_permit: Option<ConsentAppendPermit>,
+    /// Host-owned erasure containment gate for protected Timeline operations.
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
+    /// Whether the current gate was supplied by the host. The constructor's
+    /// local gate is replaceable exactly once by the composition root.
+    erasure_gate_bound: bool,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
@@ -172,6 +181,8 @@ pub struct MemoryStore {
     erasure_effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     erasure_effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
     erasure_recovery_errors: BTreeMap<ErasureReferenceV1, BTreeSet<ErasureReferenceV1>>,
+    /// Stable Fork operation identity to complete prepared-admission binding.
+    erasure_fork_admissions: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -446,8 +457,20 @@ impl MemoryStore {
         Self::default()
     }
 
+    /// Remove the containment gate. Protected operations then fail closed until
+    /// a host binds its authoritative gate.
+    #[must_use]
+    pub fn without_erasure_gate(mut self) -> Self {
+        self.erasure_gate = None;
+        self
+    }
+
     #[must_use]
     fn with_default_components(hasher: Box<dyn Hasher>) -> Self {
+        let erasure_gate: Option<Arc<dyn ErasureGate>> =
+            Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        let erasure_gate_bound = false;
+
         Self {
             timelines: HashMap::new(),
             event_ids: HashSet::new(),
@@ -464,6 +487,10 @@ impl MemoryStore {
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
             consent_authority_permit: None,
+            // A store is not allowed to make protected operations available
+            // before the composition root supplies the host-owned gate.
+            erasure_gate,
+            erasure_gate_bound,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
             authority_persistence_binding: None,
@@ -476,6 +503,7 @@ impl MemoryStore {
             erasure_effects: BTreeMap::new(),
             erasure_effect_subjects: BTreeMap::new(),
             erasure_recovery_errors: BTreeMap::new(),
+            erasure_fork_admissions: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1079,6 +1107,109 @@ impl MemoryStore {
         )
     }
 
+    fn with_erasure_fence<T>(
+        &mut self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        mut effect: impl FnMut(&mut Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let Some(gate) = self.erasure_gate.clone() else {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        };
+        let mut result = Err(CoreError::Storage(
+            "erasure fence did not execute the protected operation".to_owned(),
+        ));
+        let mut run = || {
+            result = effect(self);
+        };
+        gate.with_fence(timeline, operation, &mut run)
+            .map_err(pos_core::store::erasure_containment_error)?;
+        result
+    }
+
+    fn with_erasure_read_fence<T>(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let Some(gate) = self.erasure_gate.clone() else {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        };
+        let mut result = Err(CoreError::Storage(
+            "erasure fence did not execute the protected operation".to_owned(),
+        ));
+        let mut run = || {
+            result = effect(self);
+        };
+        gate.with_fence(timeline, operation, &mut run)
+            .map_err(pos_core::store::erasure_containment_error)?;
+        result
+    }
+
+    fn with_erasure_read_filter<T>(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
+    ) -> Result<Option<T>, CoreError> {
+        let Some(gate) = self.erasure_gate.clone() else {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        };
+        let mut result = Err(CoreError::Storage(
+            "erasure fence did not execute the protected operation".to_owned(),
+        ));
+        let mut run = || {
+            result = effect(self);
+        };
+        match gate.with_fence(timeline, operation, &mut run) {
+            Ok(()) => result.map(Some),
+            Err(pos_core::ErasureContainmentErrorV1::AccessFrozen) => Ok(None),
+            Err(error) => Err(pos_core::store::erasure_containment_error(error)),
+        }
+    }
+
+    fn visible_timeline_for_read(
+        &self,
+        candidate: &Timeline,
+    ) -> Result<Option<Timeline>, CoreError> {
+        let timeline = candidate.id();
+        self.with_erasure_read_filter(timeline, ErasureProtectedOperationV1::Read, |store| {
+            crate::generic_timeline_is_visible(
+                store.timeline_contains_geographic_evidence(timeline),
+            )
+            .map(|visible| visible.then_some(candidate.clone()))
+        })
+        .map(Option::flatten)
+    }
+
+    fn timeline_visible_for_read(&self, timeline: TimelineId) -> Result<bool, CoreError> {
+        self.with_erasure_read_filter(timeline, ErasureProtectedOperationV1::Read, |store| {
+            crate::generic_timeline_is_visible(
+                store.timeline_contains_geographic_evidence(timeline),
+            )
+        })
+        .map(|visible| visible == Some(true))
+    }
+
+    fn count_visible_root_timeline_ids(
+        &self,
+        maximum: usize,
+        timelines: impl IntoIterator<Item = TimelineId>,
+    ) -> Result<usize, CoreError> {
+        let stop_after = maximum.saturating_add(1);
+        let mut count = 0;
+        for timeline in timelines {
+            if count >= stop_after {
+                break;
+            }
+            if self.timeline_visible_for_read(timeline)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     fn append_visible(
         &mut self,
         timeline: TimelineId,
@@ -1234,6 +1365,128 @@ impl ErasureStateResolverV1 for MemoryStore {
                 })
             })
             .transpose()
+    }
+}
+
+impl ErasureInventoryPersistencePortV1 for MemoryStore {
+    fn complete_erasure_inventory_snapshot(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+        if maximum_requests == 0 || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let request_heads = self
+            .erasure_records
+            .iter()
+            .take(maximum_requests.saturating_add(1))
+            .map(|(request, (manifest, _))| (*request, *manifest))
+            .collect::<Vec<_>>();
+        if request_heads.len() > maximum_requests {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let mut topology = self.timelines.keys().copied().collect::<Vec<_>>();
+        if topology.len() > ERASURE_MAX_INVENTORY_TIMELINES {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        topology.sort_unstable();
+        ErasurePersistenceInventorySnapshotV1::new(request_heads, topology, maximum_requests)
+    }
+}
+
+impl ErasureForkPersistencePortV1 for MemoryStore {
+    fn commit_fork_admission(
+        &mut self,
+        admission: PreparedErasureForkBatchV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        let binding = admission.binding_digest();
+        let operation = admission.operation();
+        let child = admission.child().clone();
+        let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
+        let chain_head = self
+            .compute_chain_hash_at_unchecked(parent, at_seq)
+            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
+
+        if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
+            let exact_child = self.timelines.get(&child.id).is_some_and(|state| {
+                (
+                    &state.timeline.meta,
+                    state.timeline.head,
+                    state.events.is_empty(),
+                    state.chain_head,
+                ) == (&child, Seq::ZERO, true, chain_head)
+            });
+            let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
+            return ((stored_result.binding_digest(), exact_child, exact_manifest)
+                == (binding, true, true))
+                .then_some(ErasureCasOutcomeV1::ExactRetry)
+                .ok_or(ErasureErrorV1::PolicyConflict);
+        }
+
+        let generation = self
+            .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+            .generation();
+        if (
+            generation == admission.expected_inventory_generation(),
+            self.timelines.contains_key(&child.id),
+        ) != (true, false)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+
+        let timeline = Timeline::new(child);
+        let mut delta = MemoryErasureCasDelta::default();
+        for prepared in admission.admissions() {
+            let mutation = prepared.mutation();
+            // The complete inventory-generation comparison above binds every
+            // active request head, and core requires exactly one admission for
+            // each affected request before constructing the batch.
+            stage_memory_erasure_mutation(self, mutation, &mut delta)?;
+        }
+        apply_memory_erasure_delta(self, delta);
+        for prepared in admission.admissions() {
+            let mutation = prepared.mutation();
+            self.erasure_records.insert(
+                mutation.request(),
+                (
+                    mutation.next_manifest().digest(),
+                    mutation.next_manifest().canonical_cbor().to_vec(),
+                ),
+            );
+        }
+        self.timelines
+            .insert(timeline.id(), TimelineState::new(timeline, chain_head));
+        let result = admission.recovery_result()?;
+        self.erasure_fork_admissions.insert(operation, result);
+        Ok(ErasureCasOutcomeV1::Applied)
+    }
+
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+        let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
+            return Ok(None);
+        };
+        let exact_child = self.timelines.contains_key(&result.child().id);
+        exact_child
+            .then_some(Some(result))
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+}
+
+impl MemoryStore {
+    fn erasure_fork_batch_is_exact(&self, admission: &PreparedErasureForkBatchV1) -> bool {
+        admission.admissions().iter().all(|prepared| {
+            let mutation = prepared.mutation();
+            self.erasure_records
+                .get(&mutation.request())
+                .is_some_and(|(digest, bytes)| {
+                    *digest == mutation.next_manifest().digest()
+                        && bytes.as_slice() == mutation.next_manifest().canonical_cbor()
+                })
+                && memory_mutation_is_exact(self, mutation)
+        })
     }
 }
 
@@ -1417,11 +1670,18 @@ fn stage_memory_erasure_delta(
     mutation: &PreparedErasureCasV1,
 ) -> Result<MemoryErasureCasDelta, ErasureErrorV1> {
     let mut delta = MemoryErasureCasDelta::default();
-    stage_memory_objects(store, mutation.new_objects(), &mut delta)
-        .and_then(|()| stage_memory_states(store, mutation.new_states(), &mut delta))
-        .and_then(|()| stage_memory_indexes(store, mutation, &mut delta))
-        .and_then(|()| stage_memory_effect(store, mutation, &mut delta))
-        .map(|()| delta)
+    stage_memory_erasure_mutation(store, mutation, &mut delta).map(|()| delta)
+}
+
+fn stage_memory_erasure_mutation(
+    store: &MemoryStore,
+    mutation: &PreparedErasureCasV1,
+    delta: &mut MemoryErasureCasDelta,
+) -> Result<(), ErasureErrorV1> {
+    stage_memory_objects(store, mutation.new_objects(), delta)
+        .and_then(|()| stage_memory_states(store, mutation.new_states(), delta))
+        .and_then(|()| stage_memory_indexes(store, mutation, delta))
+        .and_then(|()| stage_memory_effect(store, mutation, delta))
 }
 
 fn stage_memory_objects(
@@ -2223,9 +2483,93 @@ impl MemoryStore {
         }
         Ok(Seq::from_u64(logical_head))
     }
+
+    fn compute_chain_hash_at_unchecked(
+        &self,
+        timeline: TimelineId,
+        at_seq: Seq,
+    ) -> Result<Hash, CoreError> {
+        let logical_head = self.logical_head_unchecked(timeline)?;
+        if at_seq > logical_head {
+            return Err(CoreError::ForkBeyondHead {
+                fork_seq: at_seq.as_u64(),
+                head: logical_head.as_u64(),
+            });
+        }
+        let mut hash = self.hasher.genesis_hash();
+        if at_seq == Seq::ZERO {
+            return Ok(hash);
+        }
+        for event in
+            self.collect_events_in_range(timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))?
+        {
+            let id_str = event.id.to_string();
+            hash = self
+                .hasher
+                .hash_event(&hash, id_str.as_bytes(), &event.payload);
+        }
+        Ok(hash)
+    }
+
+    fn create_timeline_with_meta_with_erasure_fence(
+        &mut self,
+        meta: &TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        let mut create = |store: &mut Self| {
+            // Resolve fork parent before duplicate-id check (parity with SqliteStore).
+            let chain = if let Some((parent, at_seq)) = meta.fork_point {
+                store
+                    .ensure_generic_timeline_visibility(parent)
+                    .and_then(|()| {
+                        let parent_head = store.logical_head(parent)?;
+                        if at_seq > parent_head {
+                            Err(CoreError::ForkBeyondHead {
+                                fork_seq: at_seq.as_u64(),
+                                head: parent_head.as_u64(),
+                            })
+                        } else {
+                            store.compute_chain_hash_at(parent, at_seq)
+                        }
+                    })
+            } else {
+                Ok(store.hasher.genesis_hash())
+            };
+            chain.and_then(|chain| {
+                if store.timelines.contains_key(&meta.id) {
+                    return Err(CoreError::Storage(format!(
+                        "timeline already exists: {}",
+                        meta.id
+                    )));
+                }
+                let id = meta.id;
+                let timeline = Timeline::new(meta.clone());
+                store
+                    .timelines
+                    .insert(id, TimelineState::new(timeline.clone(), chain));
+                Ok(timeline)
+            })
+        };
+        match meta.fork_point {
+            Some((parent, _)) => {
+                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, &mut create)
+            }
+            None => create(self),
+        }
+    }
 }
 
 impl EventStore for MemoryStore {
+    fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+        if self.erasure_gate_bound {
+            return Err(CoreError::Storage(
+                "erasure containment gate is already bound".to_owned(),
+            ));
+        }
+        self.erasure_gate = Some(gate);
+        self.erasure_gate_bound = true;
+        Ok(())
+    }
+
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
         match self.consent_authority_permit {
             Some(existing) if existing != permit => Err(CoreError::Storage(
@@ -2254,9 +2598,11 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
-        crate::ensure_non_geographic_drafts(drafts, timeline)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| self.append_visible(timeline, drafts))
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            crate::ensure_non_geographic_drafts(drafts, timeline)
+                .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
+                .and_then(|()| store.append_visible(timeline, drafts))
+        })
     }
 
     fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
@@ -2290,7 +2636,16 @@ impl EventStore for MemoryStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, false, None, None)
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            store.append_bounded_with_boundary(
+                timeline,
+                drafts,
+                max_owned_events,
+                false,
+                None,
+                None,
+            )
+        })
     }
 
     fn append_consent_bounded(
@@ -2300,14 +2655,16 @@ impl EventStore for MemoryStore {
         permit: ConsentAppendPermit,
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded_with_boundary(
-            timeline,
-            drafts,
-            max_owned_events,
-            true,
-            Some(permit),
-            None,
-        )
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            store.append_bounded_with_boundary(
+                timeline,
+                drafts,
+                max_owned_events,
+                true,
+                Some(permit),
+                None,
+            )
+        })
     }
 
     fn append_consent_revocation_bounded(
@@ -2318,15 +2675,18 @@ impl EventStore for MemoryStore {
         max_owned_events: u64,
         cleanup_scope: AppendDedupScope,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_gateway_consent_revocation(drafts, timeline)?;
-        self.append_bounded_with_boundary(
-            timeline,
-            drafts,
-            max_owned_events,
-            true,
-            Some(permit),
-            Some(cleanup_scope),
-        )
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            crate::ensure_gateway_consent_revocation(drafts, timeline).and_then(|()| {
+                store.append_bounded_with_boundary(
+                    timeline,
+                    drafts,
+                    max_owned_events,
+                    true,
+                    Some(permit),
+                    Some(cleanup_scope),
+                )
+            })
+        })
     }
 
     fn append_or_duplicate(
@@ -2336,8 +2696,11 @@ impl EventStore for MemoryStore {
         admitted_at: WallTime,
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
-        self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
-            .and_then(crate::unbounded_append_outcome)
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            store
+                .append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
+                .and_then(crate::unbounded_append_outcome)
+        })
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -2369,13 +2732,15 @@ impl EventStore for MemoryStore {
         let admitted_at = self.clock.now()?;
         let mut draft = intent.into_draft();
         draft.wall_time = Some(admitted_at);
-        self.append_or_duplicate_with_limit(
-            timeline,
-            identity,
-            admitted_at,
-            &draft,
-            Some(max_owned_events),
-        )
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            store.append_or_duplicate_with_limit(
+                timeline,
+                identity,
+                admitted_at,
+                &draft,
+                Some(max_owned_events),
+            )
+        })
     }
 
     fn read_event_by_id(
@@ -2383,7 +2748,9 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         event_id: EventId,
     ) -> Result<Option<Event>, CoreError> {
-        read_event_by_id(self, timeline, event_id)
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            read_event_by_id(store, timeline, event_id)
+        })
     }
 
     fn purge_expired_append_identities_bounded(
@@ -2454,8 +2821,11 @@ impl EventStore for MemoryStore {
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        self.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| self.collect_events_in_range(timeline, range))
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| store.collect_events_in_range(timeline, range))
+        })
     }
 
     fn read_bounded(
@@ -2464,92 +2834,64 @@ impl EventStore for MemoryStore {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
-        self.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| self.collect_events_in_range_bounded(timeline, range, bounds))
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| store.collect_events_in_range_bounded(timeline, range, bounds))
+        })
     }
 
     fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        read_own(self, timeline, range)
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Export, |store| {
+            read_own(store, timeline, range)
+        })
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
-        self.ensure_generic_timeline_visibility(parent)
-            .and_then(|()| self.fork_visible_timeline(parent, at_seq, name))
+        self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
+            store
+                .ensure_generic_timeline_visibility(parent)
+                .and_then(|()| store.fork_visible_timeline(parent, at_seq, name))
+        })
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-        Ok(self
-            .timelines
+        self.timelines
             .values()
-            .filter(|state| {
-                crate::generic_timeline_is_visible(
-                    self.timeline_contains_geographic_evidence(state.timeline.id()),
-                )
-                .is_ok_and(|visible| visible)
-            })
-            .map(|state| state.timeline.clone())
-            .collect::<Vec<_>>())
+            .map(|state| self.visible_timeline_for_read(&state.timeline))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|timelines| timelines.into_iter().flatten().collect())
     }
 
     fn root_timeline_count_bounded(&self, maximum: usize) -> Result<usize, CoreError> {
-        let stop_after = maximum.saturating_add(1);
-        Ok(self
-            .timelines
-            .values()
-            .filter(|state| state.timeline.meta.is_root())
-            .filter(|state| {
-                crate::generic_timeline_is_visible(
-                    self.timeline_contains_geographic_evidence(state.timeline.id()),
-                )
-                .is_ok_and(|visible| visible)
-            })
-            .take(stop_after)
-            .count())
+        self.count_visible_root_timeline_ids(
+            maximum,
+            self.timelines
+                .values()
+                .filter(|state| state.timeline.meta.is_root())
+                .map(|state| state.timeline.id()),
+        )
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-        self.timelines.get(&id).map_or(Ok(None), |state| {
-            crate::generic_timeline_is_visible(Ok(self.geographic_timelines.contains(&id)))
-                .map(|visible| visible.then(|| state.timeline.clone()))
+        self.with_erasure_read_fence(id, ErasureProtectedOperationV1::Read, |store| {
+            store.timelines.get(&id).map_or(Ok(None), |state| {
+                crate::generic_timeline_is_visible(Ok(store.geographic_timelines.contains(&id)))
+                    .map(|visible| visible.then(|| state.timeline.clone()))
+            })
         })
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
-        self.ensure_generic_timeline_visibility(id)?;
-        self.logical_head_unchecked(id)
+        self.with_erasure_read_fence(id, ErasureProtectedOperationV1::Read, |store| {
+            store
+                .ensure_generic_timeline_visibility(id)
+                .and_then(|()| store.logical_head_unchecked(id))
+        })
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
-        // Resolve fork parent before duplicate-id check (parity with SqliteStore).
-        let chain = if let Some((parent, at_seq)) = meta.fork_point {
-            self.ensure_generic_timeline_visibility(parent)
-                .and_then(|()| {
-                    let parent_head = self.logical_head(parent)?;
-                    if at_seq > parent_head {
-                        Err(CoreError::ForkBeyondHead {
-                            fork_seq: at_seq.as_u64(),
-                            head: parent_head.as_u64(),
-                        })
-                    } else {
-                        self.compute_chain_hash_at(parent, at_seq)
-                    }
-                })
-        } else {
-            Ok(self.hasher.genesis_hash())
-        };
-        chain.and_then(|chain| {
-            if self.timelines.contains_key(&meta.id) {
-                return Err(CoreError::Storage(format!(
-                    "timeline already exists: {}",
-                    meta.id
-                )));
-            }
-            let id = meta.id;
-            let timeline = Timeline::new(meta);
-            self.timelines
-                .insert(id, TimelineState::new(timeline.clone(), chain));
-            Ok(timeline)
-        })
+        self.create_timeline_with_meta_with_erasure_fence(&meta)
     }
 
     fn append_committed(
@@ -2557,39 +2899,43 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         events: &[Event],
     ) -> Result<(), CoreError> {
-        crate::ensure_non_geographic_events(events, timeline)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| {
-                if events.is_empty() {
-                    return Ok(());
-                }
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            crate::ensure_non_geographic_events(events, timeline)
+                .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
+                .and_then(|()| {
+                    if events.is_empty() {
+                        return Ok(());
+                    }
 
-                let mut timeline_state = self.state(timeline).timeline.clone();
-                let head = timeline_state.head;
-                let ordered = pos_core::store::validate_committed_batch(
-                    head,
-                    events,
-                    &mut |id| self.event_ids.contains(id),
-                    &*self.hasher,
-                )?;
-                let mut new_head = head;
-                let mut previous_hash = self.chain_head(timeline);
-                for event in &ordered {
-                    let id_str = event.id.to_string();
-                    previous_hash =
-                        self.hasher
-                            .hash_event(&previous_hash, id_str.as_bytes(), &event.payload);
-                    new_head = event.seq;
-                }
+                    let mut timeline_state = store.state(timeline).timeline.clone();
+                    let head = timeline_state.head;
+                    let ordered = pos_core::store::validate_committed_batch(
+                        head,
+                        events,
+                        &mut |id| store.event_ids.contains(id),
+                        &*store.hasher,
+                    )?;
+                    let mut new_head = head;
+                    let mut previous_hash = store.chain_head(timeline);
+                    for event in &ordered {
+                        let id_str = event.id.to_string();
+                        previous_hash = store.hasher.hash_event(
+                            &previous_hash,
+                            id_str.as_bytes(),
+                            &event.payload,
+                        );
+                        new_head = event.seq;
+                    }
 
-                self.event_ids.extend(ordered.iter().map(|event| event.id));
-                self.state_mut(timeline).map(|state| {
-                    state.events.extend(ordered);
-                    timeline_state.head = new_head;
-                    state.timeline = timeline_state;
-                    state.chain_head = previous_hash;
+                    store.event_ids.extend(ordered.iter().map(|event| event.id));
+                    store.state_mut(timeline).map(|state| {
+                        state.events.extend(ordered);
+                        timeline_state.head = new_head;
+                        state.timeline = timeline_state;
+                        state.chain_head = previous_hash;
+                    })
                 })
-            })
+        })
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
@@ -2597,8 +2943,11 @@ impl EventStore for MemoryStore {
     }
 
     fn chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
-        self.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| self.compute_chain_hash_at(timeline, at_seq))
+        self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Export, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| store.compute_chain_hash_at(timeline, at_seq))
+        })
     }
 
     fn import_committed(
@@ -2613,26 +2962,7 @@ impl EventStore for MemoryStore {
 impl MemoryStore {
     /// Compute the hash chain value at a specific seq in a timeline.
     fn compute_chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
-        let logical_head = self.logical_head(timeline)?;
-        if at_seq > logical_head {
-            return Err(CoreError::ForkBeyondHead {
-                fork_seq: at_seq.as_u64(),
-                head: logical_head.as_u64(),
-            });
-        }
-        let mut hash = self.hasher.genesis_hash();
-        if at_seq == Seq::ZERO {
-            return Ok(hash);
-        }
-        for event in
-            self.collect_events_in_range(timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))?
-        {
-            let id_str = event.id.to_string();
-            hash = self
-                .hasher
-                .hash_event(&hash, id_str.as_bytes(), &event.payload);
-        }
-        Ok(hash)
+        self.compute_chain_hash_at_unchecked(timeline, at_seq)
     }
 }
 
@@ -2788,6 +3118,27 @@ mod tests {
         }
     }
 
+    fn fixture_store(mut store: MemoryStore) -> MemoryStore {
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
+        store
+    }
+
+    pub(super) fn new_store() -> MemoryStore {
+        fixture_store(MemoryStore::new())
+    }
+
+    #[test]
+    fn default_store_is_fail_closed_in_test_builds_too() {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("unbound").test_ok();
+        let error = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
+            .test_err();
+        assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
+    }
+
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {
         EventDraft::new(
             entity,
@@ -2859,7 +3210,7 @@ mod tests {
     fn lifecycle_clock_errors_and_expiry_overflow_fail_closed() {
         let draft = make_draft(EntityId::new(), b"payload");
         let intent = AppendIntent::new(&draft);
-        let mut clock_error = MemoryStore::with_clock(Box::new(ErrorClock));
+        let mut clock_error = fixture_store(MemoryStore::with_clock(Box::new(ErrorClock)));
         let timeline = clock_error.create_timeline("clock-error").test_ok();
         assert!(clock_error
             .append_intent_or_duplicate(timeline.id(), append_identity(1, 1), intent.clone())
@@ -2879,8 +3230,8 @@ mod tests {
             .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok())
             .is_err());
 
-        let mut overflow = MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(
-            WallTime::from_micros(u64::MAX),
+        let mut overflow = fixture_store(MemoryStore::with_clock(Box::new(
+            pos_core::FixedAdmissionClock(WallTime::from_micros(u64::MAX)),
         )));
         let timeline = overflow.create_timeline("overflow").test_ok();
         assert!(overflow
@@ -2893,7 +3244,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_admission_clock_and_expiry_failures_leave_no_evidence() {
         let entity = EntityId::new();
-        let mut clock_error = MemoryStore::with_clock(Box::new(ErrorClock));
+        let mut clock_error = fixture_store(MemoryStore::with_clock(Box::new(ErrorClock)));
         let timeline = clock_error.create_timeline("geo-clock-error").test_ok();
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
             timeline.id(),
@@ -2917,8 +3268,8 @@ mod tests {
         assert!(clock_error.geographic_admission_links.is_empty());
 
         let entity = EntityId::new();
-        let mut overflow = MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(
-            WallTime::from_micros(u64::MAX),
+        let mut overflow = fixture_store(MemoryStore::with_clock(Box::new(
+            pos_core::FixedAdmissionClock(WallTime::from_micros(u64::MAX)),
         )));
         let timeline = overflow.create_timeline("geo-expiry-overflow").test_ok();
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
@@ -2946,7 +3297,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn geo_cell_duplicate_verifier_rejects_private_corruption() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store
             .create_timeline("geo-cell-private-corruption")
             .test_ok();
@@ -3365,7 +3716,7 @@ mod tests {
 
     #[test]
     fn geo_cell_expiry_purge_is_atomic_when_later_admission_work_fails() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store
             .create_timeline("geo-cell-expiry-purge-atomicity")
             .test_ok();
@@ -3804,7 +4155,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_and_get_timeline() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let got = store.get_timeline(tl.id()).test_ok();
         assert_eq!(got.as_ref().map(Timeline::id), Some(tl.id()));
@@ -3813,7 +4164,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_and_read_events() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let drafts = vec![
@@ -3834,7 +4185,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_rejects_inherited_event_type_before_clone() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let oversized = EventDraft::new(
             EntityId::new(),
@@ -3882,7 +4233,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_rejects_aggregate_event_bytes_before_clone() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("aggregate-bytes").test_ok();
         let entity = EntityId::new();
         store
@@ -3995,7 +4346,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_enforces_exact_fork_depth_before_chain_growth() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let mut timelines = vec![root];
         for depth in 1..=65 {
@@ -4020,7 +4371,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_seeks_late_across_forks_and_fetches_only_the_page() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<_> = (0..4_096).map(|_| make_draft(entity, b"x")).collect();
@@ -4060,7 +4411,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_fails_closed_when_memory_sequence_metadata_is_corrupt() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("corrupt").test_ok();
         let entity = EntityId::new();
         store
@@ -4085,7 +4436,7 @@ mod tests {
             .test_err();
         assert!(error.to_string().contains("contiguous Event sequence"));
 
-        let mut interior_store = MemoryStore::new();
+        let mut interior_store = new_store();
         let timeline = interior_store.create_timeline("interior").test_ok();
         interior_store
             .append(
@@ -4112,7 +4463,7 @@ mod tests {
             .test_err();
         assert!(error.to_string().contains("contiguous Event sequence"));
 
-        let mut fork_store = MemoryStore::new();
+        let mut fork_store = new_store();
         let root = fork_store.create_timeline("root").test_ok();
         let child = fork_store.fork(root.id(), Seq::ZERO, "child").test_ok();
         fork_store
@@ -4135,7 +4486,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_root_count_ignores_many_children_and_caps_at_maximum_plus_one() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let first = store.create_timeline("first").test_ok();
         for index in 0..256 {
             store
@@ -4153,7 +4504,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn payload_is_opaque_and_unchanged() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let raw = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00];
@@ -4165,7 +4516,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn seq_is_monotonically_increasing() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..10).map(|i| make_draft(entity, &[i])).collect();
@@ -4178,7 +4529,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_range_filters_correctly() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..5u8).map(|i| make_draft(entity, &[i])).collect();
@@ -4198,7 +4549,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_is_copy_on_write_child_events_do_not_affect_parent() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
 
@@ -4233,7 +4584,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn nested_forks_expose_one_logical_sequence() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
@@ -4296,7 +4647,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn logical_sequence_integrity_failures_are_fail_closed() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("integrity-root").test_ok();
         let entity = EntityId::new();
         let event = store
@@ -4354,7 +4705,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_segment_integrity_failures_are_fail_closed() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("bounded-root").test_ok();
         let child = store.fork(root.id(), Seq::ZERO, "bounded-child").test_ok();
         let chain = vec![root.id(), child.id()];
@@ -4399,7 +4750,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn parent_events_after_fork_point_invisible_to_child() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
 
@@ -4423,7 +4774,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_beyond_head_returns_error() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let result = store.fork(tl.id(), Seq::from_u64(99), "bad-fork");
         assert!(matches!(result, Err(CoreError::ForkBeyondHead { .. })));
@@ -4432,7 +4783,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_unknown_timeline_returns_error() {
-        let store = MemoryStore::new();
+        let store = new_store();
         let unknown = TimelineId::new();
         let result = store.read(unknown, SeqRange::all());
         assert!(matches!(result, Err(CoreError::TimelineNotFound(_))));
@@ -4441,7 +4792,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_to_unknown_timeline_returns_error() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let unknown = TimelineId::new();
         let entity = EntityId::new();
         let result = store.append(unknown, &[make_draft(entity, b"x")]);
@@ -4451,7 +4802,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_append_is_all_or_nothing_at_the_owned_event_ceiling() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("bounded").test_ok();
         let entity = EntityId::new();
         let two_drafts = [make_draft(entity, b"one"), make_draft(entity, b"two")];
@@ -4559,7 +4910,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_append_rejects_an_owned_head_overflow_before_mutation() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("overflow-head").test_ok();
         store
             .timelines
@@ -4585,7 +4936,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn list_timelines_returns_all() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         store.create_timeline("a").test_ok();
         store.create_timeline("b").test_ok();
         store.create_timeline("c").test_ok();
@@ -4596,7 +4947,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_is_deterministic() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let drafts: Vec<EventDraft> = (0..5u8).map(|i| make_draft(entity, &[i])).collect();
@@ -4612,7 +4963,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn empty_batch_append_returns_empty() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let result = store.append(tl.id(), &[]).test_ok();
         assert!(result.is_empty());
@@ -4621,7 +4972,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_at_zero_has_empty_parent_events() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         store
@@ -4635,7 +4986,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn explicit_wall_time_is_preserved() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let pinned = WallTime::from_micros(123_456_789);
@@ -4649,7 +5000,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn absent_wall_time_yields_nonzero_timestamp() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         let draft = make_draft(entity, b"no-wall-time");
@@ -4672,7 +5023,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn grandchild_fork_chain_stitches_correctly() {
         // Exercises compute_chain_hash_at for multi-level fork (parent timeline branch).
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
 
@@ -4719,7 +5070,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_unknown_parent_returns_timeline_not_found() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let unknown = TimelineId::new();
         let result = store.fork(unknown, Seq::ZERO, "orphan");
         assert!(matches!(result, Err(CoreError::TimelineNotFound(_))));
@@ -4728,7 +5079,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_fails_when_fork_parent_metadata_removed() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
@@ -4743,7 +5094,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fork_fails_when_ancestor_metadata_removed() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
@@ -4758,7 +5109,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_cyclic_fork_ancestry() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("cycle").test_ok();
         store.test_corrupt(TestCorruption::ForkParent {
             timeline: timeline.id(),
@@ -4783,7 +5134,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_corruption_rejects_a_missing_timeline_target() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             store.test_corrupt(TestCorruption::ForkParent {
                 timeline: TimelineId::new(),
@@ -4797,7 +5148,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_rejects_unknown_timeline() {
-        let store = MemoryStore::new();
+        let store = new_store();
         let bounded_error = store
             .read_bounded(
                 TimelineId::new(),
@@ -4810,7 +5161,7 @@ mod tests {
 
     #[test]
     fn bounded_chain_rejects_a_missing_ancestor() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let parent = store.create_timeline("parent").test_ok();
         let child = store.fork(parent.id(), Seq::ZERO, "child").test_ok();
         store.test_remove_timeline(parent.id());
@@ -4830,7 +5181,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn multiple_forks_from_same_parent_are_independent() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         store
@@ -4861,7 +5212,7 @@ mod tests {
     fn import_timeline_with_id_preserves_timeline_and_event_ids() {
         use pos_core::store::import_timeline_with_id;
 
-        let mut src = MemoryStore::new();
+        let mut src = new_store();
         let tl = src.create_timeline("shared").test_ok();
         let entity = EntityId::new();
         let committed = src
@@ -4874,7 +5225,7 @@ mod tests {
         let original_tl_id = tl.id();
         let original_event_ids: Vec<_> = committed.iter().map(|e| e.id).collect();
 
-        let mut dst = MemoryStore::new();
+        let mut dst = new_store();
         let imported = import_timeline_with_id(&mut dst, export).test_ok();
         assert_eq!(imported.id(), original_tl_id);
         let events = dst.read(original_tl_id, SeqRange::all()).test_ok();
@@ -4888,7 +5239,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta_rejects_duplicate_and_missing_parent() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let err = store.create_timeline_with_meta(root.meta).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
@@ -4901,7 +5252,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta_fork_uses_parent_chain() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
@@ -4922,7 +5273,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_is_atomic_on_mid_batch_failure() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let good = store
@@ -4957,7 +5308,7 @@ mod tests {
 
     #[test]
     fn delete_timeline_removes_events_and_blocks_with_forks() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
@@ -4986,7 +5337,7 @@ mod tests {
     fn import_timeline_with_id_rolls_back_create_on_append_fail() {
         use pos_core::store::import_timeline_with_id;
 
-        let mut src = MemoryStore::new();
+        let mut src = new_store();
         let tl = src.create_timeline("shared").test_ok();
         let entity = EntityId::new();
         let mut committed = src.append(tl.id(), &[make_draft(entity, b"one")]).test_ok();
@@ -4995,7 +5346,7 @@ mod tests {
         let mut bad_export = export;
         bad_export.events[0].payload_hash = pos_core::Hash::from_bytes([1u8; 32]);
 
-        let mut dst = MemoryStore::new();
+        let mut dst = new_store();
         let err = import_timeline_with_id(&mut dst, bad_export).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
         assert!(dst.get_timeline(tl.id()).test_ok().is_none());
@@ -5005,7 +5356,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_validates_seq_and_payload_hash() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let mut good = store
@@ -5047,7 +5398,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_rejects_duplicate_event_id() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let first = store
@@ -5067,7 +5418,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_committed_rejects_duplicate_id_in_batch() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
         let id = EventId::new();
@@ -5096,7 +5447,7 @@ mod tests {
 
     #[test]
     fn generic_committed_geographic_events_are_rejected() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("geo").test_ok();
         let payload = CanonicalBytes::from_vec(b"protected".to_vec());
         let event = Event {
@@ -5132,7 +5483,7 @@ mod tests {
 
     #[test]
     fn read_event_by_id_fails_closed_for_unknown_timeline() {
-        let store = MemoryStore::new();
+        let store = new_store();
         assert!(store
             .read_event_by_id(TimelineId::new(), EventId::new())
             .test_err()
@@ -5142,7 +5493,7 @@ mod tests {
 
     #[test]
     fn read_own_helper_returns_matching_event() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("read-own-helper").test_ok();
         store
             .append(
@@ -5168,7 +5519,7 @@ mod tests {
 
     #[test]
     fn child_reads_do_not_include_parent_events_after_a_fork_point() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let parent = store.create_timeline("lookup-parent").test_ok();
         store
             .append(parent.id(), &[make_draft(EntityId::new(), b"before-fork")])
@@ -5185,7 +5536,7 @@ mod tests {
 
     #[test]
     fn delete_timeline_helper_removes_append_identity() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("delete-helper").test_ok();
         let intent = AppendIntent::new(&make_draft(EntityId::new(), b"identified-event"));
         store
@@ -5208,7 +5559,7 @@ mod tests {
 
     #[test]
     fn delete_timeline_helper_handles_an_empty_identity_map() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = store.create_timeline("delete-empty-identities").test_ok();
 
         delete_timeline(&mut store, timeline.id()).test_ok();
@@ -5219,7 +5570,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn mutable_state_lookup_rejects_an_unknown_timeline() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         assert!(mutable_state(&mut store.timelines, TimelineId::new()).is_err());
         assert!(store.state_mut(TimelineId::new()).is_err());
     }
@@ -5229,7 +5580,7 @@ mod tests {
     fn export_own_fork_roundtrip_preserves_cow() {
         use pos_core::store::import_timeline_with_id;
 
-        let mut src = MemoryStore::new();
+        let mut src = new_store();
         let root = src.create_timeline("root").test_ok();
         let entity = EntityId::new();
         src.append(
@@ -5259,7 +5610,7 @@ mod tests {
         assert_eq!(own.events.len(), 1);
         assert_eq!(own.events[0].payload.as_slice(), b"c1");
 
-        let mut dst = MemoryStore::new();
+        let mut dst = new_store();
         let parent_export = authorized_export_timeline_own(&src, root.id()).test_ok();
         import_timeline_with_id(&mut dst, parent_export).test_ok();
         let imported = import_timeline_with_id(&mut dst, own).test_ok();
@@ -5274,7 +5625,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_own_skips_parent_events() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
@@ -5304,7 +5655,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta_rejects_fork_beyond_head() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
@@ -5319,7 +5670,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn nested_fork_chain_hash_ignores_parent_events_after_fork() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = store.create_timeline("root").test_ok();
         let entity = EntityId::new();
         store
@@ -5372,7 +5723,7 @@ mod tests {
     fn logical_fork_export_remints_ids_so_import_beside_parent_works() {
         use pos_core::store::import_timeline_with_id;
 
-        let mut src = MemoryStore::new();
+        let mut src = new_store();
         let root = src.create_timeline("root").test_ok();
         let entity = EntityId::new();
         src.append(
@@ -5397,7 +5748,7 @@ mod tests {
             assert!(!parent_ids.contains(&e.id));
         }
 
-        let mut dst = MemoryStore::new();
+        let mut dst = new_store();
         import_timeline_with_id(
             &mut dst,
             authorized_export_timeline(&src, root.id()).test_ok(),
@@ -5410,7 +5761,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta_surfaces_broken_parent_chain() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         // Parent row exists but its fork_point points at a missing grandparent.
         let mut broken_meta =
             TimelineMeta::forked_from(TimelineId::new(), Seq::from_u64(1), "broken");
@@ -5432,14 +5783,14 @@ mod tests {
     fn import_rejects_fork_parent_chain_hash_mismatch() {
         use pos_core::store::import_timeline_with_id;
 
-        let mut src = MemoryStore::new();
+        let mut src = new_store();
         let root = src.create_timeline("root").test_ok();
         let entity = EntityId::new();
         src.append(root.id(), &[make_draft(entity, b"p1")])
             .test_ok();
         let child = src.fork(root.id(), Seq::from_u64(1), "child").test_ok();
 
-        let mut dst = MemoryStore::new();
+        let mut dst = new_store();
         // Divergent parent with same id but different payload.
         let mut parent_export = authorized_export_timeline_own(&src, root.id()).test_ok();
         parent_export.events[0].payload = CanonicalBytes::from_vec(b"OTHER".to_vec());
@@ -5524,9 +5875,7 @@ mod tests {
             }
         }
 
-        let mut store = HashFailOnImport {
-            base: MemoryStore::new(),
-        };
+        let mut store = HashFailOnImport { base: new_store() };
         let parent = store.create_timeline("root").test_ok();
         let mut meta = TimelineMeta::forked_from(parent.id(), Seq::ZERO, "child");
         meta.id = TimelineId::new();
@@ -5542,7 +5891,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn with_hasher_uses_custom_hasher() {
-        let mut store = MemoryStore::with_hasher(Box::new(pos_crypto::chain::Blake3Hasher));
+        let mut store = fixture_store(MemoryStore::with_hasher(Box::new(
+            pos_crypto::chain::Blake3Hasher,
+        )));
         let tl = store.create_timeline("hasher-test").test_ok();
         let entity = EntityId::new();
         let drafts = [make_draft(entity, b"payload")];
@@ -5553,7 +5904,7 @@ mod tests {
 
     #[test]
     fn key_registry_snapshot_and_authorized_append_reject_stale_state() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         assert_eq!(store.load_key_registry().test_ok(), None);
         let mut persisted = KeyRegistryStateV1::new();
         persisted
@@ -5582,7 +5933,7 @@ mod tests {
 
     #[test]
     fn memory_effect_read_rejects_a_mismatched_stored_digest() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let manifest = ErasureReferenceV1::from_digest([1; 32]);
         let effect = pos_core::ErasureCasEffectV1::None;
         let bytes = effect.to_canonical_cbor().test_ok();
@@ -5732,6 +6083,7 @@ mod tests {
 
 #[cfg(test)]
 mod coverage_entrypoints {
+    use super::tests::new_store;
     use super::*;
     use pos_core::{ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey};
 
@@ -5814,15 +6166,58 @@ mod coverage_entrypoints {
     #[test]
     fn memory_key_registry_revalidates_loaded_and_saved_snapshots() {
         let invalid = invalid_registry();
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         store.key_registry = Some(invalid.clone());
         assert!(store.load_key_registry().is_err());
         assert!(store.save_key_registry(&invalid).is_err());
     }
 
     #[test]
+    fn memory_erasure_inventory_rejects_corrupt_state_and_request_overflow() {
+        let mut store = new_store();
+        let state = ok(pos_core::ErasureStateV1::submitted(
+            ErasureReferenceV1::from_digest([1; 32]),
+            ErasureReferenceV1::from_digest([2; 32]),
+            ErasureReferenceV1::from_digest([3; 32]),
+        ));
+        store.erasure_states.insert(
+            ErasureReferenceV1::from_digest([5; 32]),
+            ok(state.to_canonical_cbor()),
+        );
+        assert_eq!(
+            store.resolve_state(ErasureReferenceV1::from_digest([5; 32])),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store.erasure_records.insert(
+            ErasureReferenceV1::from_digest([6; 32]),
+            (ErasureReferenceV1::from_digest([7; 32]), Vec::new()),
+        );
+        store.erasure_records.insert(
+            ErasureReferenceV1::from_digest([8; 32]),
+            (ErasureReferenceV1::from_digest([9; 32]), Vec::new()),
+        );
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot(1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    #[test]
+    fn memory_erasure_inventory_rejects_topology_overflow() {
+        let mut store = new_store();
+        for ordinal in 0..=ERASURE_MAX_INVENTORY_TIMELINES {
+            let _timeline = ok(store.create_timeline(&format!("inventory-{ordinal}")));
+        }
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot(1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    #[test]
     fn memory_error_and_fork_boundaries_are_instrumented() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let root = ok(store.create_timeline("coverage-root"));
         let first = ok(store.append_or_duplicate(
             root.id(),
@@ -5910,7 +6305,7 @@ mod coverage_entrypoints {
 
     #[test]
     fn memory_append_and_bounded_read_boundaries_are_instrumented() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = ok(store.create_timeline("coverage-append"));
         expect_err(store.append(pos_core::TimelineId::new(), &[draft(b"missing")]));
         let _ = ok(store.append(timeline.id(), &[draft(b"present")]));
@@ -5921,7 +6316,7 @@ mod coverage_entrypoints {
 
     #[test]
     fn consent_append_rejects_a_missing_permit_after_authority_binding() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = ok(store.create_timeline("coverage-missing-permit"));
         let authority = ConsentAuthority::new();
         ok(store.bind_consent_authority(authority.append_permit()));
@@ -5930,7 +6325,7 @@ mod coverage_entrypoints {
 
     #[test]
     fn consent_revocation_and_cleanup_boundaries_are_instrumented() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = ok(store.create_timeline("coverage-revocation"));
         let subject = pos_core::EntityId::new();
         let revocation = pos_core::ConsentRevokedV1 {
@@ -5988,7 +6383,7 @@ mod coverage_entrypoints {
 
     #[test]
     fn memory_admin_operations_reject_geographic_timelines() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let timeline = ok(store.create_timeline("coverage-geographic-admin"));
         store.geographic_timelines.insert(timeline.id());
         let deletion = store
@@ -6002,7 +6397,7 @@ mod coverage_entrypoints {
 
     #[test]
     fn memory_recovery_error_index_rejects_an_over_bound_read() {
-        let mut store = MemoryStore::new();
+        let mut store = new_store();
         let request = ErasureReferenceV1::from_digest([250_u8; 32]);
         store.test_corrupt_recovery_error_index(request, ERASURE_MAX_RECOVERY_ERRORS);
         assert_eq!(

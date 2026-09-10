@@ -16,10 +16,10 @@ use pos_core::{
 };
 use std::{
     collections::VecDeque,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock};
 
 const MAX_AUTHORIZATION_AUDITS: usize = 1_024;
 
@@ -534,8 +534,29 @@ impl GatewayAuthorization {
     }
 
     /// Retain one accepted action's minimized authorization audit.
-    pub(crate) async fn record_audit(&self, audit: GatewayAuthorizationAudit) {
-        let mut audits = self.audits.lock().await;
+    #[cfg(test)]
+    pub(crate) fn record_audit(&self, audit: GatewayAuthorizationAudit) {
+        let mut audits = self
+            .audits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::retain_audit(&mut audits, audit);
+    }
+
+    /// Retain an accepted action audit from the dedicated synchronous host
+    /// command thread before that command releases its result.
+    pub(crate) fn record_audit_synchronously(&self, audit: GatewayAuthorizationAudit) {
+        let mut audits = self
+            .audits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::retain_audit(&mut audits, audit);
+    }
+
+    fn retain_audit(
+        audits: &mut VecDeque<GatewayAuthorizationAudit>,
+        audit: GatewayAuthorizationAudit,
+    ) {
         if audits.len() >= MAX_AUTHORIZATION_AUDITS {
             audits.pop_front();
         }
@@ -544,8 +565,13 @@ impl GatewayAuthorization {
 
     /// Return the minimized authorization audits retained by this Gateway host.
     #[must_use]
-    pub async fn audits(&self) -> Vec<GatewayAuthorizationAudit> {
-        self.audits.lock().await.iter().cloned().collect()
+    pub fn audits(&self) -> Vec<GatewayAuthorizationAudit> {
+        self.audits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Acquire the append fence used by the Gateway before a final recheck.
@@ -778,7 +804,8 @@ mod tests {
         AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthorityGranteeV1,
         AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, CapabilityGrantDraftV1,
         CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-        CapabilityScopeDraftV1, CapabilityScopeV1, PrincipalRefV1,
+        CapabilityScopeDraftV1, CapabilityScopeV1, ConsentGrantRefDraftV1, ConsentGrantRefV1,
+        ConsentGrantStatusV1, PrincipalRefV1,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -796,6 +823,30 @@ mod tests {
 
     const fn hash(byte: u8) -> Hash {
         Hash::from_bytes([byte; 32])
+    }
+
+    fn consent_grant() -> ConsentGrantRefV1 {
+        ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+            consent_id: hash(61),
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            data_categories: vec!["private".to_owned()],
+            purposes: vec!["action".to_owned()],
+            audiences: vec!["gateway".to_owned()],
+            action_classes: vec!["world.action.submit".to_owned()],
+            valid_from: WallTime::from_micros(1),
+            valid_until: WallTime::from_micros(100),
+            withdrawal_retention_policy: "erase".to_owned(),
+            policy_revision: hash(62),
+            issuer: PrincipalRefV1::try_new([63; 16], "gateway.test").test_ok(),
+            issuer_evidence: hash(64),
+            consent_timeline: TimelineId::new(),
+            grant_position: Seq::from_u64(1),
+            status: ConsentGrantStatusV1::Active,
+            revocation_fence: None,
+            authority_registry_digest: hash(65),
+        })
+        .test_ok()
     }
 
     struct Fixture {
@@ -1186,7 +1237,9 @@ mod tests {
         variants.push(request);
 
         let mut request = action(&fixture);
-        request.consent = ConsentEvidenceV1::Resolved { grants: Vec::new() };
+        request.consent = ConsentEvidenceV1::Resolved {
+            grants: vec![consent_grant()],
+        };
         variants.push(request);
 
         let mut request = action(&fixture);
@@ -1350,10 +1403,10 @@ mod tests {
             .test_ok()
             .audit();
         for _ in 0..=MAX_AUTHORIZATION_AUDITS {
-            fixture.authorization.record_audit(audit.clone()).await;
+            fixture.authorization.record_audit(audit.clone());
         }
         assert_eq!(
-            fixture.authorization.audits().await.len(),
+            fixture.authorization.audits().len(),
             MAX_AUTHORIZATION_AUDITS
         );
     }

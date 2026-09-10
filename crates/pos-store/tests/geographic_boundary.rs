@@ -1,13 +1,14 @@
 use pos_core::geo_admission::GeoLocationAdmissionStore;
 use pos_core::{
-    CanonicalBytes, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Event,
-    EventDraft, EventId, Kind, SchemaVersion, Seq, SeqRange, Timeline, TimelineMeta, WallTime,
+    CanonicalBytes, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
+    ErasureContainmentGateV1, Event, EventDraft, EventId, Kind, SchemaVersion, Seq, SeqRange,
+    Timeline, TimelineMeta, WallTime,
 };
 use pos_store::{
     import_timeline, import_timeline_with_id, memory::MemoryStore, AppendDedupKey,
     AppendDedupScope, AppendIdentity, EventStore, TimelineExport,
 };
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 trait TestValueExt<T> {
     fn test_ok(self) -> T;
@@ -44,6 +45,12 @@ impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
     }
 }
 
+fn bind_test_erasure_gate<S: EventStore + ?Sized>(store: &mut S) {
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok();
+}
+
 fn geographic_event(kind: &str, entity: EntityId) -> Event {
     let payload = CanonicalBytes::from_vec(b"protected".to_vec());
     Event {
@@ -63,6 +70,7 @@ fn geographic_event(kind: &str, entity: EntityId) -> Event {
 }
 
 fn assert_generic_geographic_admission_is_closed(store: &mut dyn EventStore) {
+    bind_test_erasure_gate(store);
     let timeline = store.create_timeline("generic-admission").test_ok();
     let entity = EntityId::new();
 
@@ -133,6 +141,7 @@ fn assert_generic_geographic_admission_is_closed(store: &mut dyn EventStore) {
 }
 
 fn assert_generic_consent_admission_is_closed(store: &mut dyn EventStore) {
+    bind_test_erasure_gate(store);
     let timeline = store.create_timeline("generic-consent-admission").test_ok();
     let entity = EntityId::new();
     let draft = EventDraft::new(
@@ -185,6 +194,7 @@ fn assert_generic_consent_admission_is_closed(store: &mut dyn EventStore) {
 fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmissionStore>(
     store: &mut S,
 ) {
+    bind_test_erasure_gate(store);
     let timeline = store
         .create_timeline("consent-coordinate-mismatch")
         .test_ok();
@@ -251,6 +261,7 @@ fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmis
 }
 
 fn assert_bounded_scope_withdrawal<S: EventStore>(store: &mut S) {
+    bind_test_erasure_gate(store);
     let timeline = store.create_timeline("bounded-withdrawal").test_ok();
     let scope = AppendDedupScope::from_keyed_hash([8; 32]);
     for key in [9, 10] {
@@ -328,6 +339,7 @@ fn sqlite_existing_geo_rows_are_detected_at_read_time_without_marker_backfill() 
     let database = tempfile::NamedTempFile::new().test_ok();
     let mut store =
         pos_store::sqlite::SqliteStore::open(database.path().to_str().test_ok()).test_ok();
+    bind_test_erasure_gate(&mut store);
     let timeline = store.create_timeline("pre-existing-v1").test_ok();
     let connection = rusqlite::Connection::open(database.path()).test_ok();
     let event = geographic_event("geo.location", EntityId::new());
@@ -368,6 +380,7 @@ fn sqlite_existing_geo_rows_are_detected_at_read_time_without_marker_backfill() 
 #[test]
 fn sqlite_public_adapter_still_reads_ordinary_events() {
     let mut store = pos_store::sqlite::SqliteStore::open_in_memory().test_ok();
+    bind_test_erasure_gate(&mut store);
     let timeline = store.create_timeline("ordinary").test_ok();
     store
         .append(
@@ -390,6 +403,7 @@ fn sqlite_event_id_lookup_propagates_storage_errors() {
     let database = tempfile::NamedTempFile::new().test_ok();
     let mut store =
         pos_store::sqlite::SqliteStore::open(database.path().to_str().test_ok()).test_ok();
+    bind_test_erasure_gate(&mut store);
     let timeline = store.create_timeline("event-id-storage-error").test_ok();
     let connection = rusqlite::Connection::open(database.path()).test_ok();
     connection.execute("DROP TABLE events", []).test_ok();

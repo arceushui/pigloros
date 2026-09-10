@@ -1524,9 +1524,17 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, SchemaVersion},
         ids::{EntityId, EventId},
+        CoreError, ErasureContainmentGateV1,
     };
     use pos_runtime::{PluginRegistry, TimelineHistorySegment};
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::{open_store as open_unbound_store, StoreConfig};
+    use std::sync::Arc;
+
+    fn open_store(config: StoreConfig) -> Result<Box<dyn pos_core::EventStore>, CoreError> {
+        let mut store = open_unbound_store(config)?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        Ok(store)
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct WorldObservationPayload {
@@ -2551,7 +2559,8 @@ mod tests {
             ),
         ];
         let plugin = WorldPlugin::new().with_bodies([body]);
-        let mut registry = PluginRegistry::new();
+        let mut registry =
+            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         registry
             .register(
                 &plugin,
@@ -2717,7 +2726,8 @@ mod tests {
         let body = EntityId::new();
         let timeline = TimelineId::new();
         let plugin = WorldPlugin::new().with_bodies([body]);
-        let mut registry = PluginRegistry::new();
+        let mut registry =
+            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         registry
             .register(
                 &plugin,

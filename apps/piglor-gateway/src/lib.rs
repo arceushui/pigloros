@@ -3,7 +3,7 @@
 #![warn(clippy::pedantic)]
 //! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
 //!
-//! JSON HTTP envelope; CBOR payloads into [`EventStore`]. Host-bound Principal
+//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. Host-bound Principal
 //! authorization is opt-in through [`GatewayAuthorization`].
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
@@ -23,24 +23,28 @@ pub use authorization::{
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
+#[cfg(test)]
+use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
-    geo_admission::{
-        GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
-    },
+    geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EntityId, EventId, PluginId, TimelineId},
     store::{
-        AppendDedupKey, AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome,
-        EventReadBounds, EventStore, PurgeOutcome, SeqRange,
+        AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin, ProposedAction,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, Plugin,
+    ProposedAction,
+};
+#[cfg(test)]
+use pos_core::{
+    geo_admission::GeoLocationAdmissionStore, store::EventStore, ErasureContainmentGateV1,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
-use pos_runtime::PluginRegistry;
+use pos_runtime::{ActionSubmissionError, ErasureExecutionHostV1, PluginRegistry};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::hash_map::DefaultHasher,
@@ -243,6 +247,7 @@ mod coverage_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fork_action_response_notice_lookup_and_read_share_logical_sequence() {
         let mut store = MemoryStore::new();
+        Gateway::bind_test_erasure_gate(&mut store);
         let root = store.create_timeline("logical-root").test_ok();
         let entity = EntityId::new();
         store
@@ -539,9 +544,9 @@ fn new_pending_consent_cleanup() -> Arc<tokio::sync::Mutex<Vec<AppendDedupScope>
 /// Shared Gateway handle (bounded `StoreExecutor` + live Event bus).
 ///
 /// The supported local-first write boundary permits Gateway and experiment-host
-/// processes to open one `SQLite` file through [`EventStore`]. Adapter-owned immediate
+/// processes to open one `SQLite` file through [`pos_core::store::EventStore`]. Adapter-owned immediate
 /// transactions serialize appends and enforce each owned-Event ceiling atomically.
-/// Direct SQL mutation that bypasses [`EventStore`] remains outside this contract.
+/// Direct SQL mutation that bypasses [`pos_core::store::EventStore`] remains outside this contract.
 #[derive(Clone)]
 pub struct Gateway {
     store: executor::StoreExecutor,
@@ -625,27 +630,42 @@ fn gateway_action_registry_with_bodies(
     gateway_action_registry_with_authority(bodies, None)
 }
 
+#[cfg(test)]
 fn gateway_action_registry_with_authority(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Arc<PluginRegistry> {
-    let mut registry = PluginRegistry::new();
+    Arc::new(gateway_action_registry_builder(bodies, authority))
+}
+
+fn gateway_action_registry_builder(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+) -> PluginRegistry {
+    let mut registry = PluginRegistry::new().without_erasure_gate();
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
-    let registration = registry.register_with_approver(
+    drop(registry.register_with_approver(
         &descriptor,
         None,
         None,
         Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
         [Kind::new(EVENT_TYPE_ACTION)],
-    );
-    if registration.is_err() {
-        return Arc::new(PluginRegistry::new());
-    }
+    ));
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
     }
+    registry
+}
+
+fn gateway_action_registry_with_authority_and_erasure_gate(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+    gate: Arc<dyn ErasureGate>,
+) -> Arc<PluginRegistry> {
+    let mut registry = gateway_action_registry_builder(bodies, authority);
+    registry.bind_erasure_gate(gate);
     Arc::new(registry)
 }
 
@@ -912,6 +932,31 @@ impl From<executor::StoreExecutorError> for GatewayError {
     }
 }
 
+impl From<executor::ActionCommandError> for GatewayError {
+    fn from(error: executor::ActionCommandError) -> Self {
+        match error {
+            executor::ActionCommandError::Executor(error) => error.into(),
+            executor::ActionCommandError::Submission(error) => error.into(),
+            executor::ActionCommandError::Authorization(error) => map_authorization_error(error),
+            executor::ActionCommandError::IngressConflict => Self::IngressConflict,
+        }
+    }
+}
+
+impl From<ActionSubmissionError> for GatewayError {
+    fn from(error: ActionSubmissionError) -> Self {
+        match error {
+            ActionSubmissionError::Rejected(error) => error.into(),
+            ActionSubmissionError::ErasureOperationUnavailable => {
+                CoreError::ErasureContainmentUnavailable.into()
+            }
+            ActionSubmissionError::ErasureContainment(error) => {
+                pos_core::store::erasure_containment_error(error).into()
+            }
+        }
+    }
+}
+
 fn accepted_event_coordinates(
     outcome: &GeoLocationAdmissionOutcome,
 ) -> Result<(EventId, Seq), GatewayError> {
@@ -936,6 +981,11 @@ fn checked_event_coordinates(
 }
 
 impl Gateway {
+    #[cfg(test)]
+    fn bind_test_erasure_gate(store: &mut dyn EventStore) {
+        drop(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+    }
+
     async fn enqueue_consent_cleanup(&self, scope: AppendDedupScope) {
         let mut pending = self.pending_consent_cleanup.lock().await;
         if !pending.contains(&scope) {
@@ -1076,7 +1126,12 @@ impl Gateway {
     /// Human action submission is intentionally disabled until the host supplies
     /// both a World body catalogue and a provider-neutral [`GatewayAuthorization`].
     #[must_use]
-    pub fn new(store: Box<dyn EventStore>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
+        #[cfg(test)]
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(store.as_mut());
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1101,12 +1156,171 @@ impl Gateway {
         .schedule_startup_consent_cleanup()
     }
 
+    /// Wrap a store after binding the host-owned erasure containment gate.
+    ///
+    /// Binding happens before the bounded `StoreExecutor` starts, so every
+    /// Gateway append/read/export command observes the same gate as direct
+    /// [`pos_core::store::EventStore`] consumers.
+    ///
+    /// # Errors
+    /// Returns a store error when the supplied gate cannot be bound before the
+    /// Gateway executor starts.
+    #[cfg(test)]
+    pub(crate) fn new_with_erasure_gate(
+        mut store: Box<dyn EventStore>,
+        gate: Arc<dyn ErasureGate>,
+    ) -> Result<Self, GatewayError> {
+        store.bind_erasure_gate(Arc::clone(&gate))?;
+        let consent_authority = ConsentAuthority::new();
+        Ok(Self {
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
+    /// Construct a Gateway whose executor exclusively owns the recovered
+    /// erasure host and its [`pos_core::store::EventStore`] adapter.
+    ///
+    /// The Gateway receives only the host's read-only containment view for
+    /// Plugin/action checks. All [`pos_core::store::EventStore`] effects remain in the host-owned
+    /// single-consumer command stream.
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot bind the Gateway's
+    /// independently owned consent authority.
+    pub fn new_with_erasure_host(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let store = executor::StoreExecutor::new_with_erasure_host(
+            host,
+            consent_authority.append_permit(),
+        )?;
+        Ok(Self {
+            store,
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
+    /// Construct an action-capable Gateway over one recovered erasure host.
+    ///
+    /// The host remains the exclusive owner of the [`pos_core::store::EventStore`]; the action
+    /// registry receives only the same read-only containment gate used by the
+    /// host command stream. Provider authentication and ADR-059 authorization
+    /// therefore cannot enable a proposed action outside ADR-060 containment.
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot bind the Gateway's
+    /// independently owned consent authority.
+    pub fn new_with_erasure_host_and_authorization(
+        host: ErasureExecutionHostV1,
+        bodies: impl IntoIterator<Item = EntityId>,
+        authorization: GatewayAuthorization,
+    ) -> Result<Self, GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let store = executor::StoreExecutor::new_with_erasure_host(
+            host,
+            consent_authority.append_permit(),
+        )?;
+        Ok(Self {
+            store,
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                bodies,
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: Some(Arc::new(authorization)),
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
+    /// Construct authenticated local `OwnTracks` ingress behind one recovered
+    /// host-owned Gateway store and erasure containment gate.
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot bind the Gateway's
+    /// independently owned consent authority.
+    pub fn new_with_owntracks_erasure_host(
+        host: ErasureExecutionHostV1,
+        owner_key: &OwnTracksOwnerKey,
+    ) -> Result<Self, GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let store = executor::StoreExecutor::new_with_owntracks_erasure_host(
+            host,
+            owner_key.0,
+            consent_authority.append_permit(),
+        )?;
+        Ok(Self {
+            store,
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: true,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
     /// Wrap a store and configure the World body catalogue used for actions.
     #[must_use]
-    pub fn new_with_world_bodies(
+    #[cfg(test)]
+    pub(crate) fn new_with_world_bodies(
         store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
     ) -> Self {
+        #[cfg(test)]
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(store.as_mut());
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1133,10 +1347,12 @@ impl Gateway {
 
     #[cfg(test)]
     fn new_with_world_bodies_and_principal_for_test(
-        store: Box<dyn EventStore>,
+        mut store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
         principal: ActionPrincipal,
     ) -> Self {
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        drop(store.bind_erasure_gate(Arc::clone(&gate)));
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1147,9 +1363,10 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
                 bodies,
                 Some(consent_authority.clone()),
+                gate,
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
@@ -1167,13 +1384,29 @@ impl Gateway {
     /// the Gateway never receives credentials or turns adapter output into
     /// policy.  Proposed actions and configured protected reads use this seam.
     #[must_use]
-    pub fn new_with_world_bodies_and_authorization(
+    #[cfg(test)]
+    pub(crate) fn new_with_world_bodies_and_authorization(
         store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
     ) -> Self {
+        #[cfg(test)]
+        let mut store = store;
+        #[cfg(test)]
+        let test_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        #[cfg(test)]
+        drop(store.bind_erasure_gate(Arc::clone(&test_gate)));
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
+        #[cfg(test)]
+        let action_registry = gateway_action_registry_with_authority_and_erasure_gate(
+            bodies,
+            Some(consent_authority.clone()),
+            test_gate,
+        );
+        #[cfg(not(test))]
+        let action_registry =
+            gateway_action_registry_with_authority(bodies, Some(consent_authority.clone()));
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(
                 store,
@@ -1182,10 +1415,7 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority(
-                bodies,
-                Some(consent_authority.clone()),
-            ),
+            action_registry,
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
@@ -1201,10 +1431,15 @@ impl Gateway {
     /// This does not register an HTTP route or widen generic ingress. Callers
     /// must already hold a backend implementing the dedicated core capability.
     #[must_use]
-    pub fn new_with_geo_location_admission<S>(store: S) -> Self
+    #[cfg(test)]
+    pub(crate) fn new_with_geo_location_admission<S>(store: S) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
+        #[cfg(test)]
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1234,10 +1469,15 @@ impl Gateway {
     /// This does not register an HTTP route. The private executor performs
     /// authentication, rate limiting, and geographic admission in one queue turn.
     #[must_use]
-    pub fn new_with_owntracks_ingress(
+    #[cfg(test)]
+    pub(crate) fn new_with_owntracks_ingress(
         store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,
     ) -> Self {
+        #[cfg(test)]
+        let mut store = store;
+        #[cfg(test)]
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1263,11 +1503,52 @@ impl Gateway {
         .schedule_startup_consent_cleanup()
     }
 
+    /// Construct the authenticated local `OwnTracks` Gateway with a shared
+    /// host-owned erasure containment gate.
+    ///
+    /// # Errors
+    /// Returns a store error when the host-owned erasure gate cannot be bound
+    /// to the supplied `SQLite` store.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn new_with_owntracks_ingress_and_erasure_gate(
+        mut store: pos_store::sqlite::SqliteStore,
+        owner_key: &OwnTracksOwnerKey,
+        gate: Arc<dyn ErasureGate>,
+    ) -> Result<Self, GatewayError> {
+        store.bind_erasure_gate(Arc::clone(&gate))?;
+        let consent_authority = ConsentAuthority::new();
+        Ok(Self {
+            store: executor::StoreExecutor::new_with_owntracks_ingress(
+                store,
+                owner_key.0,
+                consent_authority.append_permit(),
+            ),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: true,
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+                gate,
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
     #[cfg(test)]
     pub(crate) fn new_with_owntracks_ingress_for_test<S>(store: S, owner_key: [u8; 32]) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + pos_core::OwnTracksIngressStore + 'static,
     {
+        let mut store = store;
+        Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1846,25 +2127,32 @@ impl Gateway {
             Ok(decision) => decision,
             Err(error) => return Err(error),
         };
-        if let Some(error) = self.ensure_timeline_exists(timeline).await.err() {
-            return Err(error);
-        }
-        let draft = match self.submit_action_draft(&proposal) {
-            Ok(draft) => draft,
-            Err(error) => return Err(error),
-        };
-        let decision = match reauthorize_at_commit_fence(&authorization, &decision) {
-            Ok(decision) => decision,
-            Err(error) => return Err(error),
-        };
-        let event = match self.append_draft(timeline, draft).await {
+        let (event, _decision) = match self
+            .store
+            .submit_action(
+                timeline,
+                Arc::clone(&self.action_registry),
+                proposal,
+                executor::AuthorizedActionContext::new(
+                    Arc::clone(&authorization),
+                    decision,
+                    self.bus.clone(),
+                ),
+                self.limits.max_events_per_timeline,
+            )
+            .await
+        {
             Ok(event) => event,
-            Err(error) => return Err(error),
+            Err(executor::ActionCommandError::Executor(executor::StoreExecutorError::Store(
+                CoreError::Storage(message),
+            ))) if message == "event limit reached" => {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                });
+            }
+            Err(error) => return Err(error.into()),
         };
         drop(fence);
-        authorization
-            .record_audit(decision.audit().with_event_id(event.id))
-            .await;
         Ok(event)
     }
 
@@ -1878,7 +2166,7 @@ impl Gateway {
         principal.authorizes(&proposal)?;
         let timeline = parse_timeline_id(timeline_id)?;
         self.ensure_timeline_exists(timeline).await?;
-        let draft = self.submit_action_draft(&proposal)?;
+        let draft = self.submit_action_draft(timeline, &proposal)?;
         self.append_draft(timeline, draft).await
     }
 
@@ -1984,26 +2272,34 @@ impl Gateway {
             Ok(proposal) => proposal,
             Err(error) => return Err(error.into()),
         };
-        let draft = match self.submit_action_draft(&proposal) {
-            Ok(draft) => draft,
-            Err(error) => return Err(error),
-        };
-        drop(proposal);
-        let decision = match reauthorize_at_commit_fence(&authorization, &decision) {
-            Ok(decision) => decision,
-            Err(error) => return Err(error),
-        };
-        let result = match self
-            .append_identified_draft(timeline, draft, ingress_id)
+        let identity = ingress_identity(timeline, entity, ingress_id);
+        let (result, _decision) = match self
+            .store
+            .submit_identified_action(
+                timeline,
+                Arc::clone(&self.action_registry),
+                proposal,
+                executor::AuthorizedActionContext::new(
+                    Arc::clone(&authorization),
+                    decision,
+                    self.bus.clone(),
+                ),
+                identity,
+                self.limits.max_events_per_timeline,
+            )
             .await
         {
             Ok(result) => result,
-            Err(error) => return Err(error),
+            Err(executor::ActionCommandError::Executor(executor::StoreExecutorError::Store(
+                CoreError::Storage(message),
+            ))) if message == "event limit reached" => {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                });
+            }
+            Err(error) => return Err(error.into()),
         };
         drop(fence);
-        authorization
-            .record_audit(decision.audit().with_event_id(result.event.id))
-            .await;
         Ok(result)
     }
 
@@ -2029,12 +2325,13 @@ impl Gateway {
             Err(error) => return Err(error.into()),
         };
         principal.authorizes(&proposal)?;
-        let draft = self.submit_action_draft(&proposal)?;
+        let draft = self.submit_action_draft(timeline, &proposal)?;
         drop(proposal);
         self.append_identified_draft(timeline, draft, ingress_id)
             .await
     }
 
+    #[cfg(test)]
     async fn ensure_timeline_exists(&self, timeline: TimelineId) -> Result<(), GatewayError> {
         match self.store.timeline(timeline).await {
             Ok(Some(_)) => Ok(()),
@@ -2043,11 +2340,15 @@ impl Gateway {
         }
     }
 
-    fn submit_action_draft(&self, proposal: &ProposedAction) -> Result<EventDraft, GatewayError> {
-        match self.action_registry.submit_action(proposal) {
-            Ok(draft) => Ok(draft),
-            Err(error) => Err(error.into()),
-        }
+    #[cfg(test)]
+    fn submit_action_draft(
+        &self,
+        timeline: TimelineId,
+        proposal: &ProposedAction,
+    ) -> Result<EventDraft, GatewayError> {
+        self.action_registry
+            .submit_action(timeline, proposal)
+            .map_err(GatewayError::from)
     }
 
     /// Append an action using an opaque external ingress identity.
@@ -2077,6 +2378,7 @@ impl Gateway {
             .await
     }
 
+    #[cfg(test)]
     async fn append_identified_draft(
         &self,
         timeline: TimelineId,
@@ -2201,8 +2503,13 @@ impl Gateway {
                 }
             }
         };
+        self.publish_event_notice(timeline, &event);
+        Ok(event)
+    }
+
+    fn publish_event_notice(&self, timeline: TimelineId, event: &Event) {
         if pos_core::is_consent_event_type(&event.event_type) {
-            return Ok(event);
+            return;
         }
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
@@ -2212,7 +2519,6 @@ impl Gateway {
             seq: event.seq.as_u64(),
         };
         drop(self.bus.send(notice));
-        Ok(event)
     }
 
     fn publish_geographic_notice(
@@ -2231,6 +2537,7 @@ impl Gateway {
         }));
     }
 
+    #[cfg(test)]
     async fn read_event_by_id(
         &self,
         timeline: TimelineId,
@@ -2247,7 +2554,8 @@ impl Gateway {
     }
 
     #[cfg(test)]
-    fn with_bus_capacity(store: Box<dyn EventStore>, capacity: usize) -> Self {
+    fn with_bus_capacity(mut store: Box<dyn EventStore>, capacity: usize) -> Self {
+        Self::bind_test_erasure_gate(store.as_mut());
         let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(
@@ -2283,7 +2591,8 @@ impl Gateway {
     }
 
     #[cfg(test)]
-    fn with_limits(store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
+    fn with_limits(mut store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
+        Self::bind_test_erasure_gate(store.as_mut());
         let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(
@@ -2328,17 +2637,6 @@ const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayErr
         GatewayAuthorizationError::RequestUnavailable => GatewayError::InvalidAuthorizationRequest,
         GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
     }
-}
-
-fn reauthorize_at_commit_fence(
-    authorization: &GatewayAuthorization,
-    decision: &GatewayAuthorizationDecision,
-) -> Result<GatewayAuthorizationDecision, GatewayError> {
-    let mut request = decision.request().clone();
-    request.at_time = WallTime::now();
-    authorization
-        .authorize(request)
-        .map_err(map_authorization_error)
 }
 
 fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
@@ -2587,6 +2885,49 @@ mod tests {
     const EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([233; 32]);
 
+    #[test]
+    fn host_gateway_constructors_fail_closed_when_containment_is_unavailable() {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        host.bind_consent_authority(ConsentAuthority::new().append_permit())
+            .test_ok();
+        assert!(matches!(
+            Gateway::new_with_erasure_host(host),
+            Err(GatewayError::Store(CoreError::Storage(_)))
+        ));
+
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        host.bind_consent_authority(ConsentAuthority::new().append_permit())
+            .test_ok();
+        assert!(matches!(
+            Gateway::new_with_erasure_host_and_authorization(
+                host,
+                std::iter::empty(),
+                crate::authorization::test_authorization_for(EntityId::new()),
+            ),
+            Err(GatewayError::Store(CoreError::Storage(_)))
+        ));
+
+        let mut host = ErasureExecutionHostV1::open_gateway_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        host.bind_consent_authority(ConsentAuthority::new().append_permit())
+            .test_ok();
+        assert!(matches!(
+            Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32])),
+            Err(GatewayError::Store(CoreError::Storage(_)))
+        ));
+    }
+
     fn export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
         pos_core::ReplayClaimEvaluatorV1::evaluate(
             pos_core::ErasureReplayClaimV1::Exact,
@@ -2650,7 +2991,7 @@ mod tests {
         ids::EventId,
         store::{export_timeline_own, import_timeline_with_id},
         timeline::TimelineMeta,
-        EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+        ErasureContainmentGateV1, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -2661,6 +3002,27 @@ mod tests {
         time::Duration,
     };
     use tokio::sync::broadcast;
+
+    struct RejectingErasureGate(pos_core::ErasureContainmentErrorV1);
+
+    impl ErasureGate for RejectingErasureGate {
+        fn authorize(
+            &self,
+            _: TimelineId,
+            _: pos_core::ErasureProtectedOperationV1,
+        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+            Err(self.0)
+        }
+
+        fn with_fence(
+            &self,
+            timeline: TimelineId,
+            operation: pos_core::ErasureProtectedOperationV1,
+            _: &mut dyn FnMut(),
+        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+            self.authorize(timeline, operation)
+        }
+    }
 
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
@@ -3000,7 +3362,7 @@ mod tests {
             .await
             .test_ok();
         assert_eq!(event.entity, actor);
-        let audits = audit_host.audits().await;
+        let audits = audit_host.audits();
         assert_eq!(audits.len(), 1);
         assert_eq!(audits[0].actor_entity_id(), actor);
         assert_eq!(audits[0].event_id(), Some(event.id));
@@ -3051,6 +3413,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_owned_action_command_fences_plugin_approval_and_append() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_for(actor);
+        let audit_host = authorization.clone();
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gateway =
+            Gateway::new_with_erasure_host_and_authorization(host, [body], authorization).test_ok();
+        let timeline = gateway.create_timeline("host-owned-action").await.test_ok();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+        let event = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_ok();
+        assert_eq!(event.entity, actor);
+        assert_eq!(audit_host.audits()[0].event_id(), Some(event.id));
+
+        let missing = gateway
+            .submit_json_action(
+                &TimelineId::new().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            missing,
+            GatewayError::Store(CoreError::ErasureContainmentUnavailable)
+        ));
+        assert_eq!(audit_host.audits().len(), 1);
+
+        let first = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "host-owned-action-1",
+            )
+            .await
+            .test_ok();
+        let duplicate = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "host-owned-action-1",
+            )
+            .await
+            .test_ok();
+        assert!(!first.duplicate);
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.event.id, first.event.id);
+        assert_eq!(audit_host.audits().len(), 3);
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
     async fn authority_bound_gateway_rechecks_authentication_at_commit_fence() {
         let actor = EntityId::new();
         let body = EntityId::new();
@@ -3085,9 +3529,154 @@ mod tests {
             .await
             .test_err();
         assert!(matches!(error, GatewayError::AuthorizationUnavailable));
-        assert!(audit_host.audits().await.is_empty());
+        assert!(audit_host.audits().is_empty());
         gateway.shutdown().await.test_ok();
         drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn host_owned_action_rechecks_authentication_inside_the_erasure_fence() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_reject_after_first_for(actor);
+        let audit_host = authorization.clone();
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gateway =
+            Gateway::new_with_erasure_host_and_authorization(host, [body], authorization).test_ok();
+        let timeline = gateway
+            .create_timeline("host-authority-commit-recheck")
+            .await
+            .test_ok();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+
+        let error = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(error, GatewayError::AuthorizationUnavailable));
+        assert!(audit_host.audits().is_empty());
+        assert_eq!(
+            gateway
+                .store
+                .protected_logical_head(timeline.id())
+                .await
+                .test_ok(),
+            Seq::ZERO
+        );
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn authorized_action_commands_preserve_the_event_ceiling_error() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let authorization = crate::authorization::test_authorization_for(actor);
+        let audit_host = authorization.clone();
+        let mut gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            authorization,
+        );
+        let timeline = gateway
+            .create_timeline("action-event-ceiling")
+            .await
+            .test_ok();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+
+        let first = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "generic-action-success",
+            )
+            .await
+            .test_ok();
+        let duplicate = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "generic-action-success",
+            )
+            .await
+            .test_ok();
+        assert!(!first.duplicate);
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.event.id, first.event.id);
+        gateway.limits.max_events_per_timeline = 1;
+
+        let ordinary = gateway
+            .submit_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            ordinary,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+        let identified = gateway
+            .submit_identified_json_action(
+                &timeline.id().to_string(),
+                &actor.to_string(),
+                EVENT_TYPE_ACTION,
+                &payload,
+                "world.action.submit",
+                "event-ceiling",
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            identified,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+        assert_eq!(audit_host.audits().len(), 2);
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[test]
+    fn ingress_conflict_action_command_error_maps_to_gateway_error() {
+        assert!(matches!(
+            GatewayError::from(executor::ActionCommandError::IngressConflict),
+            GatewayError::IngressConflict
+        ));
     }
 
     async fn assert_authority_proposed_action_boundaries(
@@ -3268,11 +3857,8 @@ mod tests {
             .await
             .test_ok();
         assert_eq!(appended.event.entity, actor);
-        assert_eq!(audit_host.audits().await.len(), 1);
-        assert_eq!(
-            audit_host.audits().await[0].event_id(),
-            Some(appended.event.id)
-        );
+        assert_eq!(audit_host.audits().len(), 1);
+        assert_eq!(audit_host.audits()[0].event_id(), Some(appended.event.id));
 
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -3828,6 +4414,10 @@ mod tests {
     }
 
     impl EventStore for BlockFirstRootCount {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
         }
@@ -4584,6 +5174,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn root_limit_excludes_forks_and_imported_children() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let root = store.create_timeline("root").test_ok();
         store.fork(root.id(), Seq::ZERO, "fork").test_ok();
         let imported_child = TimelineMeta::forked_from(root.id(), Seq::ZERO, "imported-child");
@@ -4619,6 +5210,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn child_event_limit_counts_owned_not_inherited_events() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let root = store.create_timeline("root").test_ok();
         let root_draft = EventDraft::new(
             EntityId::new(),
@@ -4986,6 +5578,7 @@ mod tests {
         let database = TemporarySqliteFile::new("atomic-ceiling");
         let path = database.path.clone();
         let mut seed = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        Gateway::bind_test_erasure_gate(seed.as_mut());
         let timeline = seed.create_timeline("sqlite").test_ok();
         let entity = EntityId::new();
         let prefill = EventDraft::new(
@@ -5045,7 +5638,8 @@ mod tests {
                 maximum: MAX_EVENTS_PER_TIMELINE
             }
         ));
-        let fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let mut fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        Gateway::bind_test_erasure_gate(fresh.as_mut());
         assert_eq!(
             fresh.get_timeline(timeline.id()).test_ok().test_ok().head,
             Seq::from_u64(MAX_EVENTS_PER_TIMELINE)
@@ -5066,6 +5660,7 @@ mod tests {
             path: ":memory:".to_owned(),
         })
         .test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let root = store.create_timeline("root").test_ok();
         let small = EventDraft::new(
             EntityId::new(),
@@ -5098,6 +5693,7 @@ mod tests {
             path: ":memory:".to_owned(),
         })
         .test_ok();
+        Gateway::bind_test_erasure_gate(external.as_mut());
         let timeline = external.create_timeline("external").test_ok();
         let oversized = EventDraft::new(
             EntityId::new(),
@@ -5122,6 +5718,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn imported_oversized_event_type_returns_actionable_413_on_bundled_stores() {
         let mut source = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(source.as_mut());
         let timeline = source.create_timeline("import-source").test_ok();
         source
             .append(
@@ -5149,6 +5746,7 @@ mod tests {
             .test_ok(),
         ];
         for mut destination in destinations {
+            Gateway::bind_test_erasure_gate(destination.as_mut());
             import_timeline_with_id(destination.as_mut(), export.clone()).test_ok();
             let error = Gateway::new(destination)
                 .read_events_page(&timeline.id().to_string(), 0, 1)
@@ -5171,6 +5769,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn imported_deep_fork_returns_actionable_413() {
         let mut source = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(source.as_mut());
         let root = source.create_timeline("root").test_ok();
         let mut timelines = vec![root];
         for depth in 1..=MAX_FORK_DEPTH + 1 {
@@ -5182,6 +5781,7 @@ mod tests {
         }
 
         let mut destination = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(destination.as_mut());
         for timeline in &timelines {
             let export = export_timeline_own(
                 source.as_ref(),
@@ -5458,6 +6058,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fork_with_more_than_ten_thousand_logical_events_pages_to_exhaustion() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        Gateway::bind_test_erasure_gate(store.as_mut());
         let root = store.create_timeline("root").test_ok();
         let drafts: Vec<_> = (0..MAX_EVENTS_PER_TIMELINE)
             .map(|_| {
@@ -5681,6 +6282,65 @@ mod tests {
         ));
         drop(fail_create);
         drop(fail_list);
+    }
+
+    #[test]
+    fn erasure_gate_constructor_rejects_store_binding() {
+        let rejected = Gateway::new_with_erasure_gate(
+            Box::new(ScriptedStore {
+                mode: ScriptMode::FailCreate,
+            }),
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
+        );
+        assert!(matches!(rejected.as_ref(), Err(GatewayError::Store(_))));
+        drop(rejected);
+    }
+
+    #[test]
+    fn action_submission_maps_closed_erasure_gates() {
+        let timeline = TimelineId::new();
+        let proposal = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"blocked"),
+            Kind::new("world.action.submit"),
+        );
+        let missing = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        assert!(matches!(
+            missing.submit_action_draft(timeline, &proposal),
+            Err(GatewayError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+        drop(missing);
+
+        let frozen = Gateway::new_with_erasure_gate(
+            open_store(StoreConfig::Memory).test_ok(),
+            Arc::new(RejectingErasureGate(
+                pos_core::ErasureContainmentErrorV1::AccessFrozen,
+            )),
+        )
+        .test_ok();
+        assert!(matches!(
+            frozen.submit_action_draft(timeline, &proposal),
+            Err(GatewayError::Store(CoreError::ErasureAccessFrozen))
+        ));
+        drop(frozen);
+
+        let unavailable = Gateway::new_with_erasure_gate(
+            open_store(StoreConfig::Memory).test_ok(),
+            Arc::new(RejectingErasureGate(
+                pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
+            )),
+        )
+        .test_ok();
+        assert!(matches!(
+            unavailable.submit_action_draft(timeline, &proposal),
+            Err(GatewayError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+        drop(unavailable);
     }
 
     #[tokio::test]
@@ -6044,11 +6704,121 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
+    use pos_core::{ErasureContainmentGateV1, ERASURE_MAX_INVENTORY_REQUESTS};
+    use pos_runtime::ErasureExecutionHostV1;
+    use pos_store::{open_store, StoreConfig};
+    use std::error::Error;
+    use std::sync::Arc;
 
     #[test]
     fn action_registry_entrypoint_builds_the_gateway_registry() {
         assert_eq!(gateway_action_registry().driver_count(), 0);
+    }
+
+    #[test]
+    fn erasure_gate_constructors_cover_binding_success_and_rejection(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let gateway =
+            Gateway::new_with_erasure_gate(open_store(StoreConfig::Memory)?, Arc::clone(&gate))?;
+        drop(gateway);
+
+        let owner_key = OwnTracksOwnerKey([7; 32]);
+        let owntracks = Gateway::new_with_owntracks_ingress_and_erasure_gate(
+            pos_store::sqlite::SqliteStore::open_in_memory()?,
+            &owner_key,
+            gate,
+        )?;
+        drop(owntracks);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn host_owned_gateway_sequences_the_complete_generic_store_surface(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )?;
+        let gateway = Gateway::new_with_erasure_host(host)?;
+        let timeline = gateway.create_timeline("host-owned-gateway").await?;
+        let entity = EntityId::new();
+        gateway
+            .append_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 1}),
+            )
+            .await?;
+        let ingress_id = Ulid::from(1_u128).to_string();
+        gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 2}),
+                &ingress_id,
+            )
+            .await?;
+        let duplicate = gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &entity.to_string(),
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 2}),
+                &ingress_id,
+            )
+            .await?;
+        assert!(duplicate.duplicate);
+        assert_eq!(
+            gateway
+                .read_events_page(&timeline.id().to_string(), 0, 8)
+                .await?
+                .events
+                .len(),
+            2
+        );
+        let grant = ConsentGrantedV1 {
+            subject_id: entity,
+            grantee_id: EntityId::new(),
+            purpose: "host-owned-gateway".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 3,
+        };
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), grant.clone())
+            .await?;
+        gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: grant.subject_id,
+                    grantee_id: grant.grantee_id,
+                    grant_seq: grant.grant_seq,
+                    fence_seq: 4,
+                },
+            )
+            .await?;
+        assert!(matches!(
+            gateway
+                .read_events_page(&timeline.id().to_string(), 0, 8)
+                .await,
+            Err(GatewayError::ResourceUnavailable)
+        ));
+        gateway
+            .purge_expired_ingress_identities(NonZeroUsize::MIN)
+            .await?;
+        gateway.shutdown().await?;
+        drop(gateway);
+        Ok(())
     }
 }

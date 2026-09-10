@@ -38,21 +38,56 @@ use pos_core::erasure::{
     ERASURE_SCOPE_COMMITMENT_TAG_V1,
 };
 use pos_core::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
+    EntityId, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureCoordinator,
-    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
-    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureInventoryCategoryV1,
-    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureContainmentGateV1,
+    ErasureCoordinator, ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
+    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureGate,
+    ErasureInventoryCategoryV1, ErasureInventoryObservationV1, ErasureInventoryResultV1,
+    ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryErrorQueryV1,
     ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
     ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedStateQueryV1,
+    ErasureStateV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedStateQueryV1,
+    ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, ErasureVerifiedTopologyProofV1,
+    Seq, TimelineId, TimelineMeta, TimelineMode,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
+
+struct LegacyVerifiedRecoveryQuery {
+    state: Option<ErasureVerifiedStateV1>,
+    topology: Option<ErasureVerifiedTopologyProofV1>,
+}
+
+impl ErasureVerifiedStateQueryV1 for LegacyVerifiedRecoveryQuery {
+    fn verified_state(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
+        Ok(self.state.clone())
+    }
+
+    fn verified_topology(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyProofV1>, ErasureErrorV1> {
+        Ok(self.topology.clone())
+    }
+}
+
+struct StateOnlyRecoveryQuery;
+
+impl ErasureVerifiedStateQueryV1 for StateOnlyRecoveryQuery {
+    fn verified_state(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
+        Ok(None)
+    }
+}
 
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     fixture_request(RequestFixtureInput {
@@ -368,21 +403,14 @@ fn assert_recovery_query_trait(
 fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), ErasureErrorV1> {
     let target = target(10);
     let lineage_rule = reference(170);
-    let port = port(vec![target], Some(lineage_rule));
-    let observer = port.clone();
+    let coordinator_port = port(vec![target], Some(lineage_rule));
+    let observer = coordinator_port.clone();
     let request = request()?;
-    let extension_record;
     {
-        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(coordinator_port, COORDINATOR);
         coordinator.submit(request.clone(), request.provenance())?;
         coordinator.authorize(request.reference(), reference(21))?;
         coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
-        let scope = coordinator
-            .verified_state(request.reference())?
-            .and_then(|verified| verified.scope().cloned())
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        extension_record = extension(request.reference(), &scope, lineage_rule)?;
-        coordinator.append_scope_extension(request.reference(), extension_record)?;
     }
 
     let mut restarted = ErasureCoordinatorStateMachineV1::new(observer.clone(), COORDINATOR);
@@ -396,11 +424,8 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
     let scope = verified.scope().ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(scope.request(), request.reference());
     assert_eq!(scope.scope_members(), &[reference(7)]);
-    assert_eq!(verified.scope_extensions(), &[extension_record]);
-    assert_eq!(
-        verified.scope_forks().collect::<Vec<_>>(),
-        vec![reference(160)]
-    );
+    assert!(verified.scope_extensions().is_empty());
+    assert!(verified.scope_forks().next().is_none());
     assert_eq!(
         verified.manifest_digest(),
         observer
@@ -408,7 +433,168 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
             .ok_or(ErasureErrorV1::ProvenanceMissing)?
             .digest()
     );
+    assert_eq!(
+        <ErasureCoordinatorStateMachineV1<PublicCoordinatorPort> as
+            ErasureVerifiedStateQueryV1>::verified_topology(&mut restarted, request.reference())?,
+        None
+    );
     assert!(restarted.verified_state(reference(240))?.is_none());
+    assert_eq!(restarted.verified_topology(reference(240))?, None);
+
+    let mut pre_freeze = ErasureCoordinatorStateMachineV1::new(port(Vec::new(), None), COORDINATOR);
+    pre_freeze.submit(request.clone(), request.provenance())?;
+    assert!(<ErasureCoordinatorStateMachineV1<PublicCoordinatorPort> as
+        ErasureVerifiedStateQueryV1>::verified_state_with_topology(
+        &mut pre_freeze,
+        request.reference(),
+    )?
+    .is_some());
+
+    let pre_freeze_gate = ErasureContainmentGateV1::new_fail_closed();
+    pre_freeze_gate
+        .install_from_verified_query_with_topology(&mut pre_freeze, request.reference())
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        pre_freeze_gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::Read),
+        Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn verified_state_query_pins_scoped_topology_observation() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let affected = TimelineId::new();
+    let unaffected = TimelineId::new();
+    let coordinator_port = port(vec![target], None)
+        .with_verified_topology(vec![(affected, reference(7))], vec![unaffected]);
+    let observer = coordinator_port.clone();
+    let request = request()?;
+    {
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(coordinator_port, COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    }
+
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(observer, COORDINATOR);
+    let (verified, proof) = restarted
+        .verified_state_with_topology(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let gate = ErasureContainmentGateV1::new_fail_closed();
+    gate.install_verified_state_with_topology(&verified, &proof)
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        gate.authorize(affected, ErasureProtectedOperationV1::Read),
+        Err(pos_core::ErasureContainmentErrorV1::AccessFrozen)
+    );
+    assert_eq!(
+        gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn verified_state_query_rejects_manifest_mismatched_topology_observation(
+) -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let affected = TimelineId::new();
+    let coordinator_port = port(vec![target], None)
+        .with_verified_topology(vec![(affected, reference(7))], Vec::new())
+        .with_topology_manifest_override(reference(250));
+    let observer = coordinator_port.clone();
+    let request = request()?;
+    {
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(coordinator_port, COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    }
+
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(observer, COORDINATOR);
+    assert_eq!(
+        restarted.verified_state_with_topology(request.reference()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn verified_state_query_propagates_topology_observation_failure() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let affected = TimelineId::new();
+    let coordinator_port =
+        port(vec![target], None).with_verified_topology(vec![(affected, reference(7))], Vec::new());
+    let request = request()?;
+    {
+        let mut coordinator =
+            ErasureCoordinatorStateMachineV1::new(coordinator_port.clone(), COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    }
+
+    let failing_observer = coordinator_port.with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::LoadManifest,
+        occurrence: 1,
+    });
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(failing_observer, COORDINATOR);
+    assert_eq!(
+        restarted.verified_state_with_topology(request.reference()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_recovery_query_denies_combined_default() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(port(Vec::new(), None), COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    let state = coordinator
+        .verified_state(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let topology = coordinator
+        .verified_topology(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+
+    let mut successful = LegacyVerifiedRecoveryQuery {
+        state: Some(state),
+        topology: Some(topology),
+    };
+    assert!(successful
+        .verified_state_with_topology(request.reference())?
+        .is_none());
+
+    let mut state_only = StateOnlyRecoveryQuery;
+    assert!(state_only.verified_topology(request.reference())?.is_none());
+
+    let mut absent = LegacyVerifiedRecoveryQuery {
+        state: None,
+        topology: None,
+    };
+    assert!(absent
+        .verified_state_with_topology(request.reference())?
+        .is_none());
+    Ok(())
+}
+
+#[test]
+fn verified_topology_query_propagates_recovery_failure() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let adapter = port(Vec::new(), None).with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::LoadManifest,
+        occurrence: 0,
+    });
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
+    assert_eq!(
+        <ErasureCoordinatorStateMachineV1<PublicCoordinatorPort> as
+            ErasureVerifiedStateQueryV1>::verified_topology(&mut coordinator, request.reference()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
     Ok(())
 }
 
@@ -1156,6 +1342,423 @@ fn recovery_rejects_a_malformed_scope_extension() -> Result<(), ErasureErrorV1> 
         .adapter
         .object_reference_field(scope_node, SCOPE_NODE_EXTENSION_FIELD)?;
     assert_malformed_recovery_object(graph.adapter, &graph.request, subject)
+}
+
+#[test]
+fn coordinator_prepares_bound_erse1_and_child_without_committing() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let extension = extension(graph.request.reference(), &scope, lineage_rule)?;
+    let predecessor = graph
+        .adapter
+        .current_manifest(graph.request.reference())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let parent = TimelineId::new();
+    let child = TimelineId::new();
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(180),
+        expected_inventory_generation: reference(181),
+        child_scope: extension.fork(),
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("prepared-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::from_u64(4))),
+        },
+    };
+    let prepared = ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .prepare_fork_admission(graph.request.reference(), extension, input.clone())?;
+
+    assert_eq!(prepared.operation(), input.operation);
+    assert_eq!(
+        prepared.expected_inventory_generation(),
+        input.expected_inventory_generation
+    );
+    assert_eq!(prepared.child_scope(), extension.fork());
+    assert_eq!(prepared.child(), &input.child);
+    assert_eq!(prepared.extension(), &extension);
+    let named_binding = prepared.binding_digest();
+    let owned = ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .prepare_fork_admission(
+            graph.request.reference(),
+            extension,
+            ErasureForkAdmissionInputV1 {
+                operation: reference(183),
+                child: TimelineMeta {
+                    id: TimelineId::new(),
+                    name: None,
+                    owner: Some(EntityId::new()),
+                    ..input.child.clone()
+                },
+                ..input
+            },
+        )?;
+    assert_ne!(owned.binding_digest(), named_binding);
+    assert_eq!(
+        prepared.mutation().expected_manifest_digest(),
+        Some(predecessor)
+    );
+    assert_eq!(
+        graph
+            .adapter
+            .current_manifest(graph.request.reference())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .digest(),
+        predecessor
+    );
+
+    assert_eq!(
+        graph.adapter.scope_index_count(graph.request.reference())?,
+        0
+    );
+    Ok(())
+}
+
+fn fork_input(extension: ErasureScopeExtensionV1) -> ErasureForkAdmissionInputV1 {
+    ErasureForkAdmissionInputV1 {
+        operation: reference(180),
+        expected_inventory_generation: reference(181),
+        child_scope: extension.fork(),
+        child: TimelineMeta {
+            id: TimelineId::new(),
+            mode: TimelineMode::Historical,
+            name: Some("failure-child".to_owned()),
+            owner: None,
+            fork_point: Some((TimelineId::new(), Seq::from_u64(1))),
+        },
+    }
+}
+
+#[test]
+fn fork_preparation_rejects_missing_recovery_context() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let request = request()?;
+    let adapter = port(vec![target(10)], Some(lineage_rule));
+    let committed_scope = scope(request.reference(), &[target(10)], lineage_rule)?;
+    let prepared_extension = extension(request.reference(), &committed_scope, lineage_rule)?;
+    let input = fork_input(prepared_extension);
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR).prepare_fork_admission(
+            request.reference(),
+            prepared_extension,
+            input.clone()
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut submitted = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
+    submitted.submit(request.clone(), request.provenance())?;
+    assert_eq!(
+        submitted.prepare_fork_admission(request.reference(), prepared_extension, input),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let graph = completed_graph(vec![target(10)], None)?;
+    let unrelated_scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let unrelated_extension = extension(graph.request.reference(), &unrelated_scope, lineage_rule)?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR).prepare_fork_admission(
+            graph.request.reference(),
+            unrelated_extension,
+            fork_input(unrelated_extension),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn fork_preparation_rejects_mismatched_or_unavailable_admission() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let committed_scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let mismatched = extension(reference(199), &committed_scope, lineage_rule)?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+            .prepare_fork_admission(
+                graph.request.reference(),
+                mismatched,
+                fork_input(mismatched),
+            ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let extension = extension(graph.request.reference(), &committed_scope, lineage_rule)?;
+    let unavailable = graph.adapter.with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::AdmitScopeExtension,
+        occurrence: 0,
+    });
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(unavailable, COORDINATOR).prepare_fork_admission(
+            graph.request.reference(),
+            extension,
+            fork_input(extension),
+        ),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn fork_preparation_rejects_unbound_child_metadata() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let scope = scope(graph.request.reference(), &[target(10)], lineage_rule)?;
+    let extension = extension(graph.request.reference(), &scope, lineage_rule)?;
+    let base = ErasureForkAdmissionInputV1 {
+        operation: reference(180),
+        expected_inventory_generation: reference(181),
+        child_scope: extension.fork(),
+        child: TimelineMeta {
+            id: TimelineId::new(),
+            mode: TimelineMode::Historical,
+            name: Some("invalid-child".to_owned()),
+            owner: None,
+            fork_point: None,
+        },
+    };
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+            .prepare_fork_admission(graph.request.reference(), extension, base.clone()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR).prepare_fork_admission(
+            graph.request.reference(),
+            extension,
+            ErasureForkAdmissionInputV1 {
+                child_scope: reference(182),
+                child: TimelineMeta {
+                    fork_point: Some((TimelineId::new(), Seq::from_u64(1))),
+                    ..base.child.clone()
+                },
+                ..base
+            },
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR).prepare_fork_admission(
+            graph.request.reference(),
+            extension,
+            ErasureForkAdmissionInputV1 {
+                child: TimelineMeta {
+                    mode: TimelineMode::Live,
+                    fork_point: Some((TimelineId::new(), Seq::from_u64(1))),
+                    ..base.child.clone()
+                },
+                ..base
+            },
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn coordinator_verifies_complete_nonempty_inventory() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let timeline = TimelineId::new();
+    let observation = ErasureInventoryObservationV1::new(
+        vec![(request, manifest)],
+        vec![timeline],
+        vec![(
+            request,
+            ErasureVerifiedTopologyObservationV1::new(
+                manifest,
+                vec![(timeline, reference(7))],
+                Vec::new(),
+            ),
+        )],
+    );
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        graph
+            .adapter
+            .with_complete_inventory_observation(observation),
+        COORDINATOR,
+    );
+    let inventory = coordinator.verified_inventory(4)?;
+    assert_eq!(inventory.request_count(), 1);
+    assert_ne!(inventory.generation(), reference(0));
+    Ok(())
+}
+
+#[test]
+fn coordinator_rejects_inventory_bound_and_order_violations() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let timeline = TimelineId::new();
+    let topology = |topology_request| {
+        (
+            topology_request,
+            ErasureVerifiedTopologyObservationV1::new(manifest, Vec::new(), vec![timeline]),
+        )
+    };
+    let verify = |observation, maximum_requests| {
+        ErasureCoordinatorStateMachineV1::new(
+            graph
+                .adapter
+                .clone()
+                .with_complete_inventory_observation(observation),
+            COORDINATOR,
+        )
+        .verified_inventory(maximum_requests)
+    };
+    let observations = [
+        (
+            ErasureInventoryObservationV1::new(Vec::new(), Vec::new(), Vec::new()),
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS + 1,
+        ),
+        (
+            ErasureInventoryObservationV1::new(
+                vec![(reference(1), manifest), (reference(2), manifest)],
+                vec![timeline],
+                vec![topology(reference(1)), topology(reference(2))],
+            ),
+            1,
+        ),
+        (
+            ErasureInventoryObservationV1::new(
+                vec![(reference(2), manifest), (reference(1), manifest)],
+                vec![timeline],
+                vec![topology(reference(1)), topology(reference(2))],
+            ),
+            4,
+        ),
+        (
+            ErasureInventoryObservationV1::new(
+                vec![(reference(1), manifest), (reference(2), manifest)],
+                vec![timeline],
+                vec![topology(reference(2)), topology(reference(1))],
+            ),
+            4,
+        ),
+    ];
+    for (observation, maximum_requests) in observations {
+        assert_eq!(
+            verify(observation, maximum_requests),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_rejects_incomplete_or_stale_inventory_observations() -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let timeline = TimelineId::new();
+    let topology = |topology_request, topology_manifest| {
+        (
+            topology_request,
+            ErasureVerifiedTopologyObservationV1::new(
+                topology_manifest,
+                Vec::new(),
+                vec![timeline],
+            ),
+        )
+    };
+    let verify = |observation, maximum_requests| {
+        ErasureCoordinatorStateMachineV1::new(
+            graph
+                .adapter
+                .clone()
+                .with_complete_inventory_observation(observation),
+            COORDINATOR,
+        )
+        .verified_inventory(maximum_requests)
+    };
+
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(request, manifest)],
+                vec![timeline],
+                vec![topology(request, manifest)],
+            ),
+            0,
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(request, manifest)],
+                vec![timeline],
+                Vec::new(),
+            ),
+            4,
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(request, manifest), (request, manifest)],
+                vec![timeline],
+                vec![topology(request, manifest), topology(request, manifest)],
+            ),
+            4,
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(request, manifest)],
+                vec![timeline],
+                vec![topology(reference(250), manifest)],
+            ),
+            4,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(request, reference(251))],
+                vec![timeline],
+                vec![topology(request, reference(251))],
+            ),
+            4,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        verify(
+            ErasureInventoryObservationV1::new(
+                vec![(reference(252), manifest)],
+                vec![timeline],
+                vec![topology(reference(252), manifest)],
+            ),
+            4,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
 }
 
 #[test]

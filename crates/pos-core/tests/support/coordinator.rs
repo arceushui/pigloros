@@ -16,14 +16,16 @@ use pos_core::{
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
     ErasureCoordinatorPortV1, ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1,
-    ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureIndexInsertV1,
-    ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
+    ErasureFreezeFailureV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
+    ErasureInventoryObservationV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
-    ErasureStateTransitionV1, ErasureStateV1, PreparedErasureRecoveryErrorV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedTopologyObservationV1,
+    PreparedErasureRecoveryErrorV1, TimelineId,
 };
 
 use crate::erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
@@ -65,6 +67,8 @@ pub const SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD: usize = 4;
 pub const FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD: usize = 3;
 pub const OBLIGATION_SET_POLICY_FIELD: usize = 4;
 pub const OBLIGATION_SET_TRUST_FIELD: usize = 5;
+
+type VerifiedTopologyObservation = (Vec<(TimelineId, ErasureReferenceV1)>, Vec<TimelineId>);
 
 /// Configuration for the host side of the public coordinator fixture.
 #[derive(Clone)]
@@ -291,6 +295,9 @@ pub struct PublicCoordinatorPort {
     dispatch_calls: Rc<RefCell<u64>>,
     operation_fault_hits: Rc<Cell<u64>>,
     allow_overbound_recovery_errors: bool,
+    topology_observation: Rc<RefCell<Option<VerifiedTopologyObservation>>>,
+    topology_manifest_override: Rc<RefCell<Option<ErasureReferenceV1>>>,
+    inventory_observation: Rc<RefCell<Option<ErasureInventoryObservationV1>>>,
     config: PublicCoordinatorPortConfig,
 }
 
@@ -304,8 +311,36 @@ impl PublicCoordinatorPort {
             dispatch_calls: Rc::new(RefCell::new(0)),
             operation_fault_hits: Rc::new(Cell::new(0)),
             allow_overbound_recovery_errors: false,
+            topology_observation: Rc::new(RefCell::new(None)),
+            topology_manifest_override: Rc::new(RefCell::new(None)),
+            inventory_observation: Rc::new(RefCell::new(None)),
             config,
         }
+    }
+
+    #[must_use]
+    pub fn with_verified_topology(
+        self,
+        bindings: Vec<(TimelineId, ErasureReferenceV1)>,
+        unaffected: Vec<TimelineId>,
+    ) -> Self {
+        *self.topology_observation.borrow_mut() = Some((bindings, unaffected));
+        self
+    }
+
+    #[must_use]
+    pub fn with_topology_manifest_override(self, manifest: ErasureReferenceV1) -> Self {
+        *self.topology_manifest_override.borrow_mut() = Some(manifest);
+        self
+    }
+
+    #[must_use]
+    pub fn with_complete_inventory_observation(
+        self,
+        observation: ErasureInventoryObservationV1,
+    ) -> Self {
+        *self.inventory_observation.borrow_mut() = Some(observation);
+        self
     }
 
     #[must_use]
@@ -1525,6 +1560,42 @@ impl ErasureRecoveryAuthorizationVerifierV1 for PublicCoordinatorPort {
 }
 
 impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
+    fn complete_erasure_inventory_observation(
+        &self,
+        _maximum_requests: usize,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
+        self.inventory_observation
+            .borrow()
+            .clone()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn verified_topology_observation(
+        &self,
+        request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        self.maybe_fail(PublicCoordinatorOperation::LoadManifest)?;
+        let Some((bindings, unaffected)) = self.topology_observation.borrow().clone() else {
+            return Ok(None);
+        };
+        let current_manifest = self
+            .current_manifest(request)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if current_manifest.digest() != manifest_digest {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let observed_manifest = self
+            .topology_manifest_override
+            .borrow()
+            .unwrap_or(manifest_digest);
+        Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+            observed_manifest,
+            bindings,
+            unaffected,
+        )))
+    }
+
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         self.maybe_fail(PublicCoordinatorOperation::Authenticate)
     }
@@ -1623,6 +1694,15 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
     fn admit_scope_extension(
         &self,
         _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.maybe_fail(PublicCoordinatorOperation::AdmitScopeExtension)?;
+        Ok(())
+    }
+
+    fn admit_fork_scope_extension(
+        &self,
+        _extension: &ErasureScopeExtensionV1,
+        _input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
         self.maybe_fail(PublicCoordinatorOperation::AdmitScopeExtension)?;
         Ok(())

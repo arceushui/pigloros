@@ -2,12 +2,13 @@
 #![cfg(feature = "sqlite")]
 
 use pos_core::{
-    CoreError, EntityId, Event, EventDraft, EventId, EventStore, Hash, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Seq, TimelineId,
+    CoreError, EntityId, ErasureContainmentGateV1, Event, EventDraft, EventId, EventStore, Hash,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Seq,
+    TimelineId,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use rusqlite::params;
-use std::cell::Cell;
+use std::{cell::Cell, sync::Arc};
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
@@ -67,6 +68,10 @@ fn destroy_store<S: EventStore>(
     store.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))
 }
 
+fn bind_test_erasure_gate<S: EventStore + ?Sized>(store: &mut S) -> Result<(), CoreError> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
 fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, CoreError> {
     store
         .append(
@@ -87,6 +92,7 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, identity, material_digest) = registry()?;
     let mut store = SqliteStore::open_in_memory()?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(store.load_key_registry()?.is_none());
     store.save_key_registry(&registry)?;
     assert_eq!(store.load_key_registry()?, Some(registry.clone()));
@@ -191,6 +197,7 @@ fn sqlite_key_registry_initialization_public_contract_covers_reuse_and_creation(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let empty = KeyRegistryStateV1::new();
     let mut store = SqliteStore::open_in_memory()?;
+    bind_test_erasure_gate(&mut store)?;
     let created = store.initialize_timeline_with_key_registry("ledger", &empty)?;
     assert_eq!(created.meta.name.as_deref(), Some("ledger"));
     assert_eq!(store.load_key_registry()?, Some(empty.clone()));
@@ -200,12 +207,14 @@ fn sqlite_key_registry_initialization_public_contract_covers_reuse_and_creation(
 
     let (registry, _, _) = registry()?;
     let mut persisted = SqliteStore::open_in_memory()?;
+    bind_test_erasure_gate(&mut persisted)?;
     persisted.save_key_registry(&registry)?;
     let created_with_registry =
         persisted.initialize_timeline_with_key_registry("ledger", &registry)?;
     assert_eq!(created_with_registry.meta.name.as_deref(), Some("ledger"));
 
     let mut mismatch = SqliteStore::open_in_memory()?;
+    bind_test_erasure_gate(&mut mismatch)?;
     mismatch.save_key_registry(&registry)?;
     let mismatch_error = mismatch
         .initialize_timeline_with_key_registry("ledger", &empty)
@@ -228,6 +237,7 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
         .ok_or("temporary database path is not UTF-8")?;
     let (registry, identity, material_digest) = registry()?;
     let mut setup = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut setup)?;
     setup.save_key_registry(&registry)?;
     let timeline = setup.create_timeline("registry-ordering")?;
     let timeline_id = timeline.id();
@@ -237,6 +247,8 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
 
     let mut signing_store = SqliteStore::open(path)?;
     let mut destruction_store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut signing_store)?;
+    bind_test_erasure_gate(&mut destruction_store)?;
     let destruction_request =
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32]));
     let (callback_entered_tx, callback_entered_rx) = std::sync::mpsc::channel();
@@ -293,6 +305,7 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
     assert!(destroy_result.is_ok());
 
     let mut late_signing_store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut late_signing_store)?;
     let mut callback_called = false;
     let mut late_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
         callback_called = true;
@@ -327,6 +340,7 @@ fn sqlite_key_registry_load_rejects_malformed_persisted_state(
         .ok_or("temporary database path is not UTF-8")?;
     let (registry, _, _) = registry()?;
     let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     store.save_key_registry(&registry)?;
     drop(store);
 
@@ -355,6 +369,7 @@ fn sqlite_key_registry_initialization_rejects_malformed_persisted_state(
         .ok_or("temporary database path is not UTF-8")?;
     let (registry, _, _) = registry()?;
     let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     store.save_key_registry(&registry)?;
     drop(store);
 
@@ -366,6 +381,7 @@ fn sqlite_key_registry_initialization_rejects_malformed_persisted_state(
     drop(connection);
 
     let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(matches!(
         store.initialize_timeline_with_key_registry("ledger", &registry),
         Err(CoreError::Serialization(_))
@@ -387,6 +403,7 @@ fn sqlite_key_registry_mutations_reject_read_only_transactions(
     drop(store);
 
     let mut read_only = SqliteStore::open_read_only(path)?;
+    bind_test_erasure_gate(&mut read_only)?;
     assert!(matches!(
         read_only.save_key_registry(&registry),
         Err(CoreError::Storage(_))
@@ -408,10 +425,12 @@ fn sqlite_key_registry_all_mutating_boundaries_reject_read_only_transactions(
         .ok_or("temporary database path is not UTF-8")?;
     let (registry, identity, material_digest) = registry()?;
     let mut setup = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut setup)?;
     let timeline = setup.initialize_timeline_with_key_registry("ledger", &registry)?;
     drop(setup);
 
     let mut read_only = SqliteStore::open_read_only(path)?;
+    bind_test_erasure_gate(&mut read_only)?;
     assert!(matches!(
         read_only.initialize_timeline_with_key_registry("another", &registry),
         Err(CoreError::Storage(_))
@@ -478,6 +497,7 @@ fn sqlite_key_registry_rejects_a_decodable_invalid_snapshot(
     assert!(invalid.validate().is_err());
 
     let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     store.save_key_registry(&registry)?;
     assert!(matches!(
         store.save_key_registry(&invalid),
@@ -510,6 +530,7 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
         .to_str()
         .ok_or("temporary database path is not UTF-8")?;
     let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     let timeline = store.create_timeline("invalid-signature-identity")?;
     seed_event(&mut store, timeline.id())?;
     drop(store);
@@ -523,7 +544,8 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
         )?;
         drop(connection);
 
-        let store = SqliteStore::open(path)?;
+        let mut store = SqliteStore::open(path)?;
+        bind_test_erasure_gate(&mut store)?;
         assert!(matches!(
             store.read(timeline.id(), pos_core::SeqRange::all()),
             Err(CoreError::Serialization(_))
@@ -537,7 +559,8 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
         params![timeline.id().to_string()],
     )?;
     drop(connection);
-    let store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(matches!(
         store.read(timeline.id(), pos_core::SeqRange::all()),
         Err(CoreError::Serialization(_))
@@ -550,7 +573,8 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
         params![timeline.id().to_string()],
     )?;
     drop(connection);
-    let store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(matches!(
         store.read(timeline.id(), pos_core::SeqRange::all()),
         Err(CoreError::Storage(_))
@@ -563,7 +587,8 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
         params![timeline.id().to_string()],
     )?;
     drop(connection);
-    let store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(matches!(
         store.read(timeline.id(), pos_core::SeqRange::all()),
         Err(CoreError::Storage(_))
@@ -576,7 +601,8 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
         params![timeline.id().to_string()],
     )?;
     drop(connection);
-    let store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(matches!(
         store.read(timeline.id(), pos_core::SeqRange::all()),
         Err(CoreError::Storage(_))
@@ -589,7 +615,8 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
         params![timeline.id().to_string()],
     )?;
     drop(connection);
-    let store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(matches!(
         store.read(timeline.id(), pos_core::SeqRange::all()),
         Err(CoreError::Serialization(_))
@@ -601,6 +628,7 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
 fn sqlite_key_registry_requires_a_persisted_snapshot_for_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut store = SqliteStore::open_in_memory()?;
+    bind_test_erasure_gate(&mut store)?;
     let timeline = store.create_timeline("missing-registry")?;
     let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
         Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
@@ -635,6 +663,7 @@ fn memory_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, identity, material_digest) = registry()?;
     let mut store = MemoryStore::new();
+    bind_test_erasure_gate(&mut store)?;
     assert_eq!(store.load_key_registry()?, None);
     store.save_key_registry(&registry)?;
     assert_eq!(store.load_key_registry()?, Some(registry.clone()));

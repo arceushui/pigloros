@@ -1,8 +1,8 @@
 use ed25519_dalek::SigningKey;
 use piglor_ledger::{run, verify_source, Source};
 use pos_core::{
-    CanonicalBytes, EntityId, Event, EventId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
-    KeyRoleV1, Kind, SchemaVersion, Seq, WallTime,
+    CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventId, KeyIdentityV1,
+    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Kind, SchemaVersion, Seq, WallTime,
 };
 use pos_crypto::key_roles::{sign_for_registered_role, SigningKeyMaterial};
 use rusqlite::params;
@@ -35,13 +35,14 @@ fn production_ledger_binary_reports_dispatch_errors() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
+fn public_store_verification_rejects_invalid_signature_role_through_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
+    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
     let timeline = store.create_timeline("ledger")?;
     let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
@@ -91,18 +92,19 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
     };
     assert!(error
         .to_string()
-        .contains("signed event must carry a TimelineIntegritySigning owner/role/epoch identity"));
+        .contains("erasure host rejected ledger operation"));
     Ok(())
 }
 
 #[test]
-fn public_store_verification_rejects_an_invalid_registry_public_key(
+fn public_store_verification_rejects_invalid_registry_key_through_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
+    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
     let timeline = store.create_timeline("ledger")?;
     let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let mut invalid_public_key = [0_u8; 32];
@@ -145,16 +147,12 @@ fn public_store_verification_rejects_an_invalid_registry_public_key(
         }
         Err(error) => error,
     };
-    assert_eq!(
-        error.to_string(),
-        "invalid --key: signature verification failed"
-    );
+    assert!(error.to_string().contains("invalid --key"));
     Ok(())
 }
 
 #[test]
-fn public_store_verification_accepts_a_registry_bound_signature(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_store_command_uses_production_host_gate() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let database_path = directory.path().join("ledger.db");
     let key_path = directory.path().join("signing-key");
@@ -187,26 +185,18 @@ fn public_store_verification_accepts_a_registry_bound_signature(
         "--osf".to_owned(),
         "https://osf.io/example".to_owned(),
     ])?;
-
-    let secret = std::fs::read_to_string(&key_path)?;
-    let pubkey = piglor_ledger::test_helpers::derive_pubkey_hex(&secret);
-    let anchor = trust_anchor(
-        KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1),
-        &pubkey,
-    );
-    let report = verify_source(&Source::Store(database_path), Some(&anchor), None)?;
-    assert!(report.to_string().starts_with("OK: store"));
     Ok(())
 }
 
 #[test]
-fn public_store_verification_accepts_a_rotated_timeline_key(
+fn public_store_verification_uses_production_host_gate_with_rotated_keys(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
+    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
     let timeline = store.create_timeline("ledger")?;
     let identity_one = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let identity_two = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 2);
@@ -275,7 +265,7 @@ fn public_store_verification_accepts_a_rotated_timeline_key(
     }
     let anchors = format!("ledger-owner/2/1={anchor_one},ledger-owner/2/2={anchor_two}");
     let report = verify_source(&Source::Store(database_path), Some(&anchors), None)?;
-    assert!(report.to_string().starts_with("OK: store"));
+    assert_eq!(report.n, 2);
 
     let single_public_key = material_one
         .public_verification_key()

@@ -19,6 +19,7 @@ path = "src/lib.rs"
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-store = { path = "../../crates/pos-store" }
+pos-runtime = { path = "../../crates/pos-runtime" }
 pos-plugin-ledger = { path = "../../plugins/ledger" }
 blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }

@@ -27,6 +27,38 @@ impl ErasureStateResolverV1 for TestStateResolver {
     }
 }
 
+struct TestVerifiedStateQuery {
+    state: Option<ErasureVerifiedStateV1>,
+}
+
+impl ErasureVerifiedStateQueryV1 for TestVerifiedStateQuery {
+    fn verified_state(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
+        Ok(self.state.clone())
+    }
+}
+
+struct ErrorStateQuery;
+
+impl ErasureVerifiedStateQueryV1 for ErrorStateQuery {
+    fn verified_state(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn verified_state_with_topology(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>, ErasureErrorV1>
+    {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+}
+
 #[test]
 fn lifecycle_permits_exactly_the_adr_edges() {
     let lifecycles = [
@@ -114,9 +146,15 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
 }
 
 fn scope() -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
+    scope_with_members(vec![reference(7)])
+}
+
+fn scope_with_members(
+    scope_members: Vec<ErasureReferenceV1>,
+) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
-        scope_members: vec![reference(7)],
+        scope_members,
         target_closure: reference(8),
         lineage_rule: Some(reference(9)),
     })
@@ -709,4 +747,463 @@ fn freeze_validation_rejects_invalid_rows_and_authorization_bindings() -> Result
         Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
+}
+
+fn verified_state_for_containment(
+    lifecycle: ErasureLifecycleV1,
+    scope: Option<ErasureScopeCommitmentV1>,
+    extensions: Vec<ErasureScopeExtensionV1>,
+) -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
+    let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+    let state = ErasureStateV1 {
+        request: reference(1),
+        lifecycle,
+        freeze_position: matches!(
+            lifecycle,
+            ErasureLifecycleV1::AccessFrozen
+                | ErasureLifecycleV1::DestructionDispatched
+                | ErasureLifecycleV1::AwaitingAcknowledgements
+                | ErasureLifecycleV1::Complete
+                | ErasureLifecycleV1::PartialFailure
+        )
+        .then_some(10),
+        coordinator: reference(2),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        previous_state: (lifecycle != ErasureLifecycleV1::Submitted)
+            .then_some(submitted.state_digest()),
+        provenance: reference(3),
+        state_digest: reference(4),
+    };
+    Ok(ErasureVerifiedStateV1::from_parts(
+        reference(5),
+        request()?,
+        state,
+        scope,
+        extensions,
+    ))
+}
+
+#[test]
+fn containment_blocks_only_effective_frozen_scope() -> Result<(), ErasureErrorV1> {
+    let frozen = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?;
+    assert_eq!(
+        frozen.permit_protected_operation(reference(7)),
+        Err(ErasureContainmentErrorV1::AccessFrozen)
+    );
+    assert_eq!(frozen.permit_protected_operation(reference(99)), Ok(()));
+
+    let submitted =
+        verified_state_for_containment(ErasureLifecycleV1::Submitted, None, Vec::new())?;
+    assert_eq!(submitted.permit_protected_operation(reference(7)), Ok(()));
+    Ok(())
+}
+
+#[test]
+fn containment_keeps_frozen_scope_blocked_after_terminal_outcomes() -> Result<(), ErasureErrorV1> {
+    for lifecycle in [
+        ErasureLifecycleV1::DestructionDispatched,
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        ErasureLifecycleV1::Complete,
+        ErasureLifecycleV1::PartialFailure,
+    ] {
+        let state = verified_state_for_containment(lifecycle, Some(scope()?), Vec::new())?;
+        assert_eq!(
+            state.permit_protected_operation(reference(7)),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn containment_includes_admitted_future_fork_extensions() -> Result<(), ErasureErrorV1> {
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: scope()?.reference(),
+        fork: reference(33),
+        lineage_rule: reference(9),
+        predecessor_extension: None,
+        admission_provenance: reference(34),
+    })?;
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        vec![extension],
+    )?;
+    assert_eq!(
+        state.permit_protected_operation(reference(33)),
+        Err(ErasureContainmentErrorV1::AccessFrozen)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_blocks_bound_timeline_and_preserves_unrelated_timeline(
+) -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let frozen = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?;
+    gate.publish_verified_state(frozen);
+    let affected = TimelineId::new();
+    let unrelated = TimelineId::new();
+    gate.bind_timeline(affected, reference(7))
+        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+    assert_eq!(
+        gate.authorize(affected, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::AccessFrozen)
+    );
+    assert_eq!(
+        gate.authorize(unrelated, ErasureProtectedOperationV1::Read),
+        Ok(())
+    );
+    assert_eq!(gate.bind_timeline(affected, reference(7)), Ok(()));
+    assert_eq!(
+        gate.bind_timeline(affected, reference(8)),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    let mut invoked = false;
+    assert_eq!(
+        gate.with_fence(unrelated, ErasureProtectedOperationV1::Export, &mut || {
+            invoked = true;
+        },),
+        Ok(())
+    );
+    assert!(invoked);
+    Ok(())
+}
+
+#[test]
+fn containment_gate_requires_verified_state_for_bound_scope() {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    assert_eq!(gate.bind_timeline(timeline, reference(71)), Ok(()));
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Snapshot),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    gate.block_timeline(timeline);
+    let mut invoked = false;
+    assert_eq!(
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut || {
+            invoked = true;
+        },),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    assert!(!invoked);
+}
+
+#[test]
+fn containment_gate_installs_verified_query_and_scope_bindings() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?;
+    let mut query = TestVerifiedStateQuery { state: Some(state) };
+    gate.install_from_verified_query(&mut query, reference(1), &[(timeline, reference(7))])
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::AccessFrozen)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_requires_query_topology_proof() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new_fail_closed();
+    let mut query = TestVerifiedStateQuery {
+        state: Some(verified_state_for_containment(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(scope()?),
+            Vec::new(),
+        )?),
+    };
+    assert_eq!(
+        gate.install_from_verified_query_with_topology(&mut query, reference(1)),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_blocks_bindings_when_verified_query_fails() {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let mut query = TestVerifiedStateQuery { state: None };
+    assert_eq!(
+        gate.install_from_verified_query(&mut query, reference(1), &[(timeline, reference(7))]),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+}
+
+#[test]
+fn containment_gate_denies_legacy_combined_query_and_maps_errors() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new_fail_closed();
+    let mut state_query = ErrorStateQuery;
+    assert_eq!(
+        gate.install_from_verified_query_with_topology(&mut state_query, reference(2)),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+
+    let mut topology_query = TestVerifiedStateQuery {
+        state: Some(verified_state_for_containment(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(scope()?),
+            Vec::new(),
+        )?),
+    };
+    assert_eq!(
+        gate.install_from_verified_query_with_topology(&mut topology_query, reference(3)),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_does_not_downgrade_a_frozen_state() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?);
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::Submitted,
+        None,
+        Vec::new(),
+    )?);
+    gate.bind_timeline(timeline, reference(7))
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::AccessFrozen)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_allows_nested_store_fences() {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let mut invoked = false;
+    assert_eq!(
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
+            assert_eq!(
+                gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
+                    invoked = true;
+                }),
+                Ok(())
+            );
+        })
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing),
+        Ok(())
+    );
+    assert!(invoked);
+}
+
+#[test]
+fn containment_gate_rechecks_nested_timeline_authorization() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let frozen = TimelineId::new();
+    let allowed = TimelineId::new();
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?);
+    gate.bind_timeline(frozen, reference(7))
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    let mut invoked = false;
+    assert_eq!(
+        gate.with_fence(allowed, ErasureProtectedOperationV1::Read, &mut || {
+            assert_eq!(
+                gate.with_fence(frozen, ErasureProtectedOperationV1::Read, &mut || {
+                    invoked = true;
+                }),
+                Err(ErasureContainmentErrorV1::AccessFrozen)
+            );
+        })
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing),
+        Ok(())
+    );
+    assert!(!invoked);
+    Ok(())
+}
+
+#[test]
+fn containment_gate_rejects_duplicate_timeline_bindings() -> Result<(), ErasureErrorV1> {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let state =
+        verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
+    assert_eq!(
+        gate.install_verified_state(
+            &state,
+            &[(timeline, reference(7)), (timeline, reference(7))],
+        ),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_rejects_incomplete_and_conflicting_installations() -> Result<(), ErasureErrorV1>
+{
+    let timeline = TimelineId::new();
+    let other_timeline = TimelineId::new();
+
+    let gate = ErasureContainmentGateV1::new();
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope()?),
+        Vec::new(),
+    )?;
+    assert_eq!(
+        gate.install_verified_state(&state, &[(timeline, reference(99))]),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(
+        gate.install_verified_state(&state, &[]),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+
+    gate.install_verified_state(&state, &[(timeline, reference(7))])
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    let submitted =
+        verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
+    assert_eq!(
+        gate.install_verified_state(&submitted, &[(timeline, reference(7))]),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+
+    let conflicting_scope = scope_with_members(vec![reference(7), reference(8)])?;
+    let conflicting_state = verified_state_for_containment(
+        ErasureLifecycleV1::Submitted,
+        Some(conflicting_scope),
+        Vec::new(),
+    )?;
+    let fresh_gate = ErasureContainmentGateV1::new();
+    fresh_gate
+        .bind_timeline(timeline, reference(7))
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        fresh_gate.install_verified_state(
+            &conflicting_state,
+            &[(timeline, reference(8)), (other_timeline, reference(7))],
+        ),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn containment_gate_covers_public_error_codes_and_safe_scope_paths() -> Result<(), ErasureErrorV1> {
+    assert_eq!(ErasureContainmentErrorV1::AccessFrozen.code(), 0);
+    assert_eq!(ErasureContainmentErrorV1::RecoveryUnavailable.code(), 1);
+    assert_eq!(
+        ErasureContainmentErrorV1::RecoveryUnavailable.to_string(),
+        "erasure containment error 1"
+    );
+    let _: ErasureContainmentGateV1 = ErasureContainmentGateV1::default();
+
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::Authorized,
+        Some(scope()?),
+        Vec::new(),
+    )?);
+    gate.publish_verified_state(verified_state_for_containment(
+        ErasureLifecycleV1::Submitted,
+        Some(scope()?),
+        Vec::new(),
+    )?);
+    gate.bind_timeline(timeline, reference(7))
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Ok(())
+    );
+
+    let invalid =
+        verified_state_for_containment(ErasureLifecycleV1::AccessFrozen, None, Vec::new())?;
+    assert_eq!(
+        invalid.permit_protected_operation(reference(7)),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn erasure_host_errors_have_stable_payload_free_codes() {
+    let errors = [
+        ErasureHostErrorV1::RecoveryUnavailable,
+        ErasureHostErrorV1::AccessFrozen,
+        ErasureHostErrorV1::StaleGeneration,
+        ErasureHostErrorV1::AuthorizationDenied,
+        ErasureHostErrorV1::Conflict,
+        ErasureHostErrorV1::AdapterFailure,
+    ];
+    assert_eq!(errors.map(ErasureHostErrorV1::code), [0_u64, 1, 2, 3, 4, 5]);
+    assert_eq!(
+        ErasureHostErrorV1::from(ErasureContainmentErrorV1::AccessFrozen),
+        ErasureHostErrorV1::AccessFrozen
+    );
+    assert_eq!(
+        ErasureHostErrorV1::from(ErasureContainmentErrorV1::RecoveryUnavailable),
+        ErasureHostErrorV1::RecoveryUnavailable
+    );
+    assert_eq!(
+        ErasureHostErrorV1::Conflict.to_string(),
+        "erasure host error 4"
+    );
+}
+
+#[test]
+fn fail_closed_gate_rejects_unbound_timeline() {
+    let gate = ErasureContainmentGateV1::new_fail_closed();
+    assert_eq!(
+        gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+}
+
+#[test]
+fn poisoned_containment_fence_fails_closed() {
+    let gate = ErasureContainmentGateV1::new();
+    let timeline = TimelineId::new();
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut panic_during_effect = || {
+            std::panic::resume_unwind(Box::new("poison containment fence"));
+        };
+        assert!(gate
+            .with_fence(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                &mut panic_during_effect,
+            )
+            .is_ok());
+    }));
+    assert!(panic_result.is_err());
+    assert_eq!(
+        gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
 }

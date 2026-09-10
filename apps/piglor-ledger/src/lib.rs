@@ -29,10 +29,46 @@ macro_rules! output_stderr {
 pub(crate) mod cli;
 pub(crate) mod export;
 pub mod hex;
+mod host_store;
 pub(crate) mod html;
 pub(crate) mod json;
 pub mod key_output;
 pub(crate) mod verify;
+
+/// Private compatibility adapter for the ledger domain port.
+///
+/// The concrete store never escapes the execution host. Every implemented
+/// `EventStore` operation delegates to a generation-bound host sender; all
+/// other trait operations retain their fail-closed defaults.
+struct HostedLedgerStore {
+    host: std::sync::Mutex<pos_runtime::ErasureExecutionHostV1>,
+    ledger_timeline: Option<pos_core::TimelineId>,
+}
+
+impl HostedLedgerStore {
+    fn open(config: pos_store::StoreConfig) -> Result<Self, pos_core::ErasureHostErrorV1> {
+        pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            config,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .map(Self::from_host)
+    }
+
+    fn open_read_only(path: &str) -> Result<Self, pos_core::ErasureHostErrorV1> {
+        pos_runtime::ErasureExecutionHostV1::open_read_only_verified_empty(
+            path,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .map(Self::from_host)
+    }
+
+    const fn from_host(host: pos_runtime::ErasureExecutionHostV1) -> Self {
+        Self {
+            host: std::sync::Mutex::new(host),
+            ledger_timeline: None,
+        }
+    }
+}
 
 /// Test support utilities shared across crate boundaries.
 pub mod test_helpers;
@@ -43,6 +79,22 @@ pub use html::{render_html, render_redirect, CONTENT_SECURITY_POLICY};
 pub use json::render_json;
 pub use pos_plugin_ledger::LedgerView;
 pub use verify::run as verify_source;
+
+/// Bind the permissive host gate used by this crate's in-process store tests.
+///
+/// Production composition roots must install their authoritative recovered
+/// gate; test fixtures use an empty gate so they can exercise ledger behavior
+/// without fabricating erasure evidence.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn bind_test_store_gate(
+    mut store: Box<dyn pos_core::store::EventStore>,
+) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    store.bind_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new(),
+    ))?;
+    Ok(store)
+}
 
 /// Return the committed author identity used for ledger Events.
 #[must_use]

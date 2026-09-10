@@ -6,14 +6,17 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentError, ConsentGate, ConsentGrantedV1, Plugin, PluginId, ProposedAction, Reducer, State,
+    ConsentError, ConsentGate, ConsentGrantedV1, ErasureContainmentGateV1, Plugin, PluginId,
+    ProposedAction, Reducer, State,
 };
 use pos_runtime::{
-    Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
+    ActionSubmissionError, Driver, ObservationView, PluginRegistry as RuntimePluginRegistry,
+    RuntimeError, StepOutput, TimelineHistorySegment,
 };
-use pos_store::{open_store, StoreConfig};
+use pos_store::{open_store, EventStore, StoreConfig};
 use std::{
     fmt::Debug,
+    ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -32,6 +35,82 @@ fn test_err<T: Debug, E>(result: Result<T, E>) -> E {
             std::panic::resume_unwind(Box::new(format!("unexpected error-path value: {value:?}")))
         }
         Err(error) => error,
+    }
+}
+
+fn gated_store() -> Box<dyn EventStore> {
+    let mut store = test_ok(open_store(StoreConfig::Memory));
+    test_ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+    store
+}
+
+/// Bind the host-owned erasure gate for all ordinary live-registry fixtures.
+/// Individual tests that exercise an unbound consent gate still call
+/// `without_consent_gate`, which leaves erasure containment bound.
+struct PluginRegistry(RuntimePluginRegistry);
+
+impl PluginRegistry {
+    fn new() -> Self {
+        Self(
+            RuntimePluginRegistry::new()
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new())),
+        )
+    }
+
+    fn new_replay() -> RuntimePluginRegistry {
+        RuntimePluginRegistry::new_replay()
+    }
+
+    #[must_use]
+    fn with_consent_authority(self, authority: ConsentAuthority) -> RuntimePluginRegistry {
+        self.0.with_consent_authority(authority)
+    }
+
+    #[must_use]
+    fn with_consent_gate(self, gate: Arc<dyn ConsentGate>) -> RuntimePluginRegistry {
+        self.0.with_consent_gate(gate)
+    }
+
+    #[must_use]
+    fn without_consent_gate(self) -> RuntimePluginRegistry {
+        self.0.without_consent_gate()
+    }
+
+    #[must_use]
+    fn with_resource_limit(self, limit: u64) -> RuntimePluginRegistry {
+        self.0.with_resource_limit(limit)
+    }
+
+    fn into_authorized_projections(
+        self,
+        timeline: TimelineId,
+        timeline_head: Seq,
+        now_secs: u64,
+        token: Option<&ConsentCapabilityToken>,
+        public_events: Option<&[Event]>,
+    ) -> Result<pos_state::ProjectionRegistry, RuntimeError> {
+        self.0
+            .into_authorized_projections(timeline, timeline_head, now_secs, token, public_events)
+    }
+}
+
+impl Default for PluginRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Deref for PluginRegistry {
+    type Target = RuntimePluginRegistry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for PluginRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -683,9 +762,7 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
 
 #[test]
 fn protected_append_fence_rejects_before_store_append() {
-    use pos_store::{open_store, StoreConfig};
-
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let timeline = test_ok(store.create_timeline("protected-fence"));
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -714,9 +791,7 @@ fn protected_append_fence_rejects_before_store_append() {
 
 #[test]
 fn append_fence_revalidates_caller_supplied_drafts() {
-    use pos_store::{open_store, StoreConfig};
-
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let timeline = test_ok(store.create_timeline("protected-draft-replacement"));
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -742,9 +817,7 @@ fn append_fence_revalidates_caller_supplied_drafts() {
 
 #[test]
 fn public_append_fence_revalidates_caller_supplied_drafts() {
-    use pos_store::{open_store, StoreConfig};
-
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let timeline = test_ok(store.create_timeline("public-draft-replacement"));
     let subject = EntityId::new();
     let mut registry = PluginRegistry::new();
@@ -784,8 +857,6 @@ fn protected_public_seam_aborts_when_the_gate_rejects_a_draft() {
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
-    use pos_store::{open_store, StoreConfig};
-
     let timeline = TimelineId::new();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -832,7 +903,7 @@ fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
 
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let mut empty = PluginRegistry::new();
     assert!(matches!(
         test_err(empty.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[],)),
@@ -1225,8 +1296,50 @@ fn public_registry_rejects_oversized_actions() {
         Kind::new("action.type.submit"),
     );
     assert!(matches!(
-        action_registry.submit_action(&oversized),
-        Err(ActionRejected::PayloadTooLarge { .. })
+        action_registry.submit_action(TimelineId::new(), &oversized),
+        Err(ActionSubmissionError::Rejected(
+            ActionRejected::PayloadTooLarge { .. }
+        ))
+    ));
+}
+
+#[test]
+fn public_registry_fails_closed_before_action_approval() {
+    let action_plugin = configured_plugin("fenced-action", &["action.type"], false, false);
+    let proposal = ProposedAction::new(
+        Kind::new("action.type"),
+        EntityId::new(),
+        CanonicalBytes::from_static(b"payload"),
+        Kind::new("action.type.submit"),
+    );
+    let timeline = TimelineId::new();
+
+    let mut unavailable = RuntimePluginRegistry::new();
+    test_ok(unavailable.register_with_approver(
+        &action_plugin,
+        None,
+        None,
+        Some(Box::new(AcceptingApprover)),
+        [Kind::new("action.type")],
+    ));
+    assert!(matches!(
+        unavailable.submit_action(timeline, &proposal),
+        Err(ActionSubmissionError::ErasureContainment(
+            pos_core::ErasureContainmentErrorV1::RecoveryUnavailable
+        ))
+    ));
+
+    let mut missing = RuntimePluginRegistry::new().without_erasure_gate();
+    test_ok(missing.register_with_approver(
+        &action_plugin,
+        None,
+        None,
+        Some(Box::new(AcceptingApprover)),
+        [Kind::new("action.type")],
+    ));
+    assert!(matches!(
+        missing.submit_action(timeline, &proposal),
+        Err(ActionSubmissionError::ErasureOperationUnavailable)
     ));
 }
 
@@ -1239,19 +1352,26 @@ fn public_registry_rejects_unknown_actions_in_live_and_replay_modes() {
         CanonicalBytes::from_static(b"unknown"),
         Kind::new("unknown.type.submit"),
     );
+    let timeline = TimelineId::new();
     assert!(matches!(
-        PluginRegistry::new().submit_action(&unknown),
-        Err(ActionRejected::UnknownEventType)
+        PluginRegistry::new().submit_action(timeline, &unknown),
+        Err(ActionSubmissionError::Rejected(
+            ActionRejected::UnknownEventType
+        ))
     ));
     assert!(matches!(
-        PluginRegistry::new_replay().submit_action(&unknown),
-        Err(ActionRejected::UnknownEventType)
+        PluginRegistry::new_replay()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .submit_action(timeline, &unknown),
+        Err(ActionSubmissionError::Rejected(
+            ActionRejected::UnknownEventType
+        ))
     ));
 }
 
 #[test]
 fn public_registry_propagates_public_append_store_errors() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let orphan_timeline = TimelineId::new();
     let mut public_append = PluginRegistry::new();
     test_ok(public_append.step_all_anchored(orphan_timeline, Seq::ZERO));
@@ -1263,7 +1383,7 @@ fn public_registry_propagates_public_append_store_errors() {
 
 #[test]
 fn public_registry_propagates_protected_append_store_errors() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let orphan_timeline = TimelineId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
@@ -1283,7 +1403,7 @@ fn public_registry_propagates_protected_append_store_errors() {
 
 #[test]
 fn public_registry_requires_a_gate_for_protected_append() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let orphan_timeline = TimelineId::new();
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
@@ -1304,11 +1424,11 @@ fn public_registry_requires_a_gate_for_protected_append() {
 
 #[test]
 fn public_registry_requires_a_gate_for_public_append() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let orphan_timeline = TimelineId::new();
     let mut public_missing_gate = PluginRegistry::new();
     test_ok(public_missing_gate.step_all_anchored(orphan_timeline, Seq::ZERO));
-    public_missing_gate = public_missing_gate.without_consent_gate();
+    let mut public_missing_gate = public_missing_gate.without_consent_gate();
     assert!(matches!(
         public_missing_gate.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
         Err(RuntimeError::ConsentOperationUnavailable)
@@ -1697,7 +1817,7 @@ fn public_registry_requires_snapshot_anchors() {
 
 #[test]
 fn public_registry_commits_and_appends_empty_anchored_steps() {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+    let mut store = gated_store();
     let timeline = test_ok(store.create_timeline("registry-metadata"));
     let mut anchored = PluginRegistry::new();
     assert!(test_ok(anchored.tick_cadenced_anchored(timeline.id(), 0, Seq::ZERO)).is_empty());

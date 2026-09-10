@@ -2,11 +2,13 @@ use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
     ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, State,
+    ReplayClaimEvaluatorV1, State, TimelineId,
 };
+use pos_runtime::ErasureExecutionHostV1;
 use pos_state::ProjectionRegistry;
-use pos_store::{open_store, StoreConfig};
+use pos_store::StoreConfig;
 use pos_time::{snapshot, verify_snapshot_consistency};
+use std::sync::Arc;
 
 trait TestValueExt<T> {
     fn test_ok(self) -> T;
@@ -54,20 +56,30 @@ fn evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
     .test_ok()
 }
 
-fn registry() -> ProjectionRegistry {
-    let mut registry = ProjectionRegistry::new();
+fn registry(gate: &Arc<dyn pos_core::ErasureGate>) -> ProjectionRegistry {
+    let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(gate));
     registry.register("noop", Box::new(NoopReducer));
     registry
 }
 
 #[test]
 fn snapshot_verification_requires_authoritative_artifact_evidence() {
-    let mut store = open_store(StoreConfig::Memory).test_ok();
-    let timeline = store.create_timeline("artifact-snapshot").test_ok();
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok();
+    let gate = host.containment_gate();
+    let timeline = host
+        .command_sender()
+        .test_ok()
+        .create_timeline("artifact-snapshot")
+        .test_ok();
+    let mut reads = host.read_sender().test_ok();
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
-        let mut rejected_registry = registry();
+        let mut rejected_registry = registry(&gate);
         let result = snapshot(
-            store.as_ref(),
+            &mut reads,
             timeline.id(),
             &mut rejected_registry,
             SNAPSHOT_DIGEST,
@@ -80,9 +92,9 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
             ))),
         }
     }
-    let mut capture_registry = registry();
+    let mut capture_registry = registry(&gate);
     let snapshot = snapshot(
-        store.as_ref(),
+        &mut reads,
         timeline.id(),
         &mut capture_registry,
         SNAPSHOT_DIGEST,
@@ -90,9 +102,9 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
     )
     .test_ok();
 
-    let mut retained_registry = registry();
+    let mut retained_registry = registry(&gate);
     verify_snapshot_consistency(
-        store.as_ref(),
+        &mut reads,
         &snapshot,
         &mut retained_registry,
         SNAPSHOT_DIGEST,
@@ -101,9 +113,9 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
     .test_ok();
 
     for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
-        let mut rejected_registry = registry();
+        let mut rejected_registry = registry(&gate);
         let result = verify_snapshot_consistency(
-            store.as_ref(),
+            &mut reads,
             &snapshot,
             &mut rejected_registry,
             SNAPSHOT_DIGEST,
@@ -116,4 +128,41 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
             ))),
         }
     }
+}
+
+#[test]
+fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok();
+    let gate = host.containment_gate();
+    let unknown_timeline = TimelineId::new();
+    let mut reads = host.read_sender().test_ok();
+
+    let mut snapshot_registry = registry(&gate);
+    assert!(snapshot(
+        &mut reads,
+        unknown_timeline,
+        &mut snapshot_registry,
+        SNAPSHOT_DIGEST,
+        &evaluation(ArtifactStateV1::Retained),
+    )
+    .is_err());
+
+    let mut verification_registry = registry(&gate);
+    let unknown_snapshot = pos_time::Snapshot {
+        timeline: unknown_timeline,
+        at_seq: pos_core::clock::Seq::ZERO,
+        registry: std::collections::HashMap::new(),
+    };
+    assert!(verify_snapshot_consistency(
+        &mut reads,
+        &unknown_snapshot,
+        &mut verification_registry,
+        SNAPSHOT_DIGEST,
+        &evaluation(ArtifactStateV1::Retained),
+    )
+    .is_err());
 }

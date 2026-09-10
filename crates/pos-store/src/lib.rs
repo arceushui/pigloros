@@ -318,15 +318,17 @@ pub enum StoreConfig {
 /// # Examples
 ///
 /// ```rust
+/// use std::sync::Arc;
+///
 /// use pos_core::{
 ///     clock::Seq,
 ///     event::{CanonicalBytes, EventDraft, Kind},
 ///     ids::EntityId,
-///     store::SeqRange,
+///     store::{EventStore, SeqRange},
 ///     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
 ///     ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1,
 ///     ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
-///     ReplayClaimEvaluatorV1,
+///     ErasureContainmentGateV1, ReplayClaimEvaluatorV1,
 /// };
 /// use pos_store::{
 ///     export_timeline_own, import_timeline_with_id, open_store, StoreConfig,
@@ -334,6 +336,8 @@ pub enum StoreConfig {
 ///
 /// // Parent-then-child CoW sync (identity-preserving).
 /// let mut src = open_store(StoreConfig::Memory).unwrap();
+/// src.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+///     .unwrap();
 /// let root = src.create_timeline("root").unwrap();
 /// let entity = EntityId::new();
 /// src.append(
@@ -373,6 +377,8 @@ pub enum StoreConfig {
 /// let (root_artifact, root_evaluation) = host_export_authorization(root.id());
 /// let (child_artifact, child_evaluation) = host_export_authorization(child.id());
 /// let mut dst = open_store(StoreConfig::Memory).unwrap();
+/// dst.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+///     .unwrap();
 /// import_timeline_with_id(
 ///     &mut *dst,
 ///     export_timeline_own(&*src, root.id(), root_artifact, &root_evaluation).unwrap(),
@@ -543,6 +549,16 @@ mod tests {
         }
     }
 
+    fn open_fixture_store(config: StoreConfig) -> Box<dyn EventStore> {
+        let mut store = open_store(config).test_ok();
+        store
+            .bind_erasure_gate(std::sync::Arc::new(
+                pos_core::ErasureContainmentGateV1::new(),
+            ))
+            .test_ok();
+        store
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_head_helpers_cover_accept_reject_and_overflow() {
@@ -652,11 +668,11 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_store_authority_boundary_is_shared_by_backends() {
-        let mut memory = open_store(StoreConfig::Memory).test_ok();
+        let mut memory = open_fixture_store(StoreConfig::Memory);
         assert_consent_store_authority_boundary(memory.as_mut());
         #[cfg(feature = "sqlite")]
         {
-            let mut sqlite = open_store(StoreConfig::SqliteInMemory).test_ok();
+            let mut sqlite = open_fixture_store(StoreConfig::SqliteInMemory);
             assert_consent_store_authority_boundary(sqlite.as_mut());
         }
     }
@@ -962,14 +978,14 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_memory() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_fixture_store(StoreConfig::Memory);
         contract(&mut *store);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_contract_memory() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_fixture_store(StoreConfig::Memory);
         append_or_duplicate_contract(&mut *store);
     }
 
@@ -1014,7 +1030,7 @@ mod tests {
 
     #[test]
     fn bounded_identity_contract_memory() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_fixture_store(StoreConfig::Memory);
         bounded_identity_contract(&mut *store);
     }
 
@@ -1022,7 +1038,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn factory_sqlite_in_memory() {
-        let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
+        let mut store = open_fixture_store(StoreConfig::SqliteInMemory);
         contract(&mut *store);
     }
 
@@ -1030,13 +1046,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_contract_sqlite() {
-        let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
+        let mut store = open_fixture_store(StoreConfig::SqliteInMemory);
         append_or_duplicate_contract(&mut *store);
     }
 
     #[test]
     fn bounded_identity_contract_sqlite() {
-        let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
+        let mut store = open_fixture_store(StoreConfig::SqliteInMemory);
         bounded_identity_contract(&mut *store);
     }
 
@@ -1046,7 +1062,7 @@ mod tests {
     fn factory_sqlite_file() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_str().test_ok().to_owned();
-        let mut store = open_store(StoreConfig::Sqlite { path }).test_ok();
+        let mut store = open_fixture_store(StoreConfig::Sqlite { path });
         contract(&mut *store);
     }
 
@@ -1064,7 +1080,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_import_roundtrip_memory() {
-        let mut src = open_store(StoreConfig::Memory).test_ok();
+        let mut src = open_fixture_store(StoreConfig::Memory);
         let tl = src.create_timeline("source").test_ok();
         let entity = EntityId::new();
         let drafts = vec![
@@ -1092,7 +1108,7 @@ mod tests {
         assert_eq!(export.events.len(), 2);
 
         // Import into a fresh store — different backend, same data
-        let mut dst = open_store(StoreConfig::Memory).test_ok();
+        let mut dst = open_fixture_store(StoreConfig::Memory);
         let imported = pos_core::store::import_timeline(dst.as_mut(), export).test_ok();
         let events = dst.read(imported.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 2);
@@ -1104,7 +1120,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn export_memory_import_sqlite() {
-        let mut src = open_store(StoreConfig::Memory).test_ok();
+        let mut src = open_fixture_store(StoreConfig::Memory);
         let tl = src.create_timeline("mem-src").test_ok();
         let entity = EntityId::new();
         src.append(
@@ -1125,7 +1141,7 @@ mod tests {
         )
         .test_ok();
 
-        let mut dst = open_store(StoreConfig::SqliteInMemory).test_ok();
+        let mut dst = open_fixture_store(StoreConfig::SqliteInMemory);
         let imported = pos_core::store::import_timeline(dst.as_mut(), export).test_ok();
         let events = dst.read(imported.id(), SeqRange::all()).test_ok();
         assert_eq!(events.len(), 1);
@@ -1194,14 +1210,14 @@ mod tests {
             parent_fork_hash: None,
         };
 
-        let mut ok_store = open_store(StoreConfig::Memory).test_ok();
+        let mut ok_store = open_fixture_store(StoreConfig::Memory);
         ok_store.save_key_registry(&registry).test_ok();
         import_timeline_with_verified_signatures(ok_store.as_mut(), export.clone(), &pk).test_ok();
         assert_verified_import_rejections(&export, &registry, &pk);
 
         let (_, reject_vk) = generate_keypair();
         let reject_key = public_key_from_verifying_key(&reject_vk);
-        let mut bad_store = open_store(StoreConfig::Memory).test_ok();
+        let mut bad_store = open_fixture_store(StoreConfig::Memory);
         bad_store.save_key_registry(&registry).test_ok();
         let err = import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
             .test_err();
@@ -1215,7 +1231,7 @@ mod tests {
     ) {
         use pos_core::{KeyIdentityV1, KeyRoleV1};
 
-        let mut missing_registry_store = open_store(StoreConfig::Memory).test_ok();
+        let mut missing_registry_store = open_fixture_store(StoreConfig::Memory);
         let missing_registry = import_timeline_with_verified_signatures(
             missing_registry_store.as_mut(),
             export.clone(),
@@ -1228,7 +1244,7 @@ mod tests {
 
         let mut missing_identity = export.clone();
         missing_identity.events[0].signature_identity = None;
-        let mut missing_identity_store = open_store(StoreConfig::Memory).test_ok();
+        let mut missing_identity_store = open_fixture_store(StoreConfig::Memory);
         missing_identity_store.save_key_registry(registry).test_ok();
         assert!(matches!(
             import_timeline_with_verified_signatures(
@@ -1246,7 +1262,7 @@ mod tests {
             KeyRoleV1::SubjectDataEncryption,
             1,
         ));
-        let mut wrong_role_store = open_store(StoreConfig::Memory).test_ok();
+        let mut wrong_role_store = open_fixture_store(StoreConfig::Memory);
         wrong_role_store.save_key_registry(registry).test_ok();
         assert!(matches!(
             import_timeline_with_verified_signatures(
@@ -1264,7 +1280,7 @@ mod tests {
             KeyRoleV1::TimelineIntegritySigning,
             2,
         ));
-        let mut mismatched_identity_store = open_store(StoreConfig::Memory).test_ok();
+        let mut mismatched_identity_store = open_fixture_store(StoreConfig::Memory);
         mismatched_identity_store
             .save_key_registry(registry)
             .test_ok();
@@ -1285,7 +1301,7 @@ mod tests {
             KeyRoleV1::TimelineIntegritySigning,
             2,
         ));
-        let mut missing_record_store = open_store(StoreConfig::Memory).test_ok();
+        let mut missing_record_store = open_fixture_store(StoreConfig::Memory);
         missing_record_store.save_key_registry(registry).test_ok();
         assert!(matches!(
             import_timeline_with_verified_signatures(
@@ -1299,7 +1315,7 @@ mod tests {
 
         let mut invalid_signature = export.clone();
         invalid_signature.events[0].signature = Some(pos_core::Signature::from_bytes([0; 64]));
-        let mut invalid_signature_store = open_store(StoreConfig::Memory).test_ok();
+        let mut invalid_signature_store = open_fixture_store(StoreConfig::Memory);
         invalid_signature_store
             .save_key_registry(registry)
             .test_ok();
@@ -1329,7 +1345,7 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_fixture_store(StoreConfig::Memory);
         let (_, verifying_key) = generate_keypair();
         let valid = public_key_from_verifying_key(&verifying_key);
         import_timeline_with_verified_signatures(store.as_mut(), export.clone(), &valid).test_ok();
@@ -1374,7 +1390,7 @@ mod tests {
             }],
             parent_fork_hash: None,
         };
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_fixture_store(StoreConfig::Memory);
         store
             .save_key_registry(&KeyRegistryStateV1::new())
             .test_ok();
@@ -1400,6 +1416,11 @@ mod tests {
         let admission = WallTime::from_micros(APPEND_IDENTITY_RETENTION_MICROS + 42);
         let mut store =
             memory::MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(admission)));
+        store
+            .bind_erasure_gate(std::sync::Arc::new(
+                pos_core::ErasureContainmentGateV1::new(),
+            ))
+            .test_ok();
         let timeline = store.create_timeline("clock").test_ok();
         let draft = EventDraft::new(
             EntityId::new(),

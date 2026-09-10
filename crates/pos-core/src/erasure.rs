@@ -4,9 +4,16 @@
 //! exposes the host-owned artifact-registration and `ReplayClaim` policy seam.
 
 use std::{
+    cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        Arc, RwLock,
+    },
 };
+
+use crate::{clock::Seq, ids::TimelineId};
 
 const VERSION: u64 = 1;
 const ERQ1: &str = "ERQ1";
@@ -115,6 +122,10 @@ pub const ERASURE_CAS_EFFECT_TAG_V1: &str = "ERCE1";
 pub const ERASURE_RECOVERY_ERROR_TAG_V1: &str = "ERRE1";
 /// Maximum number of recovery errors retained for one ERQ1 request.
 pub const ERASURE_MAX_RECOVERY_ERRORS: usize = 4_096;
+/// Largest complete erasure-request inventory admitted by the V1 host.
+pub const ERASURE_MAX_INVENTORY_REQUESTS: usize = 4_096;
+/// Largest complete Timeline/Fork topology admitted by the V1 host.
+pub const ERASURE_MAX_INVENTORY_TIMELINES: usize = 65_536;
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,6 +162,696 @@ pub enum ErasureErrorV1 {
     TrustSnapshotInvalid,
     /// Provenance is missing or invalid.
     ProvenanceMissing,
+}
+
+/// A protected host operation whose effect must serialize with `AccessFrozen`.
+///
+/// The operation class is deliberately payload-free. It is an enforcement
+/// input, not an audit record and never carries subject data or application
+/// values across the host boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureProtectedOperationV1 {
+    /// Append an authoritative Event or commit staged work.
+    Append,
+    /// Read authoritative Event data.
+    Read,
+    /// Export Event or projection data.
+    Export,
+    /// Materialize a snapshot or projection view.
+    Snapshot,
+    /// Admit a proposed action.
+    ProposedAction,
+    /// Hand data to a Plugin.
+    PluginInput,
+    /// Create a Fork whose lineage may extend an erasure scope.
+    Fork,
+}
+
+/// Payload-free containment failures returned by the #186 host gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureContainmentErrorV1 {
+    /// The operation intersects the persisted effective erasure scope after
+    /// the `AccessFrozen` Tick Boundary.
+    AccessFrozen,
+    /// The affected boundary could not be established from verified evidence.
+    RecoveryUnavailable,
+}
+
+impl ErasureContainmentErrorV1 {
+    /// Return the stable public error code.
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::AccessFrozen => 0,
+            Self::RecoveryUnavailable => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for ErasureContainmentErrorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "erasure containment error {}", self.code())
+    }
+}
+
+impl std::error::Error for ErasureContainmentErrorV1 {}
+
+/// Closed, payload-free failures returned by the erasure execution host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureHostErrorV1 {
+    /// Complete durable recovery has not been installed or was invalidated.
+    RecoveryUnavailable,
+    /// The requested Timeline/Fork intersects a frozen-or-later scope.
+    AccessFrozen,
+    /// The caller's inventory generation or durable predecessor is stale.
+    StaleGeneration,
+    /// An independently injected verifier denied the operation.
+    AuthorizationDenied,
+    /// A stable operation identity conflicts with different bound content.
+    Conflict,
+    /// The owned persistence adapter failed without exposing payload details.
+    AdapterFailure,
+}
+
+impl ErasureHostErrorV1 {
+    /// Return the stable public error code.
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::RecoveryUnavailable => 0,
+            Self::AccessFrozen => 1,
+            Self::StaleGeneration => 2,
+            Self::AuthorizationDenied => 3,
+            Self::Conflict => 4,
+            Self::AdapterFailure => 5,
+        }
+    }
+}
+
+impl From<ErasureContainmentErrorV1> for ErasureHostErrorV1 {
+    fn from(error: ErasureContainmentErrorV1) -> Self {
+        match error {
+            ErasureContainmentErrorV1::AccessFrozen => Self::AccessFrozen,
+            ErasureContainmentErrorV1::RecoveryUnavailable => Self::RecoveryUnavailable,
+        }
+    }
+}
+
+impl std::fmt::Display for ErasureHostErrorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "erasure host error {}", self.code())
+    }
+}
+
+impl std::error::Error for ErasureHostErrorV1 {}
+
+/// Host-owned erasure containment seam used by stores and runtime consumers.
+///
+/// Implementations resolve a Timeline/Fork to the immutable scope reference
+/// committed by the erasure coordinator. The callback form lets an adapter
+/// keep the decision and its protected effect in one host-owned serialization
+/// boundary; callers must not preflight and then act outside this seam.
+pub trait ErasureGate: Send + Sync {
+    /// Authorize one protected operation at its current host boundary.
+    ///
+    /// # Errors
+    /// Returns a payload-free containment error when the effective scope is
+    /// frozen or the verified boundary is unavailable.
+    fn authorize(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), ErasureContainmentErrorV1>;
+
+    /// Serialize an operation decision with its protected effect.
+    ///
+    /// # Errors
+    /// Returns the same payload-free containment error as [`Self::authorize`].
+    fn with_fence(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(),
+    ) -> Result<(), ErasureContainmentErrorV1>;
+}
+
+/// In-process host gate backed only by verified payload-free ERS1 snapshots.
+///
+/// This is a containment adapter, not a persistence authority. #184 remains
+/// responsible for recovering and validating snapshots before they are
+/// published here. A Timeline is bound to an opaque scope reference by the
+/// authoritative topology resolver; no selector is re-evaluated by this gate.
+pub struct ErasureContainmentGateV1 {
+    authority: RwLock<Arc<ErasureGateStateV1>>,
+    fence_lock: std::sync::Mutex<()>,
+    fail_closed_unbound: bool,
+    poisoned: AtomicBool,
+}
+
+#[derive(Clone, Default)]
+struct ErasureGateStateV1 {
+    inventory: Option<ErasureVerifiedInventoryV1>,
+    timeline_scopes: BTreeMap<TimelineId, ErasureReferenceV1>,
+    verified_unaffected: BTreeMap<TimelineId, ErasureReferenceV1>,
+    states: BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
+    blocked_timelines: BTreeSet<TimelineId>,
+}
+
+thread_local! {
+    static ACTIVE_CONTAINMENT_FENCES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ActiveContainmentFence;
+
+impl Drop for ActiveContainmentFence {
+    fn drop(&mut self) {
+        ACTIVE_CONTAINMENT_FENCES.with(|active| {
+            let _ = active.borrow_mut().pop();
+        });
+    }
+}
+
+impl Default for ErasureContainmentGateV1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ErasureContainmentGateV1 {
+    /// Construct an empty gate. Unbound Timelines have no erasure evidence and
+    /// remain available; a failed recovery can be made explicit with
+    /// [`Self::block_timeline`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            authority: RwLock::new(Arc::new(ErasureGateStateV1 {
+                inventory: None,
+                timeline_scopes: BTreeMap::new(),
+                verified_unaffected: BTreeMap::new(),
+                states: BTreeMap::new(),
+                blocked_timelines: BTreeSet::new(),
+            })),
+            fence_lock: std::sync::Mutex::new(()),
+            fail_closed_unbound: false,
+            poisoned: AtomicBool::new(false),
+        }
+    }
+
+    /// Construct a gate that refuses protected operations for every Timeline
+    /// until the host installs verified evidence and topology bindings.
+    #[must_use]
+    pub fn new_fail_closed() -> Self {
+        Self {
+            authority: RwLock::new(Arc::new(ErasureGateStateV1 {
+                inventory: None,
+                timeline_scopes: BTreeMap::new(),
+                verified_unaffected: BTreeMap::new(),
+                states: BTreeMap::new(),
+                blocked_timelines: BTreeSet::new(),
+            })),
+            fence_lock: std::sync::Mutex::new(()),
+            fail_closed_unbound: true,
+            poisoned: AtomicBool::new(false),
+        }
+    }
+
+    /// Permanently close this gate after its host loses verified authority.
+    ///
+    /// Existing clones observe the same irreversible closure. This operation
+    /// can only remove access; it cannot install or grant authority.
+    pub fn poison(&self) {
+        self.poisoned.store(true, AtomicOrdering::Release);
+    }
+
+    fn ensure_available(&self) -> Result<(), ErasureContainmentErrorV1> {
+        if self.poisoned.load(AtomicOrdering::Acquire) {
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Bind one Timeline/Fork to its resolved immutable scope reference.
+    ///
+    /// Conflicting bindings fail closed and leave the original binding intact.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] for a
+    /// conflicting binding.
+    #[cfg(test)]
+    pub(crate) fn bind_timeline(
+        &self,
+        timeline: TimelineId,
+        scope: ErasureReferenceV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        let current = self
+            .authority
+            .read()
+            .map_err(containment_recovery_failure)?
+            .clone();
+        if current.verified_unaffected.contains_key(&timeline) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        match current.timeline_scopes.get(&timeline) {
+            Some(existing) if *existing != scope => {
+                return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+            }
+            Some(_) => return Ok(()),
+            None => {}
+        }
+        let mut candidate = (*current).clone();
+        candidate.timeline_scopes.insert(timeline, scope);
+        *self
+            .authority
+            .write()
+            .map_err(containment_recovery_failure)? = Arc::new(candidate);
+        Ok(())
+    }
+
+    /// Publish a recovered verified state for subsequent containment checks.
+    ///
+    /// Publishing is replacement-only for one request identity. It never
+    /// clears a previously published frozen state: a caller must provide the
+    /// monotonic state recovered from the durable predecessor chain.
+    #[cfg(test)]
+    pub(crate) fn publish_verified_state(&self, state: ErasureVerifiedStateV1) {
+        let Ok(fence) = self.fence_lock.lock() else {
+            return;
+        };
+        let request = state.request().reference();
+        let Ok(mut authority) = self.authority.write() else {
+            return;
+        };
+        if authority.states.get(&request).is_some_and(|existing| {
+            Self::containment_rank(existing.lifecycle()) > Self::containment_rank(state.lifecycle())
+        }) {
+            return;
+        }
+        let mut candidate = (**authority).clone();
+        candidate.states.insert(request, state);
+        *authority = Arc::new(candidate);
+        drop(authority);
+        drop(fence);
+    }
+
+    /// Atomically install one recovered ERS1 snapshot and its host-resolved
+    /// Timeline/Fork bindings.
+    ///
+    /// The bindings are supplied by the authoritative topology resolver; this
+    /// adapter never derives a scope reference from a Timeline identifier.
+    /// Every binding must belong to the verified effective scope, and existing
+    /// bindings may not be replaced with a different scope. A lower lifecycle
+    /// snapshot can never overwrite an already frozen state.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// evidence or topology binding is incomplete or conflicts with an
+    /// installed boundary.
+    #[cfg(test)]
+    pub(crate) fn install_verified_state(
+        &self,
+        state: &ErasureVerifiedStateV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        self.install_verified_state_with_bindings(state, bindings, &[])
+    }
+
+    /// Install verified state with a topology proof issued by the recovery
+    /// authority. Callers cannot construct the proof; it is returned only by
+    /// [`ErasureVerifiedStateQueryV1`].
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// proof is stale, incomplete, or conflicts with an installed boundary.
+    pub fn install_verified_state_with_topology(
+        &self,
+        state: &ErasureVerifiedStateV1,
+        proof: &ErasureVerifiedTopologyProofV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if proof.manifest_digest != state.manifest_digest() {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let unaffected = proof
+            .unaffected
+            .iter()
+            .map(|timeline| (*timeline, proof.manifest_digest))
+            .collect::<Vec<_>>();
+        self.install_verified_state_with_bindings(state, &proof.bindings, &unaffected)
+    }
+
+    fn install_verified_state_with_bindings(
+        &self,
+        state: &ErasureVerifiedStateV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+        unaffected: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        if bindings
+            .iter()
+            .any(|(_, scope)| !state.scope_contains(*scope))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let expected_scopes: BTreeSet<_> = state
+            .scope
+            .as_ref()
+            .into_iter()
+            .flat_map(|scope| scope.scope_members().iter().copied())
+            .chain(state.scope_forks())
+            .collect();
+        let bound_scopes: BTreeSet<_> = bindings.iter().map(|(_, scope)| *scope).collect();
+        if expected_scopes != bound_scopes {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let mut bound_timelines = BTreeSet::new();
+        if bindings
+            .iter()
+            .any(|(timeline, _)| !bound_timelines.insert(*timeline))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if unaffected
+            .iter()
+            .any(|(timeline, _)| !bound_timelines.insert(*timeline))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let request = state.request().reference();
+        let current = self
+            .authority
+            .read()
+            .map_err(containment_recovery_failure)?
+            .clone();
+        if current.states.get(&request).is_some_and(|existing| {
+            Self::containment_rank(existing.lifecycle()) > Self::containment_rank(state.lifecycle())
+        }) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if bindings.iter().any(|(timeline, scope)| {
+            current
+                .timeline_scopes
+                .get(timeline)
+                .is_some_and(|existing| *existing != *scope)
+        }) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if unaffected.iter().any(|(timeline, manifest)| {
+            current
+                .verified_unaffected
+                .get(timeline)
+                .is_some_and(|existing| *existing != *manifest)
+        }) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let mut candidate = (*current).clone();
+        candidate.states.insert(request, state.clone());
+        for (timeline, scope) in bindings {
+            candidate.timeline_scopes.insert(*timeline, *scope);
+        }
+        for (timeline, manifest) in unaffected {
+            candidate.verified_unaffected.insert(*timeline, *manifest);
+        }
+        *self
+            .authority
+            .write()
+            .map_err(containment_recovery_failure)? = Arc::new(candidate);
+        Ok(())
+    }
+
+    /// Recover and install one request through the host-owned verified-state
+    /// query seam.
+    ///
+    /// Recovery errors and missing requests block every supplied boundary so a
+    /// caller cannot accidentally continue with an unverified scope. The
+    /// query returns only payload-free verified state; this method retains no
+    /// raw ERQ1/ERS1 material.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// query cannot establish a verified state or the topology binding fails.
+    #[cfg(test)]
+    pub(crate) fn install_from_verified_query<Q: ErasureVerifiedStateQueryV1>(
+        &self,
+        query: &mut Q,
+        request: ErasureReferenceV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if let Ok(Some(state)) = query.verified_state(request) {
+            self.install_verified_state(&state, bindings)
+        } else {
+            for (timeline, _) in bindings {
+                self.block_timeline(*timeline);
+            }
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        }
+    }
+
+    /// Recover state and its opaque, complete topology proof from the host
+    /// authority before publishing any unaffected-scope availability.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when either
+    /// durable query is missing, fails, or supplies a stale/conflicting proof.
+    pub fn install_from_verified_query_with_topology<Q: ErasureVerifiedStateQueryV1>(
+        &self,
+        query: &mut Q,
+        request: ErasureReferenceV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let (state, proof) = query
+            .verified_state_with_topology(request)
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?
+            .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        self.install_verified_state_with_topology(&state, &proof)
+    }
+
+    /// Replace the complete installed recovery generation in one host fence.
+    ///
+    /// This is the production installation seam. The query, rather than the
+    /// caller, chooses the durable members. Validation completes before the
+    /// current immutable inventory is replaced.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// query fails, exceeds its admission ceiling, or a host lock is poisoned.
+    pub fn install_from_verified_inventory_query<Q: ErasureVerifiedInventoryQueryV1>(
+        &self,
+        query: &mut Q,
+        maximum_requests: usize,
+    ) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        self.ensure_available()?;
+        let candidate = query
+            .verified_inventory(maximum_requests)
+            .map_err(containment_recovery_failure)?;
+        let generation = candidate.generation();
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
+        let replacement = ErasureGateStateV1 {
+            inventory: Some(candidate),
+            ..ErasureGateStateV1::default()
+        };
+        *self
+            .authority
+            .write()
+            .map_err(containment_recovery_failure)? = Arc::new(replacement);
+        Ok(generation)
+    }
+
+    /// Run one durable coordinator transition and publish its verified
+    /// successor inventory while retaining the exclusive Tick Boundary
+    /// fence.
+    ///
+    /// Protected operations cannot authorize between the transition's CAS and
+    /// publication of its successor inventory. The callback can obtain a
+    /// non-empty opaque inventory only through core-owned recovery. If it
+    /// fails, the installed inventory remains unchanged; the execution host
+    /// must poison the gate whenever it cannot prove whether persistence
+    /// advanced.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// gate is unavailable, the transition cannot produce a complete verified
+    /// inventory, or a host lock is poisoned.
+    pub fn install_from_verified_inventory_transition<T>(
+        &self,
+        transition: &mut dyn FnMut() -> Result<(ErasureVerifiedInventoryV1, T), ErasureErrorV1>,
+    ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureContainmentErrorV1> {
+        self.ensure_available()?;
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
+        let (candidate, result) = transition().map_err(containment_recovery_failure)?;
+        let replacement = ErasureGateStateV1 {
+            inventory: Some(candidate.clone()),
+            ..ErasureGateStateV1::default()
+        };
+        *self
+            .authority
+            .write()
+            .map_err(containment_recovery_failure)? = Arc::new(replacement);
+        Ok((candidate, result))
+    }
+
+    /// Return the installed complete-inventory generation.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] before a
+    /// complete inventory is installed or after lock poisoning.
+    pub fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        self.ensure_available()?;
+        self.authority
+            .read()
+            .map_err(containment_recovery_failure)?
+            .inventory
+            .as_ref()
+            .map(ErasureVerifiedInventoryV1::generation)
+            .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)
+    }
+
+    const fn containment_rank(lifecycle: ErasureLifecycleV1) -> u8 {
+        match lifecycle {
+            ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected => 0,
+            ErasureLifecycleV1::Authorized => 1,
+            ErasureLifecycleV1::AccessFrozen
+            | ErasureLifecycleV1::DestructionDispatched
+            | ErasureLifecycleV1::AwaitingAcknowledgements
+            | ErasureLifecycleV1::Complete
+            | ErasureLifecycleV1::PartialFailure => 2,
+        }
+    }
+
+    /// Mark the narrowest authenticated boundary unavailable after recovery
+    /// cannot establish its effective erasure scope.
+    pub fn block_timeline(&self, timeline: TimelineId) {
+        let Ok(fence) = self.fence_lock.lock() else {
+            return;
+        };
+        let Ok(mut authority) = self.authority.write() else {
+            return;
+        };
+        let mut candidate = (**authority).clone();
+        candidate.blocked_timelines.insert(timeline);
+        *authority = Arc::new(candidate);
+        drop(authority);
+        drop(fence);
+    }
+
+    fn authorize_state(
+        &self,
+        timeline: TimelineId,
+        _operation: ErasureProtectedOperationV1,
+        authority: &ErasureGateStateV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if let Some(inventory) = authority.inventory.as_ref() {
+            return inventory.authorize(timeline);
+        }
+        if authority.blocked_timelines.contains(&timeline) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let scope = authority.timeline_scopes.get(&timeline).copied();
+        let Some(scope) = scope else {
+            let verified_manifest = authority.verified_unaffected.get(&timeline).copied();
+            if let Some(manifest) = verified_manifest {
+                return if authority
+                    .states
+                    .values()
+                    .any(|state| state.manifest_digest() == manifest)
+                {
+                    Ok(())
+                } else {
+                    Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+                };
+            }
+            return if self.fail_closed_unbound {
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+            } else {
+                Ok(())
+            };
+        };
+        let mut matched = false;
+        for state in authority.states.values() {
+            if !state.scope_contains(scope) {
+                continue;
+            }
+            matched = true;
+            state.permit_protected_operation(scope)?;
+        }
+        if matched {
+            Ok(())
+        } else {
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        }
+    }
+}
+
+impl ErasureGate for ErasureContainmentGateV1 {
+    fn authorize(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
+        let authority = self
+            .authority
+            .read()
+            .map_err(containment_recovery_failure)?
+            .clone();
+        self.authorize_state(timeline, operation, &authority)
+    }
+
+    fn with_fence(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(),
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let identity = std::ptr::from_ref(self) as usize;
+        if ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity)) {
+            self.ensure_available()?;
+            let authority = self
+                .authority
+                .read()
+                .map_err(containment_recovery_failure)?
+                .clone();
+            self.authorize_state(timeline, operation, &authority)?;
+            effect();
+            return self.ensure_available();
+        }
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
+        let authority = self
+            .authority
+            .read()
+            .map_err(containment_recovery_failure)?
+            .clone();
+        self.authorize_state(timeline, operation, &authority)?;
+        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
+        let _active = ActiveContainmentFence;
+        effect();
+        self.ensure_available()
+    }
+}
+
+fn containment_recovery_failure<T>(_error: T) -> ErasureContainmentErrorV1 {
+    ErasureContainmentErrorV1::RecoveryUnavailable
 }
 impl ErasureErrorV1 {
     /// Return the stable V1 error code.
@@ -3098,6 +3799,664 @@ impl ErasureVerifiedStateV1 {
     pub const fn freeze_position(&self) -> Option<u64> {
         self.state.freeze_position()
     }
+
+    /// Return whether a Timeline/Fork scope reference belongs to the
+    /// persisted effective scope, including admitted future-Fork extensions.
+    #[must_use]
+    pub fn scope_contains(&self, scope: ErasureReferenceV1) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|commitment| commitment.scope_members().contains(&scope))
+            || self.scope_forks().any(|fork| fork == scope)
+    }
+
+    /// Authorize one protected operation against this verified snapshot.
+    ///
+    /// Before `AccessFrozen` there is no erasure fence. After it, a matching
+    /// effective scope is rejected, including `Complete` and `PartialFailure`;
+    /// those terminal outcomes do not restore access. A frozen lifecycle with
+    /// no committed scope is invalid recovery evidence and therefore fails
+    /// closed.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::AccessFrozen`] for an affected
+    /// scope, or [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// lifecycle and scope evidence cannot establish a safe boundary.
+    pub fn permit_protected_operation(
+        &self,
+        scope: ErasureReferenceV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let lifecycle = self.lifecycle();
+        if lifecycle == ErasureLifecycleV1::Rejected
+            || lifecycle == ErasureLifecycleV1::Submitted
+            || lifecycle == ErasureLifecycleV1::Authorized
+        {
+            return Ok(());
+        }
+        if self.scope.is_none() || self.freeze_position().is_none() {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if self.scope_contains(scope) {
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Opaque host-issued proof of the complete Timeline/Fork topology at one
+/// verified recovery revision.
+///
+/// The fields are private intentionally: a caller must obtain this value from
+/// the durable recovery authority instead of minting an unaffected-scope
+/// assertion from a public digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureVerifiedTopologyProofV1 {
+    manifest_digest: ErasureReferenceV1,
+    bindings: Vec<(TimelineId, ErasureReferenceV1)>,
+    unaffected: Vec<TimelineId>,
+}
+
+/// Host-owned topology observation returned alongside one verified recovery
+/// snapshot.
+///
+/// This is an input to the coordinator's opaque proof construction rather than
+/// a proof that callers can install directly. The host must derive all
+/// bindings and unaffected Timelines from the same durable revision identified
+/// by [`Self::manifest_digest`]. The containment gate never resolves topology
+/// from these identifiers itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureVerifiedTopologyObservationV1 {
+    manifest_digest: ErasureReferenceV1,
+    bindings: Vec<(TimelineId, ErasureReferenceV1)>,
+    unaffected: Vec<TimelineId>,
+}
+
+/// Raw adapter snapshot of every durable erasure head and Timeline/Fork ID.
+///
+/// This value is intentionally not runtime authority. It proves what the
+/// adapter observed in one snapshot and is subsequently joined with
+/// independently verified authorization and scope classification by core.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasurePersistenceInventorySnapshotV1 {
+    request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    topology: Vec<TimelineId>,
+}
+
+impl ErasurePersistenceInventorySnapshotV1 {
+    /// Validate and retain one complete adapter observation.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when either collection exceeds
+    /// its admission ceiling, and [`ErasureErrorV1::ProvenanceMissing`] when
+    /// ordering or uniqueness is not canonical.
+    pub fn new(
+        request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+        topology: Vec<TimelineId>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureErrorV1> {
+        if maximum_requests == 0
+            || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS
+            || request_heads.len() > maximum_requests
+            || topology.len() > ERASURE_MAX_INVENTORY_TIMELINES
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if request_heads.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            || topology.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(Self {
+            request_heads,
+            topology,
+        })
+    }
+
+    /// Return canonical `(request reference, manifest head)` pairs.
+    #[must_use]
+    pub fn request_heads(&self) -> &[(ErasureReferenceV1, ErasureReferenceV1)] {
+        &self.request_heads
+    }
+
+    /// Return every Timeline/Fork ID in bytewise identity order.
+    #[must_use]
+    pub fn topology(&self) -> &[TimelineId] {
+        &self.topology
+    }
+
+    /// Return the generation derived from this complete durable snapshot.
+    ///
+    /// Adapters use this value only inside their atomic transaction to reject
+    /// a stale host admission. It is not independently trusted runtime
+    /// authority until core recovery verifies the snapshot.
+    #[must_use]
+    pub fn generation(&self) -> ErasureReferenceV1 {
+        erasure_inventory_generation(&self.request_heads, &self.topology)
+    }
+}
+
+fn erasure_inventory_generation(
+    request_heads: &[(ErasureReferenceV1, ErasureReferenceV1)],
+    topology: &[TimelineId],
+) -> ErasureReferenceV1 {
+    let mut topology_hasher = blake3::Hasher::new();
+    topology_hasher.update(b"pigloros/erasure-inventory-topology/v1");
+    topology_hasher.update(
+        &u64::try_from(topology.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for timeline in topology {
+        topology_hasher.update(&timeline.inner().to_bytes());
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros/erasure-verified-inventory/v1");
+    hasher.update(
+        &u64::try_from(request_heads.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for (request, head) in request_heads {
+        hasher.update(&request.digest());
+        hasher.update(&head.digest());
+    }
+    hasher.update(topology_hasher.finalize().as_bytes());
+    ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+}
+
+/// Adapter capability for one bounded, complete inventory read snapshot.
+pub trait ErasureInventoryPersistencePortV1 {
+    /// Read every durable erasure head and Timeline/Fork ID atomically.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, validation, provenance, or admission error.
+    /// The adapter must never truncate an over-limit result.
+    fn complete_erasure_inventory_snapshot(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1>;
+}
+
+/// Adapter capability for the single atomic `ERSE1` and child-Fork commit.
+pub trait ErasureForkPersistencePortV1 {
+    /// Persist both prepared sides, or neither side, under one adapter boundary.
+    ///
+    /// A stable operation identity must return [`ErasureCasOutcomeV1::ExactRetry`]
+    /// only when its complete binding and both persisted effects are exact.
+    ///
+    /// # Errors
+    /// Returns a closed conflict, stale-generation, validation, or persistence
+    /// error without leaving either side visible.
+    fn commit_fork_admission(
+        &mut self,
+        admission: PreparedErasureForkBatchV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
+
+    /// Recover the durable result for one stable Fork operation identity.
+    ///
+    /// The adapter must validate that the receipt still names the exact
+    /// persisted child before returning it. Missing or corrupt result evidence
+    /// fails closed rather than allocating a replacement child.
+    ///
+    /// # Errors
+    /// Returns a closed persistence or provenance error for malformed,
+    /// conflicting, or unreadable durable evidence.
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1>;
+}
+
+/// One adapter-snapshot observation of every erasure head and Timeline/Fork.
+///
+/// This is untrusted recovery input, not runtime authority. Core checks every
+/// observed head against a fully recovered manifest and transforms the whole
+/// value into [`ErasureVerifiedInventoryV1`] only when no member is omitted,
+/// duplicated, stale, malformed, or conflicting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureInventoryObservationV1 {
+    request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    topology: Vec<TimelineId>,
+    request_topology: Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
+}
+
+type ErasureInventoryObservationPartsV1 = (
+    Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    Vec<TimelineId>,
+    Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
+);
+
+impl ErasureInventoryObservationV1 {
+    /// Package one host-owned adapter snapshot for core verification.
+    #[must_use]
+    pub const fn new(
+        request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+        topology: Vec<TimelineId>,
+        request_topology: Vec<(ErasureReferenceV1, ErasureVerifiedTopologyObservationV1)>,
+    ) -> Self {
+        Self {
+            request_heads,
+            topology,
+            request_topology,
+        }
+    }
+
+    fn into_parts(self) -> ErasureInventoryObservationPartsV1 {
+        (self.request_heads, self.topology, self.request_topology)
+    }
+}
+
+impl ErasureVerifiedTopologyObservationV1 {
+    /// Construct one host observation for a verified manifest revision.
+    ///
+    /// The coordinator and gate perform the authoritative completeness and
+    /// conflict checks when the observation is installed. This constructor is
+    /// intentionally payload-free and only packages the host's already
+    /// authenticated topology result.
+    #[must_use]
+    pub const fn new(
+        manifest_digest: ErasureReferenceV1,
+        bindings: Vec<(TimelineId, ErasureReferenceV1)>,
+        unaffected: Vec<TimelineId>,
+    ) -> Self {
+        Self {
+            manifest_digest,
+            bindings,
+            unaffected,
+        }
+    }
+
+    /// Return the durable manifest revision used for the observation.
+    #[must_use]
+    pub const fn manifest_digest(&self) -> ErasureReferenceV1 {
+        self.manifest_digest
+    }
+
+    /// Return host-resolved affected Timeline/Fork bindings.
+    #[must_use]
+    pub fn bindings(&self) -> &[(TimelineId, ErasureReferenceV1)] {
+        &self.bindings
+    }
+
+    /// Return host-resolved unaffected Timelines.
+    #[must_use]
+    pub fn unaffected(&self) -> &[TimelineId] {
+        &self.unaffected
+    }
+}
+
+impl ErasureVerifiedTopologyProofV1 {
+    pub(crate) const fn from_verified_recovery(
+        manifest_digest: ErasureReferenceV1,
+        bindings: Vec<(TimelineId, ErasureReferenceV1)>,
+        unaffected: Vec<TimelineId>,
+    ) -> Self {
+        Self {
+            manifest_digest,
+            bindings,
+            unaffected,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ErasureInventoryMembershipV1 {
+    Included(ErasureReferenceV1),
+    Excluded,
+}
+
+impl ErasureInventoryMembershipV1 {
+    const fn included_scope(self) -> Option<ErasureReferenceV1> {
+        match self {
+            Self::Included(scope) => Some(scope),
+            Self::Excluded => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ErasureInventoryClassificationV1 {
+    request: ErasureReferenceV1,
+    membership: ErasureInventoryMembershipV1,
+    frozen: bool,
+}
+
+/// Opaque proof of the complete durable erasure set and Timeline/Fork topology.
+///
+/// The value has no public constructor or wire representation. A successful
+/// [`ErasureVerifiedInventoryQueryV1`] call is the only public way to obtain
+/// it, so an empty inventory is positive host evidence rather than an absent
+/// caller-supplied request list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureVerifiedInventoryV1 {
+    generation: ErasureReferenceV1,
+    request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+    members: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
+    classifications: BTreeMap<TimelineId, Vec<ErasureInventoryClassificationV1>>,
+}
+
+impl ErasureVerifiedInventoryV1 {
+    fn from_verified_empty_snapshot(
+        snapshot: ErasurePersistenceInventorySnapshotV1,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureErrorV1> {
+        if !snapshot.request_heads.is_empty() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Self::from_verified_recovery(Vec::new(), snapshot.topology, maximum_requests)
+    }
+
+    pub(crate) fn from_verified_recovery(
+        mut recovered: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
+        mut topology: Vec<TimelineId>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureErrorV1> {
+        if maximum_requests == 0
+            || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS
+            || recovered.len() > maximum_requests
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        topology.sort_unstable();
+        if topology.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        recovered.sort_unstable_by_key(|(state, _)| state.request().reference());
+        if recovered
+            .windows(2)
+            .any(|pair| pair[0].0.request().reference() == pair[1].0.request().reference())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+
+        let mut request_heads = Vec::new();
+        request_heads
+            .try_reserve(recovered.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        let mut classifications = topology
+            .iter()
+            .copied()
+            .map(|timeline| (timeline, Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        for (state, proof) in &recovered {
+            Self::validate_member(state, proof, &topology)?;
+            let request = state.request().reference();
+            request_heads.push((request, state.manifest_digest()));
+            for (timeline, timeline_classifications) in &mut classifications {
+                let membership = proof
+                    .bindings
+                    .iter()
+                    .find_map(|(candidate, scope)| (*candidate == *timeline).then_some(*scope))
+                    .map_or(ErasureInventoryMembershipV1::Excluded, |scope| {
+                        ErasureInventoryMembershipV1::Included(scope)
+                    });
+                timeline_classifications.push(ErasureInventoryClassificationV1 {
+                    request,
+                    membership,
+                    frozen: ErasureContainmentGateV1::containment_rank(state.lifecycle()) >= 2,
+                });
+            }
+        }
+        let generation = erasure_inventory_generation(&request_heads, &topology);
+        Ok(Self {
+            generation,
+            request_heads,
+            members: recovered,
+            classifications,
+        })
+    }
+
+    fn validate_member(
+        state: &ErasureVerifiedStateV1,
+        proof: &ErasureVerifiedTopologyProofV1,
+        topology: &[TimelineId],
+    ) -> Result<(), ErasureErrorV1> {
+        if proof.manifest_digest != state.manifest_digest() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let mut observed = BTreeSet::new();
+        for (timeline, scope) in &proof.bindings {
+            if !state.scope_contains(*scope) || !observed.insert(*timeline) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        for timeline in &proof.unaffected {
+            if !observed.insert(*timeline) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        (observed.iter().copied().eq(topology.iter().copied()))
+            .then_some(())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    /// Return the complete-inventory generation bound to cache and cursor use.
+    #[must_use]
+    pub const fn generation(&self) -> ErasureReferenceV1 {
+        self.generation
+    }
+
+    /// Return the positively verified durable request-head count.
+    #[must_use]
+    pub const fn request_count(&self) -> usize {
+        self.request_heads.len()
+    }
+
+    /// Derive the complete set of active requests which require an ERSE1
+    /// extension before a child Fork may become visible.
+    ///
+    /// Requests which positively exclude the parent, or whose immutable scope
+    /// has no future-Fork lineage rule, require no mutation and remain
+    /// unaffected in the successor inventory.
+    ///
+    /// # Errors
+    /// Returns a closed provenance error when the parent is absent from the
+    /// verified topology or an included request lacks its verified scope.
+    pub fn fork_scope_requirements(
+        &self,
+        parent: TimelineId,
+    ) -> Result<Vec<ErasureForkScopeRequirementV1>, ErasureErrorV1> {
+        let classifications = self
+            .classifications
+            .get(&parent)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        self.members
+            .iter()
+            .zip(classifications)
+            .filter_map(|((state, _), classification)| {
+                let request = state.request().reference();
+                if classification.request != request {
+                    return Some(Err(ErasureErrorV1::ProvenanceMissing));
+                }
+                classification.membership.included_scope()?;
+                let Some(scope) = state.scope() else {
+                    return Some(Err(ErasureErrorV1::ProvenanceMissing));
+                };
+                scope.lineage_rule().map(|lineage_rule| {
+                    Ok(ErasureForkScopeRequirementV1 {
+                        request,
+                        scope_commitment: scope.reference(),
+                        lineage_rule,
+                        predecessor_extension: state
+                            .scope_extensions()
+                            .last()
+                            .map(ErasureScopeExtensionV1::reference),
+                    })
+                })
+            })
+            .collect()
+    }
+
+    /// Prepare the complete successor inventory for one future-Fork command.
+    ///
+    /// Every active request whose verified parent membership carries a
+    /// future-Fork lineage rule must contribute exactly one independently
+    /// prepared ERSE1 mutation. Requests that positively exclude the parent,
+    /// or whose immutable scope has no future-Fork rule, classify the child as
+    /// unaffected. The resulting opaque batch is the only value an adapter may
+    /// commit for a non-empty inventory.
+    ///
+    /// # Errors
+    /// Returns a closed conflict for a stale generation, an existing child,
+    /// an omitted/duplicate/extraneous request mutation, or inconsistent child
+    /// metadata and ERSE1 evidence.
+    pub fn prepare_fork_batch(
+        self,
+        input: ErasureForkAdmissionInputV1,
+        mut admissions: Vec<PreparedErasureForkAdmissionV1>,
+    ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
+        let Some((parent, _)) = input.child.fork_point else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        if input.child.mode != crate::TimelineMode::Historical
+            || input.expected_inventory_generation != self.generation
+            || self.classifications.contains_key(&input.child.id)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let parent_classifications = self
+            .classifications
+            .get(&parent)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        admissions.sort_unstable_by_key(|admission| admission.mutation.request());
+        if admissions
+            .windows(2)
+            .any(|pair| pair[0].mutation.request() == pair[1].mutation.request())
+            || admissions.iter().any(|admission| {
+                admission.input != input
+                    || !self
+                        .request_heads
+                        .iter()
+                        .any(|(request, _)| *request == admission.mutation.request())
+            })
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+
+        let mut successor_members = Vec::new();
+        successor_members
+            .try_reserve(self.members.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        let mut admission_index = 0;
+        for ((mut state, mut proof), classification) in
+            self.members.into_iter().zip(parent_classifications.iter())
+        {
+            let request = state.request().reference();
+            if classification.request != request {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let requires_extension = classification.membership.included_scope().is_some()
+                && state
+                    .scope()
+                    .and_then(ErasureScopeCommitmentV1::lineage_rule)
+                    .is_some();
+            let admission = admissions
+                .get(admission_index)
+                .filter(|admission| admission.mutation.request() == request);
+            match (requires_extension, admission) {
+                (true, Some(admission))
+                    if admission.mutation.expected_manifest_digest()
+                        == Some(state.manifest_digest()) =>
+                {
+                    state.manifest_digest = admission.mutation.next_manifest().digest();
+                    state.scope_extensions.push(admission.extension);
+                    proof.manifest_digest = state.manifest_digest();
+                    proof
+                        .bindings
+                        .push((input.child.id, admission.child_scope()));
+                    admission_index += 1;
+                }
+                (false, None) => proof.unaffected.push(input.child.id),
+                (true, None | Some(_)) | (false, Some(_)) => {
+                    return Err(ErasureErrorV1::PolicyConflict)
+                }
+            }
+            successor_members.push((state, proof));
+        }
+        let mut topology = self.classifications.into_keys().collect::<Vec<_>>();
+        topology.push(input.child.id);
+        let successor = Self::from_verified_recovery(
+            successor_members,
+            topology,
+            self.request_heads.len().max(1),
+        )?;
+        PreparedErasureForkBatchV1::new(input, admissions, successor)
+    }
+
+    fn authorize(&self, timeline: TimelineId) -> Result<(), ErasureContainmentErrorV1> {
+        let classifications = self
+            .classifications
+            .get(&timeline)
+            .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        if classifications
+            .iter()
+            .map(|classification| classification.request)
+            .ne(self.request_heads.iter().map(|(request, _)| *request))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if classifications.iter().any(|classification| {
+            classification.frozen && classification.membership.included_scope().is_some()
+        }) {
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Least-privilege host capability for one complete erasure recovery snapshot.
+pub trait ErasureVerifiedInventoryQueryV1 {
+    /// Recover and verify every durable request head and the complete topology.
+    ///
+    /// The configured ceiling must be no larger than
+    /// [`ERASURE_MAX_INVENTORY_REQUESTS`]. An over-limit or partial result
+    /// fails closed; a verified empty result succeeds with a deterministic
+    /// generation.
+    ///
+    /// # Errors
+    /// Returns a closed validation, authorization, admission-bound, or adapter
+    /// error. No partial inventory is returned.
+    fn verified_inventory(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1>;
+}
+
+/// One-shot verifier for the positive empty-request recovery case.
+///
+/// The input remains a raw adapter observation rather than runtime authority.
+/// Calling [`ErasureVerifiedInventoryQueryV1::verified_inventory`] verifies
+/// that its complete durable request-head set is empty and consumes the
+/// observation. A host must still compare the returned generation with a
+/// fresh snapshot from the exact adapter it owns before publishing access.
+pub struct ErasureVerifiedEmptyInventoryQueryV1 {
+    snapshot: Option<ErasurePersistenceInventorySnapshotV1>,
+}
+
+impl ErasureVerifiedEmptyInventoryQueryV1 {
+    /// Retain one complete adapter observation for one verification attempt.
+    #[must_use]
+    pub const fn new(snapshot: ErasurePersistenceInventorySnapshotV1) -> Self {
+        Self {
+            snapshot: Some(snapshot),
+        }
+    }
+}
+
+impl ErasureVerifiedInventoryQueryV1 for ErasureVerifiedEmptyInventoryQueryV1 {
+    fn verified_inventory(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        self.snapshot
+            .take()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|snapshot| {
+                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+            })
+    }
 }
 
 /// Public recovery/query seam for consumers that enforce erasure containment.
@@ -3122,6 +4481,40 @@ pub trait ErasureVerifiedStateQueryV1 {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1>;
+
+    /// Recover one state and its topology proof as one pinned observation.
+    ///
+    /// Implementations backed by durable persistence must override this
+    /// method so the state and proof are derived from the same recovery
+    /// snapshot/CAS revision. The default preserves source compatibility for
+    /// older query implementations but always denies the combined capability;
+    /// it must never authorize a split state/topology read.
+    ///
+    /// # Errors
+    /// Returns a closed persistence, provenance, authorization, or validation
+    /// error when the durable graph cannot be verified.
+    fn verified_state_with_topology(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>, ErasureErrorV1>
+    {
+        Ok(None)
+    }
+
+    /// Recover the authoritative, complete Timeline/Fork topology proof for
+    /// the same request and verified manifest. The default denies this newer
+    /// capability so callers cannot accidentally treat a state-only response
+    /// as proof of unaffected scope availability.
+    ///
+    /// # Errors
+    /// Returns a closed persistence, provenance, authorization, or validation
+    /// error when durable topology evidence cannot be verified.
+    fn verified_topology(
+        &mut self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyProofV1>, ErasureErrorV1> {
+        Ok(None)
+    }
 }
 
 /// Public read-only seam for payload-free recovery diagnostics.
@@ -3632,6 +5025,450 @@ pub struct PreparedErasureCasV1 {
     effect: ErasureCasEffectV1,
 }
 
+/// Host-resolved inputs bound into one atomic future-Fork admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureForkAdmissionInputV1 {
+    /// Stable idempotency identity for the logical Fork operation.
+    pub operation: ErasureReferenceV1,
+    /// Complete inventory generation observed during host authorization.
+    pub expected_inventory_generation: ErasureReferenceV1,
+    /// Canonical scope reference assigned to the preallocated child.
+    pub child_scope: ErasureReferenceV1,
+    /// Preallocated child metadata, including parent and Fork position.
+    pub child: crate::TimelineMeta,
+}
+
+/// Payload-free host input for one future-Fork scope-extension decision.
+///
+/// The complete verified inventory derives these fields from recovered ERCRP1
+/// state. An authority Plugin may use them to construct an ERSE1 candidate,
+/// but the core coordinator still authenticates and validates that candidate
+/// before any adapter mutation is prepared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureForkScopeRequirementV1 {
+    request: ErasureReferenceV1,
+    scope_commitment: ErasureReferenceV1,
+    lineage_rule: ErasureReferenceV1,
+    predecessor_extension: Option<ErasureReferenceV1>,
+}
+
+impl ErasureForkScopeRequirementV1 {
+    /// Return the durable ERQ1 identity requiring extension.
+    #[must_use]
+    pub const fn request(self) -> ErasureReferenceV1 {
+        self.request
+    }
+
+    /// Return the immutable initial scope commitment.
+    #[must_use]
+    pub const fn scope_commitment(self) -> ErasureReferenceV1 {
+        self.scope_commitment
+    }
+
+    /// Return the lineage rule authorizing future-Fork expansion.
+    #[must_use]
+    pub const fn lineage_rule(self) -> ErasureReferenceV1 {
+        self.lineage_rule
+    }
+
+    /// Return the current ERSE1 chain head, if one exists.
+    #[must_use]
+    pub const fn predecessor_extension(self) -> Option<ErasureReferenceV1> {
+        self.predecessor_extension
+    }
+}
+
+/// Durable, payload-free result of one committed future-Fork operation.
+///
+/// This value lets a restarted host answer a retry after the original reply
+/// was lost. It identifies the original child and the complete successor
+/// inventory generation without exposing ERSE1 manifests or adapter state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureForkRecoveryV1 {
+    operation: ErasureReferenceV1,
+    binding_digest: ErasureReferenceV1,
+    successor_generation: ErasureReferenceV1,
+    child: crate::TimelineMeta,
+    receipt_digest: ErasureReferenceV1,
+}
+
+impl ErasureForkRecoveryV1 {
+    fn new(
+        operation: ErasureReferenceV1,
+        binding_digest: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
+        child: crate::TimelineMeta,
+    ) -> Result<Self, ErasureErrorV1> {
+        let Some(fork_point) = child.fork_point else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        if child.mode != crate::TimelineMode::Historical {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let receipt_digest = Self::compute_receipt_digest(
+            operation,
+            binding_digest,
+            successor_generation,
+            &child,
+            fork_point,
+        );
+        Ok(Self {
+            operation,
+            binding_digest,
+            successor_generation,
+            child,
+            receipt_digest,
+        })
+    }
+
+    /// Reconstruct one adapter-validated durable Fork result.
+    ///
+    /// # Errors
+    /// Returns a closed policy error when the persisted child is not a
+    /// Historical Fork.
+    pub fn from_persisted(
+        operation: ErasureReferenceV1,
+        binding_digest: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
+        child: crate::TimelineMeta,
+        receipt_digest: ErasureReferenceV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let recovered = Self::new(operation, binding_digest, successor_generation, child)?;
+        if recovered.receipt_digest != receipt_digest {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(recovered)
+    }
+
+    fn compute_receipt_digest(
+        operation: ErasureReferenceV1,
+        binding_digest: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
+        child: &crate::TimelineMeta,
+        fork_point: (TimelineId, Seq),
+    ) -> ErasureReferenceV1 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-recovery/v1");
+        hasher.update(&operation.digest());
+        hasher.update(&binding_digest.digest());
+        hasher.update(&successor_generation.digest());
+        hasher.update(&child.id.inner().to_bytes());
+        hasher.update(b"historical");
+        match &child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        match child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        let (parent, at_seq) = fork_point;
+        hasher.update(&parent.inner().to_bytes());
+        hasher.update(&at_seq.as_u64().to_be_bytes());
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+    }
+
+    /// Return the stable logical operation identity.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureReferenceV1 {
+        self.operation
+    }
+
+    /// Return the digest binding the original prepared transaction.
+    #[must_use]
+    pub const fn binding_digest(&self) -> ErasureReferenceV1 {
+        self.binding_digest
+    }
+
+    /// Return the complete successor inventory generation committed with it.
+    #[must_use]
+    pub const fn successor_generation(&self) -> ErasureReferenceV1 {
+        self.successor_generation
+    }
+
+    /// Return the original preallocated child metadata.
+    #[must_use]
+    pub const fn child(&self) -> &crate::TimelineMeta {
+        &self.child
+    }
+
+    /// Return the content address of the minimized durable receipt.
+    #[must_use]
+    pub const fn receipt_digest(&self) -> ErasureReferenceV1 {
+        self.receipt_digest
+    }
+}
+
+/// Opaque core-prepared ERSE1 and child-Timeline transaction.
+///
+/// Adapters may inspect the bound values but cannot construct this capability.
+/// The value is produced only after coordinator recovery, lineage validation,
+/// and host admission have all succeeded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedErasureForkAdmissionV1 {
+    input: ErasureForkAdmissionInputV1,
+    extension: ErasureScopeExtensionV1,
+    mutation: PreparedErasureCasV1,
+    binding_digest: ErasureReferenceV1,
+}
+
+impl PreparedErasureForkAdmissionV1 {
+    pub(crate) fn new(
+        input: ErasureForkAdmissionInputV1,
+        extension: ErasureScopeExtensionV1,
+        mutation: PreparedErasureCasV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let Some((parent, at_seq)) = input.child.fork_point else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        let Some(predecessor) = mutation.expected_manifest_digest() else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        if input.child.mode != crate::TimelineMode::Historical
+            || input.child_scope != extension.fork()
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let binding_digest = Self::compute_binding_digest(
+            &input,
+            &extension,
+            &mutation,
+            predecessor,
+            parent,
+            at_seq,
+        );
+        Ok(Self {
+            input,
+            extension,
+            mutation,
+            binding_digest,
+        })
+    }
+
+    fn compute_binding_digest(
+        input: &ErasureForkAdmissionInputV1,
+        extension: &ErasureScopeExtensionV1,
+        mutation: &PreparedErasureCasV1,
+        predecessor: ErasureReferenceV1,
+        parent: TimelineId,
+        at_seq: Seq,
+    ) -> ErasureReferenceV1 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-admission/v1");
+        for reference in [
+            input.operation,
+            input.expected_inventory_generation,
+            input.child_scope,
+            extension.reference(),
+            mutation.request(),
+            predecessor,
+            mutation.next_manifest().digest(),
+        ] {
+            hasher.update(&reference.digest());
+        }
+        hasher.update(&input.child.id.inner().to_bytes());
+        hasher.update(&[0]);
+        match &input.child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        match input.child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&parent.inner().to_bytes());
+        hasher.update(&at_seq.as_u64().to_be_bytes());
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+    }
+
+    /// Return the stable operation identity.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureReferenceV1 {
+        self.input.operation
+    }
+
+    /// Return the expected complete-inventory generation.
+    #[must_use]
+    pub const fn expected_inventory_generation(&self) -> ErasureReferenceV1 {
+        self.input.expected_inventory_generation
+    }
+
+    /// Return the canonical child scope reference.
+    #[must_use]
+    pub const fn child_scope(&self) -> ErasureReferenceV1 {
+        self.input.child_scope
+    }
+
+    /// Return the preallocated child metadata.
+    #[must_use]
+    pub const fn child(&self) -> &crate::TimelineMeta {
+        &self.input.child
+    }
+
+    /// Return the independently admitted ERSE1 record.
+    #[must_use]
+    pub const fn extension(&self) -> &ErasureScopeExtensionV1 {
+        &self.extension
+    }
+
+    /// Return the prepared ERCRP1 successor mutation.
+    #[must_use]
+    pub const fn mutation(&self) -> &PreparedErasureCasV1 {
+        &self.mutation
+    }
+
+    /// Return the digest binding every idempotency-relevant admission field.
+    #[must_use]
+    pub const fn binding_digest(&self) -> ErasureReferenceV1 {
+        self.binding_digest
+    }
+}
+
+/// Opaque complete-set future-Fork transaction prepared for one host command.
+///
+/// The batch contains every ERSE1 mutation required by the installed inventory
+/// plus the fully verified successor inventory. An adapter consumes the batch
+/// atomically; the host publishes its successor before exposing the child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedErasureForkBatchV1 {
+    input: ErasureForkAdmissionInputV1,
+    admissions: Vec<PreparedErasureForkAdmissionV1>,
+    successor_inventory: ErasureVerifiedInventoryV1,
+    binding_digest: ErasureReferenceV1,
+}
+
+impl PreparedErasureForkBatchV1 {
+    fn new(
+        input: ErasureForkAdmissionInputV1,
+        admissions: Vec<PreparedErasureForkAdmissionV1>,
+        successor_inventory: ErasureVerifiedInventoryV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let Some((parent, at_seq)) = input.child.fork_point else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-batch/v1");
+        for reference in [
+            input.operation,
+            input.expected_inventory_generation,
+            input.child_scope,
+            successor_inventory.generation(),
+        ] {
+            hasher.update(&reference.digest());
+        }
+        hasher.update(&input.child.id.inner().to_bytes());
+        hasher.update(b"historical");
+        match &input.child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        match input.child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&parent.inner().to_bytes());
+        hasher.update(&at_seq.as_u64().to_be_bytes());
+        hasher.update(
+            &u64::try_from(admissions.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for admission in &admissions {
+            hasher.update(&admission.binding_digest().digest());
+        }
+        let binding_digest = ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes());
+        Ok(Self {
+            input,
+            admissions,
+            successor_inventory,
+            binding_digest,
+        })
+    }
+
+    /// Return the stable operation identity.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureReferenceV1 {
+        self.input.operation
+    }
+
+    /// Return the installed inventory generation this operation extends.
+    #[must_use]
+    pub const fn expected_inventory_generation(&self) -> ErasureReferenceV1 {
+        self.input.expected_inventory_generation
+    }
+
+    /// Return the preallocated child metadata.
+    #[must_use]
+    pub const fn child(&self) -> &crate::TimelineMeta {
+        &self.input.child
+    }
+
+    /// Return the ordered complete set of prepared ERSE1 mutations.
+    #[must_use]
+    pub fn admissions(&self) -> &[PreparedErasureForkAdmissionV1] {
+        &self.admissions
+    }
+
+    /// Return the successor inventory to publish after adapter commit.
+    #[must_use]
+    pub const fn successor_inventory(&self) -> &ErasureVerifiedInventoryV1 {
+        &self.successor_inventory
+    }
+
+    /// Return the digest binding the complete operation and successor state.
+    #[must_use]
+    pub const fn binding_digest(&self) -> ErasureReferenceV1 {
+        self.binding_digest
+    }
+
+    /// Derive the durable payload-free result stored with this transaction.
+    ///
+    /// # Errors
+    /// Returns a closed policy error only if the opaque prepared value is
+    /// internally inconsistent.
+    pub fn recovery_result(&self) -> Result<ErasureForkRecoveryV1, ErasureErrorV1> {
+        ErasureForkRecoveryV1::new(
+            self.operation(),
+            self.binding_digest(),
+            self.successor_inventory().generation(),
+            self.child().clone(),
+        )
+    }
+}
+
 impl PreparedErasureCasV1 {
     pub(crate) const fn new(
         request: ErasureReferenceV1,
@@ -4040,6 +5877,39 @@ pub trait ErasureCoordinatorPortV1:
     + ErasureFreezeAuthorizationVerifierV1
     + ErasureRecoveryAuthorizationVerifierV1
 {
+    /// Observe every durable erasure head and the complete Timeline/Fork
+    /// classification from one adapter snapshot.
+    ///
+    /// Implementations must provide this observation explicitly so a host
+    /// cannot silently omit complete-set recovery. `SQLite` implementations
+    /// hold one read transaction for the observation; an exclusively owned
+    /// `MemoryStore` observes its current candidate state.
+    ///
+    /// # Errors
+    /// Returns a closed adapter, admission-bound, or provenance error. A
+    /// partial observation must never be returned.
+    fn complete_erasure_inventory_observation(
+        &self,
+        maximum_requests: usize,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1>;
+
+    /// Recover the complete Timeline/Fork topology observation for one pinned
+    /// manifest revision.
+    ///
+    /// A production host must derive the result from the same durable
+    /// snapshot/CAS revision as the coordinator's recovered state. Requiring
+    /// every host implementation to provide this method prevents an omitted
+    /// topology resolver from being mistaken for an intentional policy choice.
+    ///
+    /// # Errors
+    /// Returns a closed persistence, provenance, or authorization error when
+    /// the topology cannot be verified.
+    fn verified_topology_observation(
+        &self,
+        request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1>;
+
     /// Authenticate a request before the state machine records it.
     ///
     /// # Errors
@@ -4097,6 +5967,20 @@ pub trait ErasureCoordinatorPortV1:
     fn admit_scope_extension(
         &self,
         extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1>;
+    /// Authenticate the complete host-resolved future-Fork admission.
+    ///
+    /// Implementations must bind the stable operation identity, parent,
+    /// preallocated child, Fork position, child scope, admission provenance,
+    /// and current inventory generation. Requiring this separate method means
+    /// an ERSE1-only verifier cannot authorize child persistence.
+    ///
+    /// # Errors
+    /// Returns a closed authorization, lineage, scope, or generation error.
+    fn admit_fork_scope_extension(
+        &self,
+        extension: &ErasureScopeExtensionV1,
+        input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1>;
     /// Authenticate one administrative recovery resolution before its CAS append.
     ///
@@ -4437,3 +6321,969 @@ use evidence::{
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "erasure_tests.rs"]
 pub mod tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_paths {
+    use super::*;
+
+    const fn reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    fn frozen_state() -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
+        frozen_state_with_manifest(reference(6))
+    }
+
+    fn frozen_state_with_manifest(
+        manifest_digest: ErasureReferenceV1,
+    ) -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
+        let request = ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: reference(1),
+            subject: reference(2),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(7)],
+            requester: reference(3),
+            authorization: reference(4),
+            policy: reference(5),
+            request_position: 9,
+            horizon_position: 10,
+            provenance: reference(6),
+        })?;
+        let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: reference(1),
+            scope_members: vec![reference(7)],
+            target_closure: reference(8),
+            lineage_rule: Some(reference(9)),
+        })?;
+        let state = ErasureStateV1 {
+            request: reference(1),
+            lifecycle: ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            coordinator: reference(2),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            previous_state: Some(reference(3)),
+            provenance: reference(4),
+            state_digest: reference(5),
+        };
+        Ok(ErasureVerifiedStateV1::from_parts(
+            manifest_digest,
+            request,
+            state,
+            Some(scope),
+            Vec::new(),
+        ))
+    }
+
+    fn coverage_state(manifest_digest: ErasureReferenceV1) -> ErasureVerifiedStateV1 {
+        frozen_state_with_manifest(manifest_digest).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("coverage state failed: {error:?}")))
+        })
+    }
+
+    fn inventory_state(
+        request_reference: ErasureReferenceV1,
+        manifest: ErasureReferenceV1,
+        scope_reference: ErasureReferenceV1,
+        lifecycle: ErasureLifecycleV1,
+    ) -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
+        let request = ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: request_reference,
+            subject: reference(22),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![scope_reference],
+            requester: reference(23),
+            authorization: reference(24),
+            policy: reference(25),
+            request_position: 9,
+            horizon_position: 10,
+            provenance: reference(26),
+        })?;
+        let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: request_reference,
+            scope_members: vec![scope_reference],
+            target_closure: reference(27),
+            lineage_rule: Some(reference(28)),
+        })?;
+        Ok(ErasureVerifiedStateV1::from_parts(
+            manifest,
+            request,
+            ErasureStateV1 {
+                request: request_reference,
+                lifecycle,
+                freeze_position: (ErasureContainmentGateV1::containment_rank(lifecycle) >= 2)
+                    .then_some(10),
+                coordinator: reference(29),
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                replay_claim: ErasureReplayClaimV1::Exact,
+                previous_state: Some(reference(30)),
+                provenance: reference(31),
+                state_digest: reference(32),
+            },
+            Some(scope),
+            Vec::new(),
+        ))
+    }
+
+    struct InventoryQuery(Option<ErasureVerifiedInventoryV1>);
+
+    impl ErasureVerifiedInventoryQueryV1 for InventoryQuery {
+        fn verified_inventory(
+            &mut self,
+            _maximum_requests: usize,
+        ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+            self.0.take().ok_or(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
+    struct PoisoningInventoryQuery {
+        gate: Arc<ErasureContainmentGateV1>,
+        inventory: Option<ErasureVerifiedInventoryV1>,
+    }
+
+    impl ErasureVerifiedInventoryQueryV1 for PoisoningInventoryQuery {
+        fn verified_inventory(
+            &mut self,
+            _maximum_requests: usize,
+        ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+            self.gate.poison();
+            self.inventory
+                .take()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
+    fn assert_inventory_transition_fence(
+        gate: &ErasureContainmentGateV1,
+        inventory: ErasureVerifiedInventoryV1,
+    ) {
+        let generation = inventory.generation();
+        let mut successor = Some(inventory);
+        assert_eq!(
+            gate.install_from_verified_inventory_transition(&mut || {
+                successor
+                    .take()
+                    .map(|inventory| (inventory, ()))
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
+            .map(|(inventory, ())| inventory.generation()),
+            Ok(generation)
+        );
+        assert_eq!(
+            gate.install_from_verified_inventory_transition(&mut || {
+                Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::PolicyConflict)
+            }),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(gate.inventory_generation(), Ok(generation));
+
+        let poisoned = ErasureContainmentGateV1::new_fail_closed();
+        poisoned.poison();
+        let mut called = false;
+        assert_eq!(
+            poisoned.install_from_verified_inventory_transition(&mut || {
+                called = true;
+                Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::ProvenanceMissing)
+            }),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert!(!called);
+    }
+
+    #[test]
+    fn explicit_gate_poison_is_irreversible_across_publication_and_nested_fences(
+    ) -> Result<(), ErasureErrorV1> {
+        let timeline = TimelineId::new();
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![timeline], 1)?;
+        let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        gate.poison();
+        assert_eq!(
+            gate.inventory_generation(),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            gate.install_from_verified_inventory_query(
+                &mut InventoryQuery(Some(inventory.clone())),
+                1,
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let publication_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let mut poisoning_query = PoisoningInventoryQuery {
+            gate: Arc::clone(&publication_gate),
+            inventory: Some(inventory),
+        };
+        assert_eq!(
+            publication_gate.install_from_verified_inventory_query(&mut poisoning_query, 1),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let nested_gate = Arc::new(ErasureContainmentGateV1::new());
+        let mut nested_result = None;
+        let mut outer_effect = || {
+            nested_gate.poison();
+            let mut inner_effect = || {};
+            nested_result = Some(nested_gate.with_fence(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                &mut inner_effect,
+            ));
+        };
+        assert_eq!(
+            nested_gate.with_fence(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                &mut outer_effect,
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            nested_result,
+            Some(Err(ErasureContainmentErrorV1::RecoveryUnavailable))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_inventory_proves_empty_and_many_to_many_classification(
+    ) -> Result<(), ErasureErrorV1> {
+        let affected = TimelineId::new();
+        let unaffected = TimelineId::new();
+        let empty = ErasureVerifiedInventoryV1::from_verified_recovery(
+            Vec::new(),
+            vec![unaffected, affected],
+            4,
+        )?;
+        assert_eq!(empty.request_count(), 0);
+        assert_eq!(empty.authorize(affected), Ok(()));
+        assert_eq!(
+            empty.authorize(TimelineId::new()),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let first = inventory_state(
+            reference(41),
+            reference(42),
+            reference(43),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let second = inventory_state(
+            reference(44),
+            reference(45),
+            reference(46),
+            ErasureLifecycleV1::Authorized,
+        )?;
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![
+                (
+                    second.clone(),
+                    ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                        second.manifest_digest(),
+                        vec![(unaffected, reference(46))],
+                        vec![affected],
+                    ),
+                ),
+                (
+                    first.clone(),
+                    ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                        first.manifest_digest(),
+                        vec![(affected, reference(43))],
+                        vec![unaffected],
+                    ),
+                ),
+            ],
+            vec![affected, unaffected],
+            4,
+        )?;
+        assert_eq!(inventory.request_count(), 2);
+        assert_eq!(
+            inventory.authorize(affected),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+        assert_eq!(inventory.authorize(unaffected), Ok(()));
+
+        let mut topology = vec![affected, unaffected];
+        topology.sort_unstable();
+        let snapshot = ErasurePersistenceInventorySnapshotV1::new(
+            inventory.request_heads.clone(),
+            topology,
+            4,
+        )?;
+        assert_eq!(snapshot.generation(), inventory.generation());
+
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let generation = inventory.generation();
+        let transition_inventory = inventory.clone();
+        let mut query = InventoryQuery(Some(inventory));
+        assert_eq!(
+            gate.install_from_verified_inventory_query(&mut query, 4),
+            Ok(generation)
+        );
+        assert_eq!(
+            gate.install_from_verified_inventory_query(&mut InventoryQuery(None), 4),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(gate.inventory_generation(), Ok(generation));
+        assert_eq!(
+            gate.authorize(affected, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+        assert_eq!(
+            gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
+            Ok(())
+        );
+        assert_inventory_transition_fence(&gate, transition_inventory);
+        Ok(())
+    }
+
+    #[test]
+    fn corrupted_opaque_fork_inventory_fails_closed() -> Result<(), ErasureErrorV1> {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let state = inventory_state(
+            reference(61),
+            reference(62),
+            reference(63),
+            ErasureLifecycleV1::Authorized,
+        )?;
+        let scope_commitment = state
+            .scope()
+            .map(ErasureScopeCommitmentV1::reference)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let included = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![(
+                state.clone(),
+                ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                    state.manifest_digest(),
+                    vec![(parent, reference(63))],
+                    Vec::new(),
+                ),
+            )],
+            vec![parent],
+            4,
+        )?;
+        let requirement = included
+            .fork_scope_requirements(parent)?
+            .pop()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        assert_eq!(requirement.request(), reference(61));
+        assert_eq!(requirement.scope_commitment(), scope_commitment);
+        assert_eq!(requirement.lineage_rule(), reference(28));
+        assert_eq!(requirement.predecessor_extension(), None);
+        assert_eq!(
+            included.fork_scope_requirements(TimelineId::new()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut missing_scope = included;
+        missing_scope.members[0].0.scope = None;
+        assert_eq!(
+            missing_scope.fork_scope_requirements(parent),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            Vec::new(),
+            vec![parent],
+        );
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![(state, proof)],
+            vec![parent],
+            4,
+        )?;
+        assert!(inventory.fork_scope_requirements(parent)?.is_empty());
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(64),
+            expected_inventory_generation: inventory.generation(),
+            child_scope: reference(65),
+            child: crate::TimelineMeta {
+                id: child,
+                mode: crate::TimelineMode::Historical,
+                name: Some("corrupt-inventory-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent, crate::Seq::ZERO)),
+            },
+        };
+
+        let mut mismatched_classification = inventory.clone();
+        mismatched_classification
+            .classifications
+            .get_mut(&parent)
+            .and_then(|classifications| classifications.first_mut())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .request = reference(66);
+        assert_eq!(
+            mismatched_classification.fork_scope_requirements(parent),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            mismatched_classification
+                .clone()
+                .prepare_fork_batch(input.clone(), Vec::new()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            mismatched_classification.authorize(parent),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let mut incomplete_proof = inventory;
+        incomplete_proof.members[0].1.unaffected.clear();
+        assert_eq!(
+            incomplete_proof.prepare_fork_batch(input, Vec::new()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fork_batch_constructor_rejects_missing_parent() -> Result<(), ErasureErrorV1> {
+        let successor =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 1)?;
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(71),
+            expected_inventory_generation: successor.generation(),
+            child_scope: reference(72),
+            child: crate::TimelineMeta {
+                id: TimelineId::new(),
+                mode: crate::TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: None,
+            },
+        };
+        assert_eq!(
+            PreparedErasureForkBatchV1::new(input, Vec::new(), successor),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_inventory_rejects_partial_stale_and_over_limit() -> Result<(), ErasureErrorV1> {
+        let timeline = TimelineId::new();
+        assert_eq!(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 0),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasurePersistenceInventorySnapshotV1::new(
+                vec![(reference(1), reference(2)), (reference(1), reference(3))],
+                Vec::new(),
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut nonempty_query =
+            ErasureVerifiedEmptyInventoryQueryV1::new(ErasurePersistenceInventorySnapshotV1::new(
+                vec![(reference(1), reference(2))],
+                Vec::new(),
+                4,
+            )?);
+        assert_eq!(
+            nonempty_query.verified_inventory(4),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            nonempty_query.verified_inventory(4),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let state = inventory_state(
+            reference(51),
+            reference(52),
+            reference(53),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(53))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), proof.clone())],
+                vec![timeline],
+                0,
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![
+                    (state.clone(), proof.clone()),
+                    (state.clone(), proof.clone())
+                ],
+                vec![timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), proof)],
+                vec![timeline, TimelineId::new()],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let stale_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            reference(54),
+            vec![(timeline, reference(53))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state, stale_proof)],
+                vec![timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_inventory_rejects_duplicate_or_invalid_topology() -> Result<(), ErasureErrorV1> {
+        let timeline = TimelineId::new();
+        let state = inventory_state(
+            reference(51),
+            reference(52),
+            reference(53),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(53))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), proof)],
+                vec![timeline, timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let invalid_scope = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(254))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state.clone(), invalid_scope)],
+                vec![timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let duplicate_unaffected = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            Vec::new(),
+            vec![timeline, timeline],
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery(
+                vec![(state, duplicate_unaffected)],
+                vec![timeline],
+                4,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn frozen_scope_calls_the_verified_state_permission_check() {
+        let gate = ErasureContainmentGateV1::new();
+        let timeline = TimelineId::new();
+        gate.publish_verified_state(coverage_state(reference(6)));
+        assert!(gate.bind_timeline(timeline, reference(7)).is_ok());
+        assert_eq!(
+            gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+    }
+
+    #[test]
+    fn authorized_scope_calls_the_verified_state_permission_check() {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let timeline = TimelineId::new();
+        let unrelated_timeline = TimelineId::new();
+        let unrelated_state = inventory_state(
+            reference(71),
+            reference(72),
+            reference(73),
+            ErasureLifecycleV1::Authorized,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unrelated authorized state failed: {error:?}"
+            )))
+        });
+        let unrelated_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            unrelated_state.manifest_digest(),
+            vec![(unrelated_timeline, reference(73))],
+            Vec::new(),
+        );
+        assert!(gate
+            .install_verified_state_with_topology(&unrelated_state, &unrelated_proof)
+            .is_ok());
+        let state = inventory_state(
+            reference(81),
+            reference(82),
+            reference(83),
+            ErasureLifecycleV1::Authorized,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("authorized state failed: {error:?}")))
+        });
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(83))],
+            Vec::new(),
+        );
+        assert!(gate
+            .install_verified_state_with_topology(&state, &proof)
+            .is_ok());
+        assert_eq!(
+            gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Ok(())
+        );
+
+        let unavailable_gate = ErasureContainmentGateV1::new_fail_closed();
+        let unavailable_timeline = TimelineId::new();
+        let mut unavailable_state = inventory_state(
+            reference(92),
+            reference(93),
+            reference(94),
+            ErasureLifecycleV1::AccessFrozen,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unavailable state failed: {error:?}")))
+        });
+        unavailable_state.state.freeze_position = None;
+        let unavailable_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            unavailable_state.manifest_digest(),
+            vec![(unavailable_timeline, reference(94))],
+            Vec::new(),
+        );
+        assert!(unavailable_gate
+            .install_verified_state_with_topology(&unavailable_state, &unavailable_proof)
+            .is_ok());
+        assert_eq!(
+            unavailable_gate.authorize(unavailable_timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    #[test]
+    fn fork_admission_rejects_missing_predecessor_and_extraneous_request() {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 1)
+                .unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!(
+                        "empty inventory failed: {error:?}"
+                    )))
+                });
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(84),
+            expected_inventory_generation: inventory.generation(),
+            child_scope: reference(85),
+            child: crate::TimelineMeta {
+                id: child,
+                mode: crate::TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: Some((parent, crate::Seq::ZERO)),
+            },
+        };
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: reference(86),
+            scope_commitment: reference(87),
+            fork: input.child_scope,
+            lineage_rule: reference(88),
+            predecessor_extension: None,
+            admission_provenance: reference(89),
+        })
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("extension failed: {error:?}")))
+        });
+        let mutation = |expected_manifest_digest| {
+            PreparedErasureCasV1::new(
+                extension.request(),
+                expected_manifest_digest,
+                StoredErasureManifestV1::from_stored(reference(90), Vec::new()),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                ErasureCasEffectV1::None,
+            )
+        };
+        assert_eq!(
+            PreparedErasureForkAdmissionV1::new(input.clone(), extension, mutation(None)),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        let admission = PreparedErasureForkAdmissionV1::new(
+            input.clone(),
+            extension,
+            mutation(Some(reference(91))),
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("admission failed: {error:?}")))
+        });
+        assert_eq!(
+            inventory.prepare_fork_batch(input, vec![admission]),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+    }
+
+    #[test]
+    fn gate_mutations_fail_closed_after_lock_poisoning() {
+        fn poison_fence(gate: &Arc<ErasureContainmentGateV1>) {
+            let poisoned = Arc::clone(gate);
+            let result = std::thread::spawn(move || {
+                let _guard = poisoned.fence_lock.lock().unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+                });
+                std::panic::resume_unwind(Box::new("poison erasure fence"));
+            })
+            .join();
+            assert!(result.is_err());
+        }
+
+        fn poison_authority(gate: &Arc<ErasureContainmentGateV1>) {
+            let poisoned = Arc::clone(gate);
+            let result = std::thread::spawn(move || {
+                let _guard = poisoned.authority.write().unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+                });
+                std::panic::resume_unwind(Box::new("poison erasure authority"));
+            })
+            .join();
+            assert!(result.is_err());
+        }
+
+        let publish_fence = Arc::new(ErasureContainmentGateV1::new());
+        poison_fence(&publish_fence);
+        publish_fence.publish_verified_state(coverage_state(reference(6)));
+
+        let publish_authority = Arc::new(ErasureContainmentGateV1::new());
+        poison_authority(&publish_authority);
+        publish_authority.publish_verified_state(coverage_state(reference(6)));
+
+        let block_fence = Arc::new(ErasureContainmentGateV1::new());
+        poison_fence(&block_fence);
+        block_fence.block_timeline(TimelineId::new());
+
+        let block_authority = Arc::new(ErasureContainmentGateV1::new());
+        poison_authority(&block_authority);
+        block_authority.block_timeline(TimelineId::new());
+
+        let state = coverage_state(reference(6));
+        let timeline = TimelineId::new();
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(7))],
+            Vec::new(),
+        );
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![timeline], 1)
+                .unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("inventory failed: {error:?}")))
+                });
+
+        let poisoned_fence = Arc::new(ErasureContainmentGateV1::new());
+        poison_fence(&poisoned_fence);
+        assert_eq!(
+            poisoned_fence.bind_timeline(timeline, reference(7)),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_fence.install_verified_state_with_topology(&state, &proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_fence.install_from_verified_inventory_query(
+                &mut InventoryQuery(Some(inventory.clone())),
+                1,
+            ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_fence.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        let mut effect = || {};
+        assert_eq!(
+            poisoned_fence.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect,),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let poisoned_authority = Arc::new(ErasureContainmentGateV1::new());
+        poison_authority(&poisoned_authority);
+        assert_eq!(
+            poisoned_authority.bind_timeline(timeline, reference(7)),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority.install_verified_state_with_topology(&state, &proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority
+                .install_from_verified_inventory_query(&mut InventoryQuery(Some(inventory)), 1,),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority.inventory_generation(),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority.authorize(timeline, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            poisoned_authority
+                .with_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect,),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    #[test]
+    fn topology_proof_is_opaque_and_manifest_bound() -> Result<(), ErasureErrorV1> {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let affected = TimelineId::new();
+        let unaffected = TimelineId::new();
+        let unknown = TimelineId::new();
+        let state = frozen_state()?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![unaffected],
+        );
+        let mismatched_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            reference(8),
+            vec![(affected, reference(7))],
+            vec![unaffected],
+        );
+        assert_eq!(
+            gate.install_verified_state_with_topology(&state, &mismatched_proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        gate.install_verified_state_with_topology(&state, &proof)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        assert_eq!(
+            gate.bind_timeline(unaffected, reference(7)),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            gate.authorize(affected, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        );
+        assert_eq!(
+            gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
+            Ok(())
+        );
+        assert_eq!(
+            gate.authorize(unknown, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let duplicate_gate = ErasureContainmentGateV1::new_fail_closed();
+        let duplicate_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![affected],
+        );
+        assert_eq!(
+            duplicate_gate.install_verified_state_with_topology(&state, &duplicate_proof),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+
+        let conflicting_gate = ErasureContainmentGateV1::new_fail_closed();
+        let initial_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![unknown],
+        );
+        conflicting_gate
+            .install_verified_state_with_topology(&state, &initial_proof)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let replacement_state = frozen_state_with_manifest(reference(9))?;
+        let replacement_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            replacement_state.manifest_digest(),
+            vec![(affected, reference(7))],
+            Vec::new(),
+        );
+        assert_eq!(
+            conflicting_gate
+                .install_verified_state_with_topology(&replacement_state, &replacement_proof,),
+            Ok(())
+        );
+        assert_eq!(
+            conflicting_gate.authorize(unknown, ErasureProtectedOperationV1::Read),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn topology_proof_rejects_conflicting_unaffected_manifest() -> Result<(), ErasureErrorV1> {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let state = frozen_state_with_manifest(reference(6))?;
+        let unaffected = TimelineId::new();
+        let initial = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(TimelineId::new(), reference(7))],
+            vec![unaffected],
+        );
+        gate.install_verified_state_with_topology(&state, &initial)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let replacement = frozen_state_with_manifest(reference(8))?;
+        let conflicting = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            replacement.manifest_digest(),
+            vec![(TimelineId::new(), reference(7))],
+            vec![unaffected],
+        );
+        assert_eq!(
+            gate.install_verified_state_with_topology(&replacement, &conflicting),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn topology_proof_conflict_checks_existing_unaffected_manifest() {
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let affected = TimelineId::new();
+        let unaffected = TimelineId::new();
+        let state = coverage_state(reference(6));
+        let initial = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![unaffected],
+        );
+        assert!(gate
+            .install_verified_state_with_topology(&state, &initial)
+            .is_ok());
+        let replacement = coverage_state(reference(8));
+        let conflicting = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            replacement.manifest_digest(),
+            vec![(affected, reference(7))],
+            vec![unaffected],
+        );
+        assert_eq!(
+            gate.install_verified_state_with_topology(&replacement, &conflicting),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+    }
+}

@@ -777,6 +777,7 @@ dependencies = [
  "pos-core",
  "pos-crypto",
  "pos-plugin-ledger",
+ "pos-runtime",
  "pos-store",
  "serde",
  "serde_json",

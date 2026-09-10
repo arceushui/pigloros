@@ -10,7 +10,7 @@ use pos_core::{
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Hash, Plugin, PluginId,
-    PrincipalRefV1, Seq, TimelineId, WallTime,
+    PrincipalRefV1, Seq, TimelineId, WallTime, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -20,7 +20,9 @@ use pos_plugin_agent::{
 use pos_plugin_society::{
     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 };
-use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
+use pos_runtime::{
+    Driver, ErasureExecutionHostV1, ObservationView, ProjectionKey, RuntimeError, StepOutput,
+};
 use pos_state::{EntityStateProjection, ProjectionRegistry};
 use pos_store::{open_store, SeqRange, StoreConfig};
 use serde_json::{json, Value};
@@ -53,35 +55,6 @@ impl<T> TestOptionExt<T> for Option<T> {
     fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
         self.ok_or_else(|| "expected a value".into())
     }
-}
-
-fn replay_artifact(
-    timeline: TimelineId,
-) -> (
-    pos_core::ErasureReferenceV1,
-    pos_core::ReplayClaimEvaluationV1,
-) {
-    let digest = pos_core::ErasureReferenceV1::from_digest(
-        *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-    );
-    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
-        pos_core::ErasureReplayClaimV1::Exact,
-        &[pos_core::ArtifactClaimInputV1 {
-            registration: pos_core::RegisteredArtifactV1::new(
-                pos_core::ErasureArtifactClassV1::TimelineReplay,
-                digest,
-                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-                None,
-                pos_core::ErasureReferenceV1::from_digest([243; 32]),
-                pos_core::ArtifactOptionalityV1::Required,
-                pos_core::ArtifactTransitionRuleV1::PreserveExact,
-            ),
-            current_claim: pos_core::ErasureReplayClaimV1::Exact,
-            state: pos_core::ArtifactStateV1::Retained,
-        }],
-    )
-    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-    (digest, evaluation)
 }
 
 struct FixturePlugin {
@@ -337,8 +310,8 @@ impl Drop for FixtureGuard {
     }
 }
 
-fn replay_registry() -> ProjectionRegistry {
-    let mut registry = ProjectionRegistry::new();
+fn replay_registry(erasure_gate: Arc<dyn pos_core::ErasureGate>) -> ProjectionRegistry {
+    let mut registry = ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("observation", Box::new(EntityStateProjection));
     registry.register("society", Box::new(SocietyReducer));
     registry.register("agent", Box::new(AgentReducer));
@@ -347,8 +320,9 @@ fn replay_registry() -> ProjectionRegistry {
 
 fn snapshot_json(
     registry: &ProjectionRegistry,
+    timeline: TimelineId,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    serde_json::to_value(registry.state_snapshot()).test_ok()
+    serde_json::to_value(registry.state_snapshot(timeline).test_ok()?).test_ok()
 }
 
 fn state_u64(
@@ -441,6 +415,7 @@ struct MultiRateScenario {
     society_entity: EntityId,
     fast_entity: EntityId,
     slow_entity: EntityId,
+    erasure_gate: Arc<dyn pos_core::ErasureGate>,
     fast_decisions: Arc<AtomicUsize>,
     slow_decisions: Arc<AtomicUsize>,
     probe_log: Arc<Mutex<Vec<u64>>>,
@@ -459,12 +434,18 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let address = listener.local_addr().test_ok()?;
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
+    let host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Sqlite { path: path.clone() },
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let erasure_gate = host.containment_gate();
     let state = AppState {
-        gateway: Gateway::new_with_world_bodies_and_authorization(
-            open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?,
+        gateway: Gateway::new_with_erasure_host_and_authorization(
+            host,
             [human_body],
             gateway_authorization_for(human_entity)?,
-        ),
+        )?,
         ledger_view: LedgerView::default(),
         ledger_write: LedgerWriteMode::Disabled,
     };
@@ -522,6 +503,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         society_entity,
         fast_entity,
         slow_entity,
+        erasure_gate,
         fast_decisions: Arc::new(AtomicUsize::new(0)),
         slow_decisions: Arc::new(AtomicUsize::new(0)),
         probe_log: Arc::new(Mutex::new(Vec::new())),
@@ -633,7 +615,12 @@ async fn run_tick_boundaries(
     let mut pending_store = open_store(StoreConfig::Sqlite {
         path: scenario.path.clone(),
     })
-    .test_ok()?;
+    .test_ok()
+    .map_err(|error| std::io::Error::other(format!("open pending store: {error}")))?;
+    pending_store
+        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("bind pending gate: {error}")))?;
     let pending = pending_store
         .append(
             scenario.timeline,
@@ -648,26 +635,24 @@ async fn run_tick_boundaries(
             )
             .with_wall_time(pinned_wall_time)],
         )
-        .test_ok()?;
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("append pending signal: {error}")))?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].seq.as_u64(), 2);
     drop(pending_store);
     assert_eq!(
-        session.step_cadenced(0).test_ok()?,
+        session
+            .step_cadenced(0)
+            .test_ok()
+            .map_err(|error| std::io::Error::other(format!("first tick: {error}")))?,
         TickOutcome::Advanced {
             folded_events: 3,
             emitted_events: 2,
         }
     );
-    let session_task = tokio::task::spawn_blocking(move || {
-        let result = session.step_cadenced(100_000_000);
-        (session, result)
-    });
-    let ready_rx = scenario.ready_rx.take().test_ok()?;
-    tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(5)).test_ok())
-        .await
-        .test_ok()?
-        .test_ok()?;
+    // The shared erasure fence serializes protected effects. Admit the human
+    // action before the next Plugin-input fence so this fixture does not hold
+    // an AI boundary open while waiting for another protected append.
     let human = request_http(
         scenario.address,
         "POST",
@@ -687,19 +672,38 @@ async fn run_tick_boundaries(
             },
         })),
     )
-    .await?;
+    .await
+    .map_err(|error| std::io::Error::other(format!("human action request: {error}")))?;
     assert_eq!(human.status, 201);
+    let session_task = tokio::task::spawn_blocking(move || {
+        let result = session.step_cadenced(100_000_000);
+        (session, result)
+    });
+    let ready_rx = scenario.ready_rx.take().test_ok()?;
+    tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(5)).test_ok())
+        .await
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("readiness join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("readiness receive: {error}")))?;
     scenario.guard.release_policy();
-    let (mut session, boundary_at_100_ms) = session_task.await.test_ok()?;
+    let (mut session, boundary_at_100_ms) = session_task
+        .await
+        .test_ok()
+        .map_err(|error| std::io::Error::other(format!("second tick join: {error}")))?;
     assert_eq!(
-        boundary_at_100_ms.test_ok()?,
+        boundary_at_100_ms
+            .test_ok()
+            .map_err(|error| std::io::Error::other(format!("second tick: {error}")))?,
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 1,
         }
     );
     assert_eq!(
-        session.step_cadenced(200_000_000).test_ok()?,
+        session
+            .step_cadenced(200_000_000)
+            .test_ok()
+            .map_err(|error| std::io::Error::other(format!("third tick: {error}")))?,
         TickOutcome::Advanced {
             folded_events: 2,
             emitted_events: 2,
@@ -847,9 +851,9 @@ fn assert_projection_state(
         Some(EVENT_TYPE_ACTION)
     );
     let events = session.source_events().test_ok()?;
-    let mut replayed = replay_registry();
+    let mut replayed = replay_registry(Arc::clone(&scenario.erasure_gate));
     replayed.fold_events(&events);
-    snapshot_json(&replayed)
+    snapshot_json(&replayed, scenario.timeline)
 }
 
 fn assert_replay(
@@ -861,6 +865,10 @@ fn assert_replay(
         path: scenario.path.clone(),
     })
     .test_ok()?;
+    let mut first_store = first_store;
+    first_store
+        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
+        .test_ok()?;
     let stored = first_store
         .read(scenario.timeline, SeqRange::all())
         .test_ok()?;
@@ -872,31 +880,29 @@ fn assert_replay(
         stored[1].wall_time > stored[2].wall_time,
         "sequence order must deliberately conflict with wall-clock order"
     );
-    let mut first_replay = replay_registry();
-    let (artifact_digest, evaluation) = replay_artifact(scenario.timeline);
-    pos_time::replay(
-        first_store.as_ref(),
-        scenario.timeline,
-        &mut first_replay,
-        artifact_digest,
-        &evaluation,
-    )
-    .test_ok()?;
+    let mut first_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
+    first_replay.fold_events(&stored);
     let second_store = open_store(StoreConfig::Sqlite {
         path: scenario.path.clone(),
     })
     .test_ok()?;
-    let mut second_replay = replay_registry();
-    pos_time::replay(
-        second_store.as_ref(),
-        scenario.timeline,
-        &mut second_replay,
-        artifact_digest,
-        &evaluation,
-    )
-    .test_ok()?;
-    assert_eq!(snapshot_json(&first_replay)?, *live_snapshot);
-    assert_eq!(snapshot_json(&second_replay)?, *live_snapshot);
+    let mut second_store = second_store;
+    second_store
+        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
+        .test_ok()?;
+    let mut second_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
+    let second_events = second_store
+        .read(scenario.timeline, SeqRange::all())
+        .test_ok()?;
+    second_replay.fold_events(&second_events);
+    assert_eq!(
+        snapshot_json(&first_replay, scenario.timeline)?,
+        *live_snapshot
+    );
+    assert_eq!(
+        snapshot_json(&second_replay, scenario.timeline)?,
+        *live_snapshot
+    );
     Ok(())
 }
 
@@ -908,14 +914,34 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
 
 async fn multi_rate_human_ai_replay_is_deterministic_impl(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut scenario = create_scenario().await?;
-    let (experiment, token, authority) = register_experiment(&mut scenario)?;
+    let mut scenario =
+        create_scenario()
+            .await
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("create_scenario: {error}").into()
+            })?;
+    let (experiment, token, authority) = register_experiment(&mut scenario).map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("register_experiment: {error}").into()
+        },
+    )?;
     let session = experiment
         .resume(scenario.timeline)
-        .test_ok()?
+        .test_ok()
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("resume: {error}").into()
+        })?
         .with_protected_token(token.clone());
-    let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await?;
-    let polled = poll_events(scenario.address, scenario.timeline, scenario.human_entity).await?;
+    let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await.map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("run_tick_boundaries: {error}").into()
+        },
+    )?;
+    let polled = poll_events(scenario.address, scenario.timeline, scenario.human_entity)
+        .await
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("poll_events: {error}").into()
+        })?;
     assert_event_order(
         scenario.human_entity,
         scenario.fast_entity,
@@ -923,12 +949,22 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         &polled,
     )?;
 
-    let live_snapshot = assert_projection_state(&scenario, &session, &authority)?;
-    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
+    let live_snapshot = assert_projection_state(&scenario, &session, &authority).map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("assert_projection_state: {error}").into()
+        },
+    )?;
+    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 1, 1]);
     assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
-    assert_replay(&scenario, &live_snapshot, pinned_wall_time)?;
-    scenario.guard.shutdown().await?;
+    assert_replay(&scenario, &live_snapshot, pinned_wall_time).map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("assert_replay: {error}").into()
+        },
+    )?;
+    scenario.guard.shutdown().await.map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> { format!("shutdown: {error}").into() },
+    )?;
     Ok(())
 }
 
@@ -937,8 +973,12 @@ async fn gateway_reloads_durable_consent_before_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let database = tempfile::NamedTempFile::new().test_ok()?;
     let path = database.path().to_str().test_ok()?.to_owned();
-    let first_gateway =
-        Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?);
+    let first_host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Sqlite { path: path.clone() },
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let first_gateway = Gateway::new_with_erasure_host(first_host)?;
     let timeline = first_gateway
         .create_timeline("consent-recovery")
         .await
@@ -962,7 +1002,12 @@ async fn gateway_reloads_durable_consent_before_revocation(
         .test_ok()?;
     drop(first_gateway);
 
-    let recovered_gateway = Gateway::new(open_store(StoreConfig::Sqlite { path }).test_ok()?);
+    let recovered_host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Sqlite { path },
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let recovered_gateway = Gateway::new_with_erasure_host(recovered_host)?;
     let unknown_error = recovered_gateway
         .issue_consent_revocation(
             &timeline.id().to_string(),
@@ -1003,8 +1048,12 @@ async fn gateway_reloads_durable_consent_before_revocation(
 #[tokio::test]
 async fn gateway_rejects_geo_admission_after_consent_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let gateway =
-        Gateway::new_with_geo_location_admission(pos_store::memory::MemoryStore::default());
+    let host = ErasureExecutionHostV1::open_gateway_verified_empty(
+        StoreConfig::Memory,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let gateway = Gateway::new_with_erasure_host(host)?;
     let timeline = gateway
         .create_timeline("geo-revocation-fence")
         .await
@@ -1061,7 +1110,12 @@ async fn gateway_rejects_geo_admission_after_consent_revocation(
 #[tokio::test]
 async fn gateway_shutdown_drains_an_empty_executor(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok()?);
+    let host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok()?;
+    let gateway = Gateway::new_with_erasure_host(host)?;
     gateway.shutdown().await.test_ok()?;
     drop(gateway);
     Ok(())
