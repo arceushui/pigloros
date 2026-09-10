@@ -1745,7 +1745,7 @@ mod tests {
         for (bytes, expected) in [
             (vec![0x42, 0], BundleError::SnapshotUnavailable),
             (vec![0x98, 24], BundleError::SnapshotUnavailable),
-            (vec![0x99, 1, 1], BundleError::FieldOutOfBounds),
+            (vec![0x9a, 0, 1, 0, 1], BundleError::FieldOutOfBounds),
             (vec![0x20], BundleError::InvalidEncoding),
             (vec![0xa0], BundleError::InvalidEncoding),
             (vec![0xf9, 0, 0], BundleError::InvalidEncoding),
