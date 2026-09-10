@@ -4158,7 +4158,7 @@ mod tests {
                 ErasureProtectedOperationV1::Read,
                 |_| Ok::<(), CoreError>(()),
             ),
-            Err(ErasureHostErrorV1::AccessFrozen)
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
         let mut poisoned = ErasureExecutionHostV1::recover_verified_empty(
