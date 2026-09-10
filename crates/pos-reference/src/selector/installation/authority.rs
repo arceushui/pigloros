@@ -44,25 +44,25 @@ impl InstalledSelectorObjects {
     ) -> Result<InstalledSelectorAuthority, SelectorBoundaryError> {
         let (root_id, root_bytes) = manifest.offline_root();
         let root_key = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let [trust_digest, revocation_digest, policy_digest] = manifest.authority_digests();
         let trust = SandboxTrustSnapshot::authenticate(
             &self.control_bytes(0, trust_digest)?,
             root_id,
             &root_key,
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let revocation = SandboxRevocationSnapshot::authenticate(
             &self.control_bytes(1, revocation_digest)?,
             &trust,
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let policy = SandboxAdministratorPolicy::authenticate(
             &self.control_bytes(2, policy_digest)?,
             &trust,
             &revocation,
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         if [
             trust.snapshot_digest(),
             revocation.snapshot_digest(),

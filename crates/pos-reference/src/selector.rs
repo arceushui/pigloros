@@ -52,7 +52,7 @@ impl AttemptDeadline {
         while !bytes.is_empty() {
             stream
                 .set_write_timeout(Some(self.remaining()?))
-                .map_err(|_| AdapterError::ProtocolFailure)?;
+                .or(Err(AdapterError::ProtocolFailure))?;
             let written = stream.write(bytes).map_err(|error| map_timed_io(&error))?;
             if written == 0 {
                 return Err(AdapterError::ProtocolFailure);
@@ -70,7 +70,7 @@ impl AttemptDeadline {
         while !bytes.is_empty() {
             stream
                 .set_read_timeout(Some(self.remaining()?))
-                .map_err(|_| AdapterError::ProtocolFailure)?;
+                .or(Err(AdapterError::ProtocolFailure))?;
             let read = stream.read(bytes).map_err(|error| map_timed_io(&error))?;
             if read == 0 {
                 return Err(AdapterError::ProtocolFailure);
@@ -90,7 +90,7 @@ impl AttemptDeadline {
         loop {
             stream
                 .set_read_timeout(Some(self.remaining()?))
-                .map_err(|_| AdapterError::ProtocolFailure)?;
+                .or(Err(AdapterError::ProtocolFailure))?;
             let read = stream
                 .read(&mut chunk)
                 .map_err(|error| map_timed_io(&error))?;
@@ -175,17 +175,14 @@ impl ImmutableSandboxArtifact {
     /// # Errors
     /// Returns a closed I/O failure if the retained file cannot be cloned or read.
     pub fn read_bytes(&self) -> Result<Vec<u8>, SelectorBoundaryError> {
-        let mut file = self
-            .file
-            .try_clone()
-            .map_err(|_| SelectorBoundaryError::Io)?;
+        let mut file = self.file.try_clone().or(Err(SelectorBoundaryError::Io))?;
         let mut bytes = Vec::with_capacity(
-            usize::try_from(self.length).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
+            usize::try_from(self.length).or(Err(SelectorBoundaryError::ArtifactInvalid))?,
         );
         file.seek(SeekFrom::Start(0))
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .or(Err(SelectorBoundaryError::Io))?;
         file.read_to_end(&mut bytes)
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .or(Err(SelectorBoundaryError::Io))?;
         Ok(bytes)
     }
 }
@@ -253,28 +250,28 @@ impl SelectorAdapter {
         if socket_path == Path::new(SANDBOX_SELECTOR_SOCKET) {
             // Root may administer these directories (including 0755), but an
             // unprivileged evaluator must not be able to replace their entries.
-            let root = File::open("/").map_err(|_| AdapterError::Unavailable)?;
+            let root = File::open("/").or(Err(AdapterError::Unavailable))?;
             let parent = socket_path
                 .parent()
                 .and_then(|parent| parent.strip_prefix("/").ok())
                 .ok_or(AdapterError::Unavailable)?;
-            validate_socket_directory(&root, parent, 0).map_err(|_| AdapterError::Unavailable)?;
+            validate_socket_directory(&root, parent, 0).or(Err(AdapterError::Unavailable))?;
         }
         let mut stream =
-            connect_at(socket_path, expected_uid).map_err(|_| AdapterError::Unavailable)?;
+            connect_at(socket_path, expected_uid).or(Err(AdapterError::Unavailable))?;
         let deadline = AttemptDeadline::new(attempt.watchdog_ms)?;
         let control_length =
-            u32::try_from(request.control.len()).map_err(|_| AdapterError::ProtocolFailure)?;
+            u32::try_from(request.control.len()).or(Err(AdapterError::ProtocolFailure))?;
         deadline.write_all(&mut stream, &control_length.to_be_bytes())?;
         deadline.write_all(&mut stream, &request.control)?;
         deadline.write_all(&mut stream, &request.attempt_stream)?;
         stream
             .shutdown(std::net::Shutdown::Write)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
+            .or(Err(AdapterError::ProtocolFailure))?;
         let mut prefix = [0; 4];
         deadline.read_exact(&mut stream, &mut prefix)?;
-        let length = usize::try_from(u32::from_be_bytes(prefix))
-            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let length =
+            usize::try_from(u32::from_be_bytes(prefix)).or(Err(AdapterError::ProtocolFailure))?;
         if length == 0 || length > 16 * 1024 * 1024 {
             return Err(AdapterError::ProtocolFailure);
         }
@@ -335,8 +332,8 @@ fn open_under(
 ) -> Result<ImmutableSandboxArtifact, SelectorBoundaryError> {
     let relative_root = root
         .strip_prefix(Path::new("/"))
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let filesystem_root = File::open("/").map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
+    let filesystem_root = File::open("/").or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     let root = openat2(
         &filesystem_root,
         relative_root,
@@ -345,7 +342,7 @@ fn open_under(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     validate_owned_directory(&root, expected_uid)?;
     let directory = openat2(
         &root,
@@ -355,7 +352,7 @@ fn open_under(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     validate_owned_directory(&directory, expected_uid)?;
     let name = digest_name(digest);
     let mut file = openat2(
@@ -366,10 +363,10 @@ fn open_under(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     let metadata = file
         .metadata()
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     if !metadata.is_file()
         || metadata.uid() != expected_uid
         || metadata.mode() & FORBIDDEN_WRITE_MODE != 0
@@ -379,12 +376,12 @@ fn open_under(
     }
     let mut hasher = blake3::Hasher::new();
     let observed_length = std::io::copy(&mut (&mut file).take(metadata.len() + 1), &mut hasher)
-        .map_err(|_| SelectorBoundaryError::Io)?;
+        .or(Err(SelectorBoundaryError::Io))?;
     if observed_length != metadata.len() || hasher.finalize().as_bytes() != &digest {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
     file.seek(SeekFrom::Start(0))
-        .map_err(|_| SelectorBoundaryError::Io)?;
+        .or(Err(SelectorBoundaryError::Io))?;
     Ok(ImmutableSandboxArtifact {
         file,
         digest,
@@ -395,7 +392,7 @@ fn open_under(
 fn validate_owned_directory(file: &File, expected_uid: u32) -> Result<(), SelectorBoundaryError> {
     let metadata = file
         .metadata()
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     if metadata.is_dir()
         && metadata.uid() == expected_uid
         && metadata.mode() & FORBIDDEN_WRITE_MODE == 0
@@ -427,7 +424,7 @@ fn validate_socket_directory(
 ) -> Result<(), SelectorBoundaryError> {
     let mut directory = root
         .try_clone()
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     for component in std::iter::once(Component::CurDir).chain(relative.components()) {
         if component != Component::CurDir {
             let Component::Normal(name) = component else {
@@ -441,11 +438,11 @@ fn validate_socket_directory(
                 ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
             )
             .map(File::from)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         }
         let metadata = directory
             .metadata()
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         if !metadata.is_dir() || metadata.uid() != expected_uid || metadata.mode() & 0o022 != 0 {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
@@ -464,18 +461,18 @@ fn connect_at_with(
 ) -> Result<UnixStream, SelectorBoundaryError> {
     let path = PathBuf::from(path);
     let before =
-        std::fs::symlink_metadata(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+        std::fs::symlink_metadata(&path).or(Err(SelectorBoundaryError::SelectorUnavailable))?;
     if !before.file_type().is_socket()
         || before.uid() != expected_uid
         || before.mode() & 0o777 != SELECTOR_SOCKET_MODE
     {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    let stream = connect(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+    let stream = connect(&path).or(Err(SelectorBoundaryError::SelectorUnavailable))?;
     let credentials =
-        socket_peercred(stream.as_fd()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        socket_peercred(stream.as_fd()).or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     let after =
-        std::fs::symlink_metadata(path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+        std::fs::symlink_metadata(path).or(Err(SelectorBoundaryError::SelectorUnavailable))?;
     if credentials.uid.as_raw() != expected_uid
         || before.dev() != after.dev()
         || before.ino() != after.ino()

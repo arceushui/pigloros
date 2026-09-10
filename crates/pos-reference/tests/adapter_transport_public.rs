@@ -686,6 +686,66 @@ fn attempt_reader_rejects_every_artifact_and_terminal_boundary() -> TestResult {
 }
 
 #[test]
+fn attempt_reader_walks_auxiliaries_and_rejects_aggregate_and_chunk_overflow() -> TestResult {
+    let mut with_one_auxiliary = attempt();
+    with_one_auxiliary.auxiliary = vec![artifact(vec![9])];
+    let encoded = encoded_attempt(&with_one_auxiliary)?;
+    assert_eq!(read_attempt(encoded.as_slice()), Ok(with_one_auxiliary));
+
+    let valid = frame_values(&encoded_attempt(&attempt())?)?;
+
+    let mut aggregate_overflow = valid.clone();
+    replace_field(&mut aggregate_overflow[0], 12, integer(1))?;
+    replace_field(&mut aggregate_overflow[0], 13, integer(1))?;
+    replace_field(&mut aggregate_overflow[3], 4, integer(1))?;
+    replace_field(
+        &mut aggregate_overflow[3],
+        5,
+        Value::Bytes(blake3::hash(b"a").as_bytes().to_vec()),
+    )?;
+    replace_field(&mut aggregate_overflow[4], 5, Value::Bytes(b"a".to_vec()))?;
+    replace_field(&mut aggregate_overflow[5], 4, integer(1))?;
+    assert_eq!(
+        read_attempt(signed_frames(aggregate_overflow, ATTEMPT_DOMAIN, 2)?.as_slice()),
+        Err(TransportError::FieldOutOfBounds)
+    );
+
+    let mut chunk_overflow = valid;
+    replace_field(&mut chunk_overflow[3], 4, integer(1))?;
+    replace_field(&mut chunk_overflow[4], 5, Value::Bytes(b"ab".to_vec()))?;
+    assert_eq!(
+        read_attempt(signed_frames(chunk_overflow, ATTEMPT_DOMAIN, 2)?.as_slice()),
+        Err(TransportError::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn observation_writer_closes_each_stream_phase_and_oversized_output() {
+    let chunked = observation(SubjectResult::Output(vec![7; CHUNK_BYTES + 1]));
+    for (phase, successful_writes_remaining) in
+        [("header", 0), ("output chunk", 2), ("terminal", 6)]
+    {
+        assert_eq!(
+            write_observation(
+                FailAfterWrites {
+                    successful_writes_remaining,
+                },
+                &chunked,
+            ),
+            Err(TransportError::InvalidEncoding),
+            "{phase} write failure must be closed"
+        );
+    }
+
+    let too_large = observation(SubjectResult::Output(vec![0; 64 * 1024 * 1024 + 1]));
+    assert_eq!(
+        write_observation(io::sink(), &too_large),
+        Err(TransportError::FieldOutOfBounds)
+    );
+}
+
+#[test]
 fn observation_reader_rejects_every_chunk_terminal_and_usage_boundary() -> TestResult {
     let valid = frame_values(&encoded_observation(&observation(SubjectResult::Output(
         vec![1, 2],
@@ -747,6 +807,13 @@ fn observation_reader_rejects_every_chunk_terminal_and_usage_boundary() -> TestR
     replace_field(&mut unknown[1], 0, Value::Text("unknown".to_owned()))?;
     assert_eq!(
         read_observation(encode_frames(&unknown)?.as_slice(), 10),
+        Err(TransportError::InvalidEncoding)
+    );
+
+    let mut non_array_chunk = valid.clone();
+    non_array_chunk[1] = Value::Text("not-an-output-frame".to_owned());
+    assert_eq!(
+        read_observation(encode_frames(&non_array_chunk)?.as_slice(), 10),
         Err(TransportError::InvalidEncoding)
     );
 

@@ -73,7 +73,7 @@ fn snapshot_unavailable(_: std::io::Error) -> BundleError {
 
 impl<T, E> InvalidEncodingResult<T> for Result<T, E> {
     fn map_invalid_encoding(self) -> Result<T, BundleError> {
-        self.map_err(|_| BundleError::InvalidEncoding)
+        self.or(Err(BundleError::InvalidEncoding))
     }
 }
 
@@ -570,7 +570,7 @@ fn drain_exact<R: Read + ?Sized>(archive: &mut R, mut length: u64) -> Result<(),
     let mut buffer = [0_u8; 8192];
     while length != 0 {
         let take = usize::try_from(length.min(buffer.len() as u64))
-            .map_err(|_| BundleError::FieldOutOfBounds)?;
+            .or(Err(BundleError::FieldOutOfBounds))?;
         archive
             .read_exact(&mut buffer[..take])
             .map_err(snapshot_unavailable)?;
@@ -1046,13 +1046,13 @@ fn verify_signature(
         .authority_for(signer_key)
         .ok_or(BundleError::SignatureInvalid)?;
     ed25519_dalek::VerifyingKey::from_bytes(&signer_key)
-        .map_err(|_| BundleError::SignatureInvalid)
+        .or(Err(BundleError::SignatureInvalid))
         .and_then(|key| {
             key.verify(
                 manifest_bytes,
                 &ed25519_dalek::Signature::from_bytes(&signature),
             )
-            .map_err(|_| BundleError::SignatureInvalid)
+            .or(Err(BundleError::SignatureInvalid))
             .map(|()| (trusted_authority.clone(), key))
         })
 }
@@ -1149,8 +1149,7 @@ fn prohibited_secret_material(bytes: &[u8]) -> bool {
     let mut cursor = std::io::Cursor::new(bytes);
     let cbor = preflight_cbor(bytes, bytes.len(), true)
         .and_then(|()| {
-            ciborium::from_reader::<Value, _>(&mut cursor)
-                .map_err(|_| ProtocolError::InvalidEncoding)
+            ciborium::from_reader::<Value, _>(&mut cursor).or(Err(ProtocolError::InvalidEncoding))
         })
         .ok();
     if cursor.position() == bytes.len() as u64 && cbor.is_some_and(|value| cbor_secret(&value)) {

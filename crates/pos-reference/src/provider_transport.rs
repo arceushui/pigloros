@@ -55,18 +55,18 @@ impl StagedOutput {
     pub fn copy_to(&mut self, writer: &mut impl Write) -> Result<(), RootSelectorServiceError> {
         let file = self.file.as_file_mut();
         file.seek(SeekFrom::Start(0))
-            .map_err(|_| RootSelectorServiceError::Io)?;
+            .or(Err(RootSelectorServiceError::Io))?;
         let mut buffer = [0_u8; 8192];
         loop {
             let read = file
                 .read(&mut buffer)
-                .map_err(|_| RootSelectorServiceError::Io)?;
+                .or(Err(RootSelectorServiceError::Io))?;
             if read == 0 {
                 return Ok(());
             }
             writer
                 .write_all(&buffer[..read])
-                .map_err(|_| RootSelectorServiceError::Io)?;
+                .or(Err(RootSelectorServiceError::Io))?;
         }
     }
 
@@ -81,29 +81,29 @@ impl StagedOutput {
         if descriptor.byte_length > MAX_PAYLOAD_BYTES {
             return Err(RootSelectorServiceError::ProviderEvidence);
         }
-        let mut file = tempfile::NamedTempFile::new().map_err(|_| RootSelectorServiceError::Io)?;
+        let mut file = tempfile::NamedTempFile::new().or(Err(RootSelectorServiceError::Io))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"PiglorOS.SandboxOutputBytes.v1\0");
         let mut remaining = descriptor.byte_length;
         let mut buffer = [0_u8; 8192];
         while remaining != 0 {
             let maximum = usize::try_from(remaining.min(buffer.len() as u64))
-                .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
+                .or(Err(RootSelectorServiceError::ProviderEvidence))?;
             let read = reader
                 .read(&mut buffer[..maximum])
-                .map_err(|_| RootSelectorServiceError::Io)?;
+                .or(Err(RootSelectorServiceError::Io))?;
             if read == 0 {
                 return Err(RootSelectorServiceError::ProviderEvidence);
             }
             hasher.update(&buffer[..read]);
             file.write_all(&buffer[..read])
-                .map_err(|_| RootSelectorServiceError::Io)?;
+                .or(Err(RootSelectorServiceError::Io))?;
             remaining -= read as u64;
         }
         let mut trailing = [0_u8; 1];
         if reader
             .read(&mut trailing)
-            .map_err(|_| RootSelectorServiceError::Io)?
+            .or(Err(RootSelectorServiceError::Io))?
             != 0
             || *hasher.finalize().as_bytes() != descriptor.digest
         {
@@ -149,7 +149,7 @@ impl SelectedProviderEndpoint {
         owner_uid: u32,
     ) -> Result<Self, RootSelectorServiceError> {
         let metadata = std::fs::symlink_metadata(path)
-            .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+            .or(Err(RootSelectorServiceError::ProviderUnavailable))?;
         if !metadata.file_type().is_socket()
             || metadata.uid() != owner_uid
             || metadata.mode() & 0o7777 != 0o600
@@ -169,27 +169,27 @@ impl ProviderConnector for SelectedProviderEndpoint {
     fn connect(&mut self, timeout: Duration) -> Result<UnixStream, RootSelectorServiceError> {
         let before = endpoint_metadata(&self.path, self.device, self.inode, self.owner_uid)?;
         let address = SocketAddrUnix::new(&self.path)
-            .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+            .or(Err(RootSelectorServiceError::ProviderUnavailable))?;
         let fd = socket_with(
             AddressFamily::UNIX,
             SocketType::STREAM,
             SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
             None,
         )
-        .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+        .or(Err(RootSelectorServiceError::ProviderUnavailable))?;
         if connect(&fd, &address).is_err() {
             let seconds = i64::try_from(timeout.as_secs())
-                .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+                .or(Err(RootSelectorServiceError::ProviderUnavailable))?;
             let timespec = Timespec {
                 tv_sec: seconds,
                 tv_nsec: timeout.subsec_nanos().into(),
             };
             let poll_fd = PollFd::new(&fd, PollFlags::OUT);
             if poll(&mut [poll_fd], Some(&timespec))
-                .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?
+                .or(Err(RootSelectorServiceError::ProviderUnavailable))?
                 == 0
                 || socket_error(&fd)
-                    .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?
+                    .or(Err(RootSelectorServiceError::ProviderUnavailable))?
                     .is_err()
             {
                 return Err(RootSelectorServiceError::ProviderUnavailable);
@@ -198,13 +198,13 @@ impl ProviderConnector for SelectedProviderEndpoint {
         let stream = UnixStream::from(fd);
         stream
             .set_nonblocking(false)
-            .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+            .or(Err(RootSelectorServiceError::ProviderUnavailable))?;
         let after = endpoint_metadata(&self.path, self.device, self.inode, self.owner_uid)?;
         if before.dev() != after.dev() || before.ino() != after.ino() {
             return Err(RootSelectorServiceError::ProviderUnavailable);
         }
         let peer = socket_peercred(stream.as_fd())
-            .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+            .or(Err(RootSelectorServiceError::ProviderUnavailable))?;
         if peer.uid.as_raw() != self.owner_uid {
             return Err(RootSelectorServiceError::ProviderUnavailable);
         }
@@ -283,23 +283,19 @@ impl<C: ProviderConnector> ProviderTransport<C> {
     ) -> Result<RootSelectorProviderReply, ReceiveFailure> {
         let mut stream = self
             .connector
-            .connect(
-                deadline
-                    .remaining()
-                    .map_err(|_| ReceiveFailure::Incomplete)?,
-            )
-            .map_err(|_| ReceiveFailure::Incomplete)?;
+            .connect(deadline.remaining().or(Err(ReceiveFailure::Incomplete))?)
+            .or(Err(ReceiveFailure::Incomplete))?;
         write_frame(
             &mut stream,
             &request
                 .to_canonical_cbor()
-                .map_err(|_| ReceiveFailure::Invalid)?,
+                .or(Err(ReceiveFailure::Invalid))?,
             deadline,
         )?;
         write_input(&mut stream, request, input, deadline)?;
         stream
             .shutdown(std::net::Shutdown::Write)
-            .map_err(|_| ReceiveFailure::Incomplete)?;
+            .or(Err(ReceiveFailure::Incomplete))?;
         read_response(&mut stream, request, admission, deadline, retained_grant)
     }
 }
@@ -338,13 +334,13 @@ impl Deadline {
     fn set_read(&self, stream: &UnixStream) -> Result<(), ReceiveFailure> {
         stream
             .set_read_timeout(Some(self.remaining()?))
-            .map_err(|_| ReceiveFailure::Incomplete)
+            .or(Err(ReceiveFailure::Incomplete))
     }
 
     fn set_write(&self, stream: &UnixStream) -> Result<(), ReceiveFailure> {
         stream
             .set_write_timeout(Some(self.remaining()?))
-            .map_err(|_| ReceiveFailure::Incomplete)
+            .or(Err(ReceiveFailure::Incomplete))
     }
 }
 
@@ -390,8 +386,7 @@ fn read_response(
             Ok(RootSelectorProviderReply::BeforeAdmission { result: first })
         }
         "SPE1" => {
-            SandboxProviderError::from_canonical_cbor(&first)
-                .map_err(|_| ReceiveFailure::Invalid)?;
+            SandboxProviderError::from_canonical_cbor(&first).or(Err(ReceiveFailure::Invalid))?;
             ensure_eof(stream, deadline)?;
             Ok(RootSelectorProviderReply::Error { error: first })
         }
@@ -410,7 +405,7 @@ fn read_admitted(
 ) -> Result<RootSelectorProviderReply, ReceiveFailure> {
     let parsed = admission
         .authenticate_grant(request, &grant)
-        .map_err(|_| ReceiveFailure::Invalid)?;
+        .or(Err(ReceiveFailure::Invalid))?;
     let current = RetainedGrant {
         bytes: grant.clone(),
         digest: parsed.grant_digest,
@@ -434,21 +429,21 @@ fn read_admitted(
     if audit.is_empty() {
         return Err(ReceiveFailure::Invalid);
     }
-    SandboxProviderReceipt::from_canonical_cbor(&receipt).map_err(|_| ReceiveFailure::Invalid)?;
-    let mut staged = tempfile::NamedTempFile::new().map_err(|_| ReceiveFailure::Incomplete)?;
+    SandboxProviderReceipt::from_canonical_cbor(&receipt).or(Err(ReceiveFailure::Invalid))?;
+    let mut staged = tempfile::NamedTempFile::new().or(Err(ReceiveFailure::Incomplete))?;
     let mut chunks = Vec::new();
     let result = loop {
         let frame = read_frame(stream, deadline)?.ok_or(ReceiveFailure::Incomplete)?;
         match record_magic(&frame)?.as_str() {
             "SBC1" => {
                 let chunk = SandboxPayloadChunk::from_canonical_cbor(&frame)
-                    .map_err(|_| ReceiveFailure::Invalid)?;
+                    .or(Err(ReceiveFailure::Invalid))?;
                 if chunks.len() >= 128 {
                     return Err(ReceiveFailure::Invalid);
                 }
                 staged
                     .write_all(&chunk.bytes)
-                    .map_err(|_| ReceiveFailure::Incomplete)?;
+                    .or(Err(ReceiveFailure::Incomplete))?;
                 chunks.push(ChunkMeta::from(&chunk));
             }
             "SPY1" => break frame,
@@ -457,7 +452,7 @@ fn read_admitted(
     };
     ensure_eof(stream, deadline)?;
     let parsed_result =
-        SandboxProviderResult::from_canonical_cbor(&result).map_err(|_| ReceiveFailure::Invalid)?;
+        SandboxProviderResult::from_canonical_cbor(&result).or(Err(ReceiveFailure::Invalid))?;
     let output = stage_output(staged, chunks, request, &parsed_result)?;
     Ok(RootSelectorProviderReply::Admitted {
         grant,
@@ -510,13 +505,13 @@ fn stage_output(
                 PayloadDirection::Output,
                 descriptor.clone(),
             )
-            .map_err(|_| ReceiveFailure::Invalid)?;
+            .or(Err(ReceiveFailure::Invalid))?;
             file.seek(SeekFrom::Start(0))
-                .map_err(|_| ReceiveFailure::Incomplete)?;
+                .or(Err(ReceiveFailure::Incomplete))?;
             for meta in chunks {
                 let mut bytes = vec![0; meta.length];
                 file.read_exact(&mut bytes)
-                    .map_err(|_| ReceiveFailure::Incomplete)?;
+                    .or(Err(ReceiveFailure::Incomplete))?;
                 validator
                     .accept(&SandboxPayloadChunk {
                         parent_digest: meta.parent_digest,
@@ -528,9 +523,9 @@ fn stage_output(
                         bytes,
                         chunk_digest: meta.chunk_digest,
                     })
-                    .map_err(|_| ReceiveFailure::Invalid)?;
+                    .or(Err(ReceiveFailure::Invalid))?;
             }
-            validator.finish().map_err(|_| ReceiveFailure::Invalid)?;
+            validator.finish().or(Err(ReceiveFailure::Invalid))?;
             Ok(Some(StagedOutput::new(file, descriptor.clone())))
         }
         (SandboxTerminalOutcome::Completed, None) => Err(ReceiveFailure::Invalid),
@@ -548,14 +543,12 @@ fn write_frame(
         return Err(ReceiveFailure::Invalid);
     }
     deadline.set_write(stream)?;
-    let length = u32::try_from(bytes.len()).map_err(|_| ReceiveFailure::Invalid)?;
+    let length = u32::try_from(bytes.len()).or(Err(ReceiveFailure::Invalid))?;
     stream
         .write_all(&length.to_be_bytes())
-        .map_err(|_| ReceiveFailure::Incomplete)?;
+        .or(Err(ReceiveFailure::Incomplete))?;
     deadline.set_write(stream)?;
-    stream
-        .write_all(bytes)
-        .map_err(|_| ReceiveFailure::Incomplete)
+    stream.write_all(bytes).or(Err(ReceiveFailure::Incomplete))
 }
 
 fn read_frame(
@@ -566,7 +559,7 @@ fn read_frame(
     deadline.set_read(stream)?;
     match stream
         .read(&mut prefix)
-        .map_err(|_| ReceiveFailure::Incomplete)?
+        .or(Err(ReceiveFailure::Incomplete))?
     {
         0 => return Ok(None),
         4 => {}
@@ -580,24 +573,21 @@ fn read_frame(
     deadline.set_read(stream)?;
     stream
         .read_exact(&mut bytes)
-        .map_err(|_| ReceiveFailure::Incomplete)?;
+        .or(Err(ReceiveFailure::Incomplete))?;
     Ok(Some(bytes))
 }
 
 fn ensure_eof(stream: &mut UnixStream, deadline: &Deadline) -> Result<(), ReceiveFailure> {
     let mut byte = [0_u8; 1];
     deadline.set_read(stream)?;
-    match stream
-        .read(&mut byte)
-        .map_err(|_| ReceiveFailure::Incomplete)?
-    {
+    match stream.read(&mut byte).or(Err(ReceiveFailure::Incomplete))? {
         0 => Ok(()),
         _ => Err(ReceiveFailure::Invalid),
     }
 }
 
 fn record_magic(bytes: &[u8]) -> Result<String, ReceiveFailure> {
-    let value: Value = ciborium::from_reader(bytes).map_err(|_| ReceiveFailure::Invalid)?;
+    let value: Value = ciborium::from_reader(bytes).or(Err(ReceiveFailure::Invalid))?;
     let Value::Array(wrapper) = value else {
         return Err(ReceiveFailure::Invalid);
     };
@@ -636,7 +626,7 @@ fn encode_chunk(
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ReceiveFailure> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).map_err(|_| ReceiveFailure::Invalid)?;
+    ciborium::into_writer(value, &mut bytes).or(Err(ReceiveFailure::Invalid))?;
     Ok(bytes)
 }
 
@@ -653,8 +643,8 @@ fn endpoint_metadata(
     inode: u64,
     owner_uid: u32,
 ) -> Result<std::fs::Metadata, RootSelectorServiceError> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|_| RootSelectorServiceError::ProviderUnavailable)?;
+    let metadata =
+        std::fs::symlink_metadata(path).or(Err(RootSelectorServiceError::ProviderUnavailable))?;
     if !metadata.file_type().is_socket()
         || metadata.uid() != owner_uid
         || metadata.mode() & 0o7777 != 0o600
@@ -686,6 +676,10 @@ mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn receive<T>(result: Result<T, ReceiveFailure>) -> TestResult<T> {
+        Ok(result.map_err(|failure| format!("transport failed: {failure:?}"))?)
+    }
 
     #[test]
     fn endpoint_ancestry_requires_absolute_descriptor_validated_directories() {
@@ -798,6 +792,128 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn frames_round_trip_and_reject_closed_framing_failures() -> TestResult {
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        receive(write_frame(&mut sender, b"frame", &deadline))?;
+        assert_eq!(
+            receive(read_frame(&mut receiver, &deadline))?,
+            Some(b"frame".to_vec())
+        );
+        drop(sender);
+        assert_eq!(receive(read_frame(&mut receiver, &deadline))?, None);
+
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        sender.write_all(&0_u32.to_be_bytes())?;
+        assert_eq!(
+            read_frame(&mut receiver, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        sender.write_all(&u32::try_from(CONTROL_LIMIT + 1)?.to_be_bytes())?;
+        assert_eq!(
+            read_frame(&mut receiver, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        sender.write_all(&[0, 0, 0])?;
+        drop(sender);
+        assert_eq!(
+            read_frame(&mut receiver, &deadline),
+            Err(ReceiveFailure::Incomplete)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eof_and_deadline_helpers_fail_closed() -> TestResult {
+        assert!(Deadline::new(Duration::MAX).is_err());
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        receive(deadline.set_read(&receiver))?;
+        receive(deadline.set_write(&sender))?;
+        sender.write_all(&[1])?;
+        assert_eq!(
+            ensure_eof(&mut receiver, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+        drop(sender);
+        assert_eq!(ensure_eof(&mut receiver, &deadline), Ok(()));
+
+        let expired = Deadline {
+            expires_at: Instant::now(),
+        };
+        let (sender, receiver) = UnixStream::pair()?;
+        assert_eq!(expired.set_read(&receiver), Err(ReceiveFailure::Incomplete));
+        assert_eq!(expired.set_write(&sender), Err(ReceiveFailure::Incomplete));
+        Ok(())
+    }
+
+    fn record_with_magic(magic: &str) -> TestResult<Vec<u8>> {
+        receive(encode_value(&Value::Array(vec![
+            Value::Array(vec![Value::Text(magic.to_owned())]),
+            Value::Bytes(vec![1; 32]),
+        ])))
+    }
+
+    #[test]
+    fn record_magic_requires_the_wrapped_record_shape() -> TestResult {
+        assert_eq!(
+            record_magic(&record_with_magic("SPY1")?),
+            Ok("SPY1".to_owned())
+        );
+        for value in [
+            Value::Null,
+            Value::Array(vec![Value::Null]),
+            Value::Array(vec![Value::Array(vec![Value::Null]), Value::Bytes(vec![])]),
+        ] {
+            assert_eq!(
+                record_magic(&receive(encode_value(&value))?),
+                Err(ReceiveFailure::Invalid)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn input_frames_bind_the_request_and_payload_bytes() -> TestResult {
+        let input = b"input";
+        let mut request = request()?;
+        request.adapter_input = PayloadDescriptor {
+            byte_length: input.len() as u64,
+            digest: output_digest_with(b"PiglorOS.SandboxInputBytes.v1\0", input),
+        };
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        receive(write_input(&mut sender, &request, input, &deadline))?;
+        let frame = receive(read_frame(&mut receiver, &deadline))?.ok_or("missing input frame")?;
+        let chunk = SandboxPayloadChunk::from_canonical_cbor(&frame)?;
+        assert_eq!(chunk.parent_digest, request.request_digest);
+        assert_eq!(chunk.request_id, request.request.request_id);
+        assert_eq!(chunk.attempt_id, request.attempt_id);
+        assert_eq!(chunk.direction, PayloadDirection::Input);
+        assert_eq!(chunk.index, 0);
+        assert_eq!(chunk.offset, 0);
+        assert_eq!(chunk.bytes, input);
+
+        let mut wrong_length = request.clone();
+        wrong_length.adapter_input.byte_length += 1;
+        assert_eq!(
+            write_input(&mut sender, &wrong_length, input, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+        let mut wrong_digest = request;
+        wrong_digest.adapter_input.digest = [0; 32];
+        assert_eq!(
+            write_input(&mut sender, &wrong_digest, input, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+        Ok(())
+    }
+
     fn completed(descriptor: PayloadDescriptor) -> SandboxProviderResult {
         SandboxProviderResult {
             request_id: [2; 16],
@@ -885,6 +1001,35 @@ mod tests {
     }
 
     #[test]
+    fn staged_output_only_allows_the_terminal_output_shapes() -> TestResult {
+        let descriptor = PayloadDescriptor {
+            byte_length: 0,
+            digest: output_digest(b""),
+        };
+        let mut no_descriptor = completed(descriptor.clone());
+        no_descriptor.output = None;
+        assert!(stage_output(
+            tempfile::NamedTempFile::new()?,
+            Vec::new(),
+            &request()?,
+            &no_descriptor,
+        )
+        .is_err());
+
+        let mut cancelled = completed(descriptor);
+        cancelled.outcome = SandboxTerminalOutcome::Cancelled;
+        cancelled.output = None;
+        assert!(receive(stage_output(
+            tempfile::NamedTempFile::new()?,
+            Vec::new(),
+            &request()?,
+            &cancelled,
+        ))?
+        .is_none());
+        Ok(())
+    }
+
+    #[test]
     fn deadline_and_frame_limits_fail_closed() -> TestResult {
         let expired = Deadline {
             expires_at: Instant::now(),
@@ -897,6 +1042,10 @@ mod tests {
             &Deadline::new(Duration::from_secs(1))?
         )
         .is_err());
+        assert_eq!(
+            write_frame(&mut sender, b"", &Deadline::new(Duration::from_secs(1))?),
+            Err(ReceiveFailure::Invalid)
+        );
         Ok(())
     }
 

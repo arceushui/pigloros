@@ -160,7 +160,7 @@ pub(crate) fn decode_request_control(
     if provider_request_id == [0; 16] || attempt_id == [0; 16] {
         return Err(invalid);
     }
-    let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| invalid)?;
+    let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT).or(Err(invalid))?;
     let digest = fixed_bytes::<32>(&wrapper[1]).map_err(|_| invalid)?;
     if digest != domain_digest(SLX1_DOMAIN, &unsigned) {
         return Err(invalid);
@@ -271,13 +271,13 @@ pub(crate) fn encode_authenticated_reply(
         output,
     ]);
     let unsigned_bytes =
-        encode_with_limit(&unsigned, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
+        encode_with_limit(&unsigned, CONTROL_LIMIT).or(Err(AdapterError::ProtocolFailure))?;
     let digest = domain_digest(SLY1_DOMAIN, &unsigned_bytes);
     let control = encode_with_limit(
         &Value::Array(vec![unsigned, Value::Bytes(digest.to_vec())]),
         CONTROL_LIMIT,
     )
-    .map_err(|_| AdapterError::ProtocolFailure)?;
+    .or(Err(AdapterError::ProtocolFailure))?;
     Ok(control)
 }
 
@@ -336,7 +336,7 @@ fn validate_reply_identity(
 
 fn validate_reply_digest(wrapper: &[Value]) -> Result<(), AdapterError> {
     let unsigned =
-        encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
+        encode_with_limit(&wrapper[0], CONTROL_LIMIT).or(Err(AdapterError::ProtocolFailure))?;
     if fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?
         != domain_digest(SLY1_DOMAIN, &unsigned)
     {
@@ -383,7 +383,7 @@ fn decode_reply_outcome(
         }
         1 => {
             SandboxProviderError::from_canonical_cbor(bytes(&fields[7])?)
-                .map_err(|_| AdapterError::ProtocolFailure)?;
+                .or(Err(AdapterError::ProtocolFailure))?;
             require_absent_evidence(fields, trailing)?;
             Ok(DecodedSelectorReply {
                 observation: Err(AdapterError::ProtocolFailure),

@@ -88,7 +88,7 @@ impl RootSelectorAdmissionArtifacts {
                 network_plans,
             },
         )
-        .map_err(|_| RootSelectorServiceError::Admission)
+        .or(Err(RootSelectorServiceError::Admission))
     }
 }
 
@@ -249,19 +249,17 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
     /// # Errors
     /// Rejects a foreign peer or any malformed, unauthorized, or unauthenticated transition.
     pub fn serve_once(&mut self, listener: &UnixListener) -> Result<(), RootSelectorServiceError> {
-        let (mut stream, _) = listener
-            .accept()
-            .map_err(|_| RootSelectorServiceError::Io)?;
-        let peer = socket_peercred(stream.as_fd()).map_err(|_| RootSelectorServiceError::Io)?;
+        let (mut stream, _) = listener.accept().or(Err(RootSelectorServiceError::Io))?;
+        let peer = socket_peercred(stream.as_fd()).or(Err(RootSelectorServiceError::Io))?;
         if peer.uid.as_raw() != self.evaluator_uid {
             return Err(RootSelectorServiceError::InvalidRequest);
         }
         stream
             .set_read_timeout(Some(self.initial_io_timeout))
-            .map_err(|_| RootSelectorServiceError::Io)?;
+            .or(Err(RootSelectorServiceError::Io))?;
         stream
             .set_write_timeout(Some(self.initial_io_timeout))
-            .map_err(|_| RootSelectorServiceError::Io)?;
+            .or(Err(RootSelectorServiceError::Io))?;
         self.handle_connection(&mut stream)
     }
 
@@ -274,7 +272,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
             Err(error) => {
                 let control = error
                     .to_canonical_cbor()
-                    .map_err(|_| RootSelectorServiceError::Io)?;
+                    .or(Err(RootSelectorServiceError::Io))?;
                 return write_selector_response(stream, &control, None);
             }
         };
@@ -317,7 +315,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         };
         let execute_bytes = execute_request
             .to_canonical_cbor()
-            .map_err(|_| RootSelectorServiceError::AuthorityMismatch)?;
+            .or(Err(RootSelectorServiceError::AuthorityMismatch))?;
         let provider_reply = self.provider.execute(
             &execute_request,
             &decoded.encoded.attempt_stream,
@@ -630,7 +628,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         output: Option<&mut StagedOutput>,
     ) -> Result<(), RootSelectorServiceError> {
         let control = encode_authenticated_reply(&decoded.encoded, reply)
-            .map_err(|_| RootSelectorServiceError::ProviderEvidence)?;
+            .or(Err(RootSelectorServiceError::ProviderEvidence))?;
         write_selector_response(stream, &control, output)
     }
 
@@ -652,7 +650,7 @@ impl<A: RootSelectorAuthoritySource, P: RootSelectorProvider> RootSelectorServer
         };
         let control = error
             .to_canonical_cbor()
-            .map_err(|_| RootSelectorServiceError::Io)?;
+            .or(Err(RootSelectorServiceError::Io))?;
         write_selector_response(stream, &control, None)
     }
 }
@@ -662,13 +660,13 @@ fn bind_selector_listener(
     owner_uid: u32,
 ) -> Result<UnixListener, RootSelectorServiceError> {
     let parent = path.parent().ok_or(RootSelectorServiceError::Io)?;
-    let metadata = std::fs::metadata(parent).map_err(|_| RootSelectorServiceError::Io)?;
+    let metadata = std::fs::metadata(parent).or(Err(RootSelectorServiceError::Io))?;
     if metadata.uid() != owner_uid || metadata.mode() & 0o022 != 0 {
         return Err(RootSelectorServiceError::Io);
     }
-    let listener = UnixListener::bind(path).map_err(|_| RootSelectorServiceError::Io)?;
+    let listener = UnixListener::bind(path).or(Err(RootSelectorServiceError::Io))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))
-        .map_err(|_| RootSelectorServiceError::Io)?;
+        .or(Err(RootSelectorServiceError::Io))?;
     Ok(listener)
 }
 
@@ -685,10 +683,10 @@ fn read_selector_request(
         safe_detail: None,
     };
     let mut prefix = [0_u8; 4];
-    stream
-        .read_exact(&mut prefix)
-        .map_err(|_| failure.clone())?;
-    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| failure.clone())?;
+    let prefix_failure = failure.clone();
+    stream.read_exact(&mut prefix).or(Err(prefix_failure))?;
+    let length_failure = failure.clone();
+    let length = usize::try_from(u32::from_be_bytes(prefix)).or(Err(length_failure))?;
     if length > CONTROL_LIMIT {
         failure.code = SandboxLocalErrorCode::PayloadLimitExceeded;
         return Err(failure);
@@ -707,15 +705,16 @@ fn read_selector_request(
         failure.clone()
     })?;
     let mut attempt_stream = Vec::new();
+    let stream_failure = failure.clone();
     stream
         .take(SANDBOX_PAYLOAD_LIMIT + 1)
         .read_to_end(&mut attempt_stream)
-        .map_err(|_| failure.clone())?;
+        .or(Err(stream_failure))?;
     if attempt_stream.len() as u64 > SANDBOX_PAYLOAD_LIMIT {
         failure.code = SandboxLocalErrorCode::PayloadLimitExceeded;
         return Err(failure);
     }
-    decode_request(control, attempt_stream).map_err(|_| failure)
+    decode_request(control, attempt_stream).or(Err(failure))
 }
 
 fn validate_execute_authority(
@@ -764,11 +763,11 @@ fn write_selector_response(
     control: &[u8],
     output: Option<&mut StagedOutput>,
 ) -> Result<(), RootSelectorServiceError> {
-    let length = u32::try_from(control.len()).map_err(|_| RootSelectorServiceError::Io)?;
+    let length = u32::try_from(control.len()).or(Err(RootSelectorServiceError::Io))?;
     stream
         .write_all(&length.to_be_bytes())
         .and_then(|()| stream.write_all(control))
-        .map_err(|_| RootSelectorServiceError::Io)
+        .or(Err(RootSelectorServiceError::Io))
         .and_then(|()| output.map_or(Ok(()), |output| output.copy_to(stream)))
 }
 
@@ -786,9 +785,16 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
+
+    use crate::evaluator::{AttemptArtifact, AttemptTransportCaps};
+    use crate::evaluator_protocol::{ImplementationIdentity, OutputCapability, SubjectAdapterKind};
+    use crate::profile::DeterministicBudget;
+
     use super::*;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     struct UnusedAuthority;
 
@@ -814,6 +820,86 @@ mod tests {
         ) -> Result<RootSelectorProviderReply, RootSelectorServiceError> {
             Err(RootSelectorServiceError::ProviderUnavailable)
         }
+    }
+
+    fn selector_request_without_sandbox_requirement() -> TestResult<(Vec<u8>, Vec<u8>)> {
+        let mut request = EvaluationRequest {
+            request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+            profile_digest: [2; 32],
+            fixture_bundle_digest: [3; 32],
+            subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+            subject_artifact_digest: [4; 32],
+            implementation: ImplementationIdentity {
+                implementation_id: "subject".to_owned(),
+                source_digest: [5; 32],
+                build_digest: [6; 32],
+                binary_digest: [7; 32],
+                public_contract_digest: [8; 32],
+                organization_id: None,
+            },
+            execution_profile_digest: [9; 32],
+            trust_policy_snapshot_digest: [10; 32],
+            output_capability: OutputCapability {
+                capability_digest: [0; 32],
+                report_bytes_limit: 1,
+                diagnostic_bytes_limit: 0,
+            },
+            evaluator_protocol_digest: [12; 32],
+            evaluator_hard_caps_digest: [13; 32],
+            sandbox_requirement: None,
+            request_digest: [0; 32],
+        };
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        let artifact = |bytes: Vec<u8>| AttemptArtifact {
+            digest: *blake3::hash(&bytes).as_bytes(),
+            bytes,
+        };
+        let attempt = CaseAttempt {
+            case_id: "case".to_owned(),
+            claim_layer: 1,
+            family: 1,
+            mode: 1,
+            fixture_digest: [15; 32],
+            schema: artifact(vec![1]),
+            payload: artifact(vec![2]),
+            auxiliary: Vec::new(),
+            budget: DeterministicBudget {
+                memory_bytes: 1,
+                cpu_fuel: 1,
+                host_calls: 1,
+                event_count: 1,
+                output_bytes: 1,
+                storage_bytes: 1,
+                execution_steps: 1,
+                simulation_time_ns: 1,
+            },
+            watchdog_ms: 100,
+            network_allowed: false,
+            capability_ids: vec!["execute".to_owned()],
+            transport_caps: AttemptTransportCaps {
+                max_member_bytes: 1024,
+                max_attempt_bytes: 4096,
+            },
+        };
+        let request_bytes = request.to_canonical_cbor()?;
+        let encoded =
+            crate::selector_protocol::encode_request(&request, &request_bytes, &attempt, 0)
+                .map_err(|_| "selector test request encoding failed")?;
+        Ok((encoded.control, encoded.attempt_stream))
+    }
+
+    fn write_selector_request(
+        stream: &mut UnixStream,
+        control: &[u8],
+        attempt_stream: &[u8],
+    ) -> TestResult {
+        stream.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
+        stream.write_all(control)?;
+        stream.write_all(attempt_stream)?;
+        stream.shutdown(Shutdown::Write)?;
+        Ok(())
     }
 
     #[test]
@@ -877,6 +963,153 @@ mod tests {
             Err(RootSelectorServiceError::InvalidRequest)
         );
         foreign.join().map_err(|_| "foreign client panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn selector_reader_classifies_each_bounded_framing_failure() -> TestResult {
+        let (mut reader, writer) = UnixStream::pair()?;
+        drop(writer);
+        let Err(error) = read_selector_request(&mut reader) else {
+            return Err("closed selector stream unexpectedly decoded".into());
+        };
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+
+        let (mut reader, mut writer) = UnixStream::pair()?;
+        writer.write_all(&(u32::try_from(CONTROL_LIMIT)? + 1).to_be_bytes())?;
+        writer.shutdown(Shutdown::Write)?;
+        let Err(error) = read_selector_request(&mut reader) else {
+            return Err("oversized selector control unexpectedly decoded".into());
+        };
+        assert_eq!(error.code, SandboxLocalErrorCode::PayloadLimitExceeded);
+
+        let (mut reader, mut writer) = UnixStream::pair()?;
+        writer.write_all(&0_u32.to_be_bytes())?;
+        writer.shutdown(Shutdown::Write)?;
+        let Err(error) = read_selector_request(&mut reader) else {
+            return Err("empty selector control unexpectedly decoded".into());
+        };
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+
+        let (mut reader, mut writer) = UnixStream::pair()?;
+        writer.write_all(&2_u32.to_be_bytes())?;
+        writer.write_all(&[0xf6])?;
+        writer.shutdown(Shutdown::Write)?;
+        let Err(error) = read_selector_request(&mut reader) else {
+            return Err("truncated selector control unexpectedly decoded".into());
+        };
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+
+        let (mut reader, mut writer) = UnixStream::pair()?;
+        writer.write_all(&1_u32.to_be_bytes())?;
+        writer.write_all(&[0xf6])?;
+        writer.shutdown(Shutdown::Write)?;
+        let Err(error) = read_selector_request(&mut reader) else {
+            return Err("malformed selector control unexpectedly decoded".into());
+        };
+        assert_eq!(error.code, SandboxLocalErrorCode::InvalidSelectorRequest);
+        Ok(())
+    }
+
+    #[test]
+    fn selector_missing_requirement_returns_a_bounded_local_error() -> TestResult {
+        let (control, attempt_stream) = selector_request_without_sandbox_requirement()?;
+        let (mut server_stream, mut client_stream) = UnixStream::pair()?;
+        write_selector_request(&mut client_stream, &control, &attempt_stream)?;
+        let mut server =
+            RootSelectorServer::new(UnusedAuthority, UnusedProvider, 0, Duration::from_secs(1));
+        server.handle_connection(&mut server_stream)?;
+        server_stream.shutdown(Shutdown::Write)?;
+
+        let mut response = Vec::new();
+        client_stream.read_to_end(&mut response)?;
+        let prefix: [u8; 4] = response
+            .get(..4)
+            .ok_or("selector local error response lacks prefix")?
+            .try_into()?;
+        let control_length = usize::try_from(u32::from_be_bytes(prefix))?;
+        assert_eq!(response.len(), 4 + control_length);
+        let error = SandboxLocalError::from_canonical_cbor(&response[4..])?;
+        assert_eq!(error.phase, SandboxLocalErrorPhase::BeforeSpx1);
+        assert_eq!(error.code, SandboxLocalErrorCode::RequestAuthorityMismatch);
+        Ok(())
+    }
+
+    #[test]
+    fn selector_response_writes_control_and_staged_output_or_reports_io() -> TestResult {
+        let payload = b"selector output";
+        let descriptor = PayloadDescriptor {
+            byte_length: u64::try_from(payload.len())?,
+            digest: domain_digest(b"PiglorOS.SandboxOutputBytes.v1\0", payload),
+        };
+        let mut source = payload.as_slice();
+        let mut staged = StagedOutput::stage_verified(&mut source, descriptor)?;
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        write_selector_response(&mut writer, b"control", Some(&mut staged))?;
+        writer.shutdown(Shutdown::Write)?;
+        let mut response = Vec::new();
+        reader.read_to_end(&mut response)?;
+        assert_eq!(
+            response,
+            [7_u32.to_be_bytes().as_slice(), b"control", payload].concat()
+        );
+
+        let (mut writer, reader) = UnixStream::pair()?;
+        drop(reader);
+        assert_eq!(
+            write_selector_response(&mut writer, b"control", None),
+            Err(RootSelectorServiceError::Io)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selector_output_shape_requires_the_authenticated_terminal_shape() -> TestResult {
+        let descriptor = PayloadDescriptor {
+            byte_length: 0,
+            digest: domain_digest(b"PiglorOS.SandboxOutputBytes.v1\0", b""),
+        };
+        let mut source = b"".as_slice();
+        let staged = StagedOutput::stage_verified(&mut source, descriptor.clone())?;
+        let result = |outcome, output| crate::sandbox_provider_protocol::SandboxProviderResult {
+            request_id: [1; 16],
+            attempt_id: [2; 16],
+            outcome,
+            output,
+            agr1_digest: None,
+            spr1_digest: None,
+            operational_events: Vec::new(),
+            runtime_attestation_key_id: "runtime".to_owned(),
+            result_digest: [3; 32],
+            signature: [4; 64],
+        };
+
+        assert!(output_matches(
+            &result(SandboxTerminalOutcome::Completed, Some(descriptor.clone())),
+            Some(&staged)
+        ));
+        assert!(!output_matches(
+            &result(
+                SandboxTerminalOutcome::Completed,
+                Some(PayloadDescriptor {
+                    byte_length: 1,
+                    ..descriptor
+                })
+            ),
+            Some(&staged)
+        ));
+        assert!(output_matches(
+            &result(SandboxTerminalOutcome::Cancelled, None),
+            None
+        ));
+        assert!(output_matches(
+            &result(SandboxTerminalOutcome::UnavailableAfterAdmission, None),
+            None
+        ));
+        assert!(!output_matches(
+            &result(SandboxTerminalOutcome::Rejected, None),
+            None
+        ));
         Ok(())
     }
 }

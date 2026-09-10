@@ -44,7 +44,7 @@ impl InstallationChallenge {
             Value::Bytes(self.nonce.to_vec()),
             Value::Integer(0_u64.into()),
         ]))
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))
     }
 
     fn require_live(&self) -> Result<(), SelectorBoundaryError> {
@@ -140,10 +140,10 @@ impl InstalledSelectorAuthority {
         revocation_update_bytes: Vec<u8>,
     ) -> Result<ValidatedInstallationUpdate, SelectorBoundaryError> {
         let next_manifest = InstallationManifest::from_cbor(&next_manifest_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         previous_manifest
             .validate_revocation_successor(&next_manifest)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let next_revocation_file = self.open_updated_record(&next_manifest, 1)?;
         let next_policy_file = self.open_updated_record(&next_manifest, 2)?;
         let next_revocation_bytes = next_revocation_file.read_bytes()?;
@@ -174,7 +174,7 @@ impl InstalledSelectorAuthority {
     ) -> Result<RevocationUpdateRequest, SelectorBoundaryError> {
         let next_revocation =
             SandboxRevocationSnapshot::authenticate(next_revocation_bytes, &self.trust)
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+                .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         SandboxAdministratorPolicy::validate_revocation_successor(
             &self
                 .installed
@@ -184,10 +184,10 @@ impl InstalledSelectorAuthority {
             &self.revocation,
             &next_revocation,
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let update =
             RevocationUpdateRequest::authenticate(update_bytes, &self.trust, &self.revocation)
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+                .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let [_, expected_revocation, expected_policy] = next_manifest.authority_digests();
         if next_revocation.snapshot_digest() != expected_revocation
             || update.next_revocation != next_revocation
@@ -206,10 +206,10 @@ impl InstalledSelectorAuthority {
     ) -> Result<ImmutableSandboxArtifact, SelectorBoundaryError> {
         let identity = manifest.authority_digests()[usize::from(code)];
         let kind = InstallationObjectKind::from_code(code)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let entry = manifest
             .object(kind, identity)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         if entry.length() > MANIFEST_LIMIT {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
@@ -217,13 +217,13 @@ impl InstalledSelectorAuthority {
             .installed
             .root
             .metadata()
-            .map_err(|_| SelectorBoundaryError::Io)?
+            .or(Err(SelectorBoundaryError::Io))?
             .uid();
         let directory = open_directory_chain(
             self.installed
                 .root
                 .try_clone()
-                .map_err(|_| SelectorBoundaryError::Io)?,
+                .or(Err(SelectorBoundaryError::Io))?,
             Path::new("authority"),
             owner,
         )?;
@@ -236,12 +236,12 @@ impl InstalledSelectorAuthority {
         )?;
         let mut hasher = blake3::Hasher::new();
         let observed = std::io::copy(&mut (&mut file).take(entry.length() + 1), &mut hasher)
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .or(Err(SelectorBoundaryError::Io))?;
         if observed != entry.length() || hasher.finalize().as_bytes() != &entry.content_digest() {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         file.seek(SeekFrom::Start(0))
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .or(Err(SelectorBoundaryError::Io))?;
         Ok(ImmutableSandboxArtifact {
             file,
             digest: entry.content_digest(),
@@ -306,7 +306,7 @@ fn decode_update(
         };
         Ok((next.clone(), update.clone()))
     };
-    decode().map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    decode().or(Err(SelectorBoundaryError::ArtifactInvalid))
 }
 
 fn signed_digest(bytes: &[u8]) -> Result<[u8; 32], SelectorBoundaryError> {
@@ -314,7 +314,7 @@ fn signed_digest(bytes: &[u8]) -> Result<[u8; 32], SelectorBoundaryError> {
         let document = decode_canonical(bytes)?;
         fixed_bytes(&array(&document, 3)?[1])
     };
-    decode().map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    decode().or(Err(SelectorBoundaryError::ArtifactInvalid))
 }
 
 fn embedded_revocation(bytes: &[u8]) -> Result<Vec<u8>, SelectorBoundaryError> {
@@ -327,7 +327,7 @@ fn embedded_revocation(bytes: &[u8]) -> Result<Vec<u8>, SelectorBoundaryError> {
             Err(crate::evaluator_protocol::ProtocolError::InvalidEncoding)
         }
     };
-    decode().map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    decode().or(Err(SelectorBoundaryError::ArtifactInvalid))
 }
 
 #[cfg(test)]

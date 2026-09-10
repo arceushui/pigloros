@@ -73,7 +73,7 @@ impl PendingInstallationRecovery {
             self.snapshot.previous_live_attempt_ids().to_vec(),
             self.snapshot.required_cancelled_attempt_ids().to_vec(),
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))
     }
 
     /// Authenticate exact recovery RCA1 using only the previous SIR1-bound runtime key.
@@ -99,7 +99,7 @@ impl PendingInstallationRecovery {
             self.previous_authority.trust(),
             self.snapshot.runtime_key_id(),
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         state
             .begin_update(
                 self.update.revocation_update_bytes(),
@@ -107,10 +107,10 @@ impl PendingInstallationRecovery {
                 context,
                 0,
             )
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         state
             .acknowledge(acknowledgement_bytes, elapsed_ms)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))
     }
 
     /// Verify that SIR1 and current SIC1 still form this retained recovery floor.
@@ -124,7 +124,7 @@ impl PendingInstallationRecovery {
             .installed
             .root
             .metadata()
-            .map_err(|_| SelectorBoundaryError::Io)?
+            .or(Err(SelectorBoundaryError::Io))?
             .uid();
         let current = read_current_manifest(&self.previous_authority.installed.root, owner)?;
         if current != self.update.previous_manifest_bytes()
@@ -139,13 +139,13 @@ impl PendingInstallationRecovery {
             0o400,
             RECOVERY_LIMIT,
         )?;
-        let on_disk_metadata = on_disk.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+        let on_disk_metadata = on_disk.metadata().or(Err(SelectorBoundaryError::Io))?;
         let retained_metadata = self
             .recovery_file
             .metadata()
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .or(Err(SelectorBoundaryError::Io))?;
         let length = u64::try_from(self.recovery_bytes.len())
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         if on_disk_metadata.dev() != retained_metadata.dev()
             || on_disk_metadata.ino() != retained_metadata.ino()
             || on_disk_metadata.len() != retained_metadata.len()
@@ -201,7 +201,7 @@ impl PendingInstallationRecovery {
             .installed
             .root
             .metadata()
-            .map_err(|_| SelectorBoundaryError::Io)?
+            .or(Err(SelectorBoundaryError::Io))?
             .uid();
         super::update::durability::publish_successor(
             &self.previous_authority.installed.root,
@@ -227,7 +227,7 @@ impl InstalledSelectorObjects {
         let owner = self
             .root
             .metadata()
-            .map_err(|_| SelectorBoundaryError::Io)?
+            .or(Err(SelectorBoundaryError::Io))?
             .uid();
         let recovery_file = open_file(&self.root, RECOVERY_NAME, owner, 0o400, RECOVERY_LIMIT)?;
         let recovery_bytes = read_file(&recovery_file, RECOVERY_LIMIT)?;
@@ -242,7 +242,7 @@ impl InstalledSelectorObjects {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         let previous_manifest = super::super::InstallationManifest::from_cbor(&previous_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let previous_authority = self.authenticate_manifest(&previous_manifest)?;
         snapshot.validate_against(&previous_authority)?;
         let update = previous_authority.validate_recovery_update(
@@ -274,9 +274,9 @@ struct RecoveryRecords {
 
 fn decode_recovery(bytes: &[u8]) -> Result<RecoveryRecords, SelectorBoundaryError> {
     let document = decode_canonical_with_limit(bytes, RECOVERY_ENCODING_LIMIT)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let wrapper = array(&document, 2).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let fields = array(&wrapper[0], 9).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
+    let wrapper = array(&document, 2).or(Err(SelectorBoundaryError::ArtifactInvalid))?;
+    let fields = array(&wrapper[0], 9).or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     if text(&fields[0]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)? != "SIR1"
         || uint(&fields[1]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)? != 1
     {
@@ -288,18 +288,16 @@ fn decode_recovery(bytes: &[u8]) -> Result<RecoveryRecords, SelectorBoundaryErro
         return Err(SelectorBoundaryError::ArtifactInvalid);
     };
     for record in [previous, next, update] {
-        let length =
-            u64::try_from(record.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        let length = u64::try_from(record.len()).or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         if length == 0 || length > MANIFEST_LIMIT {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
     }
     let snapshot =
         InstallationRecoverySnapshot::from_values(&fields[5], &fields[6], &fields[7], &fields[8])?;
-    let sir1_digest =
-        fixed_bytes(&wrapper[1]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let sir1_digest = fixed_bytes(&wrapper[1]).or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     let unsigned = encode_with_limit(&wrapper[0], RECOVERY_ENCODING_LIMIT)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.SIR1.v1\0");
     hasher.update(&unsigned);
@@ -321,19 +319,19 @@ fn read_current_manifest(root: &File, owner: u32) -> Result<Vec<u8>, SelectorBou
 }
 
 fn read_file(file: &File, limit: u64) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let mut file = file.try_clone().map_err(|_| SelectorBoundaryError::Io)?;
-    let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+    let mut file = file.try_clone().or(Err(SelectorBoundaryError::Io))?;
+    let metadata = file.metadata().or(Err(SelectorBoundaryError::Io))?;
     if metadata.len() > limit {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
     let capacity =
-        usize::try_from(metadata.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        usize::try_from(metadata.len()).or(Err(SelectorBoundaryError::ArtifactInvalid))?;
     let mut bytes = Vec::with_capacity(capacity);
     file.seek(SeekFrom::Start(0))
-        .map_err(|_| SelectorBoundaryError::Io)?;
+        .or(Err(SelectorBoundaryError::Io))?;
     file.take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| SelectorBoundaryError::Io)?;
+        .or(Err(SelectorBoundaryError::Io))?;
     if bytes.len() != capacity {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }

@@ -182,7 +182,7 @@ impl PreviousProviderBinding {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         ed25519_dalek::VerifyingKey::from_bytes(&self.runtime_public_key)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         Ok(())
     }
 }
@@ -346,7 +346,7 @@ impl InstallationRecoverySnapshot {
             .installed
             .control_bytes(3, selection.provider_manifest)?;
         let manifest = SandboxProviderManifest::from_canonical_cbor(&manifest_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         if manifest.provider_id != self.previous_provider.provider_id
             || manifest.manifest_digest != self.previous_provider.provider_manifest_digest
             || manifest.binary_digest != self.previous_provider.provider_binary_digest
@@ -374,7 +374,7 @@ impl InstallationRecoverySnapshot {
                 &runtime_key.key_id,
                 SandboxTrustRole::ProviderRuntimeAttestation,
             )
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         if active.to_bytes() != runtime_key.public_key {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
@@ -385,10 +385,10 @@ impl InstallationRecoverySnapshot {
                 &manifest.provider_release_key_id,
                 SandboxTrustRole::ProviderRelease,
             )
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         manifest
             .verify_signature(&release_key)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))
     }
 
     pub(crate) fn previous_provider_value(&self) -> Value {

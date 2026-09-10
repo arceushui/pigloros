@@ -491,9 +491,9 @@ fn read_artifact_header(
     }
     let digest = nonzero_digest(&fields[5])?;
     let chunk_limit = usize::try_from(MAX_ATTEMPT_BYTES / MAX_CHUNK_BYTES as u64)
-        .map_err(|_| TransportError::FieldOutOfBounds)?;
+        .or(Err(TransportError::FieldOutOfBounds))?;
     let chunks = bounded_usize(&fields[6], chunk_limit)?;
-    let expected_length = usize::try_from(length).map_err(|_| TransportError::FieldOutOfBounds)?;
+    let expected_length = usize::try_from(length).or(Err(TransportError::FieldOutOfBounds))?;
     if chunks != expected_length.div_ceil(MAX_CHUNK_BYTES) {
         return Err(TransportError::InvalidEncoding);
     }
@@ -717,7 +717,7 @@ fn encode_frame(value: Value) -> Result<Frame, TransportError> {
     if encoded.is_empty() || encoded.len() > MAX_FRAME_BYTES {
         return Err(TransportError::FieldOutOfBounds);
     }
-    let length = u32::try_from(encoded.len()).map_err(|_| TransportError::FieldOutOfBounds)?;
+    let length = u32::try_from(encoded.len()).or(Err(TransportError::FieldOutOfBounds))?;
     Ok(Frame {
         prefix: length.to_be_bytes(),
         encoded,
@@ -737,8 +737,8 @@ fn read_transcript_frame(
 fn read_frame(reader: &mut impl Read) -> Result<Frame, TransportError> {
     let mut prefix = [0; 4];
     reader.read_exact(&mut prefix).map_err(io_error)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix))
-        .map_err(|_| TransportError::FieldOutOfBounds)?;
+    let length =
+        usize::try_from(u32::from_be_bytes(prefix)).or(Err(TransportError::FieldOutOfBounds))?;
     if length == 0 || length > MAX_FRAME_BYTES {
         return Err(TransportError::FieldOutOfBounds);
     }
@@ -862,7 +862,7 @@ fn eight_uints(value: &Value) -> Result<[u64; 8], TransportError> {
         .map(uint)
         .collect::<Result<Vec<_>, _>>()?
         .try_into()
-        .map_err(|_| TransportError::InvalidEncoding)
+        .or(Err(TransportError::InvalidEncoding))
 }
 
 fn failure_value(value: &NamespacedFailure) -> Value {
@@ -902,7 +902,7 @@ fn nonzero_digest(value: &Value) -> Result<[u8; 32], TransportError> {
 }
 
 fn bounded_u8(value: &Value, maximum: u8) -> Result<u8, TransportError> {
-    let value = u8::try_from(uint(value)?).map_err(|_| TransportError::InvalidEncoding)?;
+    let value = u8::try_from(uint(value)?).or(Err(TransportError::InvalidEncoding))?;
     if value <= maximum {
         Ok(value)
     } else {
@@ -911,7 +911,7 @@ fn bounded_u8(value: &Value, maximum: u8) -> Result<u8, TransportError> {
 }
 
 fn bounded_usize(value: &Value, maximum: usize) -> Result<usize, TransportError> {
-    let value = usize::try_from(uint(value)?).map_err(|_| TransportError::FieldOutOfBounds)?;
+    let value = usize::try_from(uint(value)?).or(Err(TransportError::FieldOutOfBounds))?;
     if value <= maximum {
         Ok(value)
     } else {
@@ -955,7 +955,7 @@ fn nesting_depth(value: &Value) -> usize {
 }
 
 fn as_u64(value: usize) -> Result<u64, TransportError> {
-    u64::try_from(value).map_err(|_| TransportError::FieldOutOfBounds)
+    u64::try_from(value).or(Err(TransportError::FieldOutOfBounds))
 }
 
 fn new_transcript(domain: &[u8]) -> blake3::Hasher {

@@ -66,33 +66,30 @@ impl InstalledSelectorAuthority {
     ) -> Result<ResolvedInstalledCase, SelectorBoundaryError> {
         let bundle = self.installed().artifact(
             InstallationObjectKind::from_code(14)
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
+                .or(Err(SelectorBoundaryError::ArtifactInvalid))?,
             request.fixture_bundle_digest,
         )?;
         let policy = self.installed().artifact(
             InstallationObjectKind::from_code(15)
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
+                .or(Err(SelectorBoundaryError::ArtifactInvalid))?,
             request.trust_policy_snapshot_digest,
         )?;
         let policy_bytes = bounded_bytes(policy, 16 * 1024 * 1024)?;
-        let mut archive = bundle
-            .file
-            .try_clone()
-            .map_err(|_| SelectorBoundaryError::Io)?;
+        let mut archive = bundle.file.try_clone().or(Err(SelectorBoundaryError::Io))?;
         archive
             .seek(SeekFrom::Start(0))
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .or(Err(SelectorBoundaryError::Io))?;
         let preflight = preflight_signed_bundle_reader(&mut archive, &policy_bytes, request)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let hard_caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         preflight
             .enforce_selected_caps(hard_caps.into())
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let verified = verify_signed_bundle_reader(&mut archive, &policy_bytes, request)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let profile = Profile::from_bundle(&verified, request)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let fixture = profile
             .selected_fixtures(request)
             .into_iter()
@@ -107,7 +104,7 @@ impl InstalledSelectorAuthority {
             verified.mode,
             profile.evaluator_hard_caps,
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         Ok(ResolvedInstalledCase {
             attempt,
             fixture_contract_digest: profile.fixture_contract_digest(),
@@ -127,15 +124,15 @@ fn bounded_bytes(
     let mut file = artifact
         .file
         .try_clone()
-        .map_err(|_| SelectorBoundaryError::Io)?;
+        .or(Err(SelectorBoundaryError::Io))?;
     file.seek(SeekFrom::Start(0))
-        .map_err(|_| SelectorBoundaryError::Io)?;
+        .or(Err(SelectorBoundaryError::Io))?;
     let mut bytes = Vec::with_capacity(
-        usize::try_from(artifact.length()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
+        usize::try_from(artifact.length()).or(Err(SelectorBoundaryError::ArtifactInvalid))?,
     );
     file.take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| SelectorBoundaryError::Io)?;
+        .or(Err(SelectorBoundaryError::Io))?;
     if bytes.len() as u64 != artifact.length() {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }

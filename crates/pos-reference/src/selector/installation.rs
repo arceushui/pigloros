@@ -77,7 +77,7 @@ pub struct InstallationObject {
 impl InstallationObject {
     fn decode(value: &Value) -> Result<Self, ProtocolError> {
         let fields = array(value, 4)?;
-        let code = u8::try_from(uint(&fields[0])?).map_err(|_| ProtocolError::FieldOutOfBounds)?;
+        let code = u8::try_from(uint(&fields[0])?).or(Err(ProtocolError::FieldOutOfBounds))?;
         let object = Self {
             kind: InstallationObjectKind::from_code(code)?,
             identity: nonzero_digest(&fields[1])?,
@@ -152,7 +152,7 @@ impl InstallationManifest {
             return Err(ProtocolError::FieldOutOfBounds);
         }
         let root_public_key = fixed_bytes(&fields[3])?;
-        VerifyingKey::from_bytes(&root_public_key).map_err(|_| ProtocolError::InvalidEncoding)?;
+        VerifyingKey::from_bytes(&root_public_key).or(Err(ProtocolError::InvalidEncoding))?;
         let execute_socket = provider_socket(&fields[7])?;
         let control_socket = provider_socket(&fields[8])?;
         if execute_socket == control_socket {
@@ -199,7 +199,7 @@ impl InstallationManifest {
         self.objects
             .binary_search_by_key(&(kind, identity), |entry| (entry.kind, entry.identity))
             .map(|index| &self.objects[index])
-            .map_err(|_| ProtocolError::InvalidEncoding)
+            .or(Err(ProtocolError::InvalidEncoding))
     }
 
     /// Exact SIC1 self-digest.
@@ -369,12 +369,12 @@ impl InstalledSelectorObjects {
     /// Rejects unsafe ancestry, non-immutable files, invalid metadata, missing
     /// objects, or incorrect content addresses. Does not expose any socket.
     pub fn open() -> Result<Self, SelectorBoundaryError> {
-        let filesystem_root = File::open("/").map_err(|_| SelectorBoundaryError::Io)?;
+        let filesystem_root = File::open("/").or(Err(SelectorBoundaryError::Io))?;
         let root = open_directory_chain(
             filesystem_root,
             Path::new(SANDBOX_ARTIFACT_ROOT)
                 .strip_prefix("/")
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
+                .or(Err(SelectorBoundaryError::ArtifactInvalid))?,
             0,
         )?;
         Self::open_at(&root, 0)
@@ -387,13 +387,13 @@ impl InstalledSelectorObjects {
         (&mut manifest_file)
             .take(MANIFEST_LIMIT + 1)
             .read_to_end(&mut manifest_bytes)
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .or(Err(SelectorBoundaryError::Io))?;
         let manifest = InstallationManifest::from_cbor(&manifest_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         let mut objects = BTreeMap::new();
         for entry in manifest.objects() {
             let directory = open_directory_chain(
-                root.try_clone().map_err(|_| SelectorBoundaryError::Io)?,
+                root.try_clone().or(Err(SelectorBoundaryError::Io))?,
                 Path::new(entry.kind.directory()),
                 owner,
             )?;
@@ -406,12 +406,12 @@ impl InstalledSelectorObjects {
             )?;
             let mut hasher = blake3::Hasher::new();
             let observed = std::io::copy(&mut (&mut file).take(entry.length + 1), &mut hasher)
-                .map_err(|_| SelectorBoundaryError::Io)?;
+                .or(Err(SelectorBoundaryError::Io))?;
             if observed != entry.length || hasher.finalize().as_bytes() != &entry.content {
                 return Err(SelectorBoundaryError::ArtifactInvalid);
             }
             file.seek(SeekFrom::Start(0))
-                .map_err(|_| SelectorBoundaryError::Io)?;
+                .or(Err(SelectorBoundaryError::Io))?;
             objects.insert(
                 (entry.kind, entry.identity),
                 ImmutableSandboxArtifact {
@@ -422,7 +422,7 @@ impl InstalledSelectorObjects {
             );
         }
         Ok(Self {
-            root: root.try_clone().map_err(|_| SelectorBoundaryError::Io)?,
+            root: root.try_clone().or(Err(SelectorBoundaryError::Io))?,
             manifest_file,
             manifest_bytes,
             manifest,
@@ -482,16 +482,14 @@ pub(crate) fn open_directory_chain(
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
         )
         .map(File::from)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
         validate_directory(&directory, owner)?;
     }
     Ok(directory)
 }
 
 fn validate_directory(directory: &File, owner: u32) -> Result<(), SelectorBoundaryError> {
-    let metadata = directory
-        .metadata()
-        .map_err(|_| SelectorBoundaryError::Io)?;
+    let metadata = directory.metadata().or(Err(SelectorBoundaryError::Io))?;
     if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o022 != 0 {
         Err(SelectorBoundaryError::ArtifactInvalid)
     } else {
@@ -514,8 +512,8 @@ fn open_file(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
+    .or(Err(SelectorBoundaryError::ArtifactInvalid))?;
+    let metadata = file.metadata().or(Err(SelectorBoundaryError::Io))?;
     if !metadata.is_file()
         || metadata.uid() != owner
         || metadata.nlink() != 1
