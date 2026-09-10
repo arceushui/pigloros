@@ -717,7 +717,7 @@ fn encode_frame(value: Value) -> Result<Frame, TransportError> {
     if encoded.is_empty() || encoded.len() > MAX_FRAME_BYTES {
         return Err(TransportError::FieldOutOfBounds);
     }
-    let length = u32::try_from(encoded.len()).or(Err(TransportError::FieldOutOfBounds))?;
+    let length = encoded.len() as u32;
     Ok(Frame {
         prefix: length.to_be_bytes(),
         encoded,
@@ -737,8 +737,7 @@ fn read_transcript_frame(
 fn read_frame(reader: &mut impl Read) -> Result<Frame, TransportError> {
     let mut prefix = [0; 4];
     reader.read_exact(&mut prefix).map_err(io_error)?;
-    let length =
-        usize::try_from(u32::from_be_bytes(prefix)).or(Err(TransportError::FieldOutOfBounds))?;
+    let length = u32::from_be_bytes(prefix) as usize;
     if length == 0 || length > MAX_FRAME_BYTES {
         return Err(TransportError::FieldOutOfBounds);
     }
