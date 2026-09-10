@@ -25,14 +25,14 @@ pub enum SandboxArchitecture {
 }
 
 impl SandboxArchitecture {
-    const fn code(self) -> u64 {
+    pub(super) const fn code(self) -> u64 {
         match self {
             Self::X86_64 => 0,
             Self::Aarch64 => 1,
         }
     }
 
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+    pub(super) const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
             0 => Ok(Self::X86_64),
             1 => Ok(Self::Aarch64),
@@ -95,6 +95,15 @@ pub enum SandboxExecutionMode {
 }
 
 impl SandboxExecutionMode {
+    pub(super) const fn code(self) -> u64 {
+        match self {
+            Self::Local => 0,
+            Self::AirGapped => 1,
+            Self::Replay => 2,
+            Self::Fork => 3,
+        }
+    }
+
     const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
             0 => Ok(Self::Local),
@@ -304,8 +313,7 @@ impl LaunchPolicy {
     fn validate(&self, unsigned: &[Value; 7]) -> Result<(), SandboxProviderProtocolError> {
         if !valid_identifier(&self.policy_id)
             || self.sim1_digest == [0; 32]
-            || self.effective_limits.is_empty()
-            || self.effective_limits.len() > 17
+            || self.effective_limits.len() != 17
             || self.network_capabilities.len() > MAX_LIST_ENTRIES
         {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);

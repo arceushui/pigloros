@@ -1,0 +1,422 @@
+use std::io::Cursor;
+use std::os::unix::fs::PermissionsExt;
+
+use ed25519_dalek::{Signer, SigningKey};
+
+use super::*;
+use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
+use crate::profile::Profile;
+use crate::selector::installation::authority::InstalledSelectorAuthority;
+use crate::signed_bundle::verify_signed_bundle_reader;
+
+type CaseTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+struct Corpus {
+    request: Vec<u8>,
+    archive: Vec<u8>,
+    trust_policy: Vec<u8>,
+}
+
+fn load_corpus(name: &str) -> CaseTestResult<Corpus> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/installed-selector")
+        .join(name);
+    Ok(Corpus {
+        request: std::fs::read(directory.join("request.cbor"))?,
+        archive: std::fs::read(directory.join("archive.cbor"))?,
+        trust_policy: std::fs::read(directory.join("trust-policy.cbor"))?,
+    })
+}
+
+fn install_raw_object(
+    fixture: &InstallationFixture,
+    manifest: &mut [Value],
+    code: u8,
+    object: &[u8],
+) -> CaseTestResult {
+    let kind = InstallationObjectKind::from_code(code)?;
+    let digest = *blake3::hash(object).as_bytes();
+    let path = fixture
+        .directory
+        .path()
+        .join(kind.directory())
+        .join(digest_name(digest));
+    std::fs::write(path, object)?;
+    std::fs::set_permissions(
+        fixture
+            .directory
+            .path()
+            .join(kind.directory())
+            .join(digest_name(digest)),
+        std::fs::Permissions::from_mode(kind.mode()),
+    )?;
+    let mut entries = array_values(&manifest[10])?.to_vec();
+    entries[usize::from(code)] = Value::Array(vec![
+        integer(u64::from(code)),
+        bytes(digest),
+        bytes(digest),
+        integer(u64::try_from(object.len())?),
+    ]);
+    manifest[10] = Value::Array(entries);
+    Ok(())
+}
+
+fn remove_raw_object(manifest: &mut [Value], code: u8) -> CaseTestResult {
+    let mut entries = array_values(&manifest[10])?.to_vec();
+    entries.remove(usize::from(code));
+    manifest[10] = Value::Array(entries);
+    Ok(())
+}
+
+fn install_case_fixture(
+    archive: &[u8],
+    trust_policy: &[u8],
+    change_manifest: impl FnOnce(&mut Vec<Value>) -> CaseTestResult,
+) -> CaseTestResult<(InstallationFixture, InstalledSelectorAuthority)> {
+    let fixture = bootstrap::authenticated_fixture(|_| {})?;
+    let installed = fixture.load()?;
+    let document = crate::evaluator_protocol::decode_canonical(installed.manifest_bytes())?;
+    let mut manifest = array_values(&array(&document, 2)?[0])?.to_vec();
+    install_raw_object(&fixture, &mut manifest, 14, archive)?;
+    install_raw_object(&fixture, &mut manifest, 15, trust_policy)?;
+    change_manifest(&mut manifest)?;
+    let path = fixture.directory.path().join(MANIFEST_NAME);
+    std::fs::remove_file(&path)?;
+    std::fs::write(&path, manifest_bytes(manifest)?)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
+    let authority = fixture.load()?.authenticate_authority()?;
+    Ok((fixture, authority))
+}
+
+fn corpus_request(corpus: &Corpus) -> CaseTestResult<EvaluationRequest> {
+    Ok(EvaluationRequest::from_canonical_cbor(&corpus.request)?)
+}
+
+fn rebind(mut request: EvaluationRequest) -> CaseTestResult<EvaluationRequest> {
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    Ok(request)
+}
+
+fn array_mut(value: &mut Value) -> Result<&mut Vec<Value>, ProtocolError> {
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => Err(ProtocolError::InvalidEncoding),
+    }
+}
+
+fn array_ref(value: &Value) -> Result<&[Value], ProtocolError> {
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => Err(ProtocolError::InvalidEncoding),
+    }
+}
+
+fn invalid_encoding() -> Box<dyn std::error::Error> {
+    Box::new(ProtocolError::InvalidEncoding)
+}
+
+fn resign_fixture(fixture: &mut [Value]) -> CaseTestResult {
+    if fixture.len() != 24 {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    }
+    let digest = crate::evaluator_protocol::contract_digest(
+        b"PiglorOS.Conformance.Fixture.v1",
+        &Value::Array(fixture[..23].to_vec()),
+    )?;
+    fixture[23] = bytes(digest);
+    Ok(())
+}
+
+fn valid_profile_with_split_case_mode(profile_bytes: &[u8]) -> CaseTestResult<(Vec<u8>, [u8; 32])> {
+    let mut profile = crate::evaluator_protocol::decode_canonical(profile_bytes)?;
+    let fields = array_mut(&mut profile)?;
+    if fields.len() != 18 {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    }
+    let fixtures = array_mut(&mut fields[9])?;
+    let first = fixtures.first().cloned().ok_or_else(invalid_encoding)?;
+    let mut mode_zero = match first {
+        Value::Array(values) if values.len() == 24 => values,
+        _ => return Err(Box::new(ProtocolError::InvalidEncoding)),
+    };
+    mode_zero[7] = Value::Array(vec![integer(0)]);
+    resign_fixture(&mut mode_zero)?;
+    let mut mode_one = mode_zero.clone();
+    mode_one[7] = Value::Array(vec![integer(1)]);
+    resign_fixture(&mut mode_one)?;
+    fixtures[0] = Value::Array(mode_zero);
+    fixtures.insert(1, Value::Array(mode_one));
+
+    let profile_digest = crate::evaluator_protocol::contract_digest(
+        b"PiglorOS.ConformanceProfile.v1",
+        &Value::Array(fields[..17].to_vec()),
+    )?;
+    fields[17] = bytes(profile_digest);
+    Ok((encode(&profile)?, profile_digest))
+}
+
+fn replace_archive_member(members: &mut [Value], path: &str, replacement: &[u8]) -> CaseTestResult {
+    let member = members
+        .iter_mut()
+        .find_map(|member| match member {
+            Value::Array(fields)
+                if fields.len() == 3
+                    && matches!(fields.first(), Some(Value::Text(value)) if value == path) =>
+            {
+                Some(fields)
+            }
+            _ => None,
+        })
+        .ok_or_else(invalid_encoding)?;
+    member[1] = Value::Bytes(replacement.to_vec());
+    Ok(())
+}
+
+fn replace_manifest_descriptor(
+    manifest: &mut [Value],
+    path: &str,
+    replacement: &[u8],
+) -> CaseTestResult {
+    let descriptors = manifest.get_mut(4).ok_or_else(invalid_encoding)?;
+    let descriptor = array_mut(descriptors)?
+        .iter_mut()
+        .find_map(|descriptor| match descriptor {
+            Value::Array(fields)
+                if fields.len() == 4
+                    && matches!(fields.first(), Some(Value::Text(value)) if value == path) =>
+            {
+                Some(fields)
+            }
+            _ => None,
+        })
+        .ok_or_else(invalid_encoding)?;
+    descriptor[1] = integer(u64::try_from(replacement.len())?);
+    descriptor[2] = bytes(*blake3::hash(replacement).as_bytes());
+    Ok(())
+}
+
+fn archive_with_valid_split_case_modes(archive: &[u8]) -> CaseTestResult<(Vec<u8>, [u8; 32])> {
+    let mut document = crate::evaluator_protocol::decode_canonical(archive)?;
+    let root = array_mut(&mut document)?;
+    if root.len() != 4 {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    }
+    let profile_member = array_ref(root.get(1).ok_or_else(invalid_encoding)?)?
+    .iter()
+    .find_map(|member| match member {
+        Value::Array(fields)
+            if fields.len() == 3
+                && matches!(fields.first(), Some(Value::Text(path)) if path == "profile/CPF1.cbor") =>
+        {
+            fields.get(1).and_then(|value| match value {
+                Value::Bytes(value) => Some(value.as_slice()),
+                _ => None,
+            })
+        }
+        _ => None,
+    })
+    .ok_or_else(invalid_encoding)?;
+    let (profile, profile_digest) = valid_profile_with_split_case_mode(profile_member)?;
+    let members = array_mut(root.get_mut(1).ok_or_else(invalid_encoding)?)?;
+    replace_archive_member(members, "profile/CPF1.cbor", &profile)?;
+
+    let manifest = array_mut(root.first_mut().ok_or_else(invalid_encoding)?)?;
+    if manifest.len() != 6 {
+        return Err(Box::new(ProtocolError::InvalidEncoding));
+    }
+    manifest[2] = integer(1);
+    manifest[3] = bytes(profile_digest);
+    replace_manifest_descriptor(manifest, "profile/CPF1.cbor", &profile)?;
+    let expected = array_mut(&mut manifest[5])?;
+    for result in expected {
+        let fields = array_mut(result)?;
+        if fields.len() != 6 {
+            return Err(Box::new(ProtocolError::InvalidEncoding));
+        }
+        fields[3] = integer(1);
+    }
+    let signature = SigningKey::from_bytes(&[9; 32])
+        .sign(&encode(&root[0])?)
+        .to_bytes();
+    root[3] = Value::Bytes(signature.to_vec());
+    Ok((encode(&document)?, profile_digest))
+}
+
+#[test]
+fn installed_authority_reconstructs_the_signed_selected_case() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let request = corpus_request(&corpus)?;
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
+    let resolved = authority.resolve_installed_case(&request, 0)?;
+    assert_eq!(resolved.bundle_digest(), request.fixture_bundle_digest);
+    assert_eq!(resolved.profile_digest(), request.profile_digest);
+    assert_ne!(resolved.fixture_contract_digest(), [0; 32]);
+    assert_eq!(resolved.attempt().case_id, "case-0");
+    assert_eq!(resolved.attempt().mode, 0);
+    Ok(())
+}
+
+#[test]
+fn installed_case_rejects_retained_archive_and_policy_length_changes() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let request = corpus_request(&corpus)?;
+    for code in [14, 15] {
+        for grow in [false, true] {
+            let (fixture, authority) =
+                install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
+            let object = if code == 14 {
+                &corpus.archive
+            } else {
+                &corpus.trust_policy
+            };
+            let kind = InstallationObjectKind::from_code(code)?;
+            let path = fixture
+                .directory
+                .path()
+                .join(kind.directory())
+                .join(digest_name(*blake3::hash(object).as_bytes()));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let mut changed = object.clone();
+            if grow {
+                changed.push(0);
+            } else {
+                changed.truncate(changed.len() / 2);
+            }
+            std::fs::write(&path, changed)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(kind.mode()))?;
+            assert!(authority.resolve_installed_case(&request, 0).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn installed_authority_rejects_missing_or_swapped_cfb1_and_tps1() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let request = corpus_request(&corpus)?;
+    for code in [14, 15] {
+        let (_fixture, authority) =
+            install_case_fixture(&corpus.archive, &corpus.trust_policy, |manifest| {
+                remove_raw_object(manifest, code)
+            })?;
+        assert!(authority.resolve_installed_case(&request, 0).is_err());
+    }
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.trust_policy, &corpus.archive, |_| Ok(()))?;
+    assert!(authority.resolve_installed_case(&request, 0).is_err());
+    Ok(())
+}
+
+#[test]
+fn installed_authority_rejects_invalid_ordinal_mode_and_request_bindings() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let request = corpus_request(&corpus)?;
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
+    assert!(authority.resolve_installed_case(&request, 7).is_err());
+    for request in [
+        rebind(EvaluationRequest {
+            subject_adapter: SubjectAdapterKind::PublicGatewayProtocol,
+            ..request.clone()
+        })?,
+        rebind(EvaluationRequest {
+            execution_profile_digest: [99; 32],
+            ..request
+        })?,
+    ] {
+        assert!(authority.resolve_installed_case(&request, 0).is_err());
+    }
+
+    let corpus = load_corpus("mode")?;
+    let request = corpus_request(&corpus)?;
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
+    assert!(authority.resolve_installed_case(&request, 0).is_err());
+    Ok(())
+}
+
+#[test]
+fn installed_authority_rejects_signed_bundle_mode_outside_fixture_modes() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let (archive, profile_digest) = archive_with_valid_split_case_modes(&corpus.archive)?;
+    let mut request = corpus_request(&corpus)?;
+    request.fixture_bundle_digest = *blake3::hash(&archive).as_bytes();
+    request.profile_digest = profile_digest;
+    let request = rebind(request)?;
+    let mut reader = Cursor::new(&archive);
+    let verified = verify_signed_bundle_reader(&mut reader, &corpus.trust_policy, &request)?;
+    let profile = Profile::from_bundle(&verified, &request)?;
+    let selected = profile.selected_fixtures(&request);
+    assert_eq!(verified.mode, 1);
+    assert_eq!(selected.len(), 8);
+    assert_eq!(selected[0].case_id, "case-0");
+    assert_eq!(selected[0].modes.as_slice(), &[0]);
+    let (_fixture, authority) = install_case_fixture(&archive, &corpus.trust_policy, |_| Ok(()))?;
+    assert_eq!(
+        authority.resolve_installed_case(&request, 0),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn installed_authority_bounds_large_installed_trust_policy_before_reading() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    let oversized_policy = vec![0; 16 * 1024 * 1024 + 1];
+    let mut request = corpus_request(&corpus)?;
+    request.trust_policy_snapshot_digest = *blake3::hash(&oversized_policy).as_bytes();
+    let request = rebind(request)?;
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.archive, &oversized_policy, |_| Ok(()))?;
+    assert_eq!(
+        authority.resolve_installed_case(&request, 0),
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn installed_authority_rejects_invalid_signed_closures_before_case_reconstruction() -> CaseTestResult
+{
+    let corpus = load_corpus("signature")?;
+    let request = corpus_request(&corpus)?;
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
+    assert!(authority.resolve_installed_case(&request, 0).is_err());
+
+    let corpus = load_corpus("profile")?;
+    let request = corpus_request(&corpus)?;
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
+    assert!(authority.resolve_installed_case(&request, 0).is_err());
+
+    let corpus = load_corpus("caps")?;
+    let request = corpus_request(&corpus)?;
+    let (_fixture, authority) =
+        install_case_fixture(&corpus.archive, &corpus.trust_policy, |_| Ok(()))?;
+    assert!(authority.resolve_installed_case(&request, 0).is_err());
+    Ok(())
+}
+
+#[test]
+fn installed_authority_rejects_noncanonical_or_trailing_archive_bytes() -> CaseTestResult {
+    let corpus = load_corpus("valid")?;
+    for noncanonical in [false, true] {
+        let mut archive = corpus.archive.clone();
+        if noncanonical {
+            assert_eq!(archive[0], 0x84);
+            drop(archive.splice(..1, [0x98, 4]));
+        } else {
+            archive.push(0);
+        }
+        let mut request = corpus_request(&corpus)?;
+        request.fixture_bundle_digest = *blake3::hash(&archive).as_bytes();
+        let request = rebind(request)?;
+        let (_fixture, authority) =
+            install_case_fixture(&archive, &corpus.trust_policy, |_| Ok(()))?;
+        assert!(authority.resolve_installed_case(&request, 0).is_err());
+    }
+    Ok(())
+}

@@ -73,7 +73,7 @@ fn snapshot_unavailable(_: std::io::Error) -> BundleError {
 
 impl<T, E> InvalidEncodingResult<T> for Result<T, E> {
     fn map_invalid_encoding(self) -> Result<T, BundleError> {
-        self.map_err(|_| BundleError::InvalidEncoding)
+        self.or(Err(BundleError::InvalidEncoding))
     }
 }
 
@@ -301,6 +301,94 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
     preflight_archive(&mut snapshot, archive_length, trust_policy_bytes, request)
 }
 
+/// Authenticate and measure an immutable seekable CFB1 without staging its
+/// complete archive. Callers retaining an immutable descriptor use this before
+/// selected-cap enforcement and before full closure materialization.
+///
+/// # Errors
+/// Returns a closed failure when the archive identity, signed manifest, TPS1,
+/// CPF1, or indexed closure metadata is invalid.
+pub(crate) fn preflight_signed_bundle_reader<R: Read + Seek>(
+    archive: &mut R,
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<AuthenticatedBundlePreflight, BundleError> {
+    let archive_length = authenticate_reader(archive, request.fixture_bundle_digest)?;
+    preflight_archive(archive, archive_length, trust_policy_bytes, request)
+}
+
+/// Fully validate a CFB1 closure from an immutable seekable reader.
+///
+/// This reader path deliberately never creates an archive-sized byte buffer;
+/// it retains only validated member bodies required by the verified closure.
+/// Callers must enforce the authenticated selected caps from
+/// [`preflight_signed_bundle_reader`] before invoking this function.
+///
+/// # Errors
+/// Returns a closed failure when CFB1 encoding, signature, trust, member body,
+/// or closure validation fails.
+pub(crate) fn verify_signed_bundle_reader<R: Read + Seek>(
+    archive: &mut R,
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<VerifiedBundle, BundleError> {
+    let archive_length = authenticate_reader(archive, request.fixture_bundle_digest)?;
+    let scanned = scan_archive(archive, archive_length)?;
+    let manifest = read_range(archive, scanned.manifest_range.clone())
+        .and_then(|bytes| decode_manifest_bytes(bytes, request))?;
+    let trust_policy = verified_trust_policy(trust_policy_bytes, request)?;
+    verify_signature(
+        &manifest.manifest_bytes,
+        scanned.signer_key,
+        scanned.signature,
+        &trust_policy,
+    )?;
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)?;
+    let VerifiedArchiveMembers {
+        members,
+        signer_key,
+        signature,
+    } = read_verified_members(archive, archive_length)?;
+    if signer_key != scanned.signer_key || signature != scanned.signature {
+        return Err(BundleError::InvalidEncoding);
+    }
+    let decoded = DecodedArchive {
+        mode: manifest.mode,
+        profile_digest: manifest.profile_digest,
+        descriptors: manifest.descriptors,
+        expected: manifest.expected,
+        members,
+        signer_key,
+        signature,
+        manifest_bytes: manifest.manifest_bytes,
+    };
+    validate_archive_closure(&decoded, &trust_policy)?;
+    let (authority, authority_verifying_key) = verify_archive_signature(&decoded, &trust_policy)?;
+    if decoded
+        .members
+        .values()
+        .any(|member| prohibited_secret_material(&member.bytes))
+    {
+        return Err(BundleError::ProhibitedMaterial);
+    }
+    let expected_results = decoded
+        .expected
+        .into_iter()
+        .map(|result| (result.key, result.path))
+        .collect();
+    Ok(VerifiedBundle {
+        mode: decoded.mode,
+        profile_digest: decoded.profile_digest,
+        archive_digest: request.fixture_bundle_digest,
+        members: decoded.members,
+        expected_results,
+        authority_key_id: authority.key_id,
+        authority_verifying_key,
+    })
+}
+
 pub(crate) fn preflight_signed_bundle_bytes(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
@@ -380,6 +468,173 @@ fn authenticated_snapshot<R: Read + Seek>(
     tempfile::tempfile()
         .map_err(snapshot_unavailable)
         .and_then(|snapshot| copy_authenticated_snapshot(archive, snapshot, length, expected))
+}
+
+fn authenticate_reader<R: Read + Seek>(
+    archive: &mut R,
+    expected: [u8; 32],
+) -> Result<u64, BundleError> {
+    let length = archive
+        .seek(SeekFrom::End(0))
+        .map_err(snapshot_unavailable)?;
+    if length == 0 || length > MAX_ARCHIVE_BYTES as u64 {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    let mut bounded = archive.take(length + 1);
+    loop {
+        let read = bounded.read(&mut buffer).map_err(snapshot_unavailable)?;
+        if read == 0 {
+            break;
+        }
+        copied += read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    if copied != length || *hasher.finalize().as_bytes() != expected {
+        return Err(BundleError::DigestMismatch);
+    }
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)?;
+    verify_canonical_archive(archive)?;
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(snapshot_unavailable)
+        .map(|_| length)
+}
+
+fn verify_canonical_archive<R: Read + ?Sized>(archive: &mut R) -> Result<(), BundleError> {
+    verify_canonical_item(archive, 0)?;
+    let mut trailing = [0_u8; 1];
+    (archive.read(&mut trailing).map_err(snapshot_unavailable)? == 0)
+        .then_some(())
+        .ok_or(BundleError::InvalidEncoding)
+}
+
+fn verify_canonical_item<R: Read + ?Sized>(
+    archive: &mut R,
+    depth: usize,
+) -> Result<(), BundleError> {
+    if depth > 32 {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    let mut initial = [0_u8; 1];
+    archive
+        .read_exact(&mut initial)
+        .map_err(snapshot_unavailable)?;
+    let major = initial[0] >> 5;
+    let argument = canonical_argument(archive, initial[0] & 0x1f)?;
+    match major {
+        0 => Ok(()),
+        2 | 3 => drain_exact(archive, argument),
+        4 if argument <= MAX_MEMBERS as u64 => {
+            for _ in 0..argument {
+                verify_canonical_item(archive, depth + 1)?;
+            }
+            Ok(())
+        }
+        4 => Err(BundleError::FieldOutOfBounds),
+        7 if matches!(argument, 20..=22) => Ok(()),
+        _ => Err(BundleError::InvalidEncoding),
+    }
+}
+
+fn canonical_argument<R: Read + ?Sized>(
+    archive: &mut R,
+    additional: u8,
+) -> Result<u64, BundleError> {
+    let (width, minimum) = match additional {
+        value @ 0..=23 => return Ok(u64::from(value)),
+        24 => (1, 24),
+        25 => (2, 256),
+        26 => (4, 65_536),
+        27 => (8, 4_294_967_296),
+        _ => return Err(BundleError::InvalidEncoding),
+    };
+    let mut encoded = [0_u8; 8];
+    archive
+        .read_exact(&mut encoded[8 - width..])
+        .map_err(snapshot_unavailable)?;
+    let value = u64::from_be_bytes(encoded);
+    (value >= minimum)
+        .then_some(value)
+        .ok_or(BundleError::InvalidEncoding)
+}
+
+fn drain_exact<R: Read + ?Sized>(archive: &mut R, mut length: u64) -> Result<(), BundleError> {
+    let mut buffer = [0_u8; 8192];
+    while length != 0 {
+        let take = usize::try_from(length.min(buffer.len() as u64))
+            .or(Err(BundleError::FieldOutOfBounds))?;
+        archive
+            .read_exact(&mut buffer[..take])
+            .map_err(snapshot_unavailable)?;
+        length -= take as u64;
+    }
+    Ok(())
+}
+
+struct VerifiedArchiveMembers {
+    members: BTreeMap<String, VerifiedMember>,
+    signer_key: [u8; 32],
+    signature: [u8; 64],
+}
+
+fn read_verified_members<R: Read + ?Sized>(
+    archive: &mut R,
+    archive_length: u64,
+) -> Result<VerifiedArchiveMembers, BundleError> {
+    let mut decoder = Decoder::from(&mut *archive);
+    expect_array(&mut decoder, 4)?;
+    skip_cbor_value(&mut decoder, 0)?;
+    let count = array_length(&mut decoder)?;
+    if count == 0 || count > MAX_MEMBERS {
+        return Err(BundleError::FieldOutOfBounds);
+    }
+    let mut members = BTreeMap::new();
+    let mut previous_path = None;
+    let mut total = 0_u64;
+    for _ in 0..count {
+        expect_array(&mut decoder, 3)?;
+        let path = validated_path(&read_text(&mut decoder, MAX_PATH_BYTES)?)?;
+        if previous_path
+            .as_ref()
+            .is_some_and(|previous: &String| previous.as_bytes() >= path.as_bytes())
+        {
+            return Err(BundleError::NonCanonicalOrder);
+        }
+        let length = bytes_length(&mut decoder)?;
+        let bytes = read_bytes(&mut decoder, length, MAX_MEMBER_BYTES)?;
+        let role = u8::try_from(positive(&mut decoder)?).map_invalid_encoding()?;
+        total = total.saturating_add(length as u64);
+        if total > MAX_ARCHIVE_BYTES as u64 || role > 19 {
+            return Err(BundleError::FieldOutOfBounds);
+        }
+        previous_path = Some(path.clone());
+        members.insert(
+            path,
+            VerifiedMember {
+                role,
+                digest: *blake3::hash(&bytes).as_bytes(),
+                bytes,
+            },
+        );
+    }
+    let signer_key = read_fixed_bytes(&mut decoder)?;
+    let signature = read_fixed_bytes(&mut decoder)?;
+    if decoder.offset() as u64 != archive_length {
+        return Err(BundleError::InvalidEncoding);
+    }
+    Ok(VerifiedArchiveMembers {
+        members,
+        signer_key,
+        signature,
+    })
 }
 
 fn copy_authenticated_snapshot<R: Read + ?Sized>(
@@ -791,13 +1046,13 @@ fn verify_signature(
         .authority_for(signer_key)
         .ok_or(BundleError::SignatureInvalid)?;
     ed25519_dalek::VerifyingKey::from_bytes(&signer_key)
-        .map_err(|_| BundleError::SignatureInvalid)
+        .or(Err(BundleError::SignatureInvalid))
         .and_then(|key| {
             key.verify(
                 manifest_bytes,
                 &ed25519_dalek::Signature::from_bytes(&signature),
             )
-            .map_err(|_| BundleError::SignatureInvalid)
+            .or(Err(BundleError::SignatureInvalid))
             .map(|()| (trusted_authority.clone(), key))
         })
 }
@@ -894,8 +1149,7 @@ fn prohibited_secret_material(bytes: &[u8]) -> bool {
     let mut cursor = std::io::Cursor::new(bytes);
     let cbor = preflight_cbor(bytes, bytes.len(), true)
         .and_then(|()| {
-            ciborium::from_reader::<Value, _>(&mut cursor)
-                .map_err(|_| ProtocolError::InvalidEncoding)
+            ciborium::from_reader::<Value, _>(&mut cursor).or(Err(ProtocolError::InvalidEncoding))
         })
         .ok();
     if cursor.position() == bytes.len() as u64 && cbor.is_some_and(|value| cbor_secret(&value)) {
@@ -1274,5 +1528,505 @@ fn validated_path(path: &str) -> Result<String, BundleError> {
         Err(BundleError::FieldOutOfBounds)
     } else {
         Ok(path.to_owned())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::error::Error;
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    use ciborium::value::Value;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    use super::*;
+
+    type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+    pub(super) type ReaderInputs = (Vec<u8>, Vec<u8>, EvaluationRequest);
+
+    struct ChangingReader {
+        inner: Cursor<Vec<u8>>,
+        replacement: Vec<u8>,
+        starts: usize,
+    }
+
+    impl Read for ChangingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buffer)
+        }
+    }
+
+    impl Seek for ChangingReader {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            if position == SeekFrom::Start(0) {
+                self.starts += 1;
+                if self.starts == 4 {
+                    self.inner = Cursor::new(self.replacement.clone());
+                }
+            }
+            self.inner.seek(position)
+        }
+    }
+
+    struct FailingSeekReader;
+
+    impl Read for FailingSeekReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Seek for FailingSeekReader {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Err(std::io::Error::other("unavailable archive"))
+        }
+    }
+
+    struct FailingReadReader {
+        inner: Cursor<Vec<u8>>,
+    }
+
+    impl Read for FailingReadReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("unavailable archive"))
+        }
+    }
+
+    impl Seek for FailingReadReader {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+
+    pub(super) fn reader_inputs() -> TestResult<ReaderInputs> {
+        let archive =
+            include_bytes!("../tests/fixtures/installed-selector/valid/archive.cbor").to_vec();
+        let trust_policy =
+            include_bytes!("../tests/fixtures/installed-selector/valid/trust-policy.cbor").to_vec();
+        let request = EvaluationRequest::from_canonical_cbor(include_bytes!(
+            "../tests/fixtures/installed-selector/valid/request.cbor"
+        ))?;
+        Ok((archive, trust_policy, request))
+    }
+
+    fn request_for_reader(mut request: EvaluationRequest, archive: &[u8]) -> EvaluationRequest {
+        request.fixture_bundle_digest = *blake3::hash(archive).as_bytes();
+        request
+    }
+
+    fn path_of(record: &Value) -> Option<&str> {
+        let Value::Array(fields) = record else {
+            return None;
+        };
+        let Some(Value::Text(path)) = fields.first() else {
+            return None;
+        };
+        Some(path)
+    }
+
+    fn signed_secret_archive() -> TestResult<ReaderInputs> {
+        let (archive, trust_policy, request) = reader_inputs()?;
+        let mut document = decode_canonical(&archive)?;
+        let Value::Array(root) = &mut document else {
+            return Err(BundleError::InvalidEncoding.into());
+        };
+        if root.len() != 4 {
+            return Err(BundleError::InvalidEncoding.into());
+        }
+        let secret_path = "fixtures/prohibited.bin";
+        let secret = br#"{"client_secret":"reader-must-reject"}"#.to_vec();
+        let secret_digest = *blake3::hash(&secret).as_bytes();
+        let descriptor = Value::Array(vec![
+            Value::Text(secret_path.to_owned()),
+            Value::Integer(u64::try_from(secret.len())?.into()),
+            Value::Bytes(secret_digest.to_vec()),
+            Value::Integer(0_u64.into()),
+        ]);
+        let member = Value::Array(vec![
+            Value::Text(secret_path.to_owned()),
+            Value::Bytes(secret),
+            Value::Integer(0_u64.into()),
+        ]);
+        {
+            let Some(Value::Array(manifest)) = root.first_mut() else {
+                return Err(BundleError::InvalidEncoding.into());
+            };
+            let Some(Value::Array(descriptors)) = manifest.get_mut(4) else {
+                return Err(BundleError::InvalidEncoding.into());
+            };
+            let position = descriptors
+                .iter()
+                .position(|entry| path_of(entry) == Some(PROFILE_PATH))
+                .ok_or(BundleError::InvalidEncoding)?;
+            descriptors.insert(position, descriptor);
+        }
+        {
+            let Some(Value::Array(members)) = root.get_mut(1) else {
+                return Err(BundleError::InvalidEncoding.into());
+            };
+            let position = members
+                .iter()
+                .position(|entry| path_of(entry) == Some(PROFILE_PATH))
+                .ok_or(BundleError::InvalidEncoding)?;
+            members.insert(position, member);
+        }
+        let signature = SigningKey::from_bytes(&[9; 32])
+            .sign(&encode(&root[0])?)
+            .to_bytes();
+        root[3] = Value::Bytes(signature.to_vec());
+        let archive = encode(&document)?;
+        let request = request_for_reader(request, &archive);
+        Ok((archive, trust_policy, request))
+    }
+
+    #[test]
+    fn reader_accepts_exact_immutable_bundle() -> TestResult {
+        let (archive, trust_policy, request) = reader_inputs()?;
+        let preflight = preflight_signed_bundle_reader(
+            &mut Cursor::new(archive.clone()),
+            &trust_policy,
+            &request,
+        )?;
+        assert!(!preflight.profile_bytes().is_empty());
+        let bundle =
+            verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request)?;
+        assert_eq!(bundle.archive_digest, request.fixture_bundle_digest);
+        assert!(bundle.member(PROFILE_PATH).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn reader_verifies_canonical_scalars_member_records_and_seek_failures() -> TestResult {
+        for bytes in [
+            vec![0x18, 24],
+            vec![0x19, 1, 0],
+            vec![0x1a, 0, 1, 0, 0],
+            vec![0x1b, 0, 0, 0, 1, 0, 0, 0, 0],
+        ] {
+            assert_eq!(verify_canonical_archive(&mut Cursor::new(bytes)), Ok(()));
+        }
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0x18, 23])),
+            Err(BundleError::InvalidEncoding)
+        );
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0xf4, 0])),
+            Err(BundleError::InvalidEncoding)
+        );
+
+        let archive = encode(&Value::Array(vec![
+            Value::Null,
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![7]),
+                Value::Integer(0_u64.into()),
+            ])]),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 64]),
+        ]))?;
+        let members =
+            read_verified_members(&mut Cursor::new(archive.clone()), archive.len() as u64)?;
+        assert_eq!(members.members["member"].bytes, vec![7]);
+        assert_eq!(members.signer_key, [1; 32]);
+        assert_eq!(members.signature, [2; 64]);
+
+        assert_eq!(
+            authenticate_reader(&mut FailingSeekReader, [0; 32]),
+            Err(BundleError::SnapshotUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_archive_validator_closes_container_and_payload_boundaries() {
+        let mut deep_array = vec![0x81; 33];
+        deep_array.push(0xf6);
+        for (bytes, expected) in [
+            (vec![0x42, 0], BundleError::SnapshotUnavailable),
+            (vec![0x98, 24], BundleError::SnapshotUnavailable),
+            (vec![0x9a, 0, 1, 0, 1], BundleError::FieldOutOfBounds),
+            (vec![0x20], BundleError::InvalidEncoding),
+            (vec![0xa0], BundleError::InvalidEncoding),
+            (vec![0xf9, 0, 0], BundleError::InvalidEncoding),
+            (vec![0x1c], BundleError::InvalidEncoding),
+            (vec![0x18], BundleError::SnapshotUnavailable),
+            (deep_array, BundleError::FieldOutOfBounds),
+        ] {
+            assert_eq!(
+                verify_canonical_archive(&mut Cursor::new(bytes)),
+                Err(expected)
+            );
+        }
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0x61, b'x'])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn authenticated_reader_closes_empty_digest_and_read_failures() {
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(Vec::new()), [0; 32]),
+            Err(BundleError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(vec![0xf6]), [0; 32]),
+            Err(BundleError::DigestMismatch)
+        );
+        assert_eq!(
+            authenticate_reader(
+                &mut FailingReadReader {
+                    inner: Cursor::new(vec![0xf6]),
+                },
+                [0; 32],
+            ),
+            Err(BundleError::SnapshotUnavailable)
+        );
+    }
+
+    #[test]
+    fn authenticated_snapshot_rejects_empty_changed_and_unseekable_archives() -> TestResult {
+        assert!(matches!(
+            authenticated_snapshot(&mut Cursor::new(Vec::new()), [0; 32]),
+            Err(BundleError::FieldOutOfBounds)
+        ));
+        assert!(matches!(
+            authenticated_snapshot(&mut Cursor::new(vec![0xf6]), [0; 32]),
+            Err(BundleError::DigestMismatch)
+        ));
+        assert!(matches!(
+            authenticated_snapshot(&mut FailingSeekReader, [0; 32]),
+            Err(BundleError::SnapshotUnavailable)
+        ));
+
+        let bytes = vec![0xf6];
+        let expected = *blake3::hash(&bytes).as_bytes();
+        let (mut snapshot, length) = authenticated_snapshot(&mut Cursor::new(bytes), expected)?;
+        let mut copied = Vec::new();
+        snapshot.read_to_end(&mut copied)?;
+        assert_eq!(length, copied.len() as u64);
+        assert_eq!(copied, vec![0xf6]);
+        Ok(())
+    }
+
+    #[test]
+    fn byte_preflight_binds_archive_identity_and_rejects_untrusted_inputs() -> TestResult {
+        let (archive, trust_policy, request) = reader_inputs()?;
+        let preflight = preflight_signed_bundle_bytes(&archive, &trust_policy, &request)?;
+        assert!(!preflight.profile_bytes().is_empty());
+
+        assert_eq!(
+            preflight_signed_bundle_bytes(&[], &trust_policy, &request),
+            Err(BundleError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            preflight_signed_bundle_bytes(b"different", &trust_policy, &request),
+            Err(BundleError::DigestMismatch)
+        );
+        assert!(preflight_signed_bundle_bytes(&archive, b"invalid-policy", &request).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_archive_validator_accepts_bounded_payload_forms() {
+        let mut long_bytes = vec![0x59, 0x20, 1];
+        long_bytes.extend(vec![7; 8193]);
+        for bytes in [
+            vec![0x40],
+            vec![0x60],
+            vec![0x80],
+            vec![0xf4],
+            vec![0xf5],
+            vec![0xf6],
+            long_bytes,
+        ] {
+            assert_eq!(verify_canonical_archive(&mut Cursor::new(bytes)), Ok(()));
+        }
+    }
+
+    #[test]
+    fn reader_rejects_invalid_signature_and_prohibited_member_material() -> TestResult {
+        let (mut archive, trust_policy, request) = reader_inputs()?;
+        let signature_byte = archive.last_mut().ok_or(BundleError::InvalidEncoding)?;
+        *signature_byte ^= 1;
+        let request = request_for_reader(request, &archive);
+        assert_eq!(
+            verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request),
+            Err(BundleError::SignatureInvalid)
+        );
+
+        let (archive, trust_policy, request) = signed_secret_archive()?;
+        assert_eq!(
+            verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request),
+            Err(BundleError::ProhibitedMaterial)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reader_rejects_empty_and_noncanonical_framing() -> TestResult {
+        let (_, trust_policy, request) = reader_inputs()?;
+        let mut deeply_nested = vec![0xf6];
+        for _ in 0..33 {
+            deeply_nested.insert(0, 0x81);
+        }
+        for (archive, expected) in [
+            (Vec::new(), BundleError::FieldOutOfBounds),
+            (deeply_nested, BundleError::FieldOutOfBounds),
+            (vec![0x9a, 0, 1, 0, 1], BundleError::FieldOutOfBounds),
+            (vec![0xf4], BundleError::InvalidEncoding),
+            (vec![0xa0], BundleError::InvalidEncoding),
+            (vec![0x1c], BundleError::InvalidEncoding),
+            (
+                vec![0x1b, 0, 0, 0, 1, 0, 0, 0, 0],
+                BundleError::InvalidEncoding,
+            ),
+        ] {
+            let request = request_for_reader(request.clone(), &archive);
+            assert_eq!(
+                verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request),
+                Err(expected)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reader_rejects_changed_second_pass_metadata_and_members() -> TestResult {
+        let (archive, trust_policy, request) = reader_inputs()?;
+        let mut changed_signature = archive.clone();
+        let signature_byte = changed_signature
+            .last_mut()
+            .ok_or(BundleError::InvalidEncoding)?;
+        *signature_byte ^= 1;
+        let unordered_members = vec![
+            0x84, 0xf6, 0x82, 0x83, 0x61, b'b', 0x40, 0x00, 0x83, 0x61, b'a', 0x40, 0x00,
+        ];
+        let oversized_role = vec![0x84, 0xf6, 0x81, 0x83, 0x61, b'a', 0x40, 0x14];
+        let mut trailing = vec![0x84, 0xf6, 0x81, 0x83, 0x61, b'a', 0x40, 0x00, 0x58, 32];
+        trailing.extend([0; 32]);
+        trailing.extend([0x58, 64]);
+        trailing.extend([0; 64]);
+        for (replacement, expected) in [
+            (changed_signature, BundleError::InvalidEncoding),
+            (vec![0x84, 0xf6, 0x80], BundleError::FieldOutOfBounds),
+            (unordered_members, BundleError::NonCanonicalOrder),
+            (oversized_role, BundleError::FieldOutOfBounds),
+            (trailing, BundleError::InvalidEncoding),
+        ] {
+            let mut reader = ChangingReader {
+                inner: Cursor::new(archive.clone()),
+                replacement,
+                starts: 0,
+            };
+            assert_eq!(
+                verify_signed_bundle_reader(&mut reader, &trust_policy, &request),
+                Err(expected)
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_tests {
+    use std::io::{self, Cursor, Read, Seek, SeekFrom};
+
+    use super::*;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected archive read failure"))
+        }
+    }
+
+    struct ChangingReader {
+        inner: Cursor<Vec<u8>>,
+        replacement: Vec<u8>,
+        starts: usize,
+    }
+
+    impl Read for ChangingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buffer)
+        }
+    }
+
+    impl Seek for ChangingReader {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            if position == SeekFrom::Start(0) {
+                self.starts += 1;
+                if self.starts == 4 {
+                    self.inner = Cursor::new(self.replacement.clone());
+                }
+            }
+            self.inner.seek(position)
+        }
+    }
+
+    #[test]
+    fn canonical_archive_validator_exercises_framing_and_payload_boundaries() {
+        let mut long_bytes = vec![0x59, 0x20, 1];
+        long_bytes.extend(vec![7; 8193]);
+        for bytes in [vec![0x40], vec![0x60], vec![0x80], vec![0xf4], long_bytes] {
+            assert_eq!(verify_canonical_archive(&mut Cursor::new(bytes)), Ok(()));
+        }
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0xf6, 0xf6])),
+            Err(BundleError::InvalidEncoding)
+        );
+        assert_eq!(
+            verify_canonical_archive(&mut FailingReader),
+            Err(BundleError::SnapshotUnavailable)
+        );
+    }
+
+    #[test]
+    fn archive_authentication_rewinds_only_after_digest_and_framing_validation() {
+        let archive = vec![0xf6];
+        let digest = *blake3::hash(&archive).as_bytes();
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(archive.clone()), digest),
+            Ok(1)
+        );
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(archive), [0; 32]),
+            Err(BundleError::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn immutable_reader_reconstructs_the_complete_authenticated_bundle() -> TestResult {
+        let (archive, trust_policy, request) = tests::reader_inputs()?;
+        let bundle =
+            verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request)?;
+        assert!(!bundle.members.is_empty());
+        assert!(!bundle.expected_results.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn immutable_reader_rejects_a_changed_second_pass() -> TestResult {
+        let (archive, trust_policy, request) = tests::reader_inputs()?;
+        let mut replacement = archive.clone();
+        assert!(!replacement.is_empty());
+        let last = replacement.len() - 1;
+        replacement[last] ^= 1;
+        let mut reader = ChangingReader {
+            inner: Cursor::new(archive),
+            replacement,
+            starts: 0,
+        };
+        assert_eq!(
+            verify_signed_bundle_reader(&mut reader, &trust_policy, &request),
+            Err(BundleError::InvalidEncoding)
+        );
+        Ok(())
     }
 }

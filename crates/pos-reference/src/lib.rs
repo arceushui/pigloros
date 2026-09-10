@@ -21,9 +21,16 @@ pub mod adapter_transport;
 pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
-pub mod process_adapter;
 pub mod profile;
+pub mod provider_transport;
+pub mod root_selector;
 pub mod sandbox_provider_protocol;
+#[cfg(unix)]
+pub mod selector;
+// Keep the namespace reachable to satisfy both `unreachable_pub` and
+// `redundant_pub_crate`; its items remain crate-only, not a public wire API.
+#[doc(hidden)]
+pub mod selector_protocol;
 pub mod signed_bundle;
 
 /// Divergence classes emitted by the independent JSON evaluator.

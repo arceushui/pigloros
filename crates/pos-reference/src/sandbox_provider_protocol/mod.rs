@@ -3,11 +3,31 @@
 //! This module deliberately does not depend on `pos-conformance`. It gives the
 //! reference evaluator a second implementation of the public wire contract.
 
+mod admission;
+mod audit;
 mod authority;
 mod codec;
 mod execution;
 mod operations;
+mod policy;
+mod revocation;
+mod revocation_update;
+mod trust;
 
+pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
+pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
+pub use revocation_update::{
+    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, RevocationAcknowledgement,
+    RevocationUpdateRequest, SandboxRevocationUpdateError, SelectorRevocationState,
+};
+pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
+
+pub use admission::{
+    AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedSandboxExecution,
+    HostCapabilityProfile, HostFeatureProof, ProviderConformanceReport, RootSelectorAdmission,
+    RootSelectorAdmissionInputs, SandboxAdmissionError, SandboxProviderAdmissionInputs,
+};
+pub use audit::SandboxAuditRecord;
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
@@ -22,7 +42,8 @@ pub use execution::{
 pub use operations::{
     RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,
     SandboxDescribeRequest, SandboxDescribeResponse, SandboxLocalError, SandboxLocalErrorCode,
-    SandboxProviderOperation, SandboxReconcileRequest, SandboxReconcileResponse,
+    SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
+    SandboxReconcileResponse,
 };
 
 /// Closed failures produced before a provider operation is trusted.

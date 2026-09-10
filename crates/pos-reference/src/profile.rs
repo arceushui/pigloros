@@ -288,6 +288,7 @@ pub struct Profile {
     pub evaluator_hard_caps: EvaluatorHardCaps,
     pub independence_requirements: IndependenceRequirements,
     pub trust_policy_snapshot_digest: [u8; 32],
+    fixture_contract_digest: [u8; 32],
     pub limitations_digest: [u8; 32],
     pub provenance_digest: [u8; 32],
 }
@@ -404,6 +405,7 @@ impl Profile {
             evaluator_hard_caps: hard_caps,
             independence_requirements,
             trust_policy_snapshot_digest,
+            fixture_contract_digest: header.fixture_policy_digest,
             limitations_digest: header.limitations_digest,
             provenance_digest: header.publication_digest,
         };
@@ -431,6 +433,12 @@ impl Profile {
                     && fixture.execution_profile_digest == request.execution_profile_digest
             })
             .collect()
+    }
+
+    /// Digest of the verified `FixtureContract` member selected by CPF1.
+    #[must_use]
+    pub const fn fixture_contract_digest(&self) -> [u8; 32] {
+        self.fixture_contract_digest
     }
 
     fn validate_request(&self, request: &EvaluationRequest) -> Result<(), ProfileError> {

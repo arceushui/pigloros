@@ -1,6 +1,4 @@
 use std::error::Error;
-use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::io;
 
 use ciborium::value::Value;
@@ -8,11 +6,10 @@ use pos_reference::adapter_transport::{
     read_attempt, read_observation, write_attempt, write_observation, TransportError,
 };
 use pos_reference::evaluator::{
-    AdapterError, AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage,
-    SubjectAdapter, SubjectObservation, SubjectResult,
+    AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage, SubjectObservation,
+    SubjectResult,
 };
-use pos_reference::evaluator_protocol::{ProtocolError, SubjectAdapterKind};
-use pos_reference::process_adapter::ProcessAdapter;
+use pos_reference::evaluator_protocol::ProtocolError;
 use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -161,6 +158,14 @@ fn signed_frames(
     Ok(bytes)
 }
 
+fn encode_frames(values: &[Value]) -> TestResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for value in values {
+        bytes.extend(framed(value)?);
+    }
+    Ok(bytes)
+}
+
 fn replace_field(value: &mut Value, index: usize, replacement: Value) -> TestResult {
     let Value::Array(fields) = value else {
         return Err("frame must be an array".into());
@@ -264,22 +269,24 @@ fn attempt_writer_rejects_invalid_public_values() {
 }
 
 #[test]
-fn attempt_writer_reports_capability_and_artifact_frame_failures() {
-    let capability_writer = FailAfterWrites {
-        successful_writes_remaining: 2,
-    };
-    assert_eq!(
-        write_attempt(capability_writer, &attempt()),
-        Err(TransportError::InvalidEncoding)
-    );
-
-    let artifact_chunk_writer = FailAfterWrites {
-        successful_writes_remaining: 8,
-    };
-    assert_eq!(
-        write_attempt(artifact_chunk_writer, &attempt()),
-        Err(TransportError::InvalidEncoding)
-    );
+fn attempt_writer_reports_failures_at_each_stream_phase() {
+    for (phase, successful_writes_remaining) in [
+        ("header", 0),
+        ("capability", 2),
+        ("schema artifact", 8),
+        ("payload artifact", 10),
+        ("auxiliary artifact", 14),
+        ("terminal frame", 22),
+    ] {
+        let writer = FailAfterWrites {
+            successful_writes_remaining,
+        };
+        assert_eq!(
+            write_attempt(writer, &attempt()),
+            Err(TransportError::InvalidEncoding),
+            "{phase} write failure must be closed"
+        );
+    }
 }
 
 #[test]
@@ -523,135 +530,298 @@ fn observation_reader_rejects_tampering_bad_offsets_and_nonexclusive_results() -
 }
 
 #[test]
-fn process_adapter_requires_an_absolute_executable() {
-    assert_eq!(
-        ProcessAdapter::new(
-            SubjectAdapterKind::ExportedArtifact,
-            [1; 32],
-            "relative-adapter",
-            Vec::<OsString>::new(),
+fn attempt_reader_rejects_every_header_and_capability_boundary() -> TestResult {
+    let valid = frame_values(&encoded_attempt(&attempt())?)?;
+    for (field, replacement, expected) in [
+        (4, integer(7), TransportError::InvalidEncoding),
+        (5, integer(4), TransportError::InvalidEncoding),
+        (
+            6,
+            Value::Bytes(vec![0; 32]),
+            TransportError::FieldOutOfBounds,
         ),
-        Err(AdapterError::ProtocolFailure)
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn process_adapter_preserves_lifecycle_failure_precedence() -> TestResult {
-    let mut operational = attempt();
-    operational.watchdog_ms = 1_000;
-    let mut crashed = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/false",
-        Vec::new(),
-    )?;
-    assert_eq!(
-        crashed.execute(&operational),
-        Err(AdapterError::Unavailable)
-    );
-
-    let mut malformed = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/sh",
-        vec![OsString::from("-c"), OsString::from("cat >/dev/null")],
-    )?;
-    assert_eq!(
-        malformed.execute(&operational),
-        Err(AdapterError::ProtocolFailure)
-    );
-
-    let mut timed_out = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/sleep",
-        vec![OsString::from("1")],
-    )?;
-    assert_eq!(
-        timed_out.execute(&attempt()),
-        Err(AdapterError::WatchdogExpired)
-    );
-
-    let mut missing = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/definitely/not/an/adapter",
-        Vec::new(),
-    )?;
-    assert_eq!(
-        missing.execute(&operational),
-        Err(AdapterError::Unavailable)
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn process_adapter_streams_a_successful_observation() -> TestResult {
-    let mut operational = attempt();
-    operational.watchdog_ms = 1_000;
-    let expected = observation(SubjectResult::Unavailable);
-    let response = encoded_observation(&expected)?;
-    let mut escaped = String::with_capacity(response.len() * 4);
-    for byte in response {
-        write!(&mut escaped, "\\{byte:03o}")?;
+        (
+            7,
+            Value::Array(vec![integer(0); 8]),
+            TransportError::FieldOutOfBounds,
+        ),
+        (8, integer(0), TransportError::FieldOutOfBounds),
+        (9, integer(0), TransportError::InvalidEncoding),
+        (10, integer(65_537), TransportError::FieldOutOfBounds),
+        (11, integer(1), TransportError::FieldOutOfBounds),
+        (11, integer(65_539), TransportError::FieldOutOfBounds),
+        (12, integer(0), TransportError::FieldOutOfBounds),
+        (
+            12,
+            integer(64 * 1024 * 1024 + 1),
+            TransportError::FieldOutOfBounds,
+        ),
+        (13, integer(0), TransportError::FieldOutOfBounds),
+        (
+            13,
+            integer(1024 * 1024 * 1024 + 1),
+            TransportError::FieldOutOfBounds,
+        ),
+        (
+            12,
+            integer(512 * 1024 + 1),
+            TransportError::FieldOutOfBounds,
+        ),
+    ] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[0], field, replacement)?;
+        assert_eq!(
+            read_attempt(signed_frames(changed, ATTEMPT_DOMAIN, 2)?.as_slice()),
+            Err(expected)
+        );
     }
-    let mut adapter = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/sh",
-        vec![
-            OsString::from("-c"),
-            OsString::from("/bin/cat >/dev/null; /usr/bin/printf %b \"$1\""),
-            OsString::from("adapter"),
-            OsString::from(escaped),
-        ],
-    )?;
 
-    assert_eq!(adapter.execute(&operational), Ok(expected));
+    for (frame, field, replacement, expected) in [
+        (
+            1,
+            0,
+            Value::Text("wrong".to_owned()),
+            TransportError::UnsupportedVersion,
+        ),
+        (1, 1, integer(2), TransportError::UnsupportedVersion),
+        (1, 2, integer(1), TransportError::InvalidEncoding),
+        (
+            1,
+            3,
+            Value::Text(String::new()),
+            TransportError::FieldOutOfBounds,
+        ),
+        (
+            2,
+            3,
+            Value::Text("alpha".to_owned()),
+            TransportError::InvalidEncoding,
+        ),
+    ] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[frame], field, replacement)?;
+        assert_eq!(
+            read_attempt(signed_frames(changed, ATTEMPT_DOMAIN, 2)?.as_slice()),
+            Err(expected)
+        );
+    }
     Ok(())
 }
 
-#[cfg(unix)]
+fn integer(value: u64) -> Value {
+    Value::Integer(value.into())
+}
+
 #[test]
-fn process_adapter_watchdog_terminates_descendants_holding_pipes_open() -> TestResult {
-    let mut adapter = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/sh",
-        vec![OsString::from("-c"), OsString::from("sleep 30 & exit 0")],
+fn attempt_reader_rejects_every_artifact_and_terminal_boundary() -> TestResult {
+    let valid = frame_values(&encoded_attempt(&attempt())?)?;
+    for (frame, field, replacement, expected) in [
+        (
+            3,
+            0,
+            Value::Text("wrong".to_owned()),
+            TransportError::UnsupportedVersion,
+        ),
+        (3, 2, integer(1), TransportError::InvalidEncoding),
+        (3, 3, integer(1), TransportError::InvalidEncoding),
+        (
+            3,
+            4,
+            integer(128 * 1024 + 1),
+            TransportError::FieldOutOfBounds,
+        ),
+        (
+            3,
+            5,
+            Value::Bytes(vec![0; 32]),
+            TransportError::FieldOutOfBounds,
+        ),
+        (3, 6, integer(0), TransportError::InvalidEncoding),
+        (
+            4,
+            0,
+            Value::Text("wrong".to_owned()),
+            TransportError::UnsupportedVersion,
+        ),
+        (4, 2, integer(1), TransportError::InvalidEncoding),
+        (4, 3, integer(1), TransportError::InvalidEncoding),
+        (4, 4, integer(1), TransportError::InvalidEncoding),
+        (
+            4,
+            5,
+            Value::Bytes(Vec::new()),
+            TransportError::FieldOutOfBounds,
+        ),
+    ] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[frame], field, replacement)?;
+        assert_eq!(
+            read_attempt(signed_frames(changed, ATTEMPT_DOMAIN, 2)?.as_slice()),
+            Err(expected)
+        );
+    }
+
+    let mut changed = valid.clone();
+    replace_field(
+        changed.last_mut().ok_or("end missing")?,
+        0,
+        Value::Text("wrong".to_owned()),
     )?;
-    let started = std::time::Instant::now();
     assert_eq!(
-        adapter.execute(&attempt()),
-        Err(AdapterError::WatchdogExpired)
+        read_attempt(encode_frames(&changed)?.as_slice()),
+        Err(TransportError::UnsupportedVersion)
     );
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+    let mut changed = valid;
+    replace_field(
+        changed.last_mut().ok_or("end missing")?,
+        2,
+        Value::Bytes(vec![9; 32]),
+    )?;
+    assert_eq!(
+        read_attempt(encode_frames(&changed)?.as_slice()),
+        Err(TransportError::InvalidEncoding)
+    );
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn process_adapter_bounds_a_blocked_request_stream() -> TestResult {
-    let mut blocked = attempt();
-    blocked.watchdog_ms = 100;
-    blocked.payload = artifact(vec![0; CHUNK_BYTES * 2]);
-    let mut adapter = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/usr/bin/python3",
-        vec![
-            OsString::from("-c"),
-            OsString::from(
-                "import os,time\nif os.fork(): os._exit(0)\nos.close(1)\nos.close(2)\ntime.sleep(30)",
-            ),
-        ],
-    )?;
+fn attempt_reader_walks_auxiliaries_and_rejects_aggregate_and_chunk_overflow() -> TestResult {
+    let mut with_one_auxiliary = attempt();
+    with_one_auxiliary.auxiliary = vec![artifact(vec![9])];
+    let encoded = encoded_attempt(&with_one_auxiliary)?;
+    assert_eq!(read_attempt(encoded.as_slice()), Ok(with_one_auxiliary));
 
+    let valid = frame_values(&encoded_attempt(&attempt())?)?;
+
+    let mut aggregate_overflow = valid.clone();
+    replace_field(&mut aggregate_overflow[0], 12, integer(1))?;
+    replace_field(&mut aggregate_overflow[0], 13, integer(1))?;
+    replace_field(&mut aggregate_overflow[3], 4, integer(1))?;
+    replace_field(
+        &mut aggregate_overflow[3],
+        5,
+        Value::Bytes(blake3::hash(b"a").as_bytes().to_vec()),
+    )?;
+    replace_field(&mut aggregate_overflow[4], 5, Value::Bytes(b"a".to_vec()))?;
+    replace_field(&mut aggregate_overflow[5], 4, integer(1))?;
     assert_eq!(
-        adapter.execute(&blocked),
-        Err(AdapterError::WatchdogExpired)
+        read_attempt(signed_frames(aggregate_overflow, ATTEMPT_DOMAIN, 2)?.as_slice()),
+        Err(TransportError::FieldOutOfBounds)
+    );
+
+    let mut chunk_overflow = valid;
+    replace_field(&mut chunk_overflow[3], 4, integer(1))?;
+    replace_field(&mut chunk_overflow[4], 5, Value::Bytes(b"ab".to_vec()))?;
+    assert_eq!(
+        read_attempt(signed_frames(chunk_overflow, ATTEMPT_DOMAIN, 2)?.as_slice()),
+        Err(TransportError::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn observation_writer_closes_each_stream_phase_and_oversized_output() {
+    let chunked = observation(SubjectResult::Output(vec![7; CHUNK_BYTES + 1]));
+    for (phase, successful_writes_remaining) in
+        [("header", 0), ("output chunk", 2), ("terminal", 6)]
+    {
+        assert_eq!(
+            write_observation(
+                FailAfterWrites {
+                    successful_writes_remaining,
+                },
+                &chunked,
+            ),
+            Err(TransportError::InvalidEncoding),
+            "{phase} write failure must be closed"
+        );
+    }
+
+    let too_large = observation(SubjectResult::Output(vec![0; 64 * 1024 * 1024 + 1]));
+    assert_eq!(
+        write_observation(io::sink(), &too_large),
+        Err(TransportError::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn observation_reader_rejects_every_chunk_terminal_and_usage_boundary() -> TestResult {
+    let valid = frame_values(&encoded_observation(&observation(SubjectResult::Output(
+        vec![1, 2],
+    )))?)?;
+    for (frame, field, replacement, expected) in [
+        (
+            1,
+            0,
+            Value::Text("wrong".to_owned()),
+            TransportError::InvalidEncoding,
+        ),
+        (1, 1, integer(2), TransportError::InvalidEncoding),
+        (1, 2, integer(1), TransportError::InvalidEncoding),
+        (
+            1,
+            3,
+            Value::Bytes(Vec::new()),
+            TransportError::FieldOutOfBounds,
+        ),
+        (2, 2, integer(4), TransportError::InvalidEncoding),
+        (2, 3, integer(3), TransportError::InvalidEncoding),
+        (
+            2,
+            4,
+            Value::Bytes(vec![0; 32]),
+            TransportError::InvalidEncoding,
+        ),
+        (
+            2,
+            5,
+            Value::Array(Vec::new()),
+            TransportError::InvalidEncoding,
+        ),
+        (
+            2,
+            6,
+            Value::Array(Vec::new()),
+            TransportError::InvalidEncoding,
+        ),
+        (
+            2,
+            7,
+            Value::Array(vec![integer(0); 7]),
+            TransportError::InvalidEncoding,
+        ),
+    ] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[frame], field, replacement)?;
+        assert_eq!(
+            read_observation(
+                signed_frames(changed, OBSERVATION_DOMAIN, 8)?.as_slice(),
+                10,
+            ),
+            Err(expected)
+        );
+    }
+
+    let mut unknown = valid.clone();
+    replace_field(&mut unknown[1], 0, Value::Text("unknown".to_owned()))?;
+    assert_eq!(
+        read_observation(encode_frames(&unknown)?.as_slice(), 10),
+        Err(TransportError::InvalidEncoding)
+    );
+
+    let mut non_array_chunk = valid.clone();
+    non_array_chunk[1] = Value::Text("not-an-output-frame".to_owned());
+    assert_eq!(
+        read_observation(encode_frames(&non_array_chunk)?.as_slice(), 10),
+        Err(TransportError::InvalidEncoding)
+    );
+
+    let mut bad_transcript = valid;
+    replace_field(&mut bad_transcript[2], 8, Value::Bytes(vec![9; 32]))?;
+    assert_eq!(
+        read_observation(encode_frames(&bad_transcript)?.as_slice(), 10),
+        Err(TransportError::InvalidEncoding)
     );
     Ok(())
 }

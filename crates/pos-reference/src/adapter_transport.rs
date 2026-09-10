@@ -94,9 +94,36 @@ impl Frame {
 pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<(), TransportError> {
     validate_attempt(attempt)?;
     let mut transcript = new_transcript(ATTEMPT_DOMAIN);
+    write_attempt_header(&mut writer, attempt, &mut transcript)?;
+    for (index, capability) in attempt.capability_ids.iter().enumerate() {
+        write_transcript_frame(
+            &mut writer,
+            Value::Array(vec![
+                text_value("EIC1"),
+                unsigned(1),
+                unsigned(index as u64),
+                text_value(capability),
+            ]),
+            &mut transcript,
+        )?;
+    }
+    write_artifact(&mut writer, &mut transcript, 0, 0, &attempt.schema)?;
+    write_artifact(&mut writer, &mut transcript, 1, 0, &attempt.payload)?;
+    for (index, artifact) in attempt.auxiliary.iter().enumerate() {
+        write_artifact(&mut writer, &mut transcript, 2, index as u64, artifact)?;
+    }
+    write_attempt_footer(&mut writer, &transcript)?;
+    writer.flush().map_err(io_error)
+}
+
+fn write_attempt_header(
+    writer: &mut impl Write,
+    attempt: &CaseAttempt,
+    transcript: &mut blake3::Hasher,
+) -> Result<(), TransportError> {
     let members = attempt.auxiliary.len() + 2;
     write_transcript_frame(
-        &mut writer,
+        writer,
         Value::Array(vec![
             text_value("EAI1"),
             unsigned(1),
@@ -113,34 +140,22 @@ pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<()
             unsigned(attempt.transport_caps.max_member_bytes),
             unsigned(attempt.transport_caps.max_attempt_bytes),
         ]),
-        &mut transcript,
-    )?;
-    for (index, capability) in attempt.capability_ids.iter().enumerate() {
-        write_transcript_frame(
-            &mut writer,
-            Value::Array(vec![
-                text_value("EIC1"),
-                unsigned(1),
-                unsigned(as_u64(index)?),
-                text_value(capability),
-            ]),
-            &mut transcript,
-        )?;
-    }
-    write_artifact(&mut writer, &mut transcript, 0, 0, &attempt.schema)?;
-    write_artifact(&mut writer, &mut transcript, 1, 0, &attempt.payload)?;
-    for (index, artifact) in attempt.auxiliary.iter().enumerate() {
-        write_artifact(&mut writer, &mut transcript, 2, as_u64(index)?, artifact)?;
-    }
+        transcript,
+    )
+}
+
+fn write_attempt_footer(
+    writer: &mut impl Write,
+    transcript: &blake3::Hasher,
+) -> Result<(), TransportError> {
     write_frame(
-        &mut writer,
+        writer,
         Value::Array(vec![
             text_value("EIE1"),
             unsigned(1),
             bytes_value(transcript.finalize().as_bytes()),
         ]),
-    )?;
-    writer.flush().map_err(io_error)
+    )
 }
 
 /// Decode one complete EAI1 attempt stream.
@@ -476,9 +491,9 @@ fn read_artifact_header(
     }
     let digest = nonzero_digest(&fields[5])?;
     let chunk_limit = usize::try_from(MAX_ATTEMPT_BYTES / MAX_CHUNK_BYTES as u64)
-        .map_err(|_| TransportError::FieldOutOfBounds)?;
+        .or(Err(TransportError::FieldOutOfBounds))?;
     let chunks = bounded_usize(&fields[6], chunk_limit)?;
-    let expected_length = usize::try_from(length).map_err(|_| TransportError::FieldOutOfBounds)?;
+    let expected_length = usize::try_from(length).or(Err(TransportError::FieldOutOfBounds))?;
     if chunks != expected_length.div_ceil(MAX_CHUNK_BYTES) {
         return Err(TransportError::InvalidEncoding);
     }
@@ -702,7 +717,7 @@ fn encode_frame(value: Value) -> Result<Frame, TransportError> {
     if encoded.is_empty() || encoded.len() > MAX_FRAME_BYTES {
         return Err(TransportError::FieldOutOfBounds);
     }
-    let length = u32::try_from(encoded.len()).map_err(|_| TransportError::FieldOutOfBounds)?;
+    let length = u32::try_from(encoded.len()).or(Err(TransportError::FieldOutOfBounds))?;
     Ok(Frame {
         prefix: length.to_be_bytes(),
         encoded,
@@ -722,8 +737,8 @@ fn read_transcript_frame(
 fn read_frame(reader: &mut impl Read) -> Result<Frame, TransportError> {
     let mut prefix = [0; 4];
     reader.read_exact(&mut prefix).map_err(io_error)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix))
-        .map_err(|_| TransportError::FieldOutOfBounds)?;
+    let length =
+        usize::try_from(u32::from_be_bytes(prefix)).or(Err(TransportError::FieldOutOfBounds))?;
     if length == 0 || length > MAX_FRAME_BYTES {
         return Err(TransportError::FieldOutOfBounds);
     }
@@ -847,7 +862,7 @@ fn eight_uints(value: &Value) -> Result<[u64; 8], TransportError> {
         .map(uint)
         .collect::<Result<Vec<_>, _>>()?
         .try_into()
-        .map_err(|_| TransportError::InvalidEncoding)
+        .or(Err(TransportError::InvalidEncoding))
 }
 
 fn failure_value(value: &NamespacedFailure) -> Value {
@@ -887,7 +902,7 @@ fn nonzero_digest(value: &Value) -> Result<[u8; 32], TransportError> {
 }
 
 fn bounded_u8(value: &Value, maximum: u8) -> Result<u8, TransportError> {
-    let value = u8::try_from(uint(value)?).map_err(|_| TransportError::InvalidEncoding)?;
+    let value = u8::try_from(uint(value)?).or(Err(TransportError::InvalidEncoding))?;
     if value <= maximum {
         Ok(value)
     } else {
@@ -896,7 +911,7 @@ fn bounded_u8(value: &Value, maximum: u8) -> Result<u8, TransportError> {
 }
 
 fn bounded_usize(value: &Value, maximum: usize) -> Result<usize, TransportError> {
-    let value = usize::try_from(uint(value)?).map_err(|_| TransportError::FieldOutOfBounds)?;
+    let value = usize::try_from(uint(value)?).or(Err(TransportError::FieldOutOfBounds))?;
     if value <= maximum {
         Ok(value)
     } else {
@@ -940,7 +955,7 @@ fn nesting_depth(value: &Value) -> usize {
 }
 
 fn as_u64(value: usize) -> Result<u64, TransportError> {
-    u64::try_from(value).map_err(|_| TransportError::FieldOutOfBounds)
+    u64::try_from(value).or(Err(TransportError::FieldOutOfBounds))
 }
 
 fn new_transcript(domain: &[u8]) -> blake3::Hasher {
@@ -963,4 +978,58 @@ fn bytes_value(value: &[u8]) -> Value {
 
 fn io_error(_: std::io::Error) -> TransportError {
     TransportError::InvalidEncoding
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn artifact_header_enforces_numeric_bounds_before_chunk_allocation() {
+        let header = Value::Array(vec![
+            text_value("EIM1"),
+            unsigned(1),
+            unsigned(0),
+            unsigned(0),
+            unsigned(1),
+            bytes_value(&[1; 32]),
+            unsigned(1),
+        ]);
+        let caps = AttemptTransportCaps {
+            max_member_bytes: 1,
+            max_attempt_bytes: 1,
+        };
+        let mut aggregate = 0;
+        assert_eq!(
+            read_artifact_header(&header, 0, 0, caps, &mut aggregate),
+            Ok((1, [1; 32], 1))
+        );
+        assert_eq!(aggregate, 1);
+
+        assert_eq!(
+            bounded_u8(&unsigned(u64::from(u8::MAX) + 1), u8::MAX),
+            Err(TransportError::InvalidEncoding)
+        );
+        assert_eq!(
+            bounded_usize(&unsigned(2), 1),
+            Err(TransportError::FieldOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn frames_round_trip_and_reject_empty_prefixes() -> Result<(), TransportError> {
+        let frame = encode_frame(Value::Null)?;
+        let mut bytes = frame.prefix.to_vec();
+        bytes.extend_from_slice(&frame.encoded);
+        let decoded = read_frame(&mut Cursor::new(bytes))?;
+        assert_eq!(decoded.value, Value::Null);
+        assert!(matches!(
+            read_frame(&mut Cursor::new([0; 4])),
+            Err(TransportError::FieldOutOfBounds)
+        ));
+        Ok(())
+    }
 }

@@ -1,9 +1,10 @@
 use ciborium::value::Value;
 
 use super::codec::{
-    array, bool_value, bytes_value, decode_document, digest32, id16, key_id, optional_id16,
-    optional_text, require_signature, self_digested, signed, text_value, uint, uint_value,
-    valid_key_id, validate_magic, verify_digest, verify_signature, MAX_SAFE_DETAIL_BYTES,
+    array, bool_value, bytes_value, decode_document, digest32, encode, id16, key_id,
+    optional_digest, optional_id16, optional_text, require_signature, self_digested, signed,
+    text_value, uint, uint_value, valid_key_id, validate_magic, verify_digest, verify_signature,
+    MAX_SAFE_DETAIL_BYTES,
 };
 use super::SandboxProviderProtocolError;
 
@@ -17,13 +18,22 @@ pub enum SandboxProviderOperation {
 }
 
 impl SandboxProviderOperation {
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
-        match code {
-            0 => Ok(Self::Describe),
-            1 => Ok(Self::Execute),
-            2 => Ok(Self::Cancel),
-            3 => Ok(Self::Reconcile),
-            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
+    const VALUES: [Self; 4] = [Self::Describe, Self::Execute, Self::Cancel, Self::Reconcile];
+
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::VALUES.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+    }
+
+    const fn code(self) -> u64 {
+        match self {
+            Self::Describe => 0,
+            Self::Execute => 1,
+            Self::Cancel => 2,
+            Self::Reconcile => 3,
         }
     }
 }
@@ -35,16 +45,72 @@ pub enum SandboxLocalErrorCode {
     ProviderIdentityInvalid,
     PolicyUnavailable,
     ControlChannelUnavailable,
+    InvalidSelectorRequest,
+    RequestAuthorityMismatch,
+    PayloadLimitExceeded,
+    ProviderTerminalUnavailable,
+    ProviderEvidenceInvalid,
 }
 
 impl SandboxLocalErrorCode {
+    const VALUES: [Self; 9] = [
+        Self::ProviderUnavailable,
+        Self::ProviderIdentityInvalid,
+        Self::PolicyUnavailable,
+        Self::ControlChannelUnavailable,
+        Self::InvalidSelectorRequest,
+        Self::RequestAuthorityMismatch,
+        Self::PayloadLimitExceeded,
+        Self::ProviderTerminalUnavailable,
+        Self::ProviderEvidenceInvalid,
+    ];
+
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::VALUES.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+    }
+
+    const fn code(self) -> u64 {
+        match self {
+            Self::ProviderUnavailable => 0,
+            Self::ProviderIdentityInvalid => 1,
+            Self::PolicyUnavailable => 2,
+            Self::ControlChannelUnavailable => 3,
+            Self::InvalidSelectorRequest => 4,
+            Self::RequestAuthorityMismatch => 5,
+            Self::PayloadLimitExceeded => 6,
+            Self::ProviderTerminalUnavailable => 7,
+            Self::ProviderEvidenceInvalid => 8,
+        }
+    }
+}
+
+/// Closed point in selector processing at which a local failure occurred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxLocalErrorPhase {
+    BeforeSpx1,
+    AfterSpx1BeforeAdmission,
+    AfterAdmission,
+}
+
+impl SandboxLocalErrorPhase {
     const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
-            0 => Ok(Self::ProviderUnavailable),
-            1 => Ok(Self::ProviderIdentityInvalid),
-            2 => Ok(Self::PolicyUnavailable),
-            3 => Ok(Self::ControlChannelUnavailable),
+            0 => Ok(Self::BeforeSpx1),
+            1 => Ok(Self::AfterSpx1BeforeAdmission),
+            2 => Ok(Self::AfterAdmission),
             _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
+        }
+    }
+
+    const fn code(self) -> u64 {
+        match self {
+            Self::BeforeSpx1 => 0,
+            Self::AfterSpx1BeforeAdmission => 1,
+            Self::AfterAdmission => 2,
         }
     }
 }
@@ -52,8 +118,11 @@ impl SandboxLocalErrorCode {
 /// Independently decoded unsigned SLE1 local selector evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxLocalError {
+    pub phase: SandboxLocalErrorPhase,
     pub operation: Option<SandboxProviderOperation>,
     pub request_id: Option<[u8; 16]>,
+    pub attempt_id: Option<[u8; 16]>,
+    pub agr1_digest: Option<[u8; 32]>,
     pub code: SandboxLocalErrorCode,
     pub safe_detail: Option<String>,
 }
@@ -65,19 +134,118 @@ impl SandboxLocalError {
     /// Returns a closed protocol error for malformed or inconsistent input.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxProviderProtocolError> {
         let value = decode_document(bytes)?;
-        let fields = array::<6>(&value)?;
+        let fields = array::<9>(&value)?;
         validate_magic(fields, "SLE1")?;
-        Ok(Self {
-            operation: if fields[2] == Value::Null {
-                None
-            } else {
-                Some(SandboxProviderOperation::decode(uint(&fields[2])?)?)
-            },
-            request_id: optional_id16(&fields[3])?,
-            code: SandboxLocalErrorCode::decode(uint(&fields[4])?)?,
-            safe_detail: optional_text(&fields[5], MAX_SAFE_DETAIL_BYTES)?,
-        })
+        let error = decode_local_error(fields)?;
+        validate_local_error_shape(&error)?;
+        Ok(error)
     }
+
+    /// Encode this validated selector-local failure in preferred deterministic CBOR.
+    ///
+    /// # Errors
+    /// Returns a closed protocol error when the phase/code/nullability algebra is invalid.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        validate_local_error_shape(self)?;
+        encode(&Value::Array(vec![
+            text_value("SLE1"),
+            uint_value(1),
+            uint_value(self.phase.code()),
+            self.operation
+                .map_or(Value::Null, |operation| uint_value(operation.code())),
+            self.request_id
+                .as_ref()
+                .map_or(Value::Null, |request_id| bytes_value(request_id)),
+            self.attempt_id
+                .as_ref()
+                .map_or(Value::Null, |attempt_id| bytes_value(attempt_id)),
+            self.agr1_digest
+                .as_ref()
+                .map_or(Value::Null, |digest| bytes_value(digest)),
+            uint_value(self.code.code()),
+            self.safe_detail
+                .as_ref()
+                .map_or(Value::Null, |detail| text_value(detail)),
+        ]))
+    }
+}
+
+fn decode_local_error(
+    fields: &[Value; 9],
+) -> Result<SandboxLocalError, SandboxProviderProtocolError> {
+    Ok(SandboxLocalError {
+        phase: SandboxLocalErrorPhase::decode(uint(&fields[2])?)?,
+        operation: if fields[3] == Value::Null {
+            None
+        } else {
+            Some(SandboxProviderOperation::decode(uint(&fields[3])?)?)
+        },
+        request_id: optional_id16(&fields[4])?,
+        attempt_id: optional_id16(&fields[5])?,
+        agr1_digest: optional_digest(&fields[6])?,
+        code: SandboxLocalErrorCode::decode(uint(&fields[7])?)?,
+        safe_detail: optional_text(&fields[8], MAX_SAFE_DETAIL_BYTES)?,
+    })
+}
+
+fn validate_local_error_shape(
+    error: &SandboxLocalError,
+) -> Result<(), SandboxProviderProtocolError> {
+    if error.request_id == Some([0; 16])
+        || error.attempt_id == Some([0; 16])
+        || error.agr1_digest == Some([0; 32])
+    {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    let execute = error.operation == Some(SandboxProviderOperation::Execute);
+    let request = error.request_id.is_some_and(|id| id != [0; 16]);
+    let attempt = error.attempt_id.is_some_and(|id| id != [0; 16]);
+    let admission = error.agr1_digest.is_some_and(|digest| digest != [0; 32]);
+    let valid = match error.phase {
+        SandboxLocalErrorPhase::BeforeSpx1 => {
+            !admission
+                && matches!(
+                    error.code,
+                    SandboxLocalErrorCode::PolicyUnavailable
+                        | SandboxLocalErrorCode::InvalidSelectorRequest
+                        | SandboxLocalErrorCode::RequestAuthorityMismatch
+                        | SandboxLocalErrorCode::PayloadLimitExceeded
+                )
+                && if error.code == SandboxLocalErrorCode::RequestAuthorityMismatch {
+                    execute && request && attempt
+                } else {
+                    (!request && !attempt) || (request && execute)
+                }
+        }
+        SandboxLocalErrorPhase::AfterSpx1BeforeAdmission => {
+            execute
+                && request
+                && attempt
+                && !admission
+                && matches!(
+                    error.code,
+                    SandboxLocalErrorCode::ProviderUnavailable
+                        | SandboxLocalErrorCode::ProviderIdentityInvalid
+                        | SandboxLocalErrorCode::ControlChannelUnavailable
+                        | SandboxLocalErrorCode::ProviderEvidenceInvalid
+                )
+        }
+        SandboxLocalErrorPhase::AfterAdmission => {
+            execute
+                && request
+                && attempt
+                && admission
+                && matches!(
+                    error.code,
+                    SandboxLocalErrorCode::ControlChannelUnavailable
+                        | SandboxLocalErrorCode::ProviderTerminalUnavailable
+                        | SandboxLocalErrorCode::ProviderEvidenceInvalid
+                )
+        }
+    };
+    valid
+        .then_some(())
+        .ok_or(SandboxProviderProtocolError::InconsistentFields)
 }
 
 /// Authority common to every request operation.
@@ -111,7 +279,7 @@ pub(super) fn validate_request_authority(
     }
 }
 
-fn request_authority_value(value: &RequestAuthority) -> Value {
+pub(super) fn request_authority_value(value: &RequestAuthority) -> Value {
     Value::Array(vec![
         bytes_value(&value.request_id),
         bytes_value(&value.apt1_digest),
@@ -543,5 +711,154 @@ fn validate_response_identity(
         Ok(())
     } else {
         Err(SandboxProviderProtocolError::InconsistentFields)
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(test)]
+mod local_error_tests {
+    use super::*;
+
+    fn identified(
+        phase: SandboxLocalErrorPhase,
+        code: SandboxLocalErrorCode,
+        grant: Option<[u8; 32]>,
+    ) -> SandboxLocalError {
+        SandboxLocalError {
+            phase,
+            operation: Some(SandboxProviderOperation::Execute),
+            request_id: Some([1; 16]),
+            attempt_id: Some([2; 16]),
+            agr1_digest: grant,
+            code,
+            safe_detail: Some("closed failure".to_owned()),
+        }
+    }
+
+    #[test]
+    fn sle1_round_trips_every_legal_phase_and_code() {
+        let cases = [
+            identified(
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::InvalidSelectorRequest,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::RequestAuthorityMismatch,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::PayloadLimitExceeded,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderUnavailable,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderIdentityInvalid,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ControlChannelUnavailable,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                None,
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ControlChannelUnavailable,
+                Some([3; 32]),
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ProviderTerminalUnavailable,
+                Some([3; 32]),
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                Some([3; 32]),
+            ),
+        ];
+        for error in cases {
+            let encoded = error.to_canonical_cbor();
+            assert!(encoded.is_ok());
+            if let Ok(encoded) = encoded {
+                assert_eq!(SandboxLocalError::from_canonical_cbor(&encoded), Ok(error));
+            }
+        }
+
+        for operation in [
+            None,
+            Some(SandboxProviderOperation::Describe),
+            Some(SandboxProviderOperation::Cancel),
+            Some(SandboxProviderOperation::Reconcile),
+        ] {
+            let error = SandboxLocalError {
+                phase: SandboxLocalErrorPhase::BeforeSpx1,
+                operation,
+                request_id: None,
+                attempt_id: None,
+                agr1_digest: None,
+                code: SandboxLocalErrorCode::PolicyUnavailable,
+                safe_detail: None,
+            };
+            let encoded = error.to_canonical_cbor();
+            assert!(encoded.is_ok());
+            if let Ok(encoded) = encoded {
+                assert_eq!(SandboxLocalError::from_canonical_cbor(&encoded), Ok(error));
+            }
+        }
+    }
+
+    #[test]
+    fn sle1_encoder_rejects_invalid_identity_and_phase_algebra() {
+        for error in [
+            identified(
+                SandboxLocalErrorPhase::BeforeSpx1,
+                SandboxLocalErrorCode::RequestAuthorityMismatch,
+                Some([3; 32]),
+            ),
+            identified(
+                SandboxLocalErrorPhase::AfterAdmission,
+                SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                None,
+            ),
+            SandboxLocalError {
+                request_id: Some([0; 16]),
+                ..identified(
+                    SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                    SandboxLocalErrorCode::ProviderUnavailable,
+                    None,
+                )
+            },
+            SandboxLocalError {
+                attempt_id: Some([0; 16]),
+                ..identified(
+                    SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                    SandboxLocalErrorCode::ProviderUnavailable,
+                    None,
+                )
+            },
+            SandboxLocalError {
+                agr1_digest: Some([0; 32]),
+                ..identified(
+                    SandboxLocalErrorPhase::AfterAdmission,
+                    SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                    Some([3; 32]),
+                )
+            },
+        ] {
+            assert!(error.to_canonical_cbor().is_err());
+        }
     }
 }

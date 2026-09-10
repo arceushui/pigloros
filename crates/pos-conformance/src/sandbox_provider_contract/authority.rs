@@ -329,7 +329,7 @@ pub struct LaunchPolicyV1 {
     pub execution_mode: ExecutionModeV1,
     /// Exact signed image manifest digest.
     pub sim1_digest: [u8; 32],
-    /// Strictly ordered resource limits.
+    /// Exactly the seventeen resource limits, in increasing ID order.
     pub effective_limits: Vec<SandboxLimitV1>,
     /// Strictly canonically ordered exact-endpoint network capabilities.
     pub network_capabilities: Vec<NetworkCapabilityV1>,
@@ -394,8 +394,7 @@ impl LaunchPolicyV1 {
     fn validate_unsigned(&self) -> Result<(), SandboxContractErrorV1> {
         if !identifier(&self.policy_id, MAX_SANDBOX_IDENTIFIER_BYTES_V1)
             || self.sim1_digest == [0; 32]
-            || self.effective_limits.is_empty()
-            || self.effective_limits.len() > 17
+            || self.effective_limits.len() != 17
             || self.network_capabilities.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
         {
             return Err(SandboxContractErrorV1::FieldOutOfBounds);

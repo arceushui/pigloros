@@ -1,5 +1,8 @@
 pub mod support;
 
+#[path = "evaluator_public/fixture_export.rs"]
+mod fixture_export;
+
 use std::error::Error;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::sync::OnceLock;
@@ -10,7 +13,8 @@ use pos_reference::evaluator::{
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_protocol::{
-    CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
+    CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence,
+    RequiredProviderCapability, SandboxRequirement, SubjectAdapterKind,
 };
 use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
@@ -35,6 +39,7 @@ struct RecordingAdapter {
     subject_digest: [u8; 32],
     output: Vec<u8>,
     attempts: Vec<CaseAttempt>,
+    case_ordinals: Vec<u16>,
 }
 
 struct FaultingArchive {
@@ -138,6 +143,7 @@ struct MismatchedOracleAdapter {
 enum AdverseBehavior {
     WrongOutput,
     AdapterUnavailable,
+    AuthenticatedEvidenceFailure,
     ExcessiveUsage,
     SubjectUnavailable,
     WrongResultKind,
@@ -189,6 +195,10 @@ impl SubjectAdapter for RecordingAdapter {
 
     fn subject_artifact_digest(&self) -> [u8; 32] {
         self.subject_digest
+    }
+
+    fn set_case_ordinal(&mut self, ordinal: u16) {
+        self.case_ordinals.push(ordinal);
     }
 
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
@@ -272,6 +282,9 @@ impl SubjectAdapter for AdverseAdapter {
     fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
         match self.behavior {
             AdverseBehavior::AdapterUnavailable => Err(AdapterError::Unavailable),
+            AdverseBehavior::AuthenticatedEvidenceFailure => {
+                Err(AdapterError::AuthenticatedEvidenceFailure)
+            }
             AdverseBehavior::WrongOutput => Ok(SubjectObservation {
                 result: SubjectResult::Output(b"wrong".to_vec()),
                 usage: ResourceUsage::default(),
@@ -391,6 +404,67 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
     assert_eq!(
         ConformanceReport::from_canonical_cbor(&first.report_bytes),
         Ok(first.report)
+    );
+    Ok(())
+}
+
+#[test]
+fn sandbox_cases_reject_success_without_authenticated_selector_provenance() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = request_with(&corpus.request, |request| {
+        request.request_id[14..].fill(0);
+        request.sandbox_requirement = Some(SandboxRequirement {
+            lps1_digest: [31; 32],
+            sim1_digest: [32; 32],
+            required_provider_capability: RequiredProviderCapability {
+                capability_id: "sandbox.execute".to_owned(),
+                capability_version: 1,
+                minimum_strength: 1,
+            },
+            apt1_digest: [33; 32],
+            policy_epoch: 1,
+        });
+    })?;
+    let mut missing = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output.clone(),
+    };
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut missing,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
+    );
+
+    let mut unavailable = AdverseAdapter {
+        subject_digest: corpus.subject_digest,
+        behavior: AdverseBehavior::AdapterUnavailable,
+    };
+    assert!(evaluate(
+        &request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity()?,
+        &mut unavailable,
+    )
+    .is_ok());
+    let mut unauthenticated = AdverseAdapter {
+        subject_digest: corpus.subject_digest,
+        behavior: AdverseBehavior::AuthenticatedEvidenceFailure,
+    };
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut unauthenticated,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
     );
     Ok(())
 }
@@ -775,6 +849,7 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
         subject_digest: corpus.subject_digest,
         output: corpus.expected_output,
         attempts: Vec::new(),
+        case_ordinals: Vec::new(),
     };
     let result = evaluate(
         &corpus.request,
@@ -785,6 +860,7 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
     )?;
     assert_eq!(result.report.cases.len(), 7);
     assert_eq!(adapter.attempts.len(), 7);
+    assert_eq!(adapter.case_ordinals, (0..7).collect::<Vec<_>>());
     assert!(adapter.attempts.iter().all(|attempt| {
         attempt.mode == 1
             && !attempt.network_allowed

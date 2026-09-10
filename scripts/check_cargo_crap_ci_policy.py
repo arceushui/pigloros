@@ -23,6 +23,12 @@ SCOPED_CARGO_CRAP_JOB_IF = (
     "${{ needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
+COVERAGE_REPORT_IF = (
+    "${{ !cancelled() && (steps.coverage_run.outcome == 'success' || "
+    "steps.coverage_run.outcome == 'failure') }}"
+)
+LCOV_UPLOAD_IF = "${{ !cancelled() && steps.coverage_lcov.outcome == 'success' }}"
+JSON_READY_IF = "${{ !cancelled() && steps.coverage_json.outcome == 'success' }}"
 GENERATE_BASELINE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
@@ -153,6 +159,40 @@ def check_workflow(
 
     coverage_steps = coverage.get("steps")
     require(isinstance(coverage_steps, list), "coverage steps must be an array")
+    coverage_run = named_step(coverage_steps, "cargo llvm-cov (lines ≥99%, regions ≥99%)")
+    require(coverage_run.get("id") == "coverage_run", "coverage result must be addressable")
+    require(
+        all("continue-on-error" not in step for step in coverage_steps),
+        "coverage steps must retain their failures",
+    )
+    for name, identifier in [
+        ("Export LCOV for cargo-crap", "coverage_lcov"),
+        ("Export coverage details for new-code gate", "coverage_json"),
+    ]:
+        step = named_step(coverage_steps, name)
+        require(
+            step.get("id") == identifier and step.get("if") == COVERAGE_REPORT_IF,
+            "coverage reports must survive failure but stop on cancellation",
+        )
+    details_upload = named_step(coverage_steps, "Upload coverage details")
+    require(
+        details_upload == {
+            "name": "Upload coverage details",
+            "if": JSON_READY_IF,
+            "uses": UPLOAD_ACTION,
+            "with": {
+                "name": "coverage-details-${{ github.sha }}",
+                "path": "${{ runner.temp }}/coverage.json",
+                "retention-days": 1,
+                "if-no-files-found": "error",
+            },
+        },
+        "coverage must publish exact-head region details when available",
+    )
+    focused = named_step(
+        coverage_steps, "Enforce new production Rust code coverage (lines ≥99%, regions ≥99%)"
+    )
+    require(focused.get("if") == JSON_READY_IF, "new-code coverage must still run after global failure")
     export = named_step(coverage_steps, "Export LCOV for cargo-crap")
     require(
         export.get("run")
@@ -164,6 +204,7 @@ def check_workflow(
         lcov_upload
         == {
             "name": "Upload LCOV for cargo-crap",
+            "if": LCOV_UPLOAD_IF,
             "uses": UPLOAD_ACTION,
             "with": {
                 "name": "coverage-lcov-${{ github.sha }}",

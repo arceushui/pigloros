@@ -29,7 +29,7 @@ network-capability = [provider-identifier, 0, 0 / 1,
   (bytes .size 4) / (bytes .size 16), 1..65535, 1..134217728, 1..134217728]
 limit-record = [0..16, uint]
 arguments = [*256 argument-text]
-limits = [1*17 limit-record]
+limits = [17*17 limit-record]
 network-capabilities = [*256 network-capability]
 identifiers = [*256 provider-identifier]
 network-plans = [*256 network-plan]
@@ -72,7 +72,8 @@ srq1-u = ["SRQ1",1,request-common,id16,digest32]
 srq1 = [srq1-u,digest32]
 sry1-u = ["SRY1",1,id16,id16,true,digest32,key-id]
 sry1 = [sry1-u,digest32,bytes .size 64]
-sle1 = ["SLE1",1,(0..3) / null,id16 / null,0..3,safe-detail]
+sle1 = ["SLE1",1,0..2,(0..3) / null,id16 / null,id16 / null,
+  digest32 / null,0..8,safe-detail]
 
 network-plan = ["NXP1",1,id16,uint,provider-identifier,uint,digest32,uint,digest32,digest32,digest32]
 payload-descriptor = [0..134217728,digest32]
@@ -100,6 +101,6 @@ spy1-u = ["SPY1",1,id16,id16,0..4,
   payload-descriptor / null,digest32 / null,digest32 / null,operational-events,key-id]
 spy1 = [spy1-u,digest32,bytes .size 64]
 
-spe1-u = ["SPE1",1,(0..3) / null,id16 / null,digest32 / null,id16 / null,0..18,
+spe1-u = ["SPE1",1,(0..3) / null,id16 / null,digest32 / null,id16 / null,0..17,
   safe-detail,key-id]
 spe1 = [spe1-u,digest32,bytes .size 64]

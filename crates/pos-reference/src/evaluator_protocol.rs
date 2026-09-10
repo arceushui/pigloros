@@ -221,7 +221,7 @@ fn evaluation_request_fields_out_of_bounds(request: &EvaluationRequest) -> bool 
         request.evaluator_hard_caps_digest,
         request.request_digest,
     ];
-    request.request_id == [0; 16]
+    invalid_request_id(request)
         || digests.contains(&[0; 32])
         || request.output_capability.report_bytes_limit == 0
         || request.output_capability.report_bytes_limit > 16 * 1024 * 1024
@@ -230,6 +230,13 @@ fn evaluation_request_fields_out_of_bounds(request: &EvaluationRequest) -> bool 
             .sandbox_requirement
             .as_ref()
             .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
+}
+
+fn invalid_request_id(request: &EvaluationRequest) -> bool {
+    request.request_id == [0; 16]
+        || (request.sandbox_requirement.is_some()
+            && (request.request_id[..14].iter().all(|byte| *byte == 0)
+                || request.request_id[14..] != [0, 0]))
 }
 
 /// Independently declared evaluator/reviewer separation evidence.
