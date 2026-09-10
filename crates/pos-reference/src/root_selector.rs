@@ -1121,31 +1121,27 @@ mod coverage_tests {
 
     use super::*;
 
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
     #[test]
-    fn selector_framing_reads_a_complete_request_and_writes_a_bounded_response() {
-        let (control, attempt_stream) =
-            tests::selector_request_without_sandbox_requirement().expect("selector fixture");
-        let (mut server, mut client) = UnixStream::pair().expect("socket pair");
-        client
-            .write_all(
-                &u32::try_from(control.len())
-                    .expect("control length")
-                    .to_be_bytes(),
-            )
-            .expect("control prefix");
-        client.write_all(&control).expect("control");
-        client.write_all(&attempt_stream).expect("attempt stream");
-        client.shutdown(Shutdown::Write).expect("close request");
+    fn selector_framing_reads_a_complete_request_and_writes_a_bounded_response() -> TestResult {
+        let (control, attempt_stream) = tests::selector_request_without_sandbox_requirement()?;
+        let (mut server, mut client) = UnixStream::pair()?;
+        client.write_all(&u32::try_from(control.len())?.to_be_bytes())?;
+        client.write_all(&control)?;
+        client.write_all(&attempt_stream)?;
+        client.shutdown(Shutdown::Write)?;
         assert!(read_selector_request(&mut server).is_ok());
 
-        let (mut writer, mut reader) = UnixStream::pair().expect("response pair");
-        write_selector_response(&mut writer, b"control", None).expect("response write");
-        writer.shutdown(Shutdown::Write).expect("close response");
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        write_selector_response(&mut writer, b"control", None)?;
+        writer.shutdown(Shutdown::Write)?;
         let mut response = Vec::new();
-        reader.read_to_end(&mut response).expect("response read");
+        reader.read_to_end(&mut response)?;
         assert_eq!(
             response,
             [7_u32.to_be_bytes().as_slice(), b"control"].concat()
         );
+        Ok(())
     }
 }

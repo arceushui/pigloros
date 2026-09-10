@@ -1274,6 +1274,8 @@ mod coverage_tests {
 
     use super::*;
 
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
     struct FailingWriter;
 
     impl Write for FailingWriter {
@@ -1294,17 +1296,16 @@ mod coverage_tests {
     }
 
     #[test]
-    fn staged_output_covers_exact_copy_trailing_and_destination_failure() {
+    fn staged_output_covers_exact_copy_trailing_and_destination_failure() -> TestResult {
         let payload = b"provider output";
         let descriptor = PayloadDescriptor {
             byte_length: payload.len() as u64,
             digest: output_digest(payload),
         };
         let mut source = payload.as_slice();
-        let mut staged = StagedOutput::stage_verified(&mut source, descriptor.clone())
-            .expect("exact staged output");
+        let mut staged = StagedOutput::stage_verified(&mut source, descriptor.clone())?;
         let mut copied = Vec::new();
-        staged.copy_to(&mut copied).expect("output copy");
+        staged.copy_to(&mut copied)?;
         assert_eq!(copied, payload);
 
         let mut trailing = b"provider output!".as_slice();
@@ -1314,5 +1315,6 @@ mod coverage_tests {
             staged.copy_to(&mut FailingWriter),
             Err(RootSelectorServiceError::Io)
         );
+        Ok(())
     }
 }

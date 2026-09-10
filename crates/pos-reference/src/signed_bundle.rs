@@ -1935,6 +1935,8 @@ mod coverage_tests {
 
     use super::*;
 
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
     struct FailingReader;
 
     impl Read for FailingReader {
@@ -1999,23 +2001,22 @@ mod coverage_tests {
     }
 
     #[test]
-    fn immutable_reader_reconstructs_the_complete_authenticated_bundle() {
-        let (archive, trust_policy, request) =
-            tests::reader_inputs().expect("valid bundle fixture");
+    fn immutable_reader_reconstructs_the_complete_authenticated_bundle() -> TestResult {
+        let (archive, trust_policy, request) = tests::reader_inputs()?;
         let bundle =
-            verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request)
-                .expect("authenticated bundle");
+            verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request)?;
         assert!(!bundle.members.is_empty());
         assert!(!bundle.expected_results.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn immutable_reader_rejects_a_changed_second_pass() {
-        let (archive, trust_policy, request) =
-            tests::reader_inputs().expect("valid bundle fixture");
+    fn immutable_reader_rejects_a_changed_second_pass() -> TestResult {
+        let (archive, trust_policy, request) = tests::reader_inputs()?;
         let mut replacement = archive.clone();
-        let signature = replacement.last_mut().expect("bundle signature byte");
-        *signature ^= 1;
+        assert!(!replacement.is_empty());
+        let last = replacement.len() - 1;
+        replacement[last] ^= 1;
         let mut reader = ChangingReader {
             inner: Cursor::new(archive),
             replacement,
@@ -2025,5 +2026,6 @@ mod coverage_tests {
             verify_signed_bundle_reader(&mut reader, &trust_policy, &request),
             Err(BundleError::InvalidEncoding)
         );
+        Ok(())
     }
 }
