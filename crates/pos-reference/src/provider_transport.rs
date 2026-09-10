@@ -1276,6 +1276,14 @@ mod coverage_tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected input read failure"))
+        }
+    }
+
     struct FailingWriter;
 
     impl Write for FailingWriter {
@@ -1297,10 +1305,10 @@ mod coverage_tests {
 
     #[test]
     fn staged_output_covers_exact_copy_trailing_and_destination_failure() -> TestResult {
-        let payload = b"provider output";
+        let payload = vec![7; 8193];
         let descriptor = PayloadDescriptor {
             byte_length: payload.len() as u64,
-            digest: output_digest(payload),
+            digest: output_digest(&payload),
         };
         let mut source = payload.as_slice();
         let mut staged = StagedOutput::stage_verified(&mut source, descriptor.clone())?;
@@ -1308,11 +1316,56 @@ mod coverage_tests {
         staged.copy_to(&mut copied)?;
         assert_eq!(copied, payload);
 
+        let mut repeated_copy = Vec::new();
+        staged.copy_to(&mut repeated_copy)?;
+        assert_eq!(repeated_copy, payload);
+
+        let mut oversized = b"ignored".as_slice();
+        assert!(StagedOutput::stage_verified(
+            &mut oversized,
+            PayloadDescriptor {
+                byte_length: MAX_PAYLOAD_BYTES + 1,
+                digest: output_digest(b"ignored"),
+            }
+        )
+        .is_err_and(|error| error == RootSelectorServiceError::ProviderEvidence));
+
+        let mut short = b"short".as_slice();
+        assert!(StagedOutput::stage_verified(
+            &mut short,
+            PayloadDescriptor {
+                byte_length: 6,
+                digest: output_digest(b"short"),
+            }
+        )
+        .is_err_and(|error| error == RootSelectorServiceError::ProviderEvidence));
+
+        assert!(StagedOutput::stage_verified(
+            &mut FailingReader,
+            PayloadDescriptor {
+                byte_length: 1,
+                digest: output_digest(b"x"),
+            }
+        )
+        .is_err_and(|error| error == RootSelectorServiceError::Io));
+
+        let mut digest_mismatch = b"provider output".as_slice();
+        assert!(StagedOutput::stage_verified(
+            &mut digest_mismatch,
+            PayloadDescriptor {
+                byte_length: 15,
+                digest: output_digest(b"different bytes"),
+            }
+        )
+        .is_err_and(|error| error == RootSelectorServiceError::ProviderEvidence));
+
         let mut trailing = b"provider output!".as_slice();
         assert!(StagedOutput::stage_verified(&mut trailing, descriptor)
             .is_err_and(|error| error == RootSelectorServiceError::ProviderEvidence));
+        let mut writer = FailingWriter;
+        assert_eq!(writer.flush(), Ok(()));
         assert_eq!(
-            staged.copy_to(&mut FailingWriter),
+            staged.copy_to(&mut writer),
             Err(RootSelectorServiceError::Io)
         );
         Ok(())
