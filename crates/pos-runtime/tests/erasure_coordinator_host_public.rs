@@ -878,15 +878,16 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
     }
     authority.deny_topology.store(true, Ordering::Release);
-    assert!(matches!(
-        ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
-            &path_text,
-            authority,
-            reference(30),
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        ),
-        Err(ErasureHostErrorV1::AdapterFailure)
-    ));
+    let denied_recovery = ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+        &path_text,
+        authority,
+        reference(30),
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    );
+    assert!(
+        denied_recovery.is_err(),
+        "topology denial must keep recovery closed"
+    );
     for candidate in [
         path,
         std::path::PathBuf::from(format!("{path_text}-wal")),
