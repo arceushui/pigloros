@@ -1272,6 +1272,7 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
     use std::io::{self, Write};
+    use std::net::Shutdown;
 
     use super::*;
 
@@ -1395,6 +1396,56 @@ mod coverage_tests {
         assert!(
             SelectedProviderEndpoint::validate(&temporary.path().join("missing.sock")).is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_frame_transport_rejects_invalid_boundaries_and_preserves_complete_frames(
+    ) -> TestResult {
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut writer, _) = UnixStream::pair()?;
+        assert_eq!(
+            write_frame(&mut writer, b"", &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+        let oversized = vec![0_u8; CONTROL_LIMIT + 1];
+        assert_eq!(
+            write_frame(&mut writer, &oversized, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        assert_eq!(
+            write_frame(&mut writer, b"provider frame", &deadline),
+            Ok(())
+        );
+        writer.shutdown(Shutdown::Write)?;
+        assert_eq!(
+            read_frame(&mut reader, &deadline),
+            Ok(Some(b"provider frame".to_vec()))
+        );
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        writer.shutdown(Shutdown::Write)?;
+        assert_eq!(read_frame(&mut reader, &deadline), Ok(None));
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        writer.write_all(&[0_u8; 3])?;
+        writer.shutdown(Shutdown::Write)?;
+        assert_eq!(
+            read_frame(&mut reader, &deadline),
+            Err(ReceiveFailure::Incomplete)
+        );
+
+        for prefix in [0_u32.to_be_bytes(), u32::MAX.to_be_bytes()] {
+            let (mut writer, mut reader) = UnixStream::pair()?;
+            writer.write_all(&prefix)?;
+            writer.shutdown(Shutdown::Write)?;
+            assert_eq!(
+                read_frame(&mut reader, &deadline),
+                Err(ReceiveFailure::Invalid)
+            );
+        }
         Ok(())
     }
 }
