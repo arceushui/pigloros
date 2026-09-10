@@ -970,6 +970,7 @@ impl ErasureExecutionHostV1 {
     }
 
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn apply_fork_batch(
         &mut self,
         admission: PreparedErasureForkBatchV1,

@@ -14053,6 +14053,7 @@ mod coverage_entrypoints {
 }
 
 #[cfg(all(test, feature = "sqlite"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) mod key_registry_coverage {
     use super::*;
     use pos_core::{
