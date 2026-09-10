@@ -1166,14 +1166,6 @@ impl ErasureExecutionHostV1 {
         Ok((state, generation))
     }
 
-    const fn maximum_requests(&self) -> Result<usize, ErasureHostErrorV1> {
-        match self.state {
-            HostStateV1::Ready {
-                maximum_requests, ..
-            } => Ok(maximum_requests),
-            _ => Err(ErasureHostErrorV1::RecoveryUnavailable),
-        }
-    }
     /// Recover a new store only when its complete durable request set is empty.
     ///
     /// # Errors
@@ -3253,10 +3245,6 @@ mod tests {
         );
         assert_eq!(host.state, HostStateV1::Poisoned);
         assert_eq!(
-            host.maximum_requests(),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        );
-        assert_eq!(
             escaped_gate.authorize(TimelineId::new(), ErasureProtectedOperationV1::Read),
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
         );
@@ -3538,10 +3526,6 @@ mod tests {
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             host.apply_empty_topology_change(|store| store.create_timeline("closed")),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        );
-        assert_eq!(
-            host.maximum_requests(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         host.state = HostStateV1::Poisoned;
