@@ -61,7 +61,7 @@ const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
 struct OpenedCliStore {
-    store: Box<dyn pos_core::store::EventStore>,
+    store: HostedCliStore,
     erasure_gate: std::sync::Arc<dyn pos_core::ErasureGate>,
 }
 
@@ -72,7 +72,8 @@ struct OpenedCliStore {
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    open_store_with_gate(config).map(|opened| opened.store)
+    open_store_with_gate(config)
+        .map(|opened| Box::new(opened.store) as Box<dyn pos_core::store::EventStore>)
 }
 
 fn open_store_with_gate(config: StoreConfig) -> Result<OpenedCliStore, pos_core::CoreError> {
@@ -80,7 +81,7 @@ fn open_store_with_gate(config: StoreConfig) -> Result<OpenedCliStore, pos_core:
         .map(|store| {
             let erasure_gate = store.containment_gate();
             OpenedCliStore {
-                store: Box::new(store) as Box<dyn pos_core::store::EventStore>,
+                store,
                 erasure_gate,
             }
         })
@@ -380,7 +381,7 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
 
     let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    let events = replay_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
+    let events = replay_retained_timeline(&store, tl_id, &mut registry)?;
     let entity_count = events
         .iter()
         .map(|e| e.entity)
@@ -404,7 +405,7 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
     let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
-    let snapshot = snapshot_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
+    let snapshot = snapshot_retained_timeline(&store, tl_id, &mut registry)?;
 
     let entity_count = count_snapshot_entities(&snapshot);
 
@@ -448,7 +449,7 @@ fn retained_timeline_artifact(
 }
 
 fn replay_retained_timeline(
-    store: &dyn pos_core::store::EventStore,
+    store: &HostedCliStore,
     timeline: TimelineId,
     registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
@@ -457,11 +458,15 @@ fn replay_retained_timeline(
         pos_core::ErasureArtifactClassV1::TimelineReplay,
         b"pos-cli/timeline-replay",
     )?;
-    pos_time::replay(store, timeline, registry, artifact_digest, &evaluation).map_err(Into::into)
+    store
+        .with_read_sender(|sender| {
+            pos_time::replay(sender, timeline, registry, artifact_digest, &evaluation)
+        })
+        .map_err(Into::into)
 }
 
 fn snapshot_retained_timeline(
-    store: &dyn pos_core::store::EventStore,
+    store: &HostedCliStore,
     timeline: TimelineId,
     registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
@@ -470,7 +475,44 @@ fn snapshot_retained_timeline(
         pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
         b"pos-cli/timeline-snapshot",
     )?;
-    pos_time::snapshot(store, timeline, registry, artifact_digest, &evaluation).map_err(Into::into)
+    store
+        .with_read_sender(|sender| {
+            pos_time::snapshot(sender, timeline, registry, artifact_digest, &evaluation)
+        })
+        .map_err(Into::into)
+}
+
+fn retained_comparison_artifacts(
+    timelines: [TimelineId; 2],
+) -> Result<
+    (
+        [pos_core::ErasureReferenceV1; 2],
+        pos_core::ReplayClaimEvaluationV1,
+    ),
+    pos_core::ErasureErrorV1,
+> {
+    let digests = timelines.map(|timeline| {
+        pos_core::ErasureReferenceV1::from_digest(
+            *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
+        )
+    });
+    let claims = digests.map(|digest| pos_core::ArtifactClaimInputV1 {
+        registration: pos_core::RegisteredArtifactV1::new(
+            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+            digest,
+            pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+            None,
+            pos_core::ErasureReferenceV1::from_digest(
+                *blake3::hash(b"pos-cli/timeline-compare").as_bytes(),
+            ),
+            pos_core::ArtifactOptionalityV1::Required,
+            pos_core::ArtifactTransitionRuleV1::PreserveExact,
+        ),
+        current_claim: pos_core::ErasureReplayClaimV1::Exact,
+        state: pos_core::ArtifactStateV1::Retained,
+    });
+    pos_core::ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &claims)
+        .map(|evaluation| (digests, evaluation))
 }
 
 fn cmd_timeline_compare(
@@ -497,14 +539,17 @@ fn cmd_timeline_compare(
     let mut reg_b = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     reg_b.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
-    let diff = pos_time::compare(
-        store.as_ref(),
-        timeline_a,
-        timeline_b,
-        fork_seq,
-        &mut reg_a,
-        &mut reg_b,
-    )?;
+    let (artifact_digests, evaluation) = retained_comparison_artifacts([timeline_a, timeline_b])?;
+    let diff = store.with_read_sender(|sender| {
+        pos_time::compare(
+            sender,
+            [timeline_a, timeline_b],
+            fork_seq,
+            [&mut reg_a, &mut reg_b],
+            artifact_digests,
+            &evaluation,
+        )
+    })?;
 
     output_stdout!("only_in_a: {}", diff.only_in_a.len());
     output_stdout!("only_in_b: {}", diff.only_in_b.len());

@@ -4547,6 +4547,7 @@ name = "pos-time"
 version = "0.1.0"
 dependencies = [
  "pos-core",
+ "pos-runtime",
  "pos-state",
  "pos-store",
  "proptest",

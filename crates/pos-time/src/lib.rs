@@ -27,3 +27,16 @@ pub use merge::{
 };
 pub use replay::{replay, replay_at};
 pub use snapshot::{snapshot, verify_snapshot_consistency, Snapshot, SnapshotError};
+
+const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::CoreError {
+    match error {
+        pos_core::ErasureHostErrorV1::AccessFrozen => pos_core::CoreError::ErasureAccessFrozen,
+        pos_core::ErasureHostErrorV1::RecoveryUnavailable
+        | pos_core::ErasureHostErrorV1::StaleGeneration => {
+            pos_core::CoreError::ErasureContainmentUnavailable
+        }
+        pos_core::ErasureHostErrorV1::AuthorizationDenied
+        | pos_core::ErasureHostErrorV1::Conflict
+        | pos_core::ErasureHostErrorV1::AdapterFailure => pos_core::CoreError::ArtifactUnavailable,
+    }
+}

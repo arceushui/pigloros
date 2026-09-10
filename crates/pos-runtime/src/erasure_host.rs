@@ -34,10 +34,6 @@ use std::num::NonZeroUsize;
 #[cfg(test)]
 use pos_core::PreparedErasureForkBatchV1;
 
-#[cfg(test)]
-#[path = "../../pos-core/tests/support/erasure.rs"]
-mod erasure_support;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HostStateV1 {
     Closed,
@@ -1796,6 +1792,33 @@ pub struct ErasureReadSenderV1<'host> {
 }
 
 impl ErasureReadSenderV1<'_> {
+    /// Run one read-only protected effect while retaining the host's current
+    /// Tick Boundary fence and inventory generation for its complete
+    /// execution.
+    ///
+    /// Nested store and projection operations reauthorize against the same
+    /// gate state without releasing the outer fence. The callback receives
+    /// only this read-only generation-bound sender.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error when this sender is stale or the
+    /// protected operation is frozen or unavailable.
+    pub fn with_protected_effect_fence(
+        &mut self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), ErasureHostErrorV1> {
+        let generation = self.generation;
+        self.host.ensure_generation(generation).and_then(|()| {
+            let gate = Arc::clone(&self.host.gate);
+            let mut fenced_effect = || effect(self);
+            gate.with_fence(timeline, operation, &mut fenced_effect)
+                .map_err(ErasureHostErrorV1::from)
+        })?;
+        self.host.ensure_generation(self.generation)
+    }
+
     /// Read a bounded Timeline range under the current inventory generation.
     ///
     /// # Errors
@@ -2367,7 +2390,7 @@ mod tests {
     #[test]
     fn hosted_coordinator_port_delegates_empty_persistence_reads() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let mut port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
         let request = ErasureReferenceV1::from_digest([71; 32]);
         assert_eq!(port.resolve_state(request)?, None);
         assert_eq!(port.read_manifest(request)?, None);
@@ -2393,7 +2416,31 @@ mod tests {
             ErasureInventoryObservationV1::new(Vec::new(), Vec::new(), Vec::new())
         );
 
-        let request_object = erasure_support::persistence_request()?;
+        Ok(())
+    }
+
+    fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+        ErasureRequestV1::new(pos_core::ErasureRequestInputV1 {
+            request: ErasureReferenceV1::from_digest([1; 32]),
+            subject: ErasureReferenceV1::from_digest([2; 32]),
+            scope: pos_core::ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![ErasureReferenceV1::from_digest([3; 32])],
+            requester: ErasureReferenceV1::from_digest([4; 32]),
+            authorization: ErasureReferenceV1::from_digest([5; 32]),
+            policy: ErasureReferenceV1::from_digest([6; 32]),
+            request_position: 9,
+            horizon_position: 20,
+            provenance: ErasureReferenceV1::from_digest([7; 32]),
+        })
+    }
+
+    #[test]
+    fn hosted_coordinator_port_delegates_submission_and_scope_authority(
+    ) -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let request = ErasureReferenceV1::from_digest([71; 32]);
+        let request_object = coordinator_request()?;
         let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
             rejected_request: request,
             rejected_terminal_state: ErasureReferenceV1::from_digest([72; 32]),
@@ -2408,6 +2455,32 @@ mod tests {
             predecessor_extension: None,
             admission_provenance: ErasureReferenceV1::from_digest([78; 32]),
         })?;
+
+        assert_eq!(
+            port.verified_topology_observation(request, request),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_corrected_submission(&request_object, &correction),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.validate_scope_extension(&extension),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_scope_extension(&extension),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_coordinator_port_delegates_resolution_and_destruction_authority(
+    ) -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let request = ErasureReferenceV1::from_digest([71; 32]);
         let resolution =
             ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
                 request,
@@ -2422,6 +2495,27 @@ mod tests {
                 issue_position: 1,
                 predecessor_resolution: None,
             })?;
+        assert_eq!(
+            port.validate_administrative_resolution(&resolution),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_administrative_resolution(&resolution),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.dispatch_destruction(request, &[]),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_coordinator_port_delegates_attempt_and_receipt_authority(
+    ) -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let request = ErasureReferenceV1::from_digest([71; 32]);
         let retry = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
             request,
             attempt_ordinal: 0,
@@ -2471,35 +2565,6 @@ mod tests {
             signature: ErasureReferenceV1::from_digest([98; 32]),
             receipt_digest: ErasureReferenceV1::from_digest([0; 32]),
         };
-
-        assert_eq!(
-            port.verified_topology_observation(request, request),
-            Err(ErasureErrorV1::Unauthorized)
-        );
-        assert_eq!(
-            port.admit_corrected_submission(&request_object, &correction),
-            Err(ErasureErrorV1::Unauthorized)
-        );
-        assert_eq!(
-            port.validate_scope_extension(&extension),
-            Err(ErasureErrorV1::Unauthorized)
-        );
-        assert_eq!(
-            port.admit_scope_extension(&extension),
-            Err(ErasureErrorV1::Unauthorized)
-        );
-        assert_eq!(
-            port.validate_administrative_resolution(&resolution),
-            Err(ErasureErrorV1::Unauthorized)
-        );
-        assert_eq!(
-            port.admit_administrative_resolution(&resolution),
-            Err(ErasureErrorV1::Unauthorized)
-        );
-        assert_eq!(
-            port.dispatch_destruction(request, &[]),
-            Err(ErasureErrorV1::Unauthorized)
-        );
         assert_eq!(
             port.admit_attempt(&retry),
             Err(ErasureErrorV1::Unauthorized)

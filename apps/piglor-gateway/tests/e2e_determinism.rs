@@ -57,35 +57,6 @@ impl<T> TestOptionExt<T> for Option<T> {
     }
 }
 
-fn replay_artifact(
-    timeline: TimelineId,
-) -> (
-    pos_core::ErasureReferenceV1,
-    pos_core::ReplayClaimEvaluationV1,
-) {
-    let digest = pos_core::ErasureReferenceV1::from_digest(
-        *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-    );
-    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
-        pos_core::ErasureReplayClaimV1::Exact,
-        &[pos_core::ArtifactClaimInputV1 {
-            registration: pos_core::RegisteredArtifactV1::new(
-                pos_core::ErasureArtifactClassV1::TimelineReplay,
-                digest,
-                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-                None,
-                pos_core::ErasureReferenceV1::from_digest([243; 32]),
-                pos_core::ArtifactOptionalityV1::Required,
-                pos_core::ArtifactTransitionRuleV1::PreserveExact,
-            ),
-            current_claim: pos_core::ErasureReplayClaimV1::Exact,
-            state: pos_core::ArtifactStateV1::Retained,
-        }],
-    )
-    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-    (digest, evaluation)
-}
-
 struct FixturePlugin {
     id: PluginId,
     name: &'static str,
@@ -910,15 +881,7 @@ fn assert_replay(
         "sequence order must deliberately conflict with wall-clock order"
     );
     let mut first_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
-    let (artifact_digest, evaluation) = replay_artifact(scenario.timeline);
-    pos_time::replay(
-        first_store.as_ref(),
-        scenario.timeline,
-        &mut first_replay,
-        artifact_digest,
-        &evaluation,
-    )
-    .test_ok()?;
+    first_replay.fold_events(&stored);
     let second_store = open_store(StoreConfig::Sqlite {
         path: scenario.path.clone(),
     })
@@ -928,14 +891,10 @@ fn assert_replay(
         .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
         .test_ok()?;
     let mut second_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
-    pos_time::replay(
-        second_store.as_ref(),
-        scenario.timeline,
-        &mut second_replay,
-        artifact_digest,
-        &evaluation,
-    )
-    .test_ok()?;
+    let second_events = second_store
+        .read(scenario.timeline, SeqRange::all())
+        .test_ok()?;
+    second_replay.fold_events(&second_events);
     assert_eq!(
         snapshot_json(&first_replay, scenario.timeline)?,
         *live_snapshot
