@@ -987,8 +987,7 @@ impl ErasureExecutionHostV1 {
         &mut self,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
-        let current_generation = self.ready_generation()?;
-        let maximum_requests = self.maximum_requests()?;
+        let (current_generation, maximum_requests, _) = self.ready_state()?;
         let expected_generation = admission.expected_inventory_generation();
         let successor = admission.successor_inventory().clone();
         let successor_generation = successor.generation();
