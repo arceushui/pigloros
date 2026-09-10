@@ -721,3 +721,36 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use std::fs::File;
+    use std::os::unix::fs::MetadataExt;
+
+    use super::*;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn durable_reads_and_staging_enforce_the_filesystem_floor() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let root = File::open(directory.path())?;
+        let owner = root.metadata()?.uid();
+        let bounded_path = directory.path().join("bounded.cbor");
+        std::fs::write(&bounded_path, b"exact")?;
+        assert_eq!(read_bounded(File::open(&bounded_path)?, 5)?, b"exact");
+
+        std::fs::write(&bounded_path, b"oversized")?;
+        assert_eq!(
+            read_bounded(File::open(&bounded_path)?, 8),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        let staging = open_staging_directory(&root, owner)?;
+        let metadata = staging.metadata()?;
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), owner);
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        Ok(())
+    }
+}
