@@ -1786,6 +1786,41 @@ mod tests {
     }
 
     #[test]
+    fn byte_preflight_binds_archive_identity_and_rejects_untrusted_inputs() -> TestResult {
+        let (archive, trust_policy, request) = reader_inputs()?;
+        let preflight = preflight_signed_bundle_bytes(&archive, &trust_policy, &request)?;
+        assert!(!preflight.profile_bytes().is_empty());
+
+        assert_eq!(
+            preflight_signed_bundle_bytes(&[], &trust_policy, &request),
+            Err(BundleError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            preflight_signed_bundle_bytes(b"different", &trust_policy, &request),
+            Err(BundleError::DigestMismatch)
+        );
+        assert!(preflight_signed_bundle_bytes(&archive, b"invalid-policy", &request).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_archive_validator_accepts_bounded_payload_forms() {
+        let mut long_bytes = vec![0x5a, 0, 0, 0x20, 1];
+        long_bytes.extend(vec![7; 8193]);
+        for bytes in [
+            vec![0x40],
+            vec![0x60],
+            vec![0x80],
+            vec![0xf4],
+            vec![0xf5],
+            vec![0xf6],
+            long_bytes,
+        ] {
+            assert_eq!(verify_canonical_archive(&mut Cursor::new(bytes)), Ok(()));
+        }
+    }
+
+    #[test]
     fn reader_rejects_invalid_signature_and_prohibited_member_material() -> TestResult {
         let (mut archive, trust_policy, request) = reader_inputs()?;
         let signature_byte = archive.last_mut().ok_or(BundleError::InvalidEncoding)?;
