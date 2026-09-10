@@ -101,18 +101,20 @@ mod lifecycle_coverage_tests {
     #[test]
     fn executor_store_reports_payload_free_erasure_status() {
         let generic = ExecutorStore::Generic(Box::new(MemoryStore::new()));
-        assert!(generic
-            .erasure_status()
-            .is_ok_and(|status| status == pos_runtime::ErasureHostStatusV1::Ready));
+        assert_eq!(
+            generic.erasure_status(),
+            pos_runtime::ErasureHostStatusV1::Ready
+        );
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
             ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let host = ExecutorStore::Host(Box::new(host));
-        assert!(host
-            .erasure_status()
-            .is_ok_and(|status| status == pos_runtime::ErasureHostStatusV1::Ready));
+        assert_eq!(
+            host.erasure_status(),
+            pos_runtime::ErasureHostStatusV1::Ready
+        );
     }
 
     #[test]
