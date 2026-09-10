@@ -2630,7 +2630,8 @@ mod tests {
                 authority.clone(),
                 coordinator,
                 0,
-            ),
+            )
+            .map(|_| ()),
             Err(ErasureHostErrorV1::Conflict)
         );
         assert_eq!(
@@ -2639,7 +2640,8 @@ mod tests {
                 authority.clone(),
                 coordinator,
                 0,
-            ),
+            )
+            .map(|_| ()),
             Err(ErasureHostErrorV1::Conflict)
         );
         let missing_path = format!(
@@ -2654,7 +2656,8 @@ mod tests {
                 authority.clone(),
                 coordinator,
                 4,
-            ),
+            )
+            .map(|_| ()),
             Err(ErasureHostErrorV1::AdapterFailure)
         );
         assert_eq!(
@@ -2663,7 +2666,8 @@ mod tests {
                 authority.clone(),
                 coordinator,
                 4,
-            ),
+            )
+            .map(|_| ()),
             Err(ErasureHostErrorV1::AdapterFailure)
         );
         assert_eq!(
@@ -2672,7 +2676,8 @@ mod tests {
                 authority,
                 coordinator,
                 4,
-            ),
+            )
+            .map(|_| ()),
             Err(ErasureHostErrorV1::AdapterFailure)
         );
     }
@@ -3932,7 +3937,7 @@ mod tests {
             reader.with_protected_effect_fence(
                 timeline,
                 ErasureProtectedOperationV1::Read,
-                &mut || {},
+                &mut |_| {},
             ),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
