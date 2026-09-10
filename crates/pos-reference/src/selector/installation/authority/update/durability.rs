@@ -575,6 +575,7 @@ fn verify_recovery_identity(
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use std::fs::File;
