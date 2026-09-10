@@ -530,35 +530,35 @@ enum HostedResolutionCommandV1 {
 }
 
 impl HostedCoordinatorCommandV1 {
-    fn submit(request: ErasureRequestV1, provenance: ErasureReferenceV1) -> Self {
+    const fn submit(request: ErasureRequestV1, provenance: ErasureReferenceV1) -> Self {
         Self::Submission(HostedSubmissionCommandV1::Submit {
             request,
             provenance,
         })
     }
 
-    fn authorize(request: ErasureReferenceV1, provenance: ErasureReferenceV1) -> Self {
+    const fn authorize(request: ErasureReferenceV1, provenance: ErasureReferenceV1) -> Self {
         Self::Submission(HostedSubmissionCommandV1::Authorize {
             request,
             provenance,
         })
     }
 
-    fn freeze(request: ErasureReferenceV1, transition: ErasureStateTransitionV1) -> Self {
+    const fn freeze(request: ErasureReferenceV1, transition: ErasureStateTransitionV1) -> Self {
         Self::Submission(HostedSubmissionCommandV1::Freeze {
             request,
             transition,
         })
     }
 
-    fn reject(request: ErasureReferenceV1, provenance: ErasureReferenceV1) -> Self {
+    const fn reject(request: ErasureReferenceV1, provenance: ErasureReferenceV1) -> Self {
         Self::Retry(HostedRetryCommandV1::Reject {
             request,
             provenance,
         })
     }
 
-    fn submit_corrected(
+    const fn submit_corrected(
         request: ErasureRequestV1,
         correction: ErasureCorrectionProvenanceV1,
     ) -> Self {
@@ -568,22 +568,31 @@ impl HostedCoordinatorCommandV1 {
         })
     }
 
-    fn dispatch_attempt(request: ErasureReferenceV1, admission: ErasureRetryAdmissionV1) -> Self {
+    const fn dispatch_attempt(
+        request: ErasureReferenceV1,
+        admission: ErasureRetryAdmissionV1,
+    ) -> Self {
         Self::Retry(HostedRetryCommandV1::DispatchAttempt { request, admission })
     }
 
-    fn acknowledge(request: ErasureReferenceV1, acknowledgement: ErasureAcknowledgementV1) -> Self {
+    const fn acknowledge(
+        request: ErasureReferenceV1,
+        acknowledgement: ErasureAcknowledgementV1,
+    ) -> Self {
         Self::Resolution(HostedResolutionCommandV1::Acknowledge {
             request,
             acknowledgement,
         })
     }
 
-    fn scope_extension(request: ErasureReferenceV1, extension: ErasureScopeExtensionV1) -> Self {
+    const fn scope_extension(
+        request: ErasureReferenceV1,
+        extension: ErasureScopeExtensionV1,
+    ) -> Self {
         Self::Resolution(HostedResolutionCommandV1::ScopeExtension { request, extension })
     }
 
-    fn administrative_resolution(
+    const fn administrative_resolution(
         request: ErasureReferenceV1,
         resolution: ErasureAdministrativeResolutionV1,
     ) -> Self {
