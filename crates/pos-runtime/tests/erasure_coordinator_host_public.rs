@@ -480,3 +480,81 @@ fn gateway_host_uses_the_same_coordinator_authority_boundary(
     )?;
     Ok(())
 }
+
+#[test]
+fn rejected_coordinator_command_closes_the_host_without_partial_publication(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
+    let mut host = test_stage(
+        "open rejected-command host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let request = test_stage("construct rejected request", persistence_request())?;
+    {
+        let mut commands = test_stage("open rejected-command sender", host.command_sender())?;
+        assert!(matches!(
+            commands.submit_erasure_request(request, reference(99)),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
+    }
+    assert!(matches!(
+        host.command_sender(),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    ));
+    Ok(())
+}
+
+#[test]
+fn stale_durable_fork_retry_closes_the_host_without_republishing_old_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
+    let mut host = test_stage(
+        "open stale-fork host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    {
+        let mut commands = test_stage("open stale-fork sender", host.command_sender())?;
+        let parent = test_stage(
+            "create stale-fork parent",
+            commands.create_timeline("stale-fork-parent"),
+        )?;
+        let operation = reference(43);
+        test_stage(
+            "commit durable fork",
+            commands.fork_timeline_identified(
+                operation,
+                parent.id(),
+                pos_core::Seq::ZERO,
+                "stale-fork-child",
+            ),
+        )?;
+        test_stage(
+            "advance inventory generation",
+            commands.create_timeline("stale-fork-intervening"),
+        )?;
+        assert!(matches!(
+            commands.fork_timeline_identified(
+                operation,
+                parent.id(),
+                pos_core::Seq::ZERO,
+                "ignored-stale-retry-name",
+            ),
+            Err(ErasureHostErrorV1::Conflict)
+        ));
+    }
+    assert!(matches!(
+        host.read_sender(),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    ));
+    Ok(())
+}
