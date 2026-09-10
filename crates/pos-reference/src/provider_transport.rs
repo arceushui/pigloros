@@ -778,13 +778,6 @@ mod tests {
         }
     }
 
-    fn output_digest(bytes: &[u8]) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"PiglorOS.SandboxOutputBytes.v1\0");
-        hasher.update(bytes);
-        *hasher.finalize().as_bytes()
-    }
-
     #[test]
     fn verified_staging_propagates_payload_and_eof_read_failures() {
         for byte_length in [0, 1] {
@@ -1290,6 +1283,13 @@ mod coverage_tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    fn output_digest(bytes: &[u8]) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.SandboxOutputBytes.v1\0");
+        hasher.update(bytes);
+        *hasher.finalize().as_bytes()
     }
 
     #[test]
