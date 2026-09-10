@@ -490,9 +490,10 @@ fn read_artifact_header(
         return Err(TransportError::FieldOutOfBounds);
     }
     let digest = nonzero_digest(&fields[5])?;
-    let chunk_limit = (MAX_ATTEMPT_BYTES / MAX_CHUNK_BYTES as u64) as usize;
+    let chunk_limit = usize::try_from(MAX_ATTEMPT_BYTES / MAX_CHUNK_BYTES as u64)
+        .or(Err(TransportError::FieldOutOfBounds))?;
     let chunks = bounded_usize(&fields[6], chunk_limit)?;
-    let expected_length = length as usize;
+    let expected_length = usize::try_from(length).or(Err(TransportError::FieldOutOfBounds))?;
     if chunks != expected_length.div_ceil(MAX_CHUNK_BYTES) {
         return Err(TransportError::InvalidEncoding);
     }
@@ -716,7 +717,7 @@ fn encode_frame(value: Value) -> Result<Frame, TransportError> {
     if encoded.is_empty() || encoded.len() > MAX_FRAME_BYTES {
         return Err(TransportError::FieldOutOfBounds);
     }
-    let length = encoded.len() as u32;
+    let length = u32::try_from(encoded.len()).or(Err(TransportError::FieldOutOfBounds))?;
     Ok(Frame {
         prefix: length.to_be_bytes(),
         encoded,
@@ -736,7 +737,8 @@ fn read_transcript_frame(
 fn read_frame(reader: &mut impl Read) -> Result<Frame, TransportError> {
     let mut prefix = [0; 4];
     reader.read_exact(&mut prefix).map_err(io_error)?;
-    let length = u32::from_be_bytes(prefix) as usize;
+    let length =
+        usize::try_from(u32::from_be_bytes(prefix)).or(Err(TransportError::FieldOutOfBounds))?;
     if length == 0 || length > MAX_FRAME_BYTES {
         return Err(TransportError::FieldOutOfBounds);
     }
@@ -900,18 +902,18 @@ fn nonzero_digest(value: &Value) -> Result<[u8; 32], TransportError> {
 }
 
 fn bounded_u8(value: &Value, maximum: u8) -> Result<u8, TransportError> {
-    let value = uint(value)?;
-    if value <= u64::from(maximum) {
-        Ok(value as u8)
+    let value = u8::try_from(uint(value)?).or(Err(TransportError::InvalidEncoding))?;
+    if value <= maximum {
+        Ok(value)
     } else {
         Err(TransportError::InvalidEncoding)
     }
 }
 
 fn bounded_usize(value: &Value, maximum: usize) -> Result<usize, TransportError> {
-    let value = uint(value)?;
-    if value <= maximum as u64 {
-        Ok(value as usize)
+    let value = usize::try_from(uint(value)?).or(Err(TransportError::FieldOutOfBounds))?;
+    if value <= maximum {
+        Ok(value)
     } else {
         Err(TransportError::FieldOutOfBounds)
     }
