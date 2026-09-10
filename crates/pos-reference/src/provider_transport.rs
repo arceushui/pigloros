@@ -1311,7 +1311,7 @@ mod coverage_tests {
             digest: output_digest(&payload),
         };
         let mut source = payload.as_slice();
-        let mut staged = StagedOutput::stage_verified(&mut source, descriptor.clone())?;
+        let mut staged = StagedOutput::stage_verified(&mut source, descriptor)?;
         let mut copied = Vec::new();
         staged.copy_to(&mut copied)?;
         assert_eq!(copied, payload);
