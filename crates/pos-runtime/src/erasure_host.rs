@@ -3101,65 +3101,7 @@ mod tests {
                 .command_sender()
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
             sender.generation = stale;
-            assert_eq!(
-                sender.create_timeline("stale"),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.fork_timeline(root.id(), Seq::ZERO, "stale"),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.commit_fork_admission(batch),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.recover_fork_admission(ErasureReferenceV1::from_digest([33; 32])),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.append(root.id(), &[]),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.initialize_timeline_with_key_registry("stale", &KeyRegistryStateV1::new()),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.fork_timeline_identified(
-                    ErasureReferenceV1::from_digest([34; 32]),
-                    root.id(),
-                    Seq::ZERO,
-                    "stale-identified",
-                ),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            let request = coordinator_request()
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-            assert_eq!(
-                sender.submit_erasure_request(request, ErasureReferenceV1::from_digest([35; 32])),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            assert_eq!(
-                sender.authorize_erasure_request(
-                    ErasureReferenceV1::from_digest([36; 32]),
-                    ErasureReferenceV1::from_digest([37; 32]),
-                ),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
-            let transition = ErasureStateTransitionV1 {
-                lifecycle: pos_core::ErasureLifecycleV1::Rejected,
-                freeze_position: None,
-                pending_owners: Vec::new(),
-                failed_owners: Vec::new(),
-                acknowledged_targets: Vec::new(),
-                replay_claim: pos_core::ErasureReplayClaimV1::Exact,
-                provenance: ErasureReferenceV1::from_digest([38; 32]),
-            };
-            assert_eq!(
-                sender.freeze_access(ErasureReferenceV1::from_digest([39; 32]), &transition),
-                Err(ErasureHostErrorV1::StaleGeneration)
-            );
+            assert_stale_command_sender(&mut sender, &root, batch);
         }
 
         let mut reader = host
@@ -3189,6 +3131,72 @@ mod tests {
         );
         assert_eq!(
             reader.key_registry(),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+
+    fn assert_stale_command_sender(
+        sender: &mut ErasureCommandSenderV1<'_>,
+        root: &Timeline,
+        batch: PreparedErasureForkBatchV1,
+    ) {
+        assert_eq!(
+            sender.create_timeline("stale"),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.fork_timeline(root.id(), Seq::ZERO, "stale"),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.commit_fork_admission(batch),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.recover_fork_admission(ErasureReferenceV1::from_digest([33; 32])),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.append(root.id(), &[]),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.initialize_timeline_with_key_registry("stale", &KeyRegistryStateV1::new()),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.fork_timeline_identified(
+                ErasureReferenceV1::from_digest([34; 32]),
+                root.id(),
+                Seq::ZERO,
+                "stale-identified",
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        let request = coordinator_request()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            sender.submit_erasure_request(request, ErasureReferenceV1::from_digest([35; 32])),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.authorize_erasure_request(
+                ErasureReferenceV1::from_digest([36; 32]),
+                ErasureReferenceV1::from_digest([37; 32]),
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        let transition = ErasureStateTransitionV1 {
+            lifecycle: pos_core::ErasureLifecycleV1::Rejected,
+            freeze_position: None,
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            provenance: ErasureReferenceV1::from_digest([38; 32]),
+        };
+        assert_eq!(
+            sender.freeze_access(ErasureReferenceV1::from_digest([39; 32]), &transition),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
     }
