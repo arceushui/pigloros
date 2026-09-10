@@ -981,8 +981,12 @@ mod tests {
         };
         let deadline = Deadline::new(Duration::from_secs(1))?;
         let (mut sender, mut receiver) = UnixStream::pair()?;
-        receive(write_input(&mut sender, &request, &input, &deadline))?;
-        drop(sender);
+        let writer_request = request.clone();
+        let writer_input = input.clone();
+        let writer = std::thread::spawn(move || {
+            let deadline = Deadline::new(Duration::from_secs(1))?;
+            write_input(&mut sender, &writer_request, &writer_input, &deadline)
+        });
 
         let first = SandboxPayloadChunk::from_canonical_cbor(
             &receive(read_frame(&mut receiver, &deadline))?.ok_or("first input frame missing")?,
@@ -999,6 +1003,7 @@ mod tests {
             (second.index, second.offset, second.bytes),
             (1, CHUNK_BYTES as u64, input[CHUNK_BYTES..].to_vec())
         );
+        writer.join().map_err(|_| "provider writer panicked")??;
         Ok(())
     }
 
