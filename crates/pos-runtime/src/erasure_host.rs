@@ -2795,6 +2795,34 @@ mod tests {
     }
 
     #[test]
+    fn inventory_install_rejects_a_generation_foreign_to_the_owned_store() {
+        let foreign_timeline = TimelineId::new();
+        let inventory = verified_empty_inventory(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![foreign_timeline], 4)
+                .unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("snapshot failed: {error:?}")))
+                }),
+            4,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("inventory failed: {error:?}")))
+        });
+        let mut host =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut query = OneShotInventoryV1(Some(inventory));
+
+        assert_eq!(
+            host.install_inventory(&mut query, 4),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            host.read_sender().err(),
+            Some(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    #[test]
     fn empty_recovery_fails_closed_for_unavailable_or_nonempty_request_inventory() {
         assert!(matches!(
             ErasureExecutionHostV1::recover_verified_empty(

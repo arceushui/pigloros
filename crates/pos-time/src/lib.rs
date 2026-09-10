@@ -40,3 +40,38 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
         | pos_core::ErasureHostErrorV1::AdapterFailure => pos_core::CoreError::ArtifactUnavailable,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::host_error_to_core;
+    use pos_core::{CoreError, ErasureHostErrorV1};
+
+    #[test]
+    fn host_errors_map_to_stable_public_time_errors() {
+        for (host, core) in [
+            (
+                ErasureHostErrorV1::AccessFrozen,
+                CoreError::ErasureAccessFrozen,
+            ),
+            (
+                ErasureHostErrorV1::RecoveryUnavailable,
+                CoreError::ErasureContainmentUnavailable,
+            ),
+            (
+                ErasureHostErrorV1::StaleGeneration,
+                CoreError::ErasureContainmentUnavailable,
+            ),
+            (
+                ErasureHostErrorV1::AuthorizationDenied,
+                CoreError::ArtifactUnavailable,
+            ),
+            (ErasureHostErrorV1::Conflict, CoreError::ArtifactUnavailable),
+            (
+                ErasureHostErrorV1::AdapterFailure,
+                CoreError::ArtifactUnavailable,
+            ),
+        ] {
+            assert_eq!(host_error_to_core(host), core);
+        }
+    }
+}
