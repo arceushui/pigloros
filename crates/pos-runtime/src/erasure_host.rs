@@ -1319,7 +1319,7 @@ impl ErasureExecutionHostV1 {
                     let successor = batch.successor_inventory().clone();
                     match self.store.host_store().commit_fork_admission(batch)? {
                         ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
-                            Ok((successor, Timeline::new(child.clone())))
+                            Ok((successor, Timeline::new(input.child.clone())))
                         }
                     }
                 })();
