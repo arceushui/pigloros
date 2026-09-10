@@ -129,3 +129,40 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
         }
     }
 }
+
+#[test]
+fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+    )
+    .test_ok();
+    let gate = host.containment_gate();
+    let unknown_timeline = TimelineId::new();
+    let mut reads = host.read_sender().test_ok();
+
+    let mut snapshot_registry = registry(&gate);
+    assert!(snapshot(
+        &mut reads,
+        unknown_timeline,
+        &mut snapshot_registry,
+        SNAPSHOT_DIGEST,
+        &evaluation(ArtifactStateV1::Retained),
+    )
+    .is_err());
+
+    let mut verification_registry = registry(&gate);
+    let unknown_snapshot = pos_time::Snapshot {
+        timeline: unknown_timeline,
+        at_seq: pos_core::clock::Seq::ZERO,
+        registry: std::collections::HashMap::new(),
+    };
+    assert!(verify_snapshot_consistency(
+        &mut reads,
+        &unknown_snapshot,
+        &mut verification_registry,
+        SNAPSHOT_DIGEST,
+        &evaluation(ArtifactStateV1::Retained),
+    )
+    .is_err());
+}
