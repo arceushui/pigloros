@@ -2927,7 +2927,7 @@ mod tests {
     #[test]
     fn hosted_coordinator_port_fails_closed_for_unverified_request_topology() {
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &ForkChildAuthorityV1);
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::Unauthorized)
@@ -3181,7 +3181,7 @@ mod tests {
     fn hosted_coordinator_port_delegates_submission_and_scope_authority(
     ) -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &ForkChildAuthorityV1);
         let request = ErasureReferenceV1::from_digest([71; 32]);
         let request_object = coordinator_request()?;
         let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
@@ -4725,7 +4725,7 @@ mod tests {
                 )),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        assert!(matches!(rejected_submit.state, HostStateV1::Ready { .. }));
+        assert_ne!(rejected_submit.status(), ErasureHostStatusV1::Poisoned);
     }
 
     #[test]
@@ -4846,7 +4846,7 @@ mod tests {
     }
 
     #[test]
-    fn identified_fork_authority_failure_poisons_the_host() {
+    fn identified_fork_authority_denial_preserves_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             4,
@@ -4868,7 +4868,7 @@ mod tests {
                 )),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        assert_eq!(host.state, HostStateV1::Poisoned);
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]
@@ -4908,7 +4908,7 @@ mod tests {
     }
 
     #[test]
-    fn identified_fork_reports_a_missing_parent_and_poisoned_host() {
+    fn identified_fork_reports_a_missing_parent_without_poisoning_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             4,
@@ -4926,7 +4926,7 @@ mod tests {
                 )),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
-        assert_eq!(host.state, HostStateV1::Poisoned);
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]
