@@ -4163,15 +4163,11 @@ mod tests {
         );
     }
 
-    fn poison_fence_mutex(gate: &ErasureContainmentGateV1) {
+    fn poison_fence_mutex(gate: &ErasureContainmentGateV1, timeline: TimelineId) {
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut effect = || std::panic::resume_unwind(Box::new("test fence panic"));
             assert!(gate
-                .with_fence(
-                    TimelineId::new(),
-                    ErasureProtectedOperationV1::Append,
-                    &mut effect,
-                )
+                .with_fence(timeline, ErasureProtectedOperationV1::Append, &mut effect,)
                 .is_err());
         }));
         assert!(panic.is_err());
@@ -4186,11 +4182,15 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         identified.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
         identified.coordinator = Some(ErasureReferenceV1::from_digest([136; 32]));
-        poison_fence_mutex(&identified.gate);
+        let identified_parent = identified
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("poisoned-fence-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        poison_fence_mutex(&identified.gate, identified_parent.id());
         assert_eq!(
             identified.apply_identified_fork(
                 ErasureReferenceV1::from_digest([137; 32]),
-                TimelineId::new(),
+                identified_parent.id(),
                 Seq::ZERO,
                 "poisoned-fence-identified",
             ),
@@ -4204,7 +4204,11 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         command.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
         command.coordinator = Some(ErasureReferenceV1::from_digest([138; 32]));
-        poison_fence_mutex(&command.gate);
+        let command_timeline = command
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("poisoned-fence-command"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        poison_fence_mutex(&command.gate, command_timeline.id());
         assert_eq!(
             command.apply_coordinator_command(HostedCoordinatorCommandV1::Submit {
                 request: coordinator_request().unwrap_or_else(|error| {
