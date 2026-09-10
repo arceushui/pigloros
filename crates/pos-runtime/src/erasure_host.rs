@@ -1157,7 +1157,7 @@ impl ErasureExecutionHostV1 {
 
     fn apply_coordinator_transition<T>(
         &mut self,
-        transition: impl FnOnce(
+        mut transition: impl FnMut(
             &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
         ) -> Result<T, ErasureErrorV1>,
     ) -> Result<(T, ErasureReferenceV1), ErasureHostErrorV1> {
@@ -1171,16 +1171,12 @@ impl ErasureExecutionHostV1 {
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let gate = Arc::clone(&self.gate);
         let mut transition_error = None;
-        let mut transition = Some(transition);
         let publication = {
             let mut fenced_transition = || {
                 let port =
                     HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
                 let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
-                match (transition.take().ok_or(ErasureErrorV1::ProvenanceMissing)?)(
-                    &mut state_machine,
-                )
-                .and_then(|result| {
+                match transition(&mut state_machine).and_then(|result| {
                     state_machine
                         .verified_inventory(maximum_requests)
                         .map(|inventory| (result, inventory))

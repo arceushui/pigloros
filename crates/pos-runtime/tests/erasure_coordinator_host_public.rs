@@ -7,18 +7,20 @@ use std::sync::{
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
     ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureHostErrorV1,
-    ErasureLifecycleV1, ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
-    ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1,
+    TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
@@ -28,13 +30,14 @@ pub mod erasure_support;
 
 use erasure_support::{
     freeze_evidence_fixture, obligation, persistence_request, persistence_target, reference,
-    FreezeEvidenceFixtureInput,
+    retry_admission, FreezeEvidenceFixtureInput, RetryAdmissionFixture,
 };
 
 #[derive(Default)]
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
     frozen: AtomicBool,
+    allow_post_freeze: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
 }
 
@@ -242,25 +245,40 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         _request: ErasureReferenceV1,
         _commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::Unauthorized)
+        self.allow_post_freeze
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn admit_attempt(
         &self,
-        _admission: &ErasureRetryAdmissionV1,
+        admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::Unauthorized)
+        self.allow_post_freeze
+            .load(Ordering::Acquire)
+            .then_some(ErasureAttemptQuotaReservationV1::new(
+                admission.reference(),
+                reference(50),
+            ))
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn admit_acknowledgement(
         &self,
         _acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::Unauthorized)
+        self.allow_post_freeze
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::Unauthorized)
+        self.allow_post_freeze
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 }
 
@@ -273,6 +291,24 @@ const fn freeze_transition() -> ErasureStateTransitionV1 {
         acknowledged_targets: Vec::new(),
         replay_claim: ErasureReplayClaimV1::Exact,
         provenance: reference(11),
+    }
+}
+
+const fn completed_inventory(
+    target: pos_core::ErasureRequiredTargetV1,
+) -> ErasureInventoryResultV1 {
+    ErasureInventoryResultV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        transition: ErasureArtifactTransitionV1 {
+            from: ErasureReplayClaimV1::Exact,
+            to: ErasureReplayClaimV1::StructuralOnly,
+            reason: reference(20),
+            owner: target.replica_id,
+            acknowledgements: reference(21),
+            provenance: reference(22),
+        },
+        retained_disclosure: reference(23),
     }
 }
 
@@ -369,6 +405,111 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
 fn memory_host_freezes_access_at_the_coordinator_cas_boundary(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_atomic_freeze_parity(StoreConfig::Memory)
+}
+
+#[test]
+fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open lifecycle host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
+    let request = test_stage("construct lifecycle request", persistence_request())?;
+    let request_reference = request.reference();
+    test_stage(
+        "submit lifecycle request",
+        commands.submit_erasure_request(request, request_reference),
+    )?;
+    test_stage(
+        "authorize lifecycle request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze lifecycle request",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+    authority.allow_post_freeze.store(true, Ordering::Release);
+
+    let target = persistence_target();
+    let obligation = test_stage(
+        "construct lifecycle obligation",
+        obligation(request_reference, target),
+    )?;
+    let admission = test_stage(
+        "construct lifecycle admission",
+        retry_admission(RetryAdmissionFixture {
+            request: request_reference,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            obligations: std::slice::from_ref(&obligation),
+            policy: reference(6),
+            trust: reference(8),
+            admitted_position: 11,
+            deadline_position: 20,
+            authorization_provenance: reference(32),
+        }),
+    )?;
+    assert_eq!(
+        test_stage(
+            "dispatch lifecycle destruction",
+            commands.dispatch_erasure_destruction(request_reference, &admission),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
+    test_stage(
+        "acknowledge lifecycle destruction",
+        commands.acknowledge_erasure(
+            request_reference,
+            pos_core::ErasureAcknowledgementV1 {
+                obligation: obligation.reference(),
+                target,
+                owner: target.replica_id,
+                evidence: reference(24),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            },
+        ),
+    )?;
+    let receipt = test_stage(
+        "finalize lifecycle request",
+        commands.finalize_erasure_request(
+            request_reference,
+            ErasureReceiptInputV1 {
+                request: reference(0),
+                terminal_state: reference(0),
+                coordinator: reference(0),
+                lifecycle: ErasureLifecycleV1::Complete,
+                freeze_position: 10,
+                acknowledgements: Vec::new(),
+                frozen_targets: Vec::new(),
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                inventories: ErasureReceiptInventoriesV1 {
+                    artifacts: vec![completed_inventory(target)],
+                    keys: Vec::new(),
+                    replicas: Vec::new(),
+                    backups: Vec::new(),
+                },
+                replay_claim: ErasureReplayClaimV1::Exact,
+                policy: reference(0),
+                trust: reference(0),
+                provenance: reference(0),
+                issue_position: 21,
+                signature: reference(25),
+                receipt_digest: reference(0),
+            },
+        ),
+    )?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    Ok(())
 }
 
 #[test]
