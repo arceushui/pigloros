@@ -36,7 +36,6 @@ use erasure_support::{
 #[derive(Default)]
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
-    frozen_scope: Mutex<Option<ErasureReferenceV1>>,
     frozen: AtomicBool,
     deny_authentication: AtomicBool,
     allow_rejection: AtomicBool,
@@ -74,17 +73,9 @@ impl TestAuthority {
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .clone();
         if self.frozen.load(Ordering::Acquire) {
-            let scope = self
-                .frozen_scope
-                .lock()
-                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             Ok(ErasureVerifiedTopologyObservationV1::new(
                 manifest,
-                timelines
-                    .into_iter()
-                    .map(|(timeline, _)| (timeline, scope))
-                    .collect(),
+                timelines,
                 Vec::new(),
             ))
         } else {
@@ -209,10 +200,6 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             freeze_admission_evidence,
             freeze_authorization_evidence,
         })?;
-        self.frozen_scope
-            .lock()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
-            .replace(scope_reference);
         self.frozen.store(true, Ordering::Release);
         Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(admission)))
     }
