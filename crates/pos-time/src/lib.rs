@@ -48,30 +48,28 @@ mod tests {
 
     #[test]
     fn host_errors_map_to_stable_public_time_errors() {
-        for (host, core) in [
-            (
-                ErasureHostErrorV1::AccessFrozen,
-                CoreError::ErasureAccessFrozen,
-            ),
-            (
-                ErasureHostErrorV1::RecoveryUnavailable,
-                CoreError::ErasureContainmentUnavailable,
-            ),
-            (
-                ErasureHostErrorV1::StaleGeneration,
-                CoreError::ErasureContainmentUnavailable,
-            ),
-            (
-                ErasureHostErrorV1::AuthorizationDenied,
-                CoreError::ArtifactUnavailable,
-            ),
-            (ErasureHostErrorV1::Conflict, CoreError::ArtifactUnavailable),
-            (
-                ErasureHostErrorV1::AdapterFailure,
-                CoreError::ArtifactUnavailable,
-            ),
+        assert!(matches!(
+            host_error_to_core(ErasureHostErrorV1::AccessFrozen),
+            CoreError::ErasureAccessFrozen
+        ));
+        for host in [
+            ErasureHostErrorV1::RecoveryUnavailable,
+            ErasureHostErrorV1::StaleGeneration,
         ] {
-            assert_eq!(host_error_to_core(host), core);
+            assert!(matches!(
+                host_error_to_core(host),
+                CoreError::ErasureContainmentUnavailable
+            ));
+        }
+        for host in [
+            ErasureHostErrorV1::AuthorizationDenied,
+            ErasureHostErrorV1::Conflict,
+            ErasureHostErrorV1::AdapterFailure,
+        ] {
+            assert!(matches!(
+                host_error_to_core(host),
+                CoreError::ArtifactUnavailable
+            ));
         }
     }
 }
