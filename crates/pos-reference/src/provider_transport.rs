@@ -1446,6 +1446,31 @@ mod coverage_tests {
                 Err(ReceiveFailure::Invalid)
             );
         }
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        writer.shutdown(Shutdown::Write)?;
+        assert_eq!(ensure_eof(&mut reader, &deadline), Ok(()));
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        writer.write_all(b"unexpected trailing byte")?;
+        writer.shutdown(Shutdown::Write)?;
+        assert_eq!(
+            ensure_eof(&mut reader, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+
+        let mut valid_magic = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![Value::Array(vec![Value::Text("SPY1".to_owned())])]),
+            &mut valid_magic,
+        )?;
+        assert_eq!(record_magic(&valid_magic), Ok("SPY1".to_owned()));
+        assert_eq!(record_magic(&[]), Err(ReceiveFailure::Invalid));
+        let mut malformed_magic = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![Value::Text("SPY1".to_owned())]),
+            &mut malformed_magic,
+        )?;
+        assert_eq!(record_magic(&malformed_magic), Err(ReceiveFailure::Invalid));
         Ok(())
     }
 }
