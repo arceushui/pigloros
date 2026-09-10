@@ -1267,3 +1267,47 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use std::io::{self, Write};
+
+    use super::*;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected output write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn staged_output_covers_exact_copy_trailing_and_destination_failure() {
+        let payload = b"provider output";
+        let descriptor = PayloadDescriptor {
+            byte_length: payload.len() as u64,
+            digest: output_digest(payload),
+        };
+        let mut source = payload.as_slice();
+        let mut staged = StagedOutput::stage_verified(&mut source, descriptor.clone())
+            .expect("exact staged output");
+        let mut copied = Vec::new();
+        staged.copy_to(&mut copied).expect("output copy");
+        assert_eq!(copied, payload);
+
+        let mut trailing = b"provider output!".as_slice();
+        assert_eq!(
+            StagedOutput::stage_verified(&mut trailing, descriptor),
+            Err(RootSelectorServiceError::ProviderEvidence)
+        );
+        assert_eq!(
+            staged.copy_to(&mut FailingWriter),
+            Err(RootSelectorServiceError::Io)
+        );
+    }
+}
