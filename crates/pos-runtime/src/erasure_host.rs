@@ -1211,7 +1211,7 @@ impl ErasureExecutionHostV1 {
 
     fn apply_coordinator_command(
         &mut self,
-        command: HostedCoordinatorCommandV1,
+        command: &HostedCoordinatorCommandV1,
     ) -> Result<(ErasureStateV1, ErasureReferenceV1), ErasureHostErrorV1> {
         self.apply_coordinator_transition(|state_machine| command.clone().execute(state_machine))
     }
@@ -1219,7 +1219,7 @@ impl ErasureExecutionHostV1 {
     fn apply_finalize_command(
         &mut self,
         request: ErasureReferenceV1,
-        input: ErasureReceiptInputV1,
+        input: &ErasureReceiptInputV1,
     ) -> Result<(ErasureReceiptV1, ErasureReferenceV1), ErasureHostErrorV1> {
         self.apply_coordinator_transition(|state_machine| {
             state_machine.finalize(request, input.clone())
@@ -1315,7 +1315,7 @@ impl ErasureCommandSenderV1<'_> {
         command: HostedCoordinatorCommandV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let (state, generation) = self.host.apply_coordinator_command(command)?;
+        let (state, generation) = self.host.apply_coordinator_command(&command)?;
         self.generation = generation;
         Ok(state)
     }
@@ -1326,7 +1326,7 @@ impl ErasureCommandSenderV1<'_> {
         input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let (receipt, generation) = self.host.apply_finalize_command(request, input)?;
+        let (receipt, generation) = self.host.apply_finalize_command(request, &input)?;
         self.generation = generation;
         Ok(receipt)
     }
@@ -4584,7 +4584,7 @@ mod tests {
             ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
-            closed.apply_coordinator_command(HostedCoordinatorCommandV1::Authorize {
+            closed.apply_coordinator_command(&HostedCoordinatorCommandV1::Authorize {
                 request: ErasureReferenceV1::from_digest([134; 32]),
                 provenance: ErasureReferenceV1::from_digest([135; 32]),
             }),
@@ -4639,7 +4639,7 @@ mod tests {
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         poison_fence_mutex(&command.gate, command_timeline.id());
         assert_eq!(
-            command.apply_coordinator_command(HostedCoordinatorCommandV1::Submit {
+            command.apply_coordinator_command(&HostedCoordinatorCommandV1::Submit {
                 request: coordinator_request().unwrap_or_else(|error| {
                     std::panic::resume_unwind(Box::new(format!("{error:?}")))
                 }),
