@@ -2058,6 +2058,18 @@ mod tests {
             }
         }
 
+        fn read_event_by_id(
+            &self,
+            timeline: TimelineId,
+            event_id: EventId,
+        ) -> Result<Option<Event>, CoreError> {
+            if self.fault == FaultModeV1::EventStore {
+                Err(CoreError::Storage("fault event lookup".to_owned()))
+            } else {
+                self.inner.read_event_by_id(timeline, event_id)
+            }
+        }
+
         fn fork(
             &mut self,
             parent: TimelineId,
@@ -2084,6 +2096,14 @@ mod tests {
                 Err(CoreError::Storage("fault timeline".to_owned()))
             } else {
                 self.inner.get_timeline(id)
+            }
+        }
+
+        fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+            if self.fault == FaultModeV1::EventStore {
+                Err(CoreError::Storage("fault key registry".to_owned()))
+            } else {
+                self.inner.load_key_registry()
             }
         }
     }
