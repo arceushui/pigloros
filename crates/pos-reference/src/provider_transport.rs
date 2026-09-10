@@ -749,6 +749,24 @@ mod tests {
         }
     }
 
+    struct FragmentingReader<'a> {
+        remaining: &'a [u8],
+        maximum_read: usize,
+    }
+
+    impl Read for FragmentingReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self
+                .remaining
+                .len()
+                .min(self.maximum_read)
+                .min(buffer.len());
+            buffer[..read].copy_from_slice(&self.remaining[..read]);
+            self.remaining = &self.remaining[read..];
+            Ok(read)
+        }
+    }
+
     struct FailingWriter;
 
     impl Write for FailingWriter {
@@ -789,6 +807,25 @@ mod tests {
                 assert_eq!(copied, bytes);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn verified_staging_accepts_fragmented_input_without_changing_the_payload() -> TestResult {
+        let bytes = vec![7; 8193];
+        let descriptor = PayloadDescriptor {
+            byte_length: bytes.len() as u64,
+            digest: output_digest(&bytes),
+        };
+        let mut reader = FragmentingReader {
+            remaining: &bytes,
+            maximum_read: 3,
+        };
+        let mut staged = StagedOutput::stage_verified(&mut reader, descriptor)?;
+        let mut copied = Vec::new();
+        staged.copy_to(&mut copied)?;
+
+        assert_eq!(copied, bytes);
         Ok(())
     }
 
@@ -914,6 +951,72 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn input_frames_fail_closed_when_the_provider_disconnects() -> TestResult {
+        let input = b"input";
+        let mut request = request()?;
+        request.adapter_input = PayloadDescriptor {
+            byte_length: input.len() as u64,
+            digest: output_digest_with(b"PiglorOS.SandboxInputBytes.v1\0", input),
+        };
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut sender, receiver) = UnixStream::pair()?;
+        drop(receiver);
+
+        assert_eq!(
+            write_input(&mut sender, &request, input, &deadline),
+            Err(ReceiveFailure::Incomplete)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn input_frames_preserve_chunk_order_across_the_payload_boundary() -> TestResult {
+        let mut input = vec![1; CHUNK_BYTES];
+        input.extend_from_slice(b"tail");
+        let mut request = request()?;
+        request.adapter_input = PayloadDescriptor {
+            byte_length: input.len() as u64,
+            digest: output_digest_with(b"PiglorOS.SandboxInputBytes.v1\0", &input),
+        };
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        receive(write_input(&mut sender, &request, &input, &deadline))?;
+        drop(sender);
+
+        let first = SandboxPayloadChunk::from_canonical_cbor(
+            &receive(read_frame(&mut receiver, &deadline))?.ok_or("first input frame missing")?,
+        )?;
+        let second = SandboxPayloadChunk::from_canonical_cbor(
+            &receive(read_frame(&mut receiver, &deadline))?.ok_or("second input frame missing")?,
+        )?;
+
+        assert_eq!(
+            (first.index, first.offset, first.bytes),
+            (0, 0, input[..CHUNK_BYTES])
+        );
+        assert_eq!(
+            (second.index, second.offset, second.bytes),
+            (1, CHUNK_BYTES as u64, input[CHUNK_BYTES..])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn frames_reject_a_truncated_payload_after_a_complete_prefix() -> TestResult {
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        sender.write_all(&4_u32.to_be_bytes())?;
+        sender.write_all(b"two")?;
+        drop(sender);
+
+        assert_eq!(
+            read_frame(&mut receiver, &deadline),
+            Err(ReceiveFailure::Incomplete)
+        );
+        Ok(())
+    }
+
     fn completed(descriptor: PayloadDescriptor) -> SandboxProviderResult {
         SandboxProviderResult {
             request_id: [2; 16],
@@ -981,6 +1084,53 @@ mod tests {
             .map_err(|failure| format!("payload validation failed: {failure:?}"))?
             .ok_or("completed output absent")?;
         assert_eq!(staged.descriptor(), &descriptor);
+        Ok(())
+    }
+
+    #[test]
+    fn staged_output_reassembles_a_multi_chunk_authenticated_stream() -> TestResult {
+        let first = vec![3; CHUNK_BYTES];
+        let second = b"tail";
+        let mut bytes = first.clone();
+        bytes.extend_from_slice(second);
+        let descriptor = PayloadDescriptor {
+            byte_length: bytes.len() as u64,
+            digest: output_digest(&bytes),
+        };
+        let result = completed(descriptor.clone());
+        let first_chunk = SandboxPayloadChunk::from_canonical_cbor(&receive(encode_chunk(
+            result.result_digest,
+            [2; 16],
+            [3; 16],
+            1,
+            0,
+            &first,
+        ))?)?;
+        let second_chunk = SandboxPayloadChunk::from_canonical_cbor(&receive(encode_chunk(
+            result.result_digest,
+            [2; 16],
+            [3; 16],
+            1,
+            1,
+            second,
+        ))?)?;
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(&bytes)?;
+        let mut staged = receive(stage_output(
+            file,
+            vec![
+                ChunkMeta::from(&first_chunk),
+                ChunkMeta::from(&second_chunk),
+            ],
+            &request()?,
+            &result,
+        ))?
+        .ok_or("completed output absent")?;
+        let mut copied = Vec::new();
+        staged.copy_to(&mut copied)?;
+
+        assert_eq!(staged.descriptor(), &descriptor);
+        assert_eq!(copied, bytes);
         Ok(())
     }
 
