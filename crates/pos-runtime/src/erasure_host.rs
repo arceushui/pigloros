@@ -1320,7 +1320,7 @@ impl ErasureExecutionHostV1 {
             gate.install_from_verified_inventory_transition(&mut fenced_transition)
         };
         match publication {
-            Ok(publication) => publication,
+            Ok(publication) => Ok(publication),
             Err(error) => {
                 let mapped = transition_error.map_or_else(|| error.into(), map_erasure_error);
                 if transition_error.is_some_and(is_non_poisoning_transition_error)
