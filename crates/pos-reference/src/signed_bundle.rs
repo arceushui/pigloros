@@ -1723,6 +1723,32 @@ mod tests {
     }
 
     #[test]
+    fn canonical_archive_validator_closes_container_and_payload_boundaries() {
+        let mut deep_array = vec![0x81; 33];
+        deep_array.push(0xf6);
+        for (bytes, expected) in [
+            (vec![0x42, 0], BundleError::SnapshotUnavailable),
+            (vec![0x98, 24], BundleError::SnapshotUnavailable),
+            (vec![0x99, 1, 1], BundleError::FieldOutOfBounds),
+            (vec![0x20], BundleError::InvalidEncoding),
+            (vec![0xa0], BundleError::InvalidEncoding),
+            (vec![0xf9, 0, 0], BundleError::InvalidEncoding),
+            (vec![0x1c], BundleError::InvalidEncoding),
+            (vec![0x18], BundleError::SnapshotUnavailable),
+            (deep_array, BundleError::FieldOutOfBounds),
+        ] {
+            assert_eq!(
+                verify_canonical_archive(&mut Cursor::new(bytes)),
+                Err(expected)
+            );
+        }
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0x61, b'x'])),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn reader_rejects_invalid_signature_and_prohibited_member_material() -> TestResult {
         let (mut archive, trust_policy, request) = reader_inputs()?;
         let signature_byte = archive.last_mut().ok_or(BundleError::InvalidEncoding)?;
