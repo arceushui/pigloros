@@ -543,6 +543,25 @@ fn delivery_denial_keeps_the_durable_attempt_retryable_without_poisoning_host(
     let request = test_stage("construct retryable-denial request", persistence_request())?;
     let request_reference = request.reference();
     let request_provenance = request.provenance();
+    let target = persistence_target();
+    let obligation = test_stage(
+        "construct retryable-denial obligation",
+        obligation(request_reference, target),
+    )?;
+    let admission = test_stage(
+        "construct retryable-denial admission",
+        retry_admission(RetryAdmissionFixture {
+            request: request_reference,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            obligations: std::slice::from_ref(&obligation),
+            policy: reference(6),
+            trust: reference(8),
+            admitted_position: 11,
+            deadline_position: 20,
+            authorization_provenance: reference(32),
+        }),
+    )?;
     {
         let mut commands = test_stage("open retryable-denial sender", host.command_sender())?;
         let timeline = test_stage(
@@ -566,45 +585,24 @@ fn delivery_denial_keeps_the_durable_attempt_retryable_without_poisoning_host(
             commands.freeze_access(request_reference, &freeze_transition()),
         )?;
 
-        let target = persistence_target();
-        let obligation = test_stage(
-            "construct retryable-denial obligation",
-            obligation(request_reference, target),
-        )?;
-        let admission = test_stage(
-            "construct retryable-denial admission",
-            retry_admission(RetryAdmissionFixture {
-                request: request_reference,
-                attempt_ordinal: 0,
-                source_receipt: None,
-                obligations: std::slice::from_ref(&obligation),
-                policy: reference(6),
-                trust: reference(8),
-                admitted_position: 11,
-                deadline_position: 20,
-                authorization_provenance: reference(32),
-            }),
-        )?;
-
         authority.allow_attempt.store(true, Ordering::Release);
         assert_eq!(
             commands.dispatch_erasure_destruction(request_reference, &admission),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        drop(commands);
-        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
-
-        authority.allow_dispatch.store(true, Ordering::Release);
-        let mut retry = test_stage("reopen retryable-denial sender", host.command_sender())?;
-        assert_eq!(
-            test_stage(
-                "retry durable destruction dispatch",
-                retry.dispatch_erasure_destruction(request_reference, &admission),
-            )?
-            .lifecycle(),
-            ErasureLifecycleV1::AwaitingAcknowledgements
-        );
     }
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+
+    authority.allow_dispatch.store(true, Ordering::Release);
+    let mut retry = test_stage("reopen retryable-denial sender", host.command_sender())?;
+    assert_eq!(
+        test_stage(
+            "retry durable destruction dispatch",
+            retry.dispatch_erasure_destruction(request_reference, &admission),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
     Ok(())
 }
 
