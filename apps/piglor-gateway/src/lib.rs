@@ -2892,12 +2892,11 @@ mod tests {
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .test_ok();
-        host.gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        host.bind_consent_authority(ConsentAuthority::new().append_permit())
+            .test_ok();
         assert!(matches!(
             Gateway::new_with_erasure_host(host),
-            Err(GatewayError::Store(
-                CoreError::ErasureContainmentUnavailable
-            ))
+            Err(GatewayError::Store(CoreError::Storage(_)))
         ));
 
         let mut host = ErasureExecutionHostV1::open_verified_empty(
@@ -2905,16 +2904,15 @@ mod tests {
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .test_ok();
-        host.gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        host.bind_consent_authority(ConsentAuthority::new().append_permit())
+            .test_ok();
         assert!(matches!(
             Gateway::new_with_erasure_host_and_authorization(
                 host,
                 std::iter::empty(),
                 crate::authorization::test_authorization_for(EntityId::new()),
             ),
-            Err(GatewayError::Store(
-                CoreError::ErasureContainmentUnavailable
-            ))
+            Err(GatewayError::Store(CoreError::Storage(_)))
         ));
 
         let mut host = ErasureExecutionHostV1::open_gateway_verified_empty(
@@ -2922,12 +2920,11 @@ mod tests {
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .test_ok();
-        host.gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        host.bind_consent_authority(ConsentAuthority::new().append_permit())
+            .test_ok();
         assert!(matches!(
             Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32])),
-            Err(GatewayError::Store(
-                CoreError::ErasureContainmentUnavailable
-            ))
+            Err(GatewayError::Store(CoreError::Storage(_)))
         ));
     }
 
