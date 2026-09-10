@@ -629,11 +629,11 @@ enum ExecutorStore {
 }
 
 impl ExecutorStore {
-    fn erasure_status(&self) -> Result<ErasureHostStatusV1, StoreExecutorError> {
+    fn erasure_status(&self) -> ErasureHostStatusV1 {
         match self {
-            Self::Host(host) => Ok(host.status()),
+            Self::Host(host) => host.status(),
             #[cfg(test)]
-            Self::Generic(_) | Self::Gateway(_) => Ok(ErasureHostStatusV1::Ready),
+            Self::Generic(_) | Self::Gateway(_) => ErasureHostStatusV1::Ready,
         }
     }
 }
@@ -2169,7 +2169,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             send_store_result(reply, state.store.protected_logical_head(timeline));
         }
         Command::ErasureStatus { reply } => {
-            drop(reply.send(state.store.erasure_status()));
+            drop(reply.send(Ok(state.store.erasure_status())));
         }
         #[cfg(test)]
         Command::Panic { reply } | Command::PanicRead { reply } => {

@@ -1687,6 +1687,10 @@ impl Gateway {
     /// Return the payload-free erasure recovery status owned by the Gateway's
     /// store executor. This status remains readable while individual
     /// protected operations are denied by containment.
+    ///
+    /// # Errors
+    /// Returns a typed executor lifecycle error when the store worker is
+    /// closed, unhealthy, saturated, or the bounded command deadline expires.
     pub async fn erasure_status(&self) -> Result<ErasureHostStatusV1, GatewayError> {
         self.store.erasure_status().await.map_err(Into::into)
     }
