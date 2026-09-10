@@ -2892,7 +2892,7 @@ mod tests {
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .test_ok();
-        host.containment_gate().poison();
+        host.gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         assert!(matches!(
             Gateway::new_with_erasure_host(host),
             Err(GatewayError::Store(
@@ -2905,7 +2905,7 @@ mod tests {
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .test_ok();
-        host.containment_gate().poison();
+        host.gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         assert!(matches!(
             Gateway::new_with_erasure_host_and_authorization(
                 host,
@@ -2922,7 +2922,7 @@ mod tests {
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .test_ok();
-        host.containment_gate().poison();
+        host.gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         assert!(matches!(
             Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32])),
             Err(GatewayError::Store(
