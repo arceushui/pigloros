@@ -984,8 +984,9 @@ mod tests {
         let writer_request = request.clone();
         let writer_input = input.clone();
         let writer = std::thread::spawn(move || {
-            let deadline = Deadline::new(Duration::from_secs(1))?;
-            write_input(&mut sender, &writer_request, &writer_input, &deadline)
+            Deadline::new(Duration::from_secs(1)).is_ok_and(|deadline| {
+                write_input(&mut sender, &writer_request, &writer_input, &deadline).is_ok()
+            })
         });
 
         let first = SandboxPayloadChunk::from_canonical_cbor(
@@ -1003,7 +1004,7 @@ mod tests {
             (second.index, second.offset, second.bytes),
             (1, CHUNK_BYTES as u64, input[CHUNK_BYTES..].to_vec())
         );
-        writer.join().map_err(|_| "provider writer panicked")??;
+        assert!(matches!(writer.join(), Ok(true)));
         Ok(())
     }
 
