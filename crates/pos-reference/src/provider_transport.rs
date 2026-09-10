@@ -1269,7 +1269,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
     use std::io::{self, Write};
     use std::net::Shutdown;

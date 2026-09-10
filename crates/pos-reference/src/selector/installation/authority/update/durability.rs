@@ -723,7 +723,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
     use std::fs::File;
     use std::os::unix::fs::MetadataExt;
