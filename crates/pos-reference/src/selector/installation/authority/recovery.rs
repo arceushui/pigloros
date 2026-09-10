@@ -343,14 +343,23 @@ fn read_file(file: &File, limit: u64) -> Result<Vec<u8>, SelectorBoundaryError> 
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use std::io::Write;
 
-    fn encoded_recovery(previous_length: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let unsigned = Value::Array(vec![
+    fn recovery_unsigned(previous_length: usize) -> Value {
+        recovery_unsigned_with_lengths(previous_length, 9 * 1024 * 1024, 1)
+    }
+
+    fn recovery_unsigned_with_lengths(
+        previous_length: usize,
+        next_length: usize,
+        update_length: usize,
+    ) -> Value {
+        Value::Array(vec![
             Value::Text("SIR1".to_owned()),
             Value::Integer(1_u64.into()),
             Value::Bytes(vec![1; previous_length]),
-            Value::Bytes(vec![2; 9 * 1024 * 1024]),
-            Value::Bytes(vec![3]),
+            Value::Bytes(vec![2; next_length]),
+            Value::Bytes(vec![3; update_length]),
             Value::Array(vec![
                 Value::Text("provider".to_owned()),
                 Value::Bytes(vec![4; 32]),
@@ -379,7 +388,10 @@ mod tests {
             ]),
             Value::Array(Vec::new()),
             Value::Array(Vec::new()),
-        ]);
+        ])
+    }
+
+    fn signed_recovery(unsigned: Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let unsigned_bytes =
             crate::evaluator_protocol::encode_with_limit(&unsigned, 48 * 1024 * 1024)?;
         let mut hasher = blake3::Hasher::new();
@@ -394,6 +406,10 @@ mod tests {
         )?)
     }
 
+    fn encoded_recovery(previous_length: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        signed_recovery(recovery_unsigned(previous_length))
+    }
+
     #[test]
     fn recovery_envelope_has_a_separate_limit_from_embedded_records(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -405,6 +421,62 @@ mod tests {
                 length <= 16 * 1024 * 1024
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_envelope_rejects_schema_record_and_digest_substitution(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let valid = signed_recovery(recovery_unsigned_with_lengths(1, 2, 3))?;
+        let decoded = decode_recovery(&valid)?;
+        assert_eq!(decoded.previous, vec![1]);
+        assert_eq!(decoded.next, vec![2; 2]);
+        assert_eq!(decoded.update, vec![3; 3]);
+        assert_ne!(decoded.sir1_digest, [0; 32]);
+
+        for (index, replacement) in [
+            (0, Value::Text("SIR2".to_owned())),
+            (1, Value::Integer(2_u64.into())),
+            (2, Value::Text("not-bytes".to_owned())),
+            (4, Value::Bytes(Vec::new())),
+        ] {
+            let Value::Array(mut fields) = recovery_unsigned_with_lengths(1, 2, 3) else {
+                unreachable!("recovery fixture must be an array");
+            };
+            fields[index] = replacement;
+            assert_eq!(
+                decode_recovery(&signed_recovery(Value::Array(fields))?),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+
+        let mut changed_digest = valid;
+        let last = changed_digest.last_mut().ok_or("empty recovery envelope")?;
+        *last ^= 1;
+        assert_eq!(
+            decode_recovery(&changed_digest),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_file_reader_rejects_oversized_and_changed_file_content(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut stable = tempfile::tempfile()?;
+        stable.write_all(b"stable")?;
+        stable.flush()?;
+        assert_eq!(read_file(&stable, 6)?, b"stable");
+        assert_eq!(
+            read_file(&stable, 5),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        let proc_command_line = std::fs::File::open("/proc/self/cmdline")?;
+        assert_eq!(
+            read_file(&proc_command_line, 4096),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
         Ok(())
     }
 }

@@ -509,3 +509,167 @@ fn random_id(excluded: &[[u8; 16]]) -> [u8; 16] {
 const fn invalid(_: crate::evaluator_protocol::ProtocolError) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn runtime_key() -> SandboxTrustKey {
+        SandboxTrustKey {
+            key_id: "runtime".to_owned(),
+            role: SandboxTrustRole::ProviderRuntimeAttestation,
+            public_key: SigningKey::from_bytes(&[45; 32]).verifying_key().to_bytes(),
+            epoch: 7,
+        }
+    }
+
+    fn binding() -> PreviousProviderBinding {
+        PreviousProviderBinding {
+            provider_id: "provider".to_owned(),
+            provider_manifest_digest: [1; 32],
+            provider_binary_digest: [2; 32],
+            public_contract_digest: [3; 32],
+            runtime_key_id: "runtime".to_owned(),
+            runtime_public_key: runtime_key().public_key,
+            runtime_key_epoch: 7,
+            runtime_instance_id: [4; 16],
+            lifecycle_scope_id: [5; 16],
+            main_pid: 101,
+            main_start_time_ticks: 202,
+        }
+    }
+
+    #[test]
+    fn previous_binding_round_trips_and_rejects_identity_substitution() -> TestResult {
+        let binding = binding();
+        let encoded = binding.value();
+        let decoded = PreviousProviderBinding::from_value(&encoded)?;
+        assert_eq!(decoded, binding);
+        assert_eq!(decoded.digest()?, binding.digest()?);
+
+        for (index, replacement) in [
+            (0, Value::Text(String::new())),
+            (1, Value::Bytes(vec![0; 32])),
+            (5, Value::Bytes(vec![0; 16])),
+            (6, Value::Bytes(vec![4; 16])),
+            (7, Value::Integer(0_u64.into())),
+        ] {
+            let Value::Array(mut fields) = binding.value() else {
+                unreachable!("binding fixture must be an array");
+            };
+            fields[index] = replacement;
+            assert_eq!(
+                PreviousProviderBinding::from_value(&Value::Array(fields)),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+
+        let Value::Array(mut fields) = binding.value() else {
+            unreachable!("binding fixture must be an array");
+        };
+        let Value::Array(runtime) = &mut fields[4] else {
+            unreachable!("runtime key fixture must be an array");
+        };
+        runtime[1] = Value::Integer(2_u64.into());
+        assert_eq!(
+            PreviousProviderBinding::from_value(&Value::Array(fields)),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_slots_and_attempt_sets_preserve_distinct_bound_identities() -> TestResult {
+        let key = runtime_key();
+        let runtime = ProviderRuntimeSlot::allocate([1; 32]).bind_observed_process(101, 0)?;
+        let snapshot = InstallationRecoverySnapshot::seal(
+            "provider".to_owned(),
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            &key,
+            &runtime,
+            vec![[6; 16], [7; 16]],
+            vec![[6; 16]],
+        )?;
+        let [recovery_runtime, recovery_scope, recovery_endpoint] = snapshot.recovery_slot_ids();
+        let (previous_runtime, previous_scope) = snapshot.previous_runtime_ids();
+        for id in [
+            recovery_runtime,
+            recovery_scope,
+            recovery_endpoint,
+            previous_runtime,
+            previous_scope,
+        ] {
+            assert_ne!(id, [0; 16]);
+        }
+        assert_ne!(recovery_runtime, recovery_scope);
+        assert_ne!(recovery_runtime, recovery_endpoint);
+        assert_ne!(recovery_scope, recovery_endpoint);
+
+        let decoded = InstallationRecoverySnapshot::from_values(
+            &snapshot.previous_provider_value(),
+            &snapshot.recovery_slot_value(),
+            &Value::Array(vec![Value::Bytes(vec![6; 16]), Value::Bytes(vec![7; 16])]),
+            &Value::Array(vec![Value::Bytes(vec![6; 16])]),
+        )?;
+        assert_eq!(decoded.previous_live_attempt_ids(), &[[6; 16], [7; 16]]);
+        assert_eq!(decoded.required_cancelled_attempt_ids(), &[[6; 16]]);
+
+        let Value::Array(mut colliding_slot) = snapshot.recovery_slot_value() else {
+            unreachable!("recovery slot fixture must be an array");
+        };
+        colliding_slot[0] = Value::Bytes(previous_runtime.to_vec());
+        assert_eq!(
+            InstallationRecoverySnapshot::from_values(
+                &snapshot.previous_provider_value(),
+                &Value::Array(colliding_slot),
+                &Value::Array(vec![Value::Bytes(vec![6; 16]), Value::Bytes(vec![7; 16])]),
+                &Value::Array(vec![Value::Bytes(vec![6; 16])]),
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            InstallationRecoverySnapshot::seal(
+                "provider".to_owned(),
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                &key,
+                &runtime,
+                vec![[7; 16], [6; 16]],
+                vec![],
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identifier_decoders_reject_zero_duplicate_and_unsorted_input() {
+        assert_eq!(
+            nonzero_digest(&Value::Bytes(vec![0; 32])),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            nonzero_id(&Value::Bytes(vec![0; 16])),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        for values in [
+            vec![Value::Bytes(vec![0; 16])],
+            vec![Value::Bytes(vec![2; 16]), Value::Bytes(vec![2; 16])],
+            vec![Value::Bytes(vec![3; 16]), Value::Bytes(vec![2; 16])],
+        ] {
+            assert_eq!(
+                attempt_ids(&Value::Array(values)),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+        let fresh = random_id(&[[9; 16]]);
+        assert_ne!(fresh, [0; 16]);
+        assert_ne!(fresh, [9; 16]);
+    }
+}

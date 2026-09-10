@@ -134,3 +134,13 @@ fn random_id() -> [u8; 16] {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn termination_proof_identity_is_never_zero() {
+        assert_ne!(random_id(), [0; 16]);
+    }
+}
