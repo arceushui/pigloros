@@ -1119,6 +1119,7 @@ mod tests {
 mod coverage_tests {
     use std::io::{Read, Write};
     use std::net::Shutdown;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     use super::*;
 
@@ -1166,6 +1167,43 @@ mod coverage_tests {
                 Err(error) if error.code == expected
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn selector_framing_rejects_truncated_and_malformed_controls() -> TestResult {
+        let (mut server, mut client) = UnixStream::pair()?;
+        client.write_all(&2_u32.to_be_bytes())?;
+        client.write_all(&[0xff])?;
+        client.shutdown(Shutdown::Write)?;
+        assert!(matches!(
+            read_selector_request(&mut server),
+            Err(error) if error.code == SandboxLocalErrorCode::InvalidSelectorRequest
+        ));
+
+        let (mut server, mut client) = UnixStream::pair()?;
+        client.write_all(&1_u32.to_be_bytes())?;
+        client.write_all(&[0xff])?;
+        client.shutdown(Shutdown::Write)?;
+        assert!(matches!(
+            read_selector_request(&mut server),
+            Err(error) if error.code == SandboxLocalErrorCode::InvalidSelectorRequest
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn selector_listener_uses_the_verified_parent_and_socket_mode() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let owner = std::fs::metadata(directory.path())?.uid();
+        let path = directory.path().join("selector.sock");
+        let listener = bind_selector_listener(&path, owner)?;
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            SOCKET_MODE
+        );
+        assert!(bind_selector_listener(&path, owner).is_err());
+        drop(listener);
         Ok(())
     }
 
