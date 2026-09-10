@@ -4165,12 +4165,12 @@ mod tests {
 
     fn poison_fence_mutex(gate: &ErasureContainmentGateV1) {
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut effect = || panic!("test fence panic");
-            let _ = gate.with_fence(
+            let mut effect = || std::panic::resume_unwind(Box::new("test fence panic"));
+            drop(gate.with_fence(
                 TimelineId::new(),
                 ErasureProtectedOperationV1::Append,
                 &mut effect,
-            );
+            ));
         }));
         assert!(panic.is_err());
     }
