@@ -783,7 +783,6 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::io::{Read, Write};
     use std::net::Shutdown;
