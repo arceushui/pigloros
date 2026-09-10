@@ -63,6 +63,17 @@ pub enum ErasureHostStatusV1 {
     Poisoned,
 }
 
+struct IdentifiedForkTransitionInput<'a> {
+    operation: ErasureReferenceV1,
+    parent: TimelineId,
+    child: &'a TimelineMeta,
+    current_generation: ErasureReferenceV1,
+    current_inventory: &'a ErasureVerifiedInventoryV1,
+    authority: &'a dyn ErasureCoordinatorAuthorityV1,
+    coordinator: ErasureReferenceV1,
+    maximum_requests: usize,
+}
+
 struct OneShotInventoryV1(Option<ErasureVerifiedInventoryV1>);
 
 impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
@@ -1224,16 +1235,17 @@ impl ErasureExecutionHostV1 {
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let child = TimelineMeta::forked_from(parent, at_seq, name);
-        let (inventory, timeline) = self.apply_identified_fork_transition(
+        let transition = IdentifiedForkTransitionInput {
             operation,
             parent,
-            child,
+            child: &child,
             current_generation,
-            current_inventory,
-            authority,
+            current_inventory: &current_inventory,
+            authority: authority.as_ref(),
             coordinator,
             maximum_requests,
-        )?;
+        };
+        let (inventory, timeline) = self.apply_identified_fork_transition(&transition)?;
         let generation = inventory.generation();
         let request_count = inventory.request_count();
         self.inventory = Some(inventory);
@@ -1247,64 +1259,63 @@ impl ErasureExecutionHostV1 {
 
     fn apply_identified_fork_transition(
         &mut self,
-        operation: ErasureReferenceV1,
-        parent: TimelineId,
-        child: TimelineMeta,
-        current_generation: ErasureReferenceV1,
-        current_inventory: ErasureVerifiedInventoryV1,
-        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
-        coordinator: ErasureReferenceV1,
-        maximum_requests: usize,
+        input: &IdentifiedForkTransitionInput<'_>,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureHostErrorV1> {
         let gate = Arc::clone(&self.gate);
         let mut transition_error = None;
         let publication = {
             let mut fenced_transition = || {
                 let transition = (|| {
-                    if let Some(recovered) =
-                        self.store.host_store().recover_fork_admission(operation)?
+                    if let Some(recovered) = self
+                        .store
+                        .host_store()
+                        .recover_fork_admission(input.operation)?
                     {
-                        if recovered.successor_generation() != current_generation {
+                        if recovered.successor_generation() != input.current_generation {
                             return Err(ErasureErrorV1::PolicyConflict);
                         }
                         return Ok((
-                            current_inventory.clone(),
+                            input.current_inventory.clone(),
                             Timeline::new(recovered.child().clone()),
                         ));
                     }
-                    let requirements = current_inventory.fork_scope_requirements(parent)?;
-                    let child_scope = authority.resolve_fork_child_scope(parent, &child)?;
-                    let input = ErasureForkAdmissionInputV1 {
-                        operation,
-                        expected_inventory_generation: current_generation,
+                    let requirements = input
+                        .current_inventory
+                        .fork_scope_requirements(input.parent)?;
+                    let child_scope = input
+                        .authority
+                        .resolve_fork_child_scope(input.parent, input.child)?;
+                    let admission_input = ErasureForkAdmissionInputV1 {
+                        operation: input.operation,
+                        expected_inventory_generation: input.current_generation,
                         child_scope,
-                        child: child.clone(),
+                        child: input.child.clone(),
                     };
                     let admissions = {
-                        let port = HostedCoordinatorPortV1::new(
-                            self.store.host_store(),
-                            authority.as_ref(),
-                        );
+                        let port =
+                            HostedCoordinatorPortV1::new(self.store.host_store(), input.authority);
                         let mut state_machine =
-                            ErasureCoordinatorStateMachineV1::new(port, coordinator);
+                            ErasureCoordinatorStateMachineV1::new(port, input.coordinator);
                         requirements
                             .into_iter()
                             .map(|requirement| {
-                                authority
-                                    .resolve_fork_scope_extension(requirement, &input)
+                                input
+                                    .authority
+                                    .resolve_fork_scope_extension(requirement, &admission_input)
                                     .and_then(|extension| {
                                         state_machine.prepare_fork_admission(
                                             requirement.request(),
                                             extension,
-                                            input.clone(),
+                                            admission_input.clone(),
                                         )
                                     })
                             })
                             .collect::<Result<Vec<_>, _>>()?
                     };
-                    let batch = current_inventory
+                    let batch = input
+                        .current_inventory
                         .clone()
-                        .prepare_fork_batch(input, admissions)?;
+                        .prepare_fork_batch(admission_input, admissions)?;
                     let successor = batch.successor_inventory().clone();
                     match self.store.host_store().commit_fork_admission(batch)? {
                         ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
@@ -1325,7 +1336,7 @@ impl ErasureExecutionHostV1 {
                 let mapped = transition_error.map_or_else(|| error.into(), map_erasure_error);
                 if transition_error.is_some_and(is_non_poisoning_transition_error)
                     && self
-                        .install_inventory_from_coordinator(maximum_requests)
+                        .install_inventory_from_coordinator(input.maximum_requests)
                         .is_ok()
                 {
                     return Err(mapped);
