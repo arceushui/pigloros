@@ -1872,7 +1872,6 @@ impl ErasureReadSenderV1<'_> {
             .host_store()
             .load_key_registry()
             .map_store_error();
-        self.host.ensure_generation(self.generation)?;
         result
     }
 
@@ -4159,6 +4158,57 @@ mod tests {
             closed.apply_coordinator_command(HostedCoordinatorCommandV1::Authorize {
                 request: ErasureReferenceV1::from_digest([134; 32]),
                 provenance: ErasureReferenceV1::from_digest([135; 32]),
+            }),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    fn poison_fence_mutex(gate: &ErasureContainmentGateV1) {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut effect = || panic!("test fence panic");
+            let _ = gate.with_fence(
+                TimelineId::new(),
+                ErasureProtectedOperationV1::Append,
+                &mut effect,
+            );
+        }));
+        assert!(panic.is_err());
+    }
+
+    #[test]
+    fn poisoned_fence_maps_transition_publication_failures_without_payloads() {
+        let mut identified = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        identified.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        identified.coordinator = Some(ErasureReferenceV1::from_digest([136; 32]));
+        poison_fence_mutex(&identified.gate);
+        assert_eq!(
+            identified.apply_identified_fork(
+                ErasureReferenceV1::from_digest([137; 32]),
+                TimelineId::new(),
+                Seq::ZERO,
+                "poisoned-fence-identified",
+            ),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+
+        let mut command = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        command.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        command.coordinator = Some(ErasureReferenceV1::from_digest([138; 32]));
+        poison_fence_mutex(&command.gate);
+        assert_eq!(
+            command.apply_coordinator_command(HostedCoordinatorCommandV1::Submit {
+                request: coordinator_request().unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                }),
+                provenance: ErasureReferenceV1::from_digest([139; 32]),
             }),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
