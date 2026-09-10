@@ -794,7 +794,7 @@ mod tests {
 
     use super::*;
 
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    pub(super) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     struct UnusedAuthority;
 
@@ -822,7 +822,7 @@ mod tests {
         }
     }
 
-    fn selector_request_without_sandbox_requirement() -> TestResult<(Vec<u8>, Vec<u8>)> {
+    pub(super) fn selector_request_without_sandbox_requirement() -> TestResult<(Vec<u8>, Vec<u8>)> {
         let mut request = EvaluationRequest {
             request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
             profile_digest: [2; 32],
@@ -1111,5 +1111,41 @@ mod tests {
             None
         ));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
+
+    use super::*;
+
+    #[test]
+    fn selector_framing_reads_a_complete_request_and_writes_a_bounded_response() {
+        let (control, attempt_stream) =
+            tests::selector_request_without_sandbox_requirement().expect("selector fixture");
+        let (mut server, mut client) = UnixStream::pair().expect("socket pair");
+        client
+            .write_all(
+                &u32::try_from(control.len())
+                    .expect("control length")
+                    .to_be_bytes(),
+            )
+            .expect("control prefix");
+        client.write_all(&control).expect("control");
+        client.write_all(&attempt_stream).expect("attempt stream");
+        client.shutdown(Shutdown::Write).expect("close request");
+        assert!(read_selector_request(&mut server).is_ok());
+
+        let (mut writer, mut reader) = UnixStream::pair().expect("response pair");
+        write_selector_response(&mut writer, b"control", None).expect("response write");
+        writer.shutdown(Shutdown::Write).expect("close response");
+        let mut response = Vec::new();
+        reader.read_to_end(&mut response).expect("response read");
+        assert_eq!(
+            response,
+            [7_u32.to_be_bytes().as_slice(), b"control"].concat()
+        );
     }
 }
