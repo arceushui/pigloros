@@ -168,9 +168,9 @@ struct PendingRevocationUpdate {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompletedRevocationUpdate {
-    request_digest: [u8; 32],
-    request_wire_digest: [u8; 32],
-    acknowledgement_digest: [u8; 32],
+    request: [u8; 32],
+    wire: [u8; 32],
+    acknowledgement: [u8; 32],
 }
 
 /// Selector-owned state that serializes revocation transitions and retains replay identity.
@@ -184,7 +184,7 @@ pub struct SelectorRevocationState {
 impl SelectorRevocationState {
     /// Start with the selector's authenticated current RVS1.
     #[must_use]
-    pub fn new(current: SandboxRevocationSnapshot) -> Self {
+    pub const fn new(current: SandboxRevocationSnapshot) -> Self {
         Self {
             current,
             pending: None,
@@ -210,8 +210,8 @@ impl SelectorRevocationState {
         validate_cancelled_attempts(&expected_cancelled_attempt_ids)?;
         let identity = request_identity(bytes)?;
         if let Some(completed) = self.completed.get(&identity.request_id) {
-            return if completed.request_digest == identity.request_digest
-                && completed.request_wire_digest == identity.wire_digest
+            return if completed.request == identity.request_digest
+                && completed.wire == identity.wire_digest
             {
                 Ok(())
             } else {
@@ -257,7 +257,7 @@ impl SelectorRevocationState {
         let acknowledgement =
             RevocationAcknowledgement::authenticate(bytes, runtime_key_id, runtime_key)?;
         if let Some(completed) = self.completed.get(&acknowledgement.request_id) {
-            return if completed.acknowledgement_digest == acknowledgement.acknowledgement_digest {
+            return if completed.acknowledgement == acknowledgement.acknowledgement_digest {
                 Ok(())
             } else {
                 Err(SandboxRevocationUpdateError::RequestIdentityConflict)
@@ -285,9 +285,9 @@ impl SelectorRevocationState {
         self.completed.insert(
             acknowledgement.request_id,
             CompletedRevocationUpdate {
-                request_digest: pending.request.request_digest,
-                request_wire_digest: pending.wire_digest,
-                acknowledgement_digest: acknowledgement.acknowledgement_digest,
+                request: pending.request.request_digest,
+                wire: pending.wire_digest,
+                acknowledgement: acknowledgement.acknowledgement_digest,
             },
         );
         Ok(())
