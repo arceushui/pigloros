@@ -1569,6 +1569,20 @@ mod tests {
         }
     }
 
+    struct FailingSeekReader;
+
+    impl Read for FailingSeekReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Seek for FailingSeekReader {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Err(std::io::Error::other("unavailable archive"))
+        }
+    }
+
     fn reader_inputs() -> TestResult<ReaderInputs> {
         let archive =
             include_bytes!("../tests/fixtures/installed-selector/valid/archive.cbor").to_vec();
@@ -1653,10 +1667,58 @@ mod tests {
     #[test]
     fn reader_accepts_exact_immutable_bundle() -> TestResult {
         let (archive, trust_policy, request) = reader_inputs()?;
+        let preflight = preflight_signed_bundle_reader(
+            &mut Cursor::new(archive.clone()),
+            &trust_policy,
+            &request,
+        )?;
+        assert!(!preflight.profile_bytes().is_empty());
         let bundle =
             verify_signed_bundle_reader(&mut Cursor::new(archive), &trust_policy, &request)?;
         assert_eq!(bundle.archive_digest, request.fixture_bundle_digest);
         assert!(bundle.member(PROFILE_PATH).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn reader_verifies_canonical_scalars_member_records_and_seek_failures() -> TestResult {
+        for bytes in [
+            vec![0x18, 24],
+            vec![0x19, 1, 0],
+            vec![0x1a, 0, 1, 0, 0],
+            vec![0x1b, 0, 0, 0, 1, 0, 0, 0, 0],
+        ] {
+            assert_eq!(verify_canonical_archive(&mut Cursor::new(bytes)), Ok(()));
+        }
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0x18, 23])),
+            Err(BundleError::InvalidEncoding)
+        );
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0xf4, 0])),
+            Err(BundleError::InvalidEncoding)
+        );
+
+        let archive = encode(&Value::Array(vec![
+            Value::Null,
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![7]),
+                integer(0),
+            ])]),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 64]),
+        ]))?;
+        let members =
+            read_verified_members(&mut Cursor::new(archive.clone()), archive.len() as u64)?;
+        assert_eq!(members.members["member"].bytes, vec![7]);
+        assert_eq!(members.signer_key, [1; 32]);
+        assert_eq!(members.signature, [2; 64]);
+
+        assert_eq!(
+            authenticate_reader(&mut FailingSeekReader, [0; 32]),
+            Err(BundleError::SnapshotUnavailable)
+        );
         Ok(())
     }
 

@@ -979,3 +979,57 @@ fn bytes_value(value: &[u8]) -> Value {
 fn io_error(_: std::io::Error) -> TransportError {
     TransportError::InvalidEncoding
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn artifact_header_enforces_numeric_bounds_before_chunk_allocation() {
+        let header = Value::Array(vec![
+            text_value("EIM1"),
+            unsigned(1),
+            unsigned(0),
+            unsigned(0),
+            unsigned(1),
+            bytes_value(&[1; 32]),
+            unsigned(1),
+        ]);
+        let caps = AttemptTransportCaps {
+            max_member_bytes: 1,
+            max_attempt_bytes: 1,
+        };
+        let mut aggregate = 0;
+        assert_eq!(
+            read_artifact_header(&header, 0, 0, caps, &mut aggregate),
+            Ok((1, [1; 32], 1))
+        );
+        assert_eq!(aggregate, 1);
+
+        assert_eq!(
+            bounded_u8(&unsigned(u64::from(u8::MAX) + 1), u8::MAX),
+            Err(TransportError::InvalidEncoding)
+        );
+        assert_eq!(
+            bounded_usize(&unsigned(2), 1),
+            Err(TransportError::FieldOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn frames_round_trip_and_reject_empty_prefixes() -> Result<(), TransportError> {
+        let frame = encode_frame(Value::Null)?;
+        let mut bytes = frame.prefix.to_vec();
+        bytes.extend_from_slice(&frame.encoded);
+        let decoded = read_frame(&mut Cursor::new(bytes))?;
+        assert_eq!(decoded.value, Value::Null);
+        assert!(matches!(
+            read_frame(&mut Cursor::new([0; 4])),
+            Err(TransportError::FieldOutOfBounds)
+        ));
+        Ok(())
+    }
+}

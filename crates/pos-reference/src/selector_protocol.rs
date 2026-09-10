@@ -748,6 +748,43 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn authenticated_reply_codec_binds_provider_errors_to_the_request() -> Result<(), AdapterError>
+    {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let provider_error = protocol_record(
+            "SPE1",
+            vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                integer(0),
+                Value::Null,
+                Value::Text("runtime-key".to_owned()),
+            ],
+            true,
+        )?
+        .0;
+        let execute = execute_request(&encoded, [14; 32])?;
+        let reply = AuthenticatedSelectorReply {
+            execute_request: &execute,
+            terminal: AuthenticatedSelectorTerminal::ProviderError(&provider_error),
+            output: None,
+        };
+        let control = encode_authenticated_reply(&encoded, &reply)?;
+        assert_eq!(
+            decode_reply(&control, &[], &encoded, [14; 32], 1024),
+            Ok(DecodedSelectorReply {
+                observation: Err(AdapterError::ProtocolFailure),
+                provenance: None,
+            })
+        );
+        Ok(())
+    }
+
     fn local_error(phase: u64) -> Result<Vec<u8>, AdapterError> {
         local_error_with_fields(vec![
             Value::Text("SLE1".to_owned()),
