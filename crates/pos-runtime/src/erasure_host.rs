@@ -1022,7 +1022,6 @@ impl ErasureExecutionHostV1 {
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let child = TimelineMeta::forked_from(parent, at_seq, name);
         let gate = Arc::clone(&self.gate);
-        let mut fork_result = None;
         let mut transition_error = None;
         let publication = {
             let mut fenced_transition = || {
@@ -1033,8 +1032,10 @@ impl ErasureExecutionHostV1 {
                         if recovered.successor_generation() != current_generation {
                             return Err(ErasureErrorV1::PolicyConflict);
                         }
-                        fork_result = Some(Timeline::new(recovered.child().clone()));
-                        return Ok(current_inventory.clone());
+                        return Ok((
+                            current_inventory.clone(),
+                            Timeline::new(recovered.child().clone()),
+                        ));
                     }
                     let requirements = current_inventory.fork_scope_requirements(parent)?;
                     let child_scope = authority.resolve_fork_child_scope(parent, &child)?;
@@ -1072,8 +1073,7 @@ impl ErasureExecutionHostV1 {
                     let successor = batch.successor_inventory().clone();
                     match self.store.host_store().commit_fork_admission(batch)? {
                         ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
-                            fork_result = Some(Timeline::new(child.clone()));
-                            Ok(successor)
+                            Ok((successor, Timeline::new(child.clone())))
                         }
                     }
                 })();
@@ -1084,17 +1084,13 @@ impl ErasureExecutionHostV1 {
             };
             gate.install_from_verified_inventory_transition(&mut fenced_transition)
         };
-        let inventory = match publication {
-            Ok(inventory) => inventory,
+        let (inventory, timeline) = match publication {
+            Ok(publication) => publication,
             Err(error) => {
                 self.poison();
                 return Err(transition_error.map_or_else(|| error.into(), map_erasure_error));
             }
         };
-        let timeline = fork_result.ok_or_else(|| {
-            self.poison();
-            ErasureHostErrorV1::RecoveryUnavailable
-        })?;
         let generation = inventory.generation();
         let request_count = inventory.request_count();
         self.inventory = Some(inventory);
@@ -1120,7 +1116,6 @@ impl ErasureExecutionHostV1 {
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let gate = Arc::clone(&self.gate);
-        let mut transition_result = None;
         let mut transition_error = None;
         let mut command = Some(command);
         let publication = {
@@ -1137,10 +1132,7 @@ impl ErasureExecutionHostV1 {
                             .verified_inventory(maximum_requests)
                             .map(|inventory| (state, inventory))
                     }) {
-                    Ok((state, inventory)) => {
-                        transition_result = Some(state);
-                        Ok(inventory)
-                    }
+                    Ok((state, inventory)) => Ok((inventory, state)),
                     Err(error) => {
                         transition_error = Some(error);
                         Err(error)
@@ -1149,17 +1141,13 @@ impl ErasureExecutionHostV1 {
             };
             gate.install_from_verified_inventory_transition(&mut fenced_transition)
         };
-        let inventory = match publication {
-            Ok(inventory) => inventory,
+        let (inventory, state) = match publication {
+            Ok(publication) => publication,
             Err(error) => {
                 self.poison();
                 return Err(transition_error.map_or_else(|| error.into(), map_erasure_error));
             }
         };
-        let state = transition_result.ok_or_else(|| {
-            self.poison();
-            ErasureHostErrorV1::RecoveryUnavailable
-        })?;
         let generation = inventory.generation();
         let request_count = inventory.request_count();
         self.inventory = Some(inventory);

@@ -681,17 +681,17 @@ impl ErasureContainmentGateV1 {
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
     /// gate is unavailable, the transition cannot produce a complete verified
     /// inventory, or a host lock is poisoned.
-    pub fn install_from_verified_inventory_transition(
+    pub fn install_from_verified_inventory_transition<T>(
         &self,
-        transition: &mut dyn FnMut() -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1>,
-    ) -> Result<ErasureVerifiedInventoryV1, ErasureContainmentErrorV1> {
+        transition: &mut dyn FnMut() -> Result<(ErasureVerifiedInventoryV1, T), ErasureErrorV1>,
+    ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureContainmentErrorV1> {
         self.ensure_available()?;
         let _fence = self
             .fence_lock
             .lock()
             .map_err(containment_recovery_failure)?;
         self.ensure_available()?;
-        let candidate = transition().map_err(containment_recovery_failure)?;
+        let (candidate, result) = transition().map_err(containment_recovery_failure)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(candidate.clone()),
             ..ErasureGateStateV1::default()
@@ -700,7 +700,7 @@ impl ErasureContainmentGateV1 {
             .authority
             .write()
             .map_err(containment_recovery_failure)? = Arc::new(replacement);
-        Ok(candidate)
+        Ok((candidate, result))
     }
 
     /// Return the installed complete-inventory generation.
@@ -6464,14 +6464,17 @@ mod coverage_paths {
         let mut successor = Some(inventory);
         assert_eq!(
             gate.install_from_verified_inventory_transition(&mut || {
-                successor.take().ok_or(ErasureErrorV1::ProvenanceMissing)
+                successor
+                    .take()
+                    .map(|inventory| (inventory, ()))
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
             })
-            .map(|inventory| inventory.generation()),
+            .map(|(inventory, ())| inventory.generation()),
             Ok(generation)
         );
         assert_eq!(
             gate.install_from_verified_inventory_transition(&mut || {
-                Err(ErasureErrorV1::PolicyConflict)
+                Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::PolicyConflict)
             }),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
@@ -6483,7 +6486,7 @@ mod coverage_paths {
         assert_eq!(
             poisoned.install_from_verified_inventory_transition(&mut || {
                 called = true;
-                Err(ErasureErrorV1::ProvenanceMissing)
+                Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::ProvenanceMissing)
             }),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
