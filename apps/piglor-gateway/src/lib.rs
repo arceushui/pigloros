@@ -2885,6 +2885,52 @@ mod tests {
     const EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([233; 32]);
 
+    #[test]
+    fn host_gateway_constructors_fail_closed_when_containment_is_unavailable() {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        host.containment_gate().poison();
+        assert!(matches!(
+            Gateway::new_with_erasure_host(host),
+            Err(GatewayError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        host.containment_gate().poison();
+        assert!(matches!(
+            Gateway::new_with_erasure_host_and_authorization(
+                host,
+                std::iter::empty(),
+                crate::authorization::test_authorization_for(EntityId::new()),
+            ),
+            Err(GatewayError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
+        let mut host = ErasureExecutionHostV1::open_gateway_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        host.containment_gate().poison();
+        assert!(matches!(
+            Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32])),
+            Err(GatewayError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+    }
+
     fn export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
         pos_core::ReplayClaimEvaluatorV1::evaluate(
             pos_core::ErasureReplayClaimV1::Exact,
