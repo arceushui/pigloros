@@ -490,10 +490,9 @@ fn read_artifact_header(
         return Err(TransportError::FieldOutOfBounds);
     }
     let digest = nonzero_digest(&fields[5])?;
-    let chunk_limit = usize::try_from(MAX_ATTEMPT_BYTES / MAX_CHUNK_BYTES as u64)
-        .or(Err(TransportError::FieldOutOfBounds))?;
+    let chunk_limit = (MAX_ATTEMPT_BYTES / MAX_CHUNK_BYTES as u64) as usize;
     let chunks = bounded_usize(&fields[6], chunk_limit)?;
-    let expected_length = usize::try_from(length).or(Err(TransportError::FieldOutOfBounds))?;
+    let expected_length = length as usize;
     if chunks != expected_length.div_ceil(MAX_CHUNK_BYTES) {
         return Err(TransportError::InvalidEncoding);
     }
@@ -901,18 +900,18 @@ fn nonzero_digest(value: &Value) -> Result<[u8; 32], TransportError> {
 }
 
 fn bounded_u8(value: &Value, maximum: u8) -> Result<u8, TransportError> {
-    let value = u8::try_from(uint(value)?).or(Err(TransportError::InvalidEncoding))?;
-    if value <= maximum {
-        Ok(value)
+    let value = uint(value)?;
+    if value <= u64::from(maximum) {
+        Ok(value as u8)
     } else {
         Err(TransportError::InvalidEncoding)
     }
 }
 
 fn bounded_usize(value: &Value, maximum: usize) -> Result<usize, TransportError> {
-    let value = usize::try_from(uint(value)?).or(Err(TransportError::FieldOutOfBounds))?;
-    if value <= maximum {
-        Ok(value)
+    let value = uint(value)?;
+    if value <= maximum as u64 {
+        Ok(value as usize)
     } else {
         Err(TransportError::FieldOutOfBounds)
     }
