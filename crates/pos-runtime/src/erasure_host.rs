@@ -34,6 +34,10 @@ use std::num::NonZeroUsize;
 #[cfg(test)]
 use pos_core::PreparedErasureForkBatchV1;
 
+#[cfg(test)]
+#[path = "../../pos-core/tests/support/erasure.rs"]
+mod erasure_support;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HostStateV1 {
     Closed,
@@ -1970,9 +1974,14 @@ mod tests {
     use pos_core::{
         geo_admission::GeoLocationAdmissionInputV1, AppendDedupKey, CanonicalBytes,
         ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
-        ErasureForkAdmissionInputV1, ErasurePersistenceInventorySnapshotV1, Kind, TimelineMeta,
+        ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
+        ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+        ErasureCorrectionProvenanceInputV1, ErasureForkAdmissionInputV1,
+        ErasurePersistenceInventorySnapshotV1, ErasureReceiptInventoriesV1,
+        ErasureRetryAdmissionInputV1, ErasureScopeExtensionInputV1, Kind, TimelineMeta,
         TimelineMode, MODALITY_LOCATION,
     };
+
     use pos_store::memory::MemoryStore;
 
     fn verified_empty_inventory(
@@ -2358,7 +2367,7 @@ mod tests {
     #[test]
     fn hosted_coordinator_port_delegates_empty_persistence_reads() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let mut port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
         let request = ErasureReferenceV1::from_digest([71; 32]);
         assert_eq!(port.resolve_state(request)?, None);
         assert_eq!(port.read_manifest(request)?, None);
@@ -2382,6 +2391,126 @@ mod tests {
         assert_eq!(
             observation,
             ErasureInventoryObservationV1::new(Vec::new(), Vec::new(), Vec::new())
+        );
+
+        let request_object = erasure_support::persistence_request()?;
+        let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request,
+            rejected_terminal_state: ErasureReferenceV1::from_digest([72; 32]),
+            correction_reason: ErasureReferenceV1::from_digest([73; 32]),
+            authorization_provenance: ErasureReferenceV1::from_digest([74; 32]),
+        })?;
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: ErasureReferenceV1::from_digest([75; 32]),
+            fork: ErasureReferenceV1::from_digest([76; 32]),
+            lineage_rule: ErasureReferenceV1::from_digest([77; 32]),
+            predecessor_extension: None,
+            admission_provenance: ErasureReferenceV1::from_digest([78; 32]),
+        })?;
+        let resolution =
+            ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+                request,
+                affected_digests: vec![ErasureReferenceV1::from_digest([79; 32])],
+                action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+                scope_commitment: ErasureReferenceV1::from_digest([80; 32]),
+                policy: ErasureReferenceV1::from_digest([81; 32]),
+                trust: ErasureReferenceV1::from_digest([82; 32]),
+                principal: ErasureReferenceV1::from_digest([83; 32]),
+                authorization_provenance: ErasureReferenceV1::from_digest([84; 32]),
+                reason: ErasureReferenceV1::from_digest([85; 32]),
+                issue_position: 1,
+                predecessor_resolution: None,
+            })?;
+        let retry = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            request,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![ErasureReferenceV1::from_digest([86; 32])],
+            command_identities: vec![ErasureReferenceV1::from_digest([87; 32])],
+            policy: ErasureReferenceV1::from_digest([88; 32]),
+            trust: ErasureReferenceV1::from_digest([89; 32]),
+            admitted_position: 1,
+            deadline_position: 2,
+            authorization_provenance: ErasureReferenceV1::from_digest([90; 32]),
+        })?;
+        let acknowledgement =
+            ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+                request,
+                command: ErasureReferenceV1::from_digest([91; 32]),
+                attempt: retry.reference(),
+                obligation: ErasureReferenceV1::from_digest([86; 32]),
+                owner: ErasureReferenceV1::from_digest([92; 32]),
+                scope: ErasureReferenceV1::from_digest([93; 32]),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+                evidence: ErasureReferenceV1::from_digest([94; 32]),
+                policy: ErasureReferenceV1::from_digest([88; 32]),
+                trust: ErasureReferenceV1::from_digest([89; 32]),
+            })?;
+        let receipt = ErasureReceiptInputV1 {
+            request,
+            terminal_state: ErasureReferenceV1::from_digest([95; 32]),
+            coordinator: ErasureReferenceV1::from_digest([96; 32]),
+            lifecycle: pos_core::ErasureLifecycleV1::Complete,
+            freeze_position: 1,
+            acknowledgements: Vec::new(),
+            frozen_targets: Vec::new(),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            inventories: ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            policy: ErasureReferenceV1::from_digest([88; 32]),
+            trust: ErasureReferenceV1::from_digest([89; 32]),
+            provenance: ErasureReferenceV1::from_digest([97; 32]),
+            issue_position: 2,
+            signature: ErasureReferenceV1::from_digest([98; 32]),
+            receipt_digest: ErasureReferenceV1::from_digest([0; 32]),
+        };
+
+        assert_eq!(
+            port.verified_topology_observation(request, request),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_corrected_submission(&request_object, &correction),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.validate_scope_extension(&extension),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_scope_extension(&extension),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.validate_administrative_resolution(&resolution),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_administrative_resolution(&resolution),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.dispatch_destruction(request, &[]),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_attempt(&retry),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_acknowledgement(&acknowledgement),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        assert_eq!(
+            port.admit_receipt(&receipt),
+            Err(ErasureErrorV1::Unauthorized)
         );
         Ok(())
     }
