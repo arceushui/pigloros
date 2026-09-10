@@ -1704,7 +1704,7 @@ mod tests {
             Value::Array(vec![Value::Array(vec![
                 Value::Text("member".to_owned()),
                 Value::Bytes(vec![7]),
-                integer(0),
+                Value::Integer(0_u64.into()),
             ])]),
             Value::Bytes(vec![1; 32]),
             Value::Bytes(vec![2; 64]),

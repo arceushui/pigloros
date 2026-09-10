@@ -444,19 +444,19 @@ mod tests {
                 unreachable!("recovery fixture must be an array");
             };
             fields[index] = replacement;
-            assert_eq!(
+            assert!(matches!(
                 decode_recovery(&signed_recovery(Value::Array(fields))?),
                 Err(SelectorBoundaryError::ArtifactInvalid)
-            );
+            ));
         }
 
         let mut changed_digest = valid;
         let last = changed_digest.last_mut().ok_or("empty recovery envelope")?;
         *last ^= 1;
-        assert_eq!(
+        assert!(matches!(
             decode_recovery(&changed_digest),
             Err(SelectorBoundaryError::ArtifactInvalid)
-        );
+        ));
         Ok(())
     }
 

@@ -993,11 +993,11 @@ mod tests {
 
         assert_eq!(
             (first.index, first.offset, first.bytes),
-            (0, 0, input[..CHUNK_BYTES])
+            (0, 0, input[..CHUNK_BYTES].to_vec())
         );
         assert_eq!(
             (second.index, second.offset, second.bytes),
-            (1, CHUNK_BYTES as u64, input[CHUNK_BYTES..])
+            (1, CHUNK_BYTES as u64, input[CHUNK_BYTES..].to_vec())
         );
         Ok(())
     }
