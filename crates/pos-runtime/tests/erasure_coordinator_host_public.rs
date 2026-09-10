@@ -424,9 +424,10 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
     let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
     let request = test_stage("construct lifecycle request", persistence_request())?;
     let request_reference = request.reference();
+    let request_provenance = request.provenance();
     test_stage(
         "submit lifecycle request",
-        commands.submit_erasure_request(request, request_reference),
+        commands.submit_erasure_request(request, request_provenance),
     )?;
     test_stage(
         "authorize lifecycle request",
