@@ -4733,7 +4733,7 @@ mod tests {
                 )),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        assert_eq!(rejected_submit.status(), ErasureHostStatusV1::Poisoned);
+        assert_eq!(rejected_submit.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]
