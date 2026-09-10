@@ -2191,6 +2191,10 @@ mod tests {
 
     use pos_store::memory::MemoryStore;
 
+    const fn reference(seed: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([seed; 32])
+    }
+
     fn verified_empty_inventory(
         snapshot: ErasurePersistenceInventorySnapshotV1,
         maximum_requests: usize,
