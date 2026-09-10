@@ -1928,3 +1928,49 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use std::io::{self, Cursor, Read};
+
+    use super::*;
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected archive read failure"))
+        }
+    }
+
+    #[test]
+    fn canonical_archive_validator_exercises_framing_and_payload_boundaries() {
+        let mut long_bytes = vec![0x59, 0x20, 1];
+        long_bytes.extend(vec![7; 8193]);
+        for bytes in [vec![0x40], vec![0x60], vec![0x80], vec![0xf4], long_bytes] {
+            assert_eq!(verify_canonical_archive(&mut Cursor::new(bytes)), Ok(()));
+        }
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0xf6, 0xf6])),
+            Err(BundleError::InvalidEncoding)
+        );
+        assert_eq!(
+            verify_canonical_archive(&mut FailingReader),
+            Err(BundleError::SnapshotUnavailable)
+        );
+    }
+
+    #[test]
+    fn archive_authentication_rewinds_only_after_digest_and_framing_validation() {
+        let archive = vec![0xf6];
+        let digest = *blake3::hash(&archive).as_bytes();
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(archive.clone()), digest),
+            Ok(1)
+        );
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(archive), [0; 32]),
+            Err(BundleError::DigestMismatch)
+        );
+    }
+}
