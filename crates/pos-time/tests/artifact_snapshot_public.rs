@@ -2,7 +2,7 @@ use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
     ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, State,
+    ReplayClaimEvaluatorV1, State, TimelineId,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_state::ProjectionRegistry;
