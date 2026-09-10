@@ -1931,7 +1931,7 @@ mod tests {
 
 #[cfg(test)]
 mod coverage_tests {
-    use std::io::{self, Cursor, Read};
+    use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
     use super::*;
 
@@ -1940,6 +1940,30 @@ mod coverage_tests {
     impl Read for FailingReader {
         fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("injected archive read failure"))
+        }
+    }
+
+    struct ChangingReader {
+        inner: Cursor<Vec<u8>>,
+        replacement: Vec<u8>,
+        starts: usize,
+    }
+
+    impl Read for ChangingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buffer)
+        }
+    }
+
+    impl Seek for ChangingReader {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            if position == SeekFrom::Start(0) {
+                self.starts += 1;
+                if self.starts == 4 {
+                    self.inner = Cursor::new(self.replacement.clone());
+                }
+            }
+            self.inner.seek(position)
         }
     }
 
@@ -1983,5 +2007,23 @@ mod coverage_tests {
                 .expect("authenticated bundle");
         assert!(!bundle.members.is_empty());
         assert!(!bundle.expected_results.is_empty());
+    }
+
+    #[test]
+    fn immutable_reader_rejects_a_changed_second_pass() {
+        let (archive, trust_policy, request) =
+            tests::reader_inputs().expect("valid bundle fixture");
+        let mut replacement = archive.clone();
+        let signature = replacement.last_mut().expect("bundle signature byte");
+        *signature ^= 1;
+        let mut reader = ChangingReader {
+            inner: Cursor::new(archive),
+            replacement,
+            starts: 0,
+        };
+        assert_eq!(
+            verify_signed_bundle_reader(&mut reader, &trust_policy, &request),
+            Err(BundleError::InvalidEncoding)
+        );
     }
 }
