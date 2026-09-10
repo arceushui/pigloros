@@ -980,6 +980,7 @@ fn io_error(_: std::io::Error) -> TransportError {
     TransportError::InvalidEncoding
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;

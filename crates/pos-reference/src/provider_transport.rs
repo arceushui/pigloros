@@ -668,6 +668,7 @@ fn root_owned_ancestors(path: &Path) -> bool {
     })
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;

@@ -782,6 +782,7 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
