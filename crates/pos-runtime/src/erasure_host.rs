@@ -45,6 +45,24 @@ enum HostStateV1 {
     Poisoned,
 }
 
+/// Payload-free recovery status for an erasure execution host.
+///
+/// This status is safe to expose from health and minimized-status endpoints:
+/// it carries no request, subject, selector, scope, or event data. A `Ready`
+/// host may still report containment denials for individual protected
+/// operations after `AccessFrozen`; status describes host recovery, not the
+/// lifecycle of any one request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureHostStatusV1 {
+    /// Complete verified recovery has not been installed.
+    Closed,
+    /// Complete verified recovery is installed and the host accepts commands.
+    Ready,
+    /// A persistence or publication boundary became uncertain; the host is
+    /// permanently fail-closed until restarted from durable evidence.
+    Poisoned,
+}
+
 struct OneShotInventoryV1(Option<ErasureVerifiedInventoryV1>);
 
 impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
@@ -759,6 +777,17 @@ impl ErasureExecutionHostV1 {
         self.inventory = None;
     }
 
+    /// Return the payload-free recovery status for health/minimized-status
+    /// consumers.
+    #[must_use]
+    pub const fn status(&self) -> ErasureHostStatusV1 {
+        match self.state {
+            HostStateV1::Closed => ErasureHostStatusV1::Closed,
+            HostStateV1::Ready { .. } => ErasureHostStatusV1::Ready,
+            HostStateV1::Poisoned => ErasureHostStatusV1::Poisoned,
+        }
+    }
+
     /// Bind an owned store to one fail-closed gate.
     ///
     /// # Errors
@@ -1261,8 +1290,16 @@ impl ErasureExecutionHostV1 {
         let (inventory, timeline) = match publication {
             Ok(publication) => publication,
             Err(error) => {
+                let mapped = transition_error.map_or_else(|| error.into(), map_erasure_error);
+                if transition_error.is_some_and(is_non_poisoning_transition_error)
+                    && self
+                        .install_inventory_from_coordinator(maximum_requests)
+                        .is_ok()
+                {
+                    return Err(mapped);
+                }
                 self.poison();
-                return Err(transition_error.map_or_else(|| error.into(), map_erasure_error));
+                return Err(mapped);
             }
         };
         let generation = inventory.generation();
@@ -2285,6 +2322,20 @@ const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
     }
 }
 
+const fn is_non_poisoning_transition_error(error: ErasureErrorV1) -> bool {
+    matches!(
+        error,
+        ErasureErrorV1::InvalidEncoding
+            | ErasureErrorV1::UnsupportedVersion
+            | ErasureErrorV1::Unauthorized
+            | ErasureErrorV1::ScopeInvalid
+            | ErasureErrorV1::PolicyConflict
+            | ErasureErrorV1::AccessFreezeFailed
+            | ErasureErrorV1::TrustSnapshotInvalid
+            | ErasureErrorV1::ProvenanceMissing
+    )
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -2607,9 +2658,13 @@ mod tests {
         fn verified_topology_observation(
             &self,
             _request: ErasureReferenceV1,
-            _manifest_digest: ErasureReferenceV1,
+            manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-            Err(ErasureErrorV1::Unauthorized)
+            Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+                manifest_digest,
+                Vec::new(),
+                Vec::new(),
+            )))
         }
 
         fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
@@ -3021,53 +3076,61 @@ mod tests {
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
         let request = reference(71);
         let request_object = coordinator_request()?;
-        assert!(
+        assert_eq!(
             HostedCoordinatorCommandV1::submit(request_object.clone(), reference(95))
-                .execute(&mut coordinator)
-                .is_err()
+                .execute(&mut coordinator),
+            Err(ErasureErrorV1::Unauthorized)
         );
-        assert!(
-            HostedCoordinatorCommandV1::authorize(request, reference(96))
-                .execute(&mut coordinator)
-                .is_err()
+        assert_eq!(
+            HostedCoordinatorCommandV1::authorize(request, reference(96)).execute(&mut coordinator),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
-        assert!(
+        assert_eq!(
             HostedCoordinatorCommandV1::freeze(request, lifecycle_transition(94))
-                .execute(&mut coordinator)
-                .is_err()
+                .execute(&mut coordinator),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
-        assert!(HostedCoordinatorCommandV1::reject(request, reference(97))
-            .execute(&mut coordinator)
-            .is_err());
-        assert!(HostedCoordinatorCommandV1::submit_corrected(
-            request_object,
-            lifecycle_correction(request, 72)?,
-        )
-        .execute(&mut coordinator)
-        .is_err());
-        assert!(HostedCoordinatorCommandV1::dispatch_attempt(
-            request,
-            lifecycle_admission(request, 75)?,
-        )
-        .execute(&mut coordinator)
-        .is_err());
-        assert!(
+        assert_eq!(
+            HostedCoordinatorCommandV1::reject(request, reference(97)).execute(&mut coordinator),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            HostedCoordinatorCommandV1::submit_corrected(
+                request_object,
+                lifecycle_correction(request, 72)?,
+            )
+            .execute(&mut coordinator),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            HostedCoordinatorCommandV1::dispatch_attempt(
+                request,
+                lifecycle_admission(request, 75)?,
+            )
+            .execute(&mut coordinator),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
             HostedCoordinatorCommandV1::acknowledge(request, lifecycle_acknowledgement(80),)
-                .execute(&mut coordinator)
-                .is_err()
+                .execute(&mut coordinator),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
-        assert!(HostedCoordinatorCommandV1::scope_extension(
-            request,
-            lifecycle_extension(request, 83)?,
-        )
-        .execute(&mut coordinator)
-        .is_err());
-        assert!(HostedCoordinatorCommandV1::administrative_resolution(
-            request,
-            lifecycle_resolution(request, 87)?,
-        )
-        .execute(&mut coordinator)
-        .is_err());
+        assert_eq!(
+            HostedCoordinatorCommandV1::scope_extension(
+                request,
+                lifecycle_extension(request, 83)?,
+            )
+            .execute(&mut coordinator),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            HostedCoordinatorCommandV1::administrative_resolution(
+                request,
+                lifecycle_resolution(request, 87)?,
+            )
+            .execute(&mut coordinator),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         Ok(())
     }
 
@@ -3287,6 +3350,7 @@ mod tests {
             closed.read_sender(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
+        assert_eq!(closed.status(), ErasureHostStatusV1::Closed);
         assert_eq!(
             closed.bind_consent_authority(ConsentAuthority::new().append_permit()),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
@@ -3299,6 +3363,9 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(ready.read_sender().is_ok());
         assert!(ready.command_sender().is_ok());
+        assert_eq!(ready.status(), ErasureHostStatusV1::Ready);
+        ready.poison();
+        assert_eq!(ready.status(), ErasureHostStatusV1::Poisoned);
     }
 
     #[test]
@@ -3755,6 +3822,30 @@ mod tests {
             ErasureErrorV1::ReceiptCommitFailed,
         ] {
             assert_eq!(map_erasure_error(error), ErasureHostErrorV1::AdapterFailure);
+        }
+        for error in [
+            ErasureErrorV1::InvalidEncoding,
+            ErasureErrorV1::UnsupportedVersion,
+            ErasureErrorV1::Unauthorized,
+            ErasureErrorV1::ScopeInvalid,
+            ErasureErrorV1::PolicyConflict,
+            ErasureErrorV1::AccessFreezeFailed,
+            ErasureErrorV1::TrustSnapshotInvalid,
+            ErasureErrorV1::ProvenanceMissing,
+        ] {
+            assert!(is_non_poisoning_transition_error(error));
+        }
+        for error in [
+            ErasureErrorV1::KeyRegistryUnavailable,
+            ErasureErrorV1::KeyDestructionFailed,
+            ErasureErrorV1::ArtifactDeletionFailed,
+            ErasureErrorV1::ReplicaTimeout,
+            ErasureErrorV1::ReplicaNegativeAcknowledgement,
+            ErasureErrorV1::BackupInventoryIncomplete,
+            ErasureErrorV1::BackupDeletionPending,
+            ErasureErrorV1::ReceiptCommitFailed,
+        ] {
+            assert!(!is_non_poisoning_transition_error(error));
         }
     }
 
@@ -4634,7 +4725,7 @@ mod tests {
                 )),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        assert_eq!(rejected_submit.state, HostStateV1::Poisoned);
+        assert!(matches!(rejected_submit.state, HostStateV1::Ready { .. }));
     }
 
     #[test]

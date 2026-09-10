@@ -22,7 +22,7 @@ use pos_core::{
     ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1,
     TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
-use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1};
+use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1, ErasureHostStatusV1};
 use pos_store::StoreConfig;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
@@ -37,7 +37,11 @@ use erasure_support::{
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
     frozen: AtomicBool,
-    allow_post_freeze: AtomicBool,
+    allow_rejection: AtomicBool,
+    allow_attempt: AtomicBool,
+    allow_dispatch: AtomicBool,
+    allow_ack: AtomicBool,
+    allow_receipt: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
 }
 
@@ -48,6 +52,13 @@ impl TestAuthority {
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .push((timeline, reference(9)));
         Ok(())
+    }
+
+    fn allow_post_freeze(&self) {
+        self.allow_attempt.store(true, Ordering::Release);
+        self.allow_dispatch.store(true, Ordering::Release);
+        self.allow_ack.store(true, Ordering::Release);
+        self.allow_receipt.store(true, Ordering::Release);
     }
 
     fn topology(
@@ -124,9 +135,11 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         _provenance: ErasureReferenceV1,
         decision: ErasureAuthorizationDecisionV1,
     ) -> Result<(), ErasureErrorV1> {
-        (decision == ErasureAuthorizationDecisionV1::Authorized)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        (decision == ErasureAuthorizationDecisionV1::Authorized
+            || (decision == ErasureAuthorizationDecisionV1::Rejected
+                && self.allow_rejection.load(Ordering::Acquire)))
+        .then_some(())
+        .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn admit_corrected_submission(
@@ -245,7 +258,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         _request: ErasureReferenceV1,
         _commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
-        self.allow_post_freeze
+        self.allow_dispatch
             .load(Ordering::Acquire)
             .then_some(())
             .ok_or(ErasureErrorV1::Unauthorized)
@@ -255,7 +268,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-        self.allow_post_freeze
+        self.allow_attempt
             .load(Ordering::Acquire)
             .then_some(ErasureAttemptQuotaReservationV1::new(
                 admission.reference(),
@@ -268,14 +281,14 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         &self,
         _acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.allow_post_freeze
+        self.allow_ack
             .load(Ordering::Acquire)
             .then_some(())
             .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-        self.allow_post_freeze
+        self.allow_receipt
             .load(Ordering::Acquire)
             .then_some(())
             .ok_or(ErasureErrorV1::Unauthorized)
@@ -437,7 +450,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
         "freeze lifecycle request",
         commands.freeze_access(request_reference, &freeze_transition()),
     )?;
-    authority.allow_post_freeze.store(true, Ordering::Release);
+    authority.allow_post_freeze();
 
     let target = persistence_target();
     let obligation = test_stage(
@@ -510,6 +523,217 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
         ),
     )?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    Ok(())
+}
+
+#[test]
+fn delivery_denial_keeps_the_durable_attempt_retryable_without_poisoning_host(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open retryable-denial host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let request = test_stage("construct retryable-denial request", persistence_request())?;
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    {
+        let mut commands = test_stage("open retryable-denial sender", host.command_sender())?;
+        let timeline = test_stage(
+            "create retryable-denial timeline",
+            commands.create_timeline("retryable-denial-timeline"),
+        )?;
+        test_stage(
+            "publish retryable-denial topology",
+            authority.set_timeline(timeline.id()),
+        )?;
+        test_stage(
+            "submit retryable-denial request",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize retryable-denial request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze retryable-denial request",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+
+        let target = persistence_target();
+        let obligation = test_stage(
+            "construct retryable-denial obligation",
+            obligation(request_reference, target),
+        )?;
+        let admission = test_stage(
+            "construct retryable-denial admission",
+            retry_admission(RetryAdmissionFixture {
+                request: request_reference,
+                attempt_ordinal: 0,
+                source_receipt: None,
+                obligations: std::slice::from_ref(&obligation),
+                policy: reference(6),
+                trust: reference(8),
+                admitted_position: 11,
+                deadline_position: 20,
+                authorization_provenance: reference(32),
+            }),
+        )?;
+
+        authority.allow_attempt.store(true, Ordering::Release);
+        assert_eq!(
+            commands.dispatch_erasure_destruction(request_reference, &admission),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        drop(commands);
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+
+        authority.allow_dispatch.store(true, Ordering::Release);
+        let mut retry = test_stage("reopen retryable-denial sender", host.command_sender())?;
+        assert_eq!(
+            test_stage(
+                "retry durable destruction dispatch",
+                retry.dispatch_erasure_destruction(request_reference, &admission),
+            )?
+            .lifecycle(),
+            ErasureLifecycleV1::AwaitingAcknowledgements
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_sender_reaches_rejected_lifecycle_before_containment(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open rejected-lifecycle host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let request = test_stage(
+        "construct rejected-lifecycle request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    authority.allow_rejection.store(true, Ordering::Release);
+    let mut commands = test_stage("open rejected-lifecycle sender", host.command_sender())?;
+    test_stage(
+        "submit rejected-lifecycle request",
+        commands.submit_erasure_request(request, request_provenance),
+    )?;
+    assert_eq!(
+        test_stage(
+            "reject rejected-lifecycle request",
+            commands.reject_erasure_request(request_reference, reference(32)),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::Rejected
+    );
+    Ok(())
+}
+
+#[test]
+fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open partial-failure host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::SqliteInMemory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let request = test_stage("construct partial-failure request", persistence_request())?;
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    let target = persistence_target();
+    let obligation = test_stage(
+        "construct partial-failure obligation",
+        obligation(request_reference, target),
+    )?;
+    let admission = test_stage(
+        "construct partial-failure admission",
+        retry_admission(RetryAdmissionFixture {
+            request: request_reference,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            obligations: std::slice::from_ref(&obligation),
+            policy: reference(6),
+            trust: reference(8),
+            admitted_position: 11,
+            deadline_position: 20,
+            authorization_provenance: reference(32),
+        }),
+    )?;
+    authority.allow_post_freeze();
+    let mut commands = test_stage("open partial-failure sender", host.command_sender())?;
+    test_stage(
+        "submit partial-failure request",
+        commands.submit_erasure_request(request, request_provenance),
+    )?;
+    test_stage(
+        "authorize partial-failure request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze partial-failure request",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+    assert_eq!(
+        test_stage(
+            "dispatch partial-failure destruction",
+            commands.dispatch_erasure_destruction(request_reference, &admission),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
+    let receipt = test_stage(
+        "finalize partial-failure request",
+        commands.finalize_erasure_request(
+            request_reference,
+            &ErasureReceiptInputV1 {
+                request: reference(0),
+                terminal_state: reference(0),
+                coordinator: reference(0),
+                lifecycle: ErasureLifecycleV1::PartialFailure,
+                freeze_position: 10,
+                acknowledgements: Vec::new(),
+                frozen_targets: Vec::new(),
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                inventories: ErasureReceiptInventoriesV1 {
+                    artifacts: vec![completed_inventory(target)],
+                    keys: Vec::new(),
+                    replicas: Vec::new(),
+                    backups: Vec::new(),
+                },
+                replay_claim: ErasureReplayClaimV1::StructuralOnly,
+                policy: reference(0),
+                trust: reference(0),
+                provenance: reference(0),
+                issue_position: 21,
+                signature: reference(25),
+                receipt_digest: reference(0),
+            },
+        ),
+    )?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     Ok(())
 }
 
@@ -682,7 +906,7 @@ fn gateway_host_uses_the_same_coordinator_authority_boundary(
 }
 
 #[test]
-fn rejected_coordinator_command_closes_the_host_without_partial_publication(
+fn rejected_coordinator_command_preserves_a_recovered_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
@@ -702,10 +926,8 @@ fn rejected_coordinator_command_closes_the_host_without_partial_publication(
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
     }
-    assert!(matches!(
-        host.command_sender(),
-        Err(ErasureHostErrorV1::RecoveryUnavailable)
-    ));
+    assert!(host.command_sender().is_ok());
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     Ok(())
 }
 
