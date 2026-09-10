@@ -2586,7 +2586,11 @@ mod tests {
             &self,
             request: ErasureReferenceV1,
         ) -> Result<Option<pos_core::StoredErasureManifestV1>, ErasureErrorV1> {
-            self.inner.read_manifest(request)
+            if self.fault == FaultModeV1::NonemptyRequestInventory {
+                Err(ErasureErrorV1::ProvenanceMissing)
+            } else {
+                self.inner.read_manifest(request)
+            }
         }
 
         fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
@@ -2957,23 +2961,27 @@ mod tests {
         assert_eq!(port.administrative_resolution_ref(request, 0)?, None);
         assert_eq!(port.administrative_resolution_index_count(request)?, 0);
         assert!(port.recovery_error_refs(request)?.is_empty());
-        let recovery_error = pos_core::ErasureRecoveryErrorV1::new(
-            request,
-            None,
-            request,
-            ErasureErrorV1::ProvenanceMissing,
-        )?;
-        port.append_recovery_error(PreparedErasureRecoveryErrorV1::new(recovery_error)?)?;
-        assert_eq!(
-            port.recovery_error_refs(request)?,
-            vec![recovery_error.reference()]
-        );
         let observation = port.complete_erasure_inventory_observation(1)?;
         assert_eq!(
             observation,
             ErasureInventoryObservationV1::new(Vec::new(), Vec::new(), Vec::new())
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_coordinator_port_retains_recovery_failures() -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        let request = reference(34);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
+        assert_eq!(
+            coordinator.verified_inventory(4),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        drop(coordinator);
+        assert_eq!(store.recovery_error_refs(request)?.len(), 1);
         Ok(())
     }
 
