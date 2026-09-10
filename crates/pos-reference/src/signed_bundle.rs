@@ -1583,6 +1583,22 @@ mod tests {
         }
     }
 
+    struct FailingReadReader {
+        inner: Cursor<Vec<u8>>,
+    }
+
+    impl Read for FailingReadReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("unavailable archive"))
+        }
+    }
+
+    impl Seek for FailingReadReader {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+
     fn reader_inputs() -> TestResult<ReaderInputs> {
         let archive =
             include_bytes!("../tests/fixtures/installed-selector/valid/archive.cbor").to_vec();
@@ -1745,6 +1761,27 @@ mod tests {
         assert_eq!(
             verify_canonical_archive(&mut Cursor::new(vec![0x61, b'x'])),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn authenticated_reader_closes_empty_digest_and_read_failures() {
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(Vec::new()), [0; 32]),
+            Err(BundleError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(vec![0xf6]), [0; 32]),
+            Err(BundleError::DigestMismatch)
+        );
+        assert_eq!(
+            authenticate_reader(
+                &mut FailingReadReader {
+                    inner: Cursor::new(vec![0xf6]),
+                },
+                [0; 32],
+            ),
+            Err(BundleError::SnapshotUnavailable)
         );
     }
 
