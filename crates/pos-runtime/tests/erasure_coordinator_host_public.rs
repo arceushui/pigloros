@@ -482,7 +482,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
         "finalize lifecycle request",
         commands.finalize_erasure_request(
             request_reference,
-            ErasureReceiptInputV1 {
+            &ErasureReceiptInputV1 {
                 request: reference(0),
                 terminal_state: reference(0),
                 coordinator: reference(0),

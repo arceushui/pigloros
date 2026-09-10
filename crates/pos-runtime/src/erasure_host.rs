@@ -1315,7 +1315,7 @@ impl ErasureCommandSenderV1<'_> {
         command: &HostedCoordinatorCommandV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let (state, generation) = self.host.apply_coordinator_command(&command)?;
+        let (state, generation) = self.host.apply_coordinator_command(command)?;
         self.generation = generation;
         Ok(state)
     }
@@ -1326,7 +1326,7 @@ impl ErasureCommandSenderV1<'_> {
         input: &ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let (receipt, generation) = self.host.apply_finalize_command(request, &input)?;
+        let (receipt, generation) = self.host.apply_finalize_command(request, input)?;
         self.generation = generation;
         Ok(receipt)
     }
@@ -1686,9 +1686,9 @@ impl ErasureCommandSenderV1<'_> {
     pub fn finalize_erasure_request(
         &mut self,
         request: ErasureReferenceV1,
-        input: ErasureReceiptInputV1,
+        input: &ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
-        self.apply_receipt_command(request, &input)
+        self.apply_receipt_command(request, input)
     }
 
     /// Recover the original durable Fork result after a lost reply or restart.
@@ -3003,7 +3003,7 @@ mod tests {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(
-            sender.finalize_erasure_request(request, lifecycle_receipt(request, 126)),
+            sender.finalize_erasure_request(request, &lifecycle_receipt(request, 126)),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         Ok(())
