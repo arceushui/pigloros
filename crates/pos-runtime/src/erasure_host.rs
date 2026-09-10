@@ -598,9 +598,9 @@ impl HostedCoordinatorCommandV1 {
         coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         match self {
-            Self::Submission(command) => command.execute(coordinator),
-            Self::Retry(command) => command.execute(coordinator),
-            Self::Resolution(command) => command.execute(coordinator),
+            Self::Submission(command) => HostedSubmissionCommandV1::execute(command, coordinator),
+            Self::Retry(command) => HostedRetryCommandV1::execute(command, coordinator),
+            Self::Resolution(command) => HostedResolutionCommandV1::execute(command, coordinator),
         }
     }
 }
