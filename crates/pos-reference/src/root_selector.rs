@@ -1144,4 +1144,27 @@ mod coverage_tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn selector_framing_rejects_empty_and_oversized_control_prefixes() -> TestResult {
+        for (prefix, expected) in [
+            (
+                0_u32.to_be_bytes(),
+                SandboxLocalErrorCode::InvalidSelectorRequest,
+            ),
+            (
+                u32::MAX.to_be_bytes(),
+                SandboxLocalErrorCode::PayloadLimitExceeded,
+            ),
+        ] {
+            let (mut server, mut client) = UnixStream::pair()?;
+            client.write_all(&prefix)?;
+            client.shutdown(Shutdown::Write)?;
+            assert!(matches!(
+                read_selector_request(&mut server),
+                Err(error) if error.code == expected
+            ));
+        }
+        Ok(())
+    }
 }
