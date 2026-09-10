@@ -441,7 +441,7 @@ mod tests {
             (4, Value::Bytes(Vec::new())),
         ] {
             let Value::Array(mut fields) = recovery_unsigned_with_lengths(1, 2, 3) else {
-                unreachable!("recovery fixture must be an array");
+                return Err("recovery fixture must be an array".into());
             };
             fields[index] = replacement;
             assert!(matches!(

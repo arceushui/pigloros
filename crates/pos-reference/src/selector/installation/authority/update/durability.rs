@@ -711,8 +711,10 @@ mod tests {
 
         let name = temporary_name();
         assert!(name.starts_with("sir1-"));
-        assert!(name.ends_with(".cbor"));
-        let nonce = &name[5..name.len() - 5];
+        let nonce = name
+            .strip_prefix("sir1-")
+            .and_then(|name| name.strip_suffix(".cbor"))
+            .ok_or("temporary name must retain the expected extension")?;
         assert_eq!(nonce.len(), 32);
         let _ = u128::from_str_radix(nonce, 16)?;
         Ok(())

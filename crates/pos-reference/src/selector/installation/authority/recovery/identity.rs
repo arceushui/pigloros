@@ -558,7 +558,7 @@ mod tests {
             (7, Value::Integer(0_u64.into())),
         ] {
             let Value::Array(mut fields) = binding.value() else {
-                unreachable!("binding fixture must be an array");
+                return Err("binding fixture must be an array".into());
             };
             fields[index] = replacement;
             assert_eq!(
@@ -568,10 +568,10 @@ mod tests {
         }
 
         let Value::Array(mut fields) = binding.value() else {
-            unreachable!("binding fixture must be an array");
+            return Err("binding fixture must be an array".into());
         };
         let Value::Array(runtime) = &mut fields[4] else {
-            unreachable!("runtime key fixture must be an array");
+            return Err("runtime key fixture must be an array".into());
         };
         runtime[1] = Value::Integer(2_u64.into());
         assert_eq!(
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(decoded.required_cancelled_attempt_ids(), &[[6; 16]]);
 
         let Value::Array(mut colliding_slot) = snapshot.recovery_slot_value() else {
-            unreachable!("recovery slot fixture must be an array");
+            return Err("recovery slot fixture must be an array".into());
         };
         colliding_slot[0] = Value::Bytes(previous_runtime.to_vec());
         assert_eq!(

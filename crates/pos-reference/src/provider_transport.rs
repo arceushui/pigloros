@@ -981,7 +981,7 @@ mod tests {
         };
         let deadline = Deadline::new(Duration::from_secs(1))?;
         let (mut sender, mut receiver) = UnixStream::pair()?;
-        let writer_request = request.clone();
+        let writer_request = request;
         let writer_input = input.clone();
         let writer = std::thread::spawn(move || {
             Deadline::new(Duration::from_secs(1)).is_ok_and(|deadline| {
