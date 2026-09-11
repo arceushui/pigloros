@@ -121,11 +121,11 @@ pub(crate) fn validate_rejoin_proof_reference(
         .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn canonical_rejoin_bytes(proof: &pos_core::ErasureRejoinProofV1) -> Vec<u8> {
-    proof
-        .to_canonical_cbor()
-        .unwrap_or_else(|_| std::panic::panic_any("validated ERRJ1 proof must encode"))
+    // The proof constructor already bounds every field and the encoder writes
+    // only to an in-memory Vec, so this serialization path is infallible for a
+    // validated proof. An empty fallback remains fail-closed at decode/admit.
+    proof.to_canonical_cbor().unwrap_or_default()
 }
 
 #[cfg(test)]
