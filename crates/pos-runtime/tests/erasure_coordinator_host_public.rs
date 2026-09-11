@@ -355,6 +355,59 @@ const fn completed_inventory(
     }
 }
 
+const fn receipt_input(
+    target: pos_core::ErasureRequiredTargetV1,
+    lifecycle: ErasureLifecycleV1,
+    replay_claim: ErasureReplayClaimV1,
+) -> ErasureReceiptInputV1 {
+    ErasureReceiptInputV1 {
+        request: reference(0),
+        terminal_state: reference(0),
+        coordinator: reference(0),
+        lifecycle,
+        freeze_position: 10,
+        acknowledgements: Vec::new(),
+        frozen_targets: Vec::new(),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            artifacts: vec![completed_inventory(target)],
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim,
+        policy: reference(0),
+        trust: reference(0),
+        provenance: reference(0),
+        issue_position: 21,
+        signature: reference(25),
+        receipt_digest: reference(0),
+    }
+}
+
+fn submit_authorize_freeze(
+    host: &mut ErasureExecutionHostV1,
+    request: ErasureRequestV1,
+) -> Result<ErasureReferenceV1, Box<dyn std::error::Error>> {
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
+    test_stage(
+        "submit lifecycle request",
+        commands.submit_erasure_request(request, request_provenance),
+    )?;
+    test_stage(
+        "authorize lifecycle request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze lifecycle request",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+    Ok(request_reference)
+}
+
 fn test_stage<T, E: std::fmt::Debug>(
     stage: &str,
     result: Result<T, E>,
@@ -465,23 +518,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
         ),
     )?;
     let request = test_stage("construct lifecycle request", persistence_request())?;
-    let request_reference = request.reference();
-    let request_provenance = request.provenance();
-    {
-        let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
-        test_stage(
-            "submit lifecycle request",
-            commands.submit_erasure_request(request, request_provenance),
-        )?;
-        test_stage(
-            "authorize lifecycle request",
-            commands.authorize_erasure_request(request_reference, reference(32)),
-        )?;
-        test_stage(
-            "freeze lifecycle request",
-            commands.freeze_access(request_reference, &freeze_transition()),
-        )?;
-    }
+    let request_reference = submit_authorize_freeze(&mut host, request)?;
     authority.allow_post_freeze();
 
     let target = persistence_target();
@@ -531,30 +568,11 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
             "finalize lifecycle request",
             commands.finalize_erasure_request(
                 request_reference,
-                &ErasureReceiptInputV1 {
-                    request: reference(0),
-                    terminal_state: reference(0),
-                    coordinator: reference(0),
-                    lifecycle: ErasureLifecycleV1::Complete,
-                    freeze_position: 10,
-                    acknowledgements: Vec::new(),
-                    frozen_targets: Vec::new(),
-                    pending_owners: Vec::new(),
-                    failed_owners: Vec::new(),
-                    inventories: ErasureReceiptInventoriesV1 {
-                        artifacts: vec![completed_inventory(target)],
-                        keys: Vec::new(),
-                        replicas: Vec::new(),
-                        backups: Vec::new(),
-                    },
-                    replay_claim: ErasureReplayClaimV1::Exact,
-                    policy: reference(0),
-                    trust: reference(0),
-                    provenance: reference(0),
-                    issue_position: 21,
-                    signature: reference(25),
-                    receipt_digest: reference(0),
-                },
+                &receipt_input(
+                    target,
+                    ErasureLifecycleV1::Complete,
+                    ErasureReplayClaimV1::Exact,
+                ),
             ),
         )?
     };
@@ -862,8 +880,7 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
         ),
     )?;
     let request = test_stage("construct partial-failure request", persistence_request())?;
-    let request_reference = request.reference();
-    let request_provenance = request.provenance();
+    let request_reference = submit_authorize_freeze(&mut host, request)?;
     let target = persistence_target();
     let obligation = test_stage(
         "construct partial-failure obligation",
@@ -886,18 +903,6 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
     authority.allow_post_freeze();
     let receipt = {
         let mut commands = test_stage("open partial-failure sender", host.command_sender())?;
-        test_stage(
-            "submit partial-failure request",
-            commands.submit_erasure_request(request, request_provenance),
-        )?;
-        test_stage(
-            "authorize partial-failure request",
-            commands.authorize_erasure_request(request_reference, reference(32)),
-        )?;
-        test_stage(
-            "freeze partial-failure request",
-            commands.freeze_access(request_reference, &freeze_transition()),
-        )?;
         let dispatched = test_stage(
             "dispatch partial-failure destruction",
             commands.dispatch_erasure_destruction(request_reference, &admission),
@@ -911,30 +916,11 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
             "finalize partial-failure request",
             commands.finalize_erasure_request(
                 request_reference,
-                &ErasureReceiptInputV1 {
-                    request: reference(0),
-                    terminal_state: reference(0),
-                    coordinator: reference(0),
-                    lifecycle: ErasureLifecycleV1::PartialFailure,
-                    freeze_position: 10,
-                    acknowledgements: Vec::new(),
-                    frozen_targets: Vec::new(),
-                    pending_owners: Vec::new(),
-                    failed_owners: Vec::new(),
-                    inventories: ErasureReceiptInventoriesV1 {
-                        artifacts: vec![completed_inventory(target)],
-                        keys: Vec::new(),
-                        replicas: Vec::new(),
-                        backups: Vec::new(),
-                    },
-                    replay_claim: ErasureReplayClaimV1::StructuralOnly,
-                    policy: reference(0),
-                    trust: reference(0),
-                    provenance: reference(0),
-                    issue_position: 21,
-                    signature: reference(25),
-                    receipt_digest: reference(0),
-                },
+                &receipt_input(
+                    target,
+                    ErasureLifecycleV1::PartialFailure,
+                    ErasureReplayClaimV1::StructuralOnly,
+                ),
             ),
         )?
     };
