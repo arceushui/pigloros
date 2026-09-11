@@ -2081,6 +2081,38 @@ fn local_errors_round_trip_every_legal_phase_and_failure_code() -> TestResult {
 }
 
 #[test]
+fn local_errors_reject_codes_from_another_phase() {
+    for (phase, code, admitted) in [
+        (
+            SandboxLocalErrorPhaseV1::BeforeSpx1,
+            SandboxLocalErrorCodeV1::ProviderUnavailable,
+            false,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission,
+            SandboxLocalErrorCodeV1::PolicyUnavailable,
+            false,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::AfterAdmission,
+            SandboxLocalErrorCodeV1::PolicyUnavailable,
+            true,
+        ),
+    ] {
+        let error = SandboxLocalErrorV1 {
+            phase,
+            operation: Some(SandboxProviderOperationV1::Execute),
+            request_id: Some([1; 16]),
+            attempt_id: Some([2; 16]),
+            agr1_digest: admitted.then_some([3; 32]),
+            code,
+            safe_detail: None,
+        };
+        assert!(error.validate().is_err());
+    }
+}
+
+#[test]
 fn describe_responses_reject_mismatched_request_bindings() -> TestResult {
     let key = signing_key();
     let describe = SandboxDescribeRequestV1 {
