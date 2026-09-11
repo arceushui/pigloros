@@ -623,7 +623,7 @@ mod tests {
 
     use super::*;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     fn integer(value: u64) -> Value {
         Value::Integer(value.into())
