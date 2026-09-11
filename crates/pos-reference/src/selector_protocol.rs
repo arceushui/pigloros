@@ -535,7 +535,7 @@ mod tests {
             descriptor(
                 &request.attempt_stream,
                 domain_digest(INPUT_DOMAIN, &request.attempt_stream),
-            )?,
+            ),
             Value::Array(Vec::new()),
         ]);
         fields[4] = Value::Bytes(evr1_digest.to_vec());
