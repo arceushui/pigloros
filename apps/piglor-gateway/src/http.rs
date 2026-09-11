@@ -60,7 +60,6 @@ mod coverage_tests {
 
     use super::*;
     use pos_core::Kind;
-    use pos_runtime::ErasureExecutionHostV1;
     use pos_store::{open_store, StoreConfig};
 
     #[tokio::test]
@@ -527,6 +526,7 @@ mod tests {
         ids::{EntityId, TimelineId},
     };
     use pos_plugin_ledger::LedgerStore;
+    use pos_runtime::ErasureExecutionHostV1;
     use pos_store::{open_store, StoreConfig};
     use std::path::PathBuf;
     use tower::ServiceExt;
