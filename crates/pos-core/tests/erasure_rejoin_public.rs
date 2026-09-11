@@ -4,9 +4,9 @@ use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
     ErasureArtifactTransitionV1, ErasureErrorV1, ErasureInventoryCategoryV1,
     ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureRejoinDispositionV1,
-    ErasureRejoinInventoryV1, ErasureRejoinProofInputV1, ErasureRejoinProofV1,
-    ErasureReplayClaimV1, ErasureRequiredTargetV1,
+    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1,
+    ErasureRejoinAttestationVerifierV1, ErasureRejoinDispositionV1, ErasureRejoinInventoryV1,
+    ErasureRejoinProofInputV1, ErasureRejoinProofV1, ErasureReplayClaimV1, ErasureRequiredTargetV1,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -127,6 +127,20 @@ fn proof_for(
     })
 }
 
+struct TestAttestationVerifier {
+    attestation: ErasureReferenceV1,
+}
+
+impl ErasureRejoinAttestationVerifierV1 for TestAttestationVerifier {
+    fn verify(&self, proof: &ErasureRejoinProofV1) -> Result<(), ErasureErrorV1> {
+        if proof.attestation() == self.attestation {
+            Ok(())
+        } else {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+}
+
 fn proof_entries() -> Vec<ErasureRejoinInventoryV1> {
     vec![
         ErasureRejoinInventoryV1 {
@@ -150,6 +164,9 @@ fn proof_entries() -> Vec<ErasureRejoinInventoryV1> {
 fn complete_receipt_round_trips_and_admits_rejoin() -> Result<(), ErasureErrorV1> {
     let receipt = receipt(ErasureLifecycleV1::Complete)?;
     let proof = proof_for(&receipt, proof_entries())?;
+    let verifier = TestAttestationVerifier {
+        attestation: reference(201),
+    };
     assert_eq!(
         proof.entries()[0].category,
         ErasureInventoryCategoryV1::Replica
@@ -157,11 +174,13 @@ fn complete_receipt_round_trips_and_admits_rejoin() -> Result<(), ErasureErrorV1
     let bytes = proof.to_canonical_cbor()?;
     let decoded = ErasureRejoinProofV1::from_canonical_cbor(&bytes)?;
     assert_eq!(decoded, proof);
-    let admission = decoded.admit(&receipt)?;
+    let admission = decoded.admit(&receipt, &verifier)?;
     assert_eq!(admission.request(), receipt.request());
     assert_eq!(admission.terminal_receipt(), receipt.receipt_digest());
     assert_eq!(admission.replica_set(), reference(90));
     assert_eq!(admission.replica_id(), reference(91));
+    assert_eq!(decoded.inventory_generation(), reference(200));
+    assert_eq!(decoded.attestation(), reference(201));
     assert_eq!(admission.proof(), proof.reference());
     Ok(())
 }
@@ -170,8 +189,11 @@ fn complete_receipt_round_trips_and_admits_rejoin() -> Result<(), ErasureErrorV1
 fn partial_receipt_denies_rejoin_until_backup_deletion_is_complete() -> Result<(), ErasureErrorV1> {
     let receipt = receipt(ErasureLifecycleV1::PartialFailure)?;
     let proof = proof_for(&receipt, proof_entries())?;
+    let verifier = TestAttestationVerifier {
+        attestation: reference(201),
+    };
     assert_eq!(
-        proof.admit(&receipt),
+        proof.admit(&receipt, &verifier),
         Err(ErasureErrorV1::BackupDeletionPending)
     );
     Ok(())
@@ -181,8 +203,11 @@ fn partial_receipt_denies_rejoin_until_backup_deletion_is_complete() -> Result<(
 fn incomplete_inventory_and_mismatched_receipt_are_rejected() -> Result<(), ErasureErrorV1> {
     let receipt = receipt(ErasureLifecycleV1::Complete)?;
     let missing_backup = proof_for(&receipt, vec![proof_entries().remove(1)])?;
+    let verifier = TestAttestationVerifier {
+        attestation: reference(201),
+    };
     assert_eq!(
-        missing_backup.admit(&receipt),
+        missing_backup.admit(&receipt, &verifier),
         Err(ErasureErrorV1::BackupInventoryIncomplete)
     );
 
@@ -196,7 +221,7 @@ fn incomplete_inventory_and_mismatched_receipt_are_rejected() -> Result<(), Eras
         attestation: reference(201),
     })?;
     assert_eq!(
-        mismatched.admit(&receipt),
+        mismatched.admit(&receipt, &verifier),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -212,6 +237,41 @@ fn proof_digest_mutation_is_rejected() -> Result<(), ErasureErrorV1> {
     assert_eq!(
         ErasureRejoinProofV1::from_canonical_cbor(&bytes),
         Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn attestation_verifier_is_required_for_admission() -> Result<(), ErasureErrorV1> {
+    let receipt = receipt(ErasureLifecycleV1::Complete)?;
+    let proof = proof_for(&receipt, proof_entries())?;
+    let verifier = TestAttestationVerifier {
+        attestation: reference(202),
+    };
+    assert_eq!(
+        proof.admit(&receipt, &verifier),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
+}
+
+#[test]
+fn reordered_wire_entries_are_rejected() -> Result<(), ErasureErrorV1> {
+    let receipt = receipt(ErasureLifecycleV1::Complete)?;
+    let proof = proof_for(&receipt, proof_entries())?;
+    let bytes = proof.to_canonical_cbor()?;
+    let mut value: ciborium::value::Value =
+        ciborium::from_reader(bytes.as_slice()).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    if let ciborium::value::Value::Array(fields) = &mut value {
+        if let ciborium::value::Value::Array(entries) = &mut fields[7] {
+            entries.swap(0, 1);
+        }
+    }
+    let mut reordered = Vec::new();
+    ciborium::into_writer(&value, &mut reordered).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    assert_eq!(
+        ErasureRejoinProofV1::from_canonical_cbor(&reordered),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }

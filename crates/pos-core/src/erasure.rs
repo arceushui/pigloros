@@ -4550,8 +4550,9 @@ use receipt::{
     inventories_match_frozen_obligations,
 };
 pub use rejoin::{
-    ErasureRejoinAdmissionV1, ErasureRejoinDispositionV1, ErasureRejoinInventoryV1,
-    ErasureRejoinProofInputV1, ErasureRejoinProofV1, ERASURE_REJOIN_PROOF_TAG_V1,
+    ErasureRejoinAdmissionV1, ErasureRejoinAttestationVerifierV1, ErasureRejoinDispositionV1,
+    ErasureRejoinInventoryV1, ErasureRejoinProofInputV1, ErasureRejoinProofV1,
+    ERASURE_REJOIN_PROOF_TAG_V1,
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureAcknowledgementV1 {

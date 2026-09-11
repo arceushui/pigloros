@@ -98,6 +98,19 @@ pub struct ErasureRejoinProofV1 {
     content_digest: ErasureReferenceV1,
 }
 
+/// Host capability that authenticates the opaque attestation in an `ERRJ1`
+/// proof.  The core record remains payload-free; only the owner of the
+/// attestation can authorize topology rejoin.
+pub trait ErasureRejoinAttestationVerifierV1 {
+    /// Authenticate one proof's host-owned attestation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed authorization or provenance error when the attestation
+    /// is not valid for this proof.
+    fn verify(&self, proof: &ErasureRejoinProofV1) -> Result<(), ErasureErrorV1>;
+}
+
 /// A structural admission token returned after a proof is bound to a complete
 /// terminal receipt.
 ///
@@ -238,6 +251,7 @@ impl ErasureRejoinProofV1 {
     pub fn admit(
         &self,
         receipt: &ErasureReceiptV1,
+        verifier: &impl ErasureRejoinAttestationVerifierV1,
     ) -> Result<ErasureRejoinAdmissionV1, ErasureErrorV1> {
         let request_matches = self.request() == receipt.request();
         let receipt_matches = self.terminal_receipt() == receipt.receipt_digest();
@@ -257,6 +271,10 @@ impl ErasureRejoinProofV1 {
             .replicas
             .iter()
             .chain(&receipt.inventories().backups)
+            .filter(|entry| {
+                entry.target.replica_set == self.replica_set()
+                    && entry.target.replica_id == self.replica_id()
+            })
             .map(|entry| (entry.category, entry.target, entry.transition.owner))
             .collect::<Vec<_>>();
         expected.sort_unstable();
@@ -266,9 +284,10 @@ impl ErasureRejoinProofV1 {
             .map(|entry| (entry.category, entry.target, entry.owner))
             .collect::<Vec<_>>();
         found.sort_unstable();
-        if found != expected {
+        if expected.is_empty() || found != expected {
             return Err(ErasureErrorV1::BackupInventoryIncomplete);
         }
+        verifier.verify(self)?;
         Ok(ErasureRejoinAdmissionV1 {
             request: self.request(),
             terminal_receipt: self.terminal_receipt(),
@@ -284,38 +303,6 @@ impl ErasureRejoinProofV1 {
                 ErasureReferenceV1::from_digest(domain_digest(ERASURE_REJOIN_PROOF_TAG_V1, &bytes));
             self
         })
-    }
-}
-
-impl ErasureRejoinAdmissionV1 {
-    /// Return the admitted ERQ1 request.
-    #[must_use]
-    pub const fn request(self) -> ErasureReferenceV1 {
-        self.request
-    }
-
-    /// Return the admitted terminal ERC1 receipt.
-    #[must_use]
-    pub const fn terminal_receipt(self) -> ErasureReferenceV1 {
-        self.terminal_receipt
-    }
-
-    /// Return the admitted replica-set identity.
-    #[must_use]
-    pub const fn replica_set(self) -> ErasureReferenceV1 {
-        self.replica_set
-    }
-
-    /// Return the admitted replica identity.
-    #[must_use]
-    pub const fn replica_id(self) -> ErasureReferenceV1 {
-        self.replica_id
-    }
-
-    /// Return the content address of the proof that produced this token.
-    #[must_use]
-    pub const fn proof(self) -> ErasureReferenceV1 {
-        self.proof
     }
 }
 
@@ -362,8 +349,8 @@ fn entries_from_value(value: &Value) -> Result<Vec<ErasureRejoinInventoryV1>, Er
     })
 }
 
-fn proof_core_value(proof: &ErasureRejoinProofV1) -> Value {
-    Value::Array(vec![
+fn proof_fields(proof: &ErasureRejoinProofV1) -> Vec<Value> {
+    vec![
         text(ERASURE_REJOIN_PROOF_TAG_V1),
         uint(1),
         digest(proof.request()),
@@ -373,39 +360,69 @@ fn proof_core_value(proof: &ErasureRejoinProofV1) -> Value {
         digest(proof.inventory_generation()),
         entries_value(proof.entries()),
         digest(proof.attestation()),
-    ])
+    ]
+}
+
+fn proof_core_value(proof: &ErasureRejoinProofV1) -> Value {
+    Value::Array(proof_fields(proof))
 }
 
 fn proof_value(proof: &ErasureRejoinProofV1) -> Value {
-    let mut fields = vec![
-        text(ERASURE_REJOIN_PROOF_TAG_V1),
-        uint(1),
-        digest(proof.request()),
-        digest(proof.terminal_receipt()),
-        digest(proof.replica_set()),
-        digest(proof.replica_id()),
-        digest(proof.inventory_generation()),
-        entries_value(proof.entries()),
-        digest(proof.attestation()),
-    ];
+    let mut fields = proof_fields(proof);
     fields.push(digest(proof.reference()));
     Value::Array(fields)
 }
 
 fn proof_from_fields(fields: &[Value]) -> Result<ErasureRejoinProofV1, ErasureErrorV1> {
     header(fields, ERASURE_REJOIN_PROOF_TAG_V1)?;
+    let entries = entries_from_value(&fields[7])?;
+    if entries.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
     let proof = ErasureRejoinProofV1::new(ErasureRejoinProofInputV1 {
         request: bytes32(&fields[2])?,
         terminal_receipt: bytes32(&fields[3])?,
         replica_set: bytes32(&fields[4])?,
         replica_id: bytes32(&fields[5])?,
         inventory_generation: bytes32(&fields[6])?,
-        entries: entries_from_value(&fields[7])?,
+        entries,
         attestation: bytes32(&fields[8])?,
     })?;
     if proof.reference() == bytes32(&fields[9])? {
         Ok(proof)
     } else {
         Err(ErasureErrorV1::ProvenanceMissing)
+    }
+}
+
+impl ErasureRejoinAdmissionV1 {
+    /// Return the admitted ERQ1 request.
+    #[must_use]
+    pub const fn request(self) -> ErasureReferenceV1 {
+        self.request
+    }
+
+    /// Return the admitted terminal ERC1 receipt.
+    #[must_use]
+    pub const fn terminal_receipt(self) -> ErasureReferenceV1 {
+        self.terminal_receipt
+    }
+
+    /// Return the admitted replica-set identity.
+    #[must_use]
+    pub const fn replica_set(self) -> ErasureReferenceV1 {
+        self.replica_set
+    }
+
+    /// Return the admitted replica identity.
+    #[must_use]
+    pub const fn replica_id(self) -> ErasureReferenceV1 {
+        self.replica_id
+    }
+
+    /// Return the content address of the proof that produced this token.
+    #[must_use]
+    pub const fn proof(self) -> ErasureReferenceV1 {
+        self.proof
     }
 }
