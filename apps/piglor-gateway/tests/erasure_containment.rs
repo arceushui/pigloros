@@ -73,6 +73,7 @@ fn obligation(
     })
 }
 
+#[derive(Clone, Copy)]
 struct FreezeEvidenceFixtureInput<'a> {
     request: ErasureReferenceV1,
     scope_commitment: ErasureReferenceV1,
@@ -428,6 +429,7 @@ async fn recovered_access_frozen_gateway_health_is_payload_free(
         serde_json::json!({"ok": true})
     );
     gateway.shutdown().await?;
+    drop(gateway);
     Ok(())
 }
 
