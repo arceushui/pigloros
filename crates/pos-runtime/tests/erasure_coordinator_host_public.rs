@@ -575,7 +575,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
             authorization_provenance: reference(32),
         }),
     )?;
-    let receipt = {
+    let (receipt, dispatched_predecessor) = {
         let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
         let dispatched = test_stage(
             "dispatch lifecycle destruction",
@@ -601,7 +601,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
                 },
             ),
         )?;
-        test_stage(
+        let receipt = test_stage(
             "finalize lifecycle request",
             commands.finalize_erasure_request(
                 request_reference,
@@ -611,10 +611,9 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
                     ErasureReplayClaimV1::Exact,
                 ),
             ),
-        )?
-        .map(|receipt| (receipt, predecessor))
-    };
-    let (receipt, dispatched_predecessor) = receipt;
+        )?;
+        Ok((receipt, predecessor))
+    }?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_ne!(receipt.terminal_state(), reference(0));
     assert_ne!(receipt.coordinator(), reference(0));
@@ -841,7 +840,7 @@ fn public_read_sender_reports_missing_request_and_missing_authority(
     let mut empty_reads = test_stage("open authority-free reader", empty_host.read_sender())?;
     assert_eq!(
         empty_reads.erasure_state(reference(250)),
-        Err(pos_runtime::ErasureHostErrorV1::AuthorizationDenied)
+        Err(ErasureHostErrorV1::AuthorizationDenied)
     );
     Ok(())
 }
@@ -969,7 +968,7 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
         }),
     )?;
     authority.allow_post_freeze();
-    let receipt = {
+    let (receipt, dispatched_predecessor) = {
         let mut commands = test_stage("open partial-failure sender", host.command_sender())?;
         let dispatched = test_stage(
             "dispatch partial-failure destruction",
@@ -982,7 +981,7 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
         let predecessor = dispatched
             .previous_state()
             .ok_or("dispatched state has no predecessor")?;
-        test_stage(
+        let receipt = test_stage(
             "finalize partial-failure request",
             commands.finalize_erasure_request(
                 request_reference,
@@ -992,10 +991,9 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
                     ErasureReplayClaimV1::StructuralOnly,
                 ),
             ),
-        )?
-        .map(|receipt| (receipt, predecessor))
-    };
-    let (receipt, dispatched_predecessor) = receipt;
+        )?;
+        Ok((receipt, predecessor))
+    }?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     assert_ne!(receipt.terminal_state(), reference(0));
     assert_ne!(receipt.coordinator(), reference(0));
