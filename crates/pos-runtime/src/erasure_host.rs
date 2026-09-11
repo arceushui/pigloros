@@ -949,7 +949,7 @@ impl ErasureExecutionHostV1 {
         Self::open_read_only_with_recovery(path, Some(&composition), maximum_requests)
     }
 
-    /// Open one read-only SQLite store through the production recovery
+    /// Open one read-only `SQLite` store through the production recovery
     /// boundary. See [`Self::open_with_recovery`] for the empty-only behavior
     /// when no authority composition is supplied.
     ///
