@@ -4750,7 +4750,7 @@ impl crate::ErasureRejoinPersistencePortV1 for SqliteStore {
         &mut self,
         proof: &pos_core::ErasureRejoinProofV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
-        let bytes = proof.to_canonical_cbor()?;
+        let bytes = crate::canonical_rejoin_bytes(proof);
         let inserted = self
             .conn
             .execute(
@@ -6213,6 +6213,60 @@ mod tests {
         assert_eq!(
             store.store_rejoin_proof(&proof),
             Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn rejoin_adapter_closes_sqlite_storage_failures() {
+        let proof = crate::test_rejoin_proof();
+
+        let mut missing_table = new_store();
+        missing_table
+            .conn
+            .execute_batch("DROP TABLE erasure_evidence;")
+            .test_ok();
+        assert_eq!(
+            missing_table.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        let mut wrong_column_type = new_store();
+        wrong_column_type
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER inject_wrong_rejoin_type AFTER INSERT ON erasure_evidence
+                 BEGIN
+                     UPDATE erasure_evidence SET object_cbor=7
+                     WHERE reference_digest=NEW.reference_digest;
+                 END;",
+            )
+            .test_ok();
+        assert_eq!(
+            wrong_column_type.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        let mut ignored_insert = new_store();
+        ignored_insert
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER ignore_rejoin_insert BEFORE INSERT ON erasure_evidence
+                 BEGIN SELECT RAISE(IGNORE); END;",
+            )
+            .test_ok();
+        assert_eq!(
+            ignored_insert.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut failed_read = new_store();
+        failed_read
+            .conn
+            .execute_batch("DROP TABLE erasure_evidence;")
+            .test_ok();
+        assert_eq!(
+            failed_read.load_rejoin_proof(proof.reference()),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
         );
     }
 

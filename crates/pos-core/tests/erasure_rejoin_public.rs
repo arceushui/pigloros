@@ -513,6 +513,22 @@ fn malformed_inventory_entries_are_rejected() -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
+    let unsupported_disposition = mutate_wire(&proof, |fields| {
+        mutate_entry(fields, 5, ciborium::value::Value::Integer(99.into()));
+    })?;
+    assert_eq!(
+        ErasureRejoinProofV1::from_canonical_cbor(&unsupported_disposition),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let zero_owner = mutate_wire(&proof, |fields| {
+        mutate_entry(fields, 4, ciborium::value::Value::Bytes(vec![0; 32]));
+    })?;
+    assert_eq!(
+        ErasureRejoinProofV1::from_canonical_cbor(&zero_owner),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
     for (index, expected) in [
         (3_usize, ErasureErrorV1::InvalidEncoding),
         (4, ErasureErrorV1::InvalidEncoding),

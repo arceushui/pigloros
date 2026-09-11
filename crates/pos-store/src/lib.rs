@@ -121,7 +121,15 @@ pub(crate) fn validate_rejoin_proof_reference(
         .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn canonical_rejoin_bytes(proof: &pos_core::ErasureRejoinProofV1) -> Vec<u8> {
+    proof
+        .to_canonical_cbor()
+        .unwrap_or_else(|_| unreachable!("validated ERRJ1 proof must encode"))
+}
+
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn test_rejoin_proof() -> pos_core::ErasureRejoinProofV1 {
     pos_core::ErasureRejoinProofV1::new(pos_core::ErasureRejoinProofInputV1 {
         request: pos_core::ErasureReferenceV1::from_digest([1; 32]),

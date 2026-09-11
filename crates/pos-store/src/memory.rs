@@ -1373,7 +1373,7 @@ impl crate::ErasureRejoinPersistencePortV1 for MemoryStore {
         &mut self,
         proof: &pos_core::ErasureRejoinProofV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
-        let bytes = proof.to_canonical_cbor()?;
+        let bytes = crate::canonical_rejoin_bytes(proof);
         match self.erasure_evidence.entry(proof.reference()) {
             Entry::Vacant(entry) => {
                 entry.insert(bytes);
