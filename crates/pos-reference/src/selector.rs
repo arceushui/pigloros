@@ -1,5 +1,6 @@
 //! Root-owned immutable artifact and selector-socket boundary.
 
+use std::fs::Metadata;
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
@@ -183,26 +184,47 @@ fn connect_at_with(
     connect: impl FnOnce(&Path) -> std::io::Result<UnixStream>,
 ) -> Result<UnixStream, SelectorBoundaryError> {
     let path = PathBuf::from(path);
-    let before =
-        std::fs::symlink_metadata(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-    if !before.file_type().is_socket()
-        || before.uid() != expected_uid
-        || before.mode() & 0o777 != SELECTOR_SOCKET_MODE
+    std::fs::symlink_metadata(&path)
+        .map_err(|_| SelectorBoundaryError::SelectorUnavailable)
+        .and_then(|before| {
+            validate_selector_socket(&before, expected_uid)
+                .and_then(|()| {
+                    connect(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)
+                })
+                .and_then(|stream| {
+                    socket_peercred(stream.as_fd())
+                        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                        .map(|credentials| (before, stream, credentials))
+                })
+        })
+        .and_then(|(before, stream, credentials)| {
+            std::fs::symlink_metadata(path)
+                .map_err(|_| SelectorBoundaryError::SelectorUnavailable)
+                .and_then(|after| {
+                    if credentials.uid.as_raw() != expected_uid
+                        || before.dev() != after.dev()
+                        || before.ino() != after.ino()
+                    {
+                        Err(SelectorBoundaryError::ArtifactInvalid)
+                    } else {
+                        Ok(stream)
+                    }
+                })
+        })
+}
+
+fn validate_selector_socket(
+    metadata: &Metadata,
+    expected_uid: u32,
+) -> Result<(), SelectorBoundaryError> {
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o777 != SELECTOR_SOCKET_MODE
     {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    } else {
+        Ok(())
     }
-    let stream = connect(&path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-    let credentials =
-        socket_peercred(stream.as_fd()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let after =
-        std::fs::symlink_metadata(path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-    if credentials.uid.as_raw() != expected_uid
-        || before.dev() != after.dev()
-        || before.ino() != after.ino()
-    {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(stream)
 }
 
 #[cfg(test)]

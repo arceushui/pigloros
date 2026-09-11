@@ -39,51 +39,51 @@ impl InstalledSelectorState {
         self,
     ) -> Result<AuthenticatedSelectorBootstrap, SelectorBoundaryError> {
         let (root_key_id, root_bytes) = self.manifest.offline_root();
-        let root_key = VerifyingKey::from_bytes(&root_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
         let [trust_digest, revocation_digest, policy_digest] = self.manifest.authority_digests();
-        let trust = SandboxTrustSnapshot::authenticate(
-            &self.control_record(InstallationObjectKind(0), trust_digest)?,
-            root_key_id,
-            &root_key,
-        )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let revocation = SandboxRevocationSnapshot::authenticate(
-            &self.control_record(InstallationObjectKind(1), revocation_digest)?,
-            &trust,
-        )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let policy = SandboxAdministratorPolicy::authenticate(
-            &self.control_record(InstallationObjectKind(2), policy_digest)?,
-            &trust,
-            &revocation,
-        )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        if [
-            trust.snapshot_digest(),
-            revocation.snapshot_digest(),
-            policy.policy_digest(),
-        ] != [trust_digest, revocation_digest, policy_digest]
-        {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        let selection = policy.selection();
-        for (kind, identity) in [
-            (InstallationObjectKind(3), selection.provider_manifest),
-            (InstallationObjectKind(11), selection.provider_binary),
-            (InstallationObjectKind(10), selection.broker_hard_caps),
-            (InstallationObjectKind(5), selection.conformance_profile),
-            (InstallationObjectKind(4), selection.conformance_report),
-            (InstallationObjectKind(7), selection.syscall_set),
-        ] {
-            self.artifact(kind, identity)?;
-        }
-        Ok(AuthenticatedSelectorBootstrap {
-            installed: self,
-            trust,
-            revocation,
-            policy,
-        })
+        VerifyingKey::from_bytes(&root_bytes)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            .and_then(|root_key| {
+                self.control_record(InstallationObjectKind(0), trust_digest)
+                    .and_then(|trust_record| {
+                        SandboxTrustSnapshot::authenticate(&trust_record, root_key_id, &root_key)
+                            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                    })
+            })
+            .and_then(|trust| {
+                self.control_record(InstallationObjectKind(1), revocation_digest)
+                    .and_then(|revocation_record| {
+                        SandboxRevocationSnapshot::authenticate(&revocation_record, &trust)
+                            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                            .map(|revocation| (trust, revocation))
+                    })
+            })
+            .and_then(|(trust, revocation)| {
+                self.control_record(InstallationObjectKind(2), policy_digest)
+                    .and_then(|policy_record| {
+                        SandboxAdministratorPolicy::authenticate(
+                            &policy_record,
+                            &trust,
+                            &revocation,
+                        )
+                        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                        .map(|policy| (trust, revocation, policy))
+                    })
+            })
+            .and_then(|(trust, revocation, policy)| {
+                authenticate_selected_artifacts(
+                    &self,
+                    &trust,
+                    &revocation,
+                    &policy,
+                    [trust_digest, revocation_digest, policy_digest],
+                )
+                .map(|()| AuthenticatedSelectorBootstrap {
+                    installed: self,
+                    trust,
+                    revocation,
+                    policy,
+                })
+            })
     }
 
     fn control_record(
@@ -91,8 +91,37 @@ impl InstalledSelectorState {
         kind: InstallationObjectKind,
         identity: [u8; 32],
     ) -> Result<Vec<u8>, SelectorBoundaryError> {
-        self.artifact(kind, identity)?.read_control(MANIFEST_LIMIT)
+        self.artifact(kind, identity)
+            .and_then(|artifact| artifact.read_control(MANIFEST_LIMIT))
     }
+}
+
+fn authenticate_selected_artifacts(
+    installed: &InstalledSelectorState,
+    trust: &SandboxTrustSnapshot,
+    revocation: &SandboxRevocationSnapshot,
+    policy: &SandboxAdministratorPolicy,
+    expected_digests: [[u8; 32]; 3],
+) -> Result<(), SelectorBoundaryError> {
+    if [
+        trust.snapshot_digest(),
+        revocation.snapshot_digest(),
+        policy.policy_digest(),
+    ] != expected_digests
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    let selection = policy.selection();
+    [
+        (InstallationObjectKind(3), selection.provider_manifest),
+        (InstallationObjectKind(11), selection.provider_binary),
+        (InstallationObjectKind(10), selection.broker_hard_caps),
+        (InstallationObjectKind(5), selection.conformance_profile),
+        (InstallationObjectKind(4), selection.conformance_report),
+        (InstallationObjectKind(7), selection.syscall_set),
+    ]
+    .into_iter()
+    .try_for_each(|(kind, identity)| installed.artifact(kind, identity).map(|_| ()))
 }
 
 impl AuthenticatedSelectorBootstrap {
@@ -128,7 +157,7 @@ impl AuthenticatedSelectorBootstrap {
             .artifact(InstallationObjectKind(11), selection.provider_binary)?
             .object()
             .content_digest();
-        let provider = AdmittedSandboxProvider::admit(
+        AdmittedSandboxProvider::admit(
             &self.policy,
             &self.trust,
             &self.revocation,
@@ -142,8 +171,8 @@ impl AuthenticatedSelectorBootstrap {
                 required_features: self.installed.manifest.required_features(),
             },
         )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        Ok(AdmittedSelectorProvider {
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .map(|provider| AdmittedSelectorProvider {
             bootstrap: self,
             provider,
         })
