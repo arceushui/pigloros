@@ -2500,64 +2500,40 @@ mod tests {
         Wrong(ErasureReferenceV1),
     }
 
+    #[derive(Clone, Copy)]
+    enum ResolveStateOccurrenceFaultV1 {
+        Adapter {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+        Missing {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+    }
+
     struct ResolveStateControlV1 {
         fault: std::sync::Mutex<Option<ResolveStateFaultV1>>,
     }
 
-    impl ResolveStateControlV1 {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                fault: std::sync::Mutex::new(None),
-            })
-        }
-
-        fn set_fault(&self, fault: ResolveStateFaultV1) {
-            if let Ok(mut configured) = self.fault.lock() {
-                *configured = Some(fault.reset());
-            }
-        }
-
-        fn next_occurrence(self, digest: ErasureReferenceV1) -> Option<usize> {
+    impl ResolveStateFaultV1 {
+        const fn occurrence(self) -> Option<ResolveStateOccurrenceFaultV1> {
             match self {
-                ResolveStateFaultV1::Adapter {
+                Self::Adapter {
                     requested,
                     occurrence,
-                }
-                | ResolveStateFaultV1::Missing {
+                } => Some(ResolveStateOccurrenceFaultV1::Adapter {
                     requested,
                     occurrence,
-                } => (requested == digest).then_some(occurrence.saturating_sub(1)),
+                }),
+                Self::Missing {
+                    requested,
+                    occurrence,
+                } => Some(ResolveStateOccurrenceFaultV1::Missing {
+                    requested,
+                    occurrence,
+                }),
                 ResolveStateFaultV1::Wrong { .. } => None,
-            }
-        }
-
-        const fn with_occurrence(self, occurrence: usize) -> Self {
-            match self {
-                Self::Adapter { requested, .. } => Self::Adapter {
-                    requested,
-                    occurrence,
-                },
-                Self::Missing { requested, .. } => Self::Missing {
-                    requested,
-                    occurrence,
-                },
-                Self::Wrong {
-                    requested,
-                    replacement,
-                    seen,
-                } => Self::Wrong {
-                    requested,
-                    replacement,
-                    seen,
-                },
-            }
-        }
-
-        const fn fault_outcome(self) -> ResolveStateFaultOutcomeV1 {
-            match self {
-                Self::Adapter { .. } => ResolveStateFaultOutcomeV1::Adapter,
-                Self::Missing { .. } => ResolveStateFaultOutcomeV1::Missing,
-                Self::Wrong { replacement, .. } => ResolveStateFaultOutcomeV1::Wrong(replacement),
             }
         }
 
@@ -2575,6 +2551,54 @@ mod tests {
                 other => other,
             }
         }
+    }
+
+    impl ResolveStateOccurrenceFaultV1 {
+        fn next_occurrence(self, digest: ErasureReferenceV1) -> Option<usize> {
+            match self {
+                Self::Adapter {
+                    requested,
+                    occurrence,
+                }
+                | Self::Missing {
+                    requested,
+                    occurrence,
+                } => (requested == digest).then_some(occurrence.saturating_sub(1)),
+            }
+        }
+        const fn with_occurrence(self, occurrence: usize) -> ResolveStateFaultV1 {
+            match self {
+                Self::Adapter { requested, .. } => ResolveStateFaultV1::Adapter {
+                    requested,
+                    occurrence,
+                },
+                Self::Missing { requested, .. } => ResolveStateFaultV1::Missing {
+                    requested,
+                    occurrence,
+                },
+            }
+        }
+
+        const fn fault_outcome(self) -> ResolveStateFaultOutcomeV1 {
+            match self {
+                Self::Adapter { .. } => ResolveStateFaultOutcomeV1::Adapter,
+                Self::Missing { .. } => ResolveStateFaultOutcomeV1::Missing,
+            }
+        }
+    }
+
+    impl ResolveStateControlV1 {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                fault: std::sync::Mutex::new(None),
+            })
+        }
+
+        fn set_fault(&self, fault: ResolveStateFaultV1) {
+            if let Ok(mut configured) = self.fault.lock() {
+                *configured = Some(fault.reset());
+            }
+        }
 
         fn outcome(&self, digest: ErasureReferenceV1) -> Option<ResolveStateFaultOutcomeV1> {
             let Ok(mut configured) = self.fault.lock() else {
@@ -2583,13 +2607,15 @@ mod tests {
             let Some(fault) = *configured else {
                 return None;
             };
-            if let Some(remaining) = fault.next_occurrence(digest) {
-                if remaining == 0 {
-                    *configured = None;
-                    return Some(fault.fault_outcome());
+            if let Some(occurrence_fault) = fault.occurrence() {
+                if let Some(remaining) = occurrence_fault.next_occurrence(digest) {
+                    if remaining == 0 {
+                        *configured = None;
+                        return Some(occurrence_fault.fault_outcome());
+                    }
+                    *configured = Some(occurrence_fault.with_occurrence(remaining));
+                    return None;
                 }
-                *configured = Some(fault.with_occurrence(remaining));
-                return None;
             }
             if let ResolveStateFaultV1::Wrong {
                 requested,
