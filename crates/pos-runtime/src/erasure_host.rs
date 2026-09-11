@@ -2428,7 +2428,7 @@ mod tests {
     };
 
     use pos_store::memory::MemoryStore;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const fn reference(seed: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([seed; 32])
@@ -2464,7 +2464,8 @@ mod tests {
         calls: AtomicUsize,
         fail_at: AtomicUsize,
         missing_at: AtomicUsize,
-        wrong_at: AtomicUsize,
+        wrong_seen: AtomicBool,
+        wrong_for: std::sync::Mutex<Option<ErasureReferenceV1>>,
         wrong_digest: std::sync::Mutex<Option<ErasureReferenceV1>>,
     }
 
@@ -2474,7 +2475,8 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 fail_at: AtomicUsize::new(usize::MAX),
                 missing_at: AtomicUsize::new(usize::MAX),
-                wrong_at: AtomicUsize::new(usize::MAX),
+                wrong_seen: AtomicBool::new(false),
+                wrong_for: std::sync::Mutex::new(None),
                 wrong_digest: std::sync::Mutex::new(None),
             })
         }
@@ -2640,7 +2642,15 @@ mod tests {
             if self.resolve_control.missing_at.load(Ordering::Acquire) == call {
                 return Ok(None);
             }
-            if self.resolve_control.wrong_at.load(Ordering::Acquire) == call {
+            let wrong_for = self
+                .resolve_control
+                .wrong_for
+                .lock()
+                .ok()
+                .and_then(|digest| *digest);
+            if wrong_for == Some(digest)
+                && self.resolve_control.wrong_seen.swap(true, Ordering::AcqRel)
+            {
                 if let Some(wrong_digest) = self
                     .resolve_control
                     .wrong_digest
@@ -3319,6 +3329,7 @@ mod tests {
             Arc<ResolveStateControlV1>,
             ErasureReferenceV1,
             ErasureReferenceV1,
+            ErasureReferenceV1,
         ),
         ErasureHostErrorV1,
     > {
@@ -3340,40 +3351,67 @@ mod tests {
                 .map_err(map_erasure_error)?
         };
         let rejected_digest = rejected.state_digest();
+        let predecessor_digest = rejected
+            .previous_state()
+            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))?;
         host.authority = Some(Arc::new(RejectedCoordinatorAuthorityV1));
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)?;
-        Ok((host, resolve_control, request_reference, rejected_digest))
+        Ok((
+            host,
+            resolve_control,
+            request_reference,
+            rejected_digest,
+            predecessor_digest,
+        ))
     }
 
     fn set_resolve_fault(control: &ResolveStateControlV1, kind: &ResolveStateFaultV1) {
         control.fail_at.store(usize::MAX, Ordering::Release);
         control.missing_at.store(usize::MAX, Ordering::Release);
-        control.wrong_at.store(usize::MAX, Ordering::Release);
-        if let ResolveStateFaultV1::Wrong(digest) = kind {
-            if let Ok(mut wrong_digest) = control.wrong_digest.lock() {
-                *wrong_digest = Some(*digest);
-            }
+        control.wrong_seen.store(false, Ordering::Release);
+        if let Ok(mut wrong_for) = control.wrong_for.lock() {
+            *wrong_for = None;
         }
-        let target = control.calls.load(Ordering::Acquire) + 3;
+        if let Ok(mut wrong_digest) = control.wrong_digest.lock() {
+            *wrong_digest = None;
+        }
         match kind {
-            ResolveStateFaultV1::Adapter => control.fail_at.store(target, Ordering::Release),
-            ResolveStateFaultV1::Missing => control.missing_at.store(target, Ordering::Release),
-            ResolveStateFaultV1::Wrong(_) => control.wrong_at.store(target, Ordering::Release),
+            ResolveStateFaultV1::Adapter => control
+                .fail_at
+                .store(control.calls.load(Ordering::Acquire) + 3, Ordering::Release),
+            ResolveStateFaultV1::Missing => control
+                .missing_at
+                .store(control.calls.load(Ordering::Acquire) + 3, Ordering::Release),
+            ResolveStateFaultV1::Wrong {
+                requested,
+                replacement,
+            } => {
+                if let Ok(mut wrong_for) = control.wrong_for.lock() {
+                    *wrong_for = Some(*requested);
+                }
+                if let Ok(mut wrong_digest) = control.wrong_digest.lock() {
+                    *wrong_digest = Some(*replacement);
+                }
+            }
         }
     }
 
     enum ResolveStateFaultV1 {
         Adapter,
         Missing,
-        Wrong(ErasureReferenceV1),
+        Wrong {
+            requested: ErasureReferenceV1,
+            replacement: ErasureReferenceV1,
+        },
     }
 
     #[test]
     fn read_sender_fails_closed_for_recovery_and_history_adapter_faults(
     ) -> Result<(), ErasureHostErrorV1> {
-        let (mut host, control, request, wrong_digest) = rejected_host_with_resolve_control()?;
+        let (mut host, control, request, wrong_digest, predecessor_digest) =
+            rejected_host_with_resolve_control()?;
         control
             .fail_at
             .store(control.calls.load(Ordering::Acquire) + 1, Ordering::Release);
@@ -3394,7 +3432,13 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(&control, &ResolveStateFaultV1::Wrong(wrong_digest));
+        set_resolve_fault(
+            &control,
+            &ResolveStateFaultV1::Wrong {
+                requested: predecessor_digest,
+                replacement: wrong_digest,
+            },
+        );
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
