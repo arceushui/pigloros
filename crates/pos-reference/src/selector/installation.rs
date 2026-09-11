@@ -4,6 +4,8 @@
 //! and retains the administrator-installed bootstrap objects that a later
 //! selector composition must authenticate before exposing its evaluator socket.
 
+pub mod authority;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -611,11 +613,13 @@ fn hex_name(digest: [u8; 32]) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use ciborium::value::Value;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
 
     use super::*;
 
@@ -671,6 +675,165 @@ mod tests {
                 object(kind, *blake3::hash(&bytes).as_bytes(), bytes.len() as u64)
             })
             .collect()
+    }
+
+    fn sign_record(magic: &str, unsigned: Value, signer: &SigningKey) -> TestResult<Vec<u8>> {
+        let mut digest = blake3::Hasher::new();
+        digest.update(format!("PiglorOS.{magic}.v1\0").as_bytes());
+        digest.update(&encode(&unsigned)?);
+        let digest = digest.finalize();
+        let mut message = format!("PiglorOS.{magic}.Signature.v1\0").into_bytes();
+        message.extend_from_slice(digest.as_bytes());
+        Ok(encode(&Value::Array(vec![
+            unsigned,
+            Value::Bytes(digest.as_bytes().to_vec()),
+            Value::Bytes(signer.sign(&message).to_bytes().to_vec()),
+        ]))?)
+    }
+
+    fn held_artifact(
+        kind: u8,
+        identity: [u8; 32],
+        bytes: &[u8],
+    ) -> TestResult<HeldInstallationArtifact> {
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(bytes)?;
+        Ok(HeldInstallationArtifact {
+            file: file.into_file(),
+            object: InstallationObject {
+                kind: InstallationObjectKind::from_code(kind)?,
+                identity,
+                content_digest: *blake3::hash(bytes).as_bytes(),
+                byte_length: bytes.len().try_into()?,
+            },
+        })
+    }
+
+    fn authenticated_state() -> TestResult<InstalledSelectorState> {
+        let root = SigningKey::from_bytes(&[1; 32]);
+        let policy_signer = SigningKey::from_bytes(&[2; 32]);
+        let trust_bytes = sign_record(
+            "TRS1",
+            Value::Array(vec![
+                Value::Text("TRS1".to_owned()),
+                integer(1),
+                integer(1),
+                Value::Array(vec![Value::Array(vec![
+                    Value::Text("policy".to_owned()),
+                    integer(1),
+                    Value::Bytes(policy_signer.verifying_key().to_bytes().to_vec()),
+                    integer(1),
+                ])]),
+                Value::Array(Vec::new()),
+                Value::Text("root".to_owned()),
+            ]),
+            &root,
+        )?;
+        let trust_digest: [u8; 32] = {
+            let value: Value = ciborium::from_reader(trust_bytes.as_slice())?;
+            let Value::Array(wrapper) = value else {
+                return Err("TRS1 wrapper is not an array".into());
+            };
+            let Value::Bytes(digest) = wrapper.get(1).ok_or("TRS1 digest missing")? else {
+                return Err("TRS1 digest is not bytes".into());
+            };
+            digest.as_slice().try_into()?
+        };
+        let revocation_bytes = sign_record(
+            "RVS1",
+            Value::Array(vec![
+                Value::Text("RVS1".to_owned()),
+                integer(1),
+                Value::Bytes(trust_digest.to_vec()),
+                integer(1),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                Value::Text("policy".to_owned()),
+            ]),
+            &policy_signer,
+        )?;
+        let revocation_digest: [u8; 32] = {
+            let value: Value = ciborium::from_reader(revocation_bytes.as_slice())?;
+            let Value::Array(wrapper) = value else {
+                return Err("RVS1 wrapper is not an array".into());
+            };
+            let Value::Bytes(digest) = wrapper.get(1).ok_or("RVS1 digest missing")? else {
+                return Err("RVS1 digest is not bytes".into());
+            };
+            digest.as_slice().try_into()?
+        };
+        let provider_binary = *blake3::hash(b"provider-binary").as_bytes();
+        let hard_caps = *blake3::hash(b"hard-caps").as_bytes();
+        let policy_bytes = sign_record(
+            "APT1",
+            Value::Array(vec![
+                Value::Text("APT1".to_owned()),
+                integer(1),
+                integer(1),
+                Value::Bytes(vec![10; 32]),
+                Value::Bytes(provider_binary.to_vec()),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                Value::Bytes(hard_caps.to_vec()),
+                Value::Bytes(vec![15; 32]),
+                Value::Bytes(vec![16; 32]),
+                Value::Bytes(trust_digest.to_vec()),
+                Value::Bytes(revocation_digest.to_vec()),
+                integer(1),
+                integer(1),
+                Value::Bytes(vec![17; 32]),
+                Value::Text("policy".to_owned()),
+            ]),
+            &policy_signer,
+        )?;
+        let policy_digest: [u8; 32] = {
+            let value: Value = ciborium::from_reader(policy_bytes.as_slice())?;
+            let Value::Array(wrapper) = value else {
+                return Err("APT1 wrapper is not an array".into());
+            };
+            let Value::Bytes(digest) = wrapper.get(1).ok_or("APT1 digest missing")? else {
+                return Err("APT1 digest is not bytes".into());
+            };
+            digest.as_slice().try_into()?
+        };
+        let artifacts = [
+            (0, trust_digest, trust_bytes.as_slice()),
+            (1, revocation_digest, revocation_bytes.as_slice()),
+            (2, policy_digest, policy_bytes.as_slice()),
+            (3, [10; 32], b"provider-manifest".as_slice()),
+            (11, provider_binary, b"provider-binary".as_slice()),
+            (10, hard_caps, b"hard-caps".as_slice()),
+            (5, [15; 32], b"conformance-profile".as_slice()),
+            (4, [16; 32], b"conformance-report".as_slice()),
+            (7, [17; 32], b"syscall-set".as_slice()),
+        ];
+        let mut installed = BTreeMap::new();
+        for (kind, identity, bytes) in artifacts {
+            let artifact = held_artifact(kind, identity, bytes)?;
+            installed.insert((artifact.object.kind, artifact.object.identity), artifact);
+        }
+        let objects = installed
+            .values()
+            .map(|artifact| artifact.object.clone())
+            .collect();
+        Ok(InstalledSelectorState {
+            manifest_file: tempfile::NamedTempFile::new()?.into_file(),
+            manifest_bytes: Vec::new(),
+            manifest: InstallationManifest {
+                root_key_id: "root".to_owned(),
+                root_public_key: root.verifying_key().to_bytes(),
+                trust_digest,
+                revocation_digest,
+                policy_digest,
+                execute_socket: "/run/pigloros/provider-execute.sock".to_owned(),
+                control_socket: "/run/pigloros/provider-control.sock".to_owned(),
+                required_features: Vec::new(),
+                objects,
+                digest: [1; 32],
+            },
+            artifacts: installed,
+        })
     }
 
     #[test]
@@ -830,6 +993,34 @@ mod tests {
             digest_complete_file(&file, 4)?,
             *blake3::hash(&[9; 4]).as_bytes()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn authenticates_pinned_bootstrap_and_selected_artifacts() -> TestResult {
+        let bootstrap = authenticated_state()?.authenticate_bootstrap()?;
+        assert_eq!(bootstrap.trust().trust_epoch(), 1);
+        assert_eq!(bootstrap.revocation().revocation_epoch(), 1);
+        assert_eq!(bootstrap.policy().policy_epoch(), 1);
+        assert!(bootstrap
+            .installed()
+            .artifact(InstallationObjectKind::from_code(3)?, [10; 32])
+            .is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_foreign_root_or_missing_selected_artifact() -> TestResult {
+        let mut foreign_root = authenticated_state()?;
+        foreign_root.manifest.root_public_key =
+            SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
+        assert!(foreign_root.authenticate_bootstrap().is_err());
+
+        let mut missing_selected = authenticated_state()?;
+        missing_selected
+            .artifacts
+            .remove(&(InstallationObjectKind::from_code(4)?, [16; 32]));
+        assert!(missing_selected.authenticate_bootstrap().is_err());
         Ok(())
     }
 }
