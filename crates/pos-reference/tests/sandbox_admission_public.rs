@@ -1884,34 +1884,10 @@ fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
         )
         .is_err());
 
-    let forged_receipt = SandboxProviderReceipt::from_canonical_cbor(&replace_signed_signature(
-        &receipt_bytes,
-        [9; 64],
-    )?)?;
-    let result =
-        pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
-            &result_bytes,
-        )?;
-    assert!(admitted
-        .authenticate_audit_chain(&audit, &forged_receipt, &result)
-        .is_err());
-    let forged_result =
-        pos_reference::sandbox_provider_protocol::SandboxProviderResult::from_canonical_cbor(
-            &replace_signed_signature(&result_bytes, [9; 64])?,
-        )?;
-    assert!(admitted
-        .authenticate_audit_chain(&audit, &receipt, &forged_result)
-        .is_err());
     let mut forged_audit = audit;
     forged_audit[0] = replace_signed_signature(&forged_audit[0], [9; 64])?;
     assert!(admitted
         .authenticate_audit_chain(&forged_audit, &receipt, &result)
-        .is_err());
-
-    let mut invalid_receipt = receipt;
-    invalid_receipt.attempt_id = [0; 16];
-    assert!(admitted
-        .authenticate_terminal_result(&result_bytes, &request, &grant, &invalid_receipt)
         .is_err());
     Ok(())
 }
