@@ -960,12 +960,12 @@ impl ErasureExecutionHostV1 {
         composition: Option<&ErasureCoordinatorCompositionV1>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        let Some(composition) = composition else {
+            return Self::open_read_only_verified_empty(path, maximum_requests);
+        };
         let store = pos_store::sqlite::SqliteStore::open_read_only(path)
             .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        let Some(composition) = composition else {
-            return Self::recover_verified_empty(store, maximum_requests);
-        };
         let mut host = Self::new_closed(store)?;
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
