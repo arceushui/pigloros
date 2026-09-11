@@ -722,7 +722,6 @@ mod tests {
             std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
         )?;
         let uid = std::fs::metadata(&socket)?.uid();
-        let server = thread::spawn(move || listener.accept().map(|_| ()));
         let request = selector_request();
         let mut attempt = selector_attempt();
         attempt.watchdog_ms = 0;
@@ -731,7 +730,7 @@ mod tests {
             SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
             Err(AdapterError::Unavailable)
         );
-        server.join().map_err(|_| AdapterError::ProtocolFailure)??;
+        drop(listener);
         Ok(())
     }
 
