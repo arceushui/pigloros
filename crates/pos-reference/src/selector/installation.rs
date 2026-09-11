@@ -324,14 +324,20 @@ impl InstalledSelectorState {
             Path::new(SANDBOX_ARTIFACT_ROOT)
                 .strip_prefix("/")
                 .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
+            0,
         )?;
         Self::open_at(&artifact_root)
     }
 
     fn open_at(root: &File) -> Result<Self, SelectorBoundaryError> {
-        validate_directory(root)?;
+        Self::open_at_for_owner(root, 0)
+    }
+
+    fn open_at_for_owner(root: &File, expected_owner: u32) -> Result<Self, SelectorBoundaryError> {
+        validate_directory(root, expected_owner)?;
         ensure_no_pending_recovery(root)?;
-        let manifest_file = open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT)?;
+        let manifest_file =
+            open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT, expected_owner)?;
         let manifest_bytes = read_complete_file(&manifest_file, MANIFEST_LIMIT)?;
         let manifest = InstallationManifest::from_canonical_cbor(&manifest_bytes)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
@@ -340,12 +346,14 @@ impl InstalledSelectorState {
             let directory = open_directory_chain(
                 root.try_clone().map_err(|_| SelectorBoundaryError::Io)?,
                 Path::new(object.kind.directory()),
+                expected_owner,
             )?;
             let file = open_immutable_file(
                 &directory,
                 &hex_name(object.content_digest),
                 object.kind.required_mode(),
                 object.byte_length,
+                expected_owner,
             )?;
             if digest_complete_file(&file, object.byte_length)? != object.content_digest {
                 return Err(SelectorBoundaryError::ArtifactInvalid);
@@ -364,6 +372,15 @@ impl InstalledSelectorState {
             manifest,
             artifacts,
         })
+    }
+
+    #[cfg(test)]
+    fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
+        let owner = root
+            .metadata()
+            .map_err(|_| SelectorBoundaryError::Io)?
+            .uid();
+        Self::open_at_for_owner(root, owner)
     }
 
     /// Returns the retained manifest descriptor.
@@ -483,8 +500,9 @@ fn require_preferred_order(values: &[Value]) -> Result<(), ProtocolError> {
 fn open_directory_chain(
     mut directory: File,
     relative: &Path,
+    expected_owner: u32,
 ) -> Result<File, SelectorBoundaryError> {
-    validate_directory(&directory)?;
+    validate_directory(&directory, expected_owner)?;
     for component in relative.components() {
         let Component::Normal(name) = component else {
             return Err(SelectorBoundaryError::ArtifactInvalid);
@@ -500,16 +518,16 @@ fn open_directory_chain(
         )
         .map(File::from)
         .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        validate_directory(&directory)?;
+        validate_directory(&directory, expected_owner)?;
     }
     Ok(directory)
 }
 
-fn validate_directory(directory: &File) -> Result<(), SelectorBoundaryError> {
+fn validate_directory(directory: &File, expected_owner: u32) -> Result<(), SelectorBoundaryError> {
     let metadata = directory
         .metadata()
         .map_err(|_| SelectorBoundaryError::Io)?;
-    if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+    if !metadata.is_dir() || metadata.uid() != expected_owner || metadata.mode() & 0o022 != 0 {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
     Ok(())
@@ -520,6 +538,7 @@ fn open_immutable_file(
     name: &str,
     required_mode: u32,
     maximum: u64,
+    expected_owner: u32,
 ) -> Result<File, SelectorBoundaryError> {
     let file = openat2(
         directory,
@@ -534,7 +553,7 @@ fn open_immutable_file(
     .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
     let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
     if !metadata.is_file()
-        || metadata.uid() != 0
+        || metadata.uid() != expected_owner
         || metadata.nlink() != 1
         || metadata.mode() & 0o7777 != required_mode
         || metadata.len() == 0
@@ -1233,7 +1252,10 @@ mod tests {
         let temporary = tempfile::tempdir()?;
         write_state(temporary.path())?;
         let root = File::open(temporary.path())?;
-        let state = InstalledSelectorState::open_at(&root)?;
+        if root.metadata()?.uid() != 0 {
+            assert!(InstalledSelectorState::open_at(&root).is_err());
+        }
+        let state = InstalledSelectorState::open_at_for_test(&root)?;
         assert!(!state.manifest_bytes().is_empty());
         assert!(state.manifest_file().metadata()?.is_file());
         let authority = state.artifact(InstallationObjectKind::from_code(0)?, [1; 32])?;
@@ -1254,11 +1276,11 @@ mod tests {
         let linked = temporary.path().join("authority").join("linked");
         fs::hard_link(&source, &linked)?;
         let root = File::open(temporary.path())?;
-        assert!(InstalledSelectorState::open_at(&root).is_err());
+        assert!(InstalledSelectorState::open_at_for_test(&root).is_err());
         fs::remove_file(linked)?;
         fs::remove_file(&source)?;
         symlink("elsewhere", &source)?;
-        assert!(InstalledSelectorState::open_at(&root).is_err());
+        assert!(InstalledSelectorState::open_at_for_test(&root).is_err());
         Ok(())
     }
 
@@ -1268,7 +1290,7 @@ mod tests {
         write_state(temporary.path())?;
         fs::write(temporary.path().join("installation-update.cbor"), [1])?;
         let root = File::open(temporary.path())?;
-        assert!(InstalledSelectorState::open_at(&root).is_err());
+        assert!(InstalledSelectorState::open_at_for_test(&root).is_err());
         Ok(())
     }
 
