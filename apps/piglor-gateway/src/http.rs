@@ -874,7 +874,12 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn health_reports_executor_unready_after_shutdown() {
-        let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
         gateway.shutdown().await.test_ok();
         let (status, json) = json_request(
             router(AppState {

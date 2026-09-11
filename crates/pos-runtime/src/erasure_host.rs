@@ -21,8 +21,8 @@ use pos_core::{
     ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
     ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedEmptyInventoryQueryV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1,
-    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
+    ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
     KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
     KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1,
     PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
@@ -548,10 +548,6 @@ enum HostedResolutionCommandV1 {
         request: ErasureReferenceV1,
         acknowledgement: ErasureAcknowledgementV1,
     },
-    ScopeExtension {
-        request: ErasureReferenceV1,
-        extension: ErasureScopeExtensionV1,
-    },
     AdministrativeResolution {
         request: ErasureReferenceV1,
         resolution: ErasureAdministrativeResolutionV1,
@@ -612,13 +608,6 @@ impl HostedCoordinatorCommandV1 {
             request,
             acknowledgement,
         })
-    }
-
-    const fn scope_extension(
-        request: ErasureReferenceV1,
-        extension: ErasureScopeExtensionV1,
-    ) -> Self {
-        Self::Resolution(HostedResolutionCommandV1::ScopeExtension { request, extension })
     }
 
     const fn administrative_resolution(
@@ -696,9 +685,6 @@ impl HostedResolutionCommandV1 {
                 request,
                 acknowledgement,
             } => coordinator.acknowledge(request, acknowledgement),
-            Self::ScopeExtension { request, extension } => {
-                coordinator.append_scope_extension(request, extension)
-            }
             Self::AdministrativeResolution {
                 request,
                 resolution,
@@ -1828,24 +1814,6 @@ impl ErasureCommandSenderV1<'_> {
         ))
     }
 
-    /// Append one authorized future-Fork scope extension to the coordinator.
-    ///
-    /// This command is available during containment and remains serialized with
-    /// the installed inventory generation.
-    ///
-    /// # Errors
-    /// Returns a payload-free authorization, conflict, adapter, or recovery
-    /// error and poisons an uncertain persistence/publication outcome.
-    pub fn append_erasure_scope_extension(
-        &mut self,
-        request: ErasureReferenceV1,
-        extension: ErasureScopeExtensionV1,
-    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.apply_state_command(&HostedCoordinatorCommandV1::scope_extension(
-            request, extension,
-        ))
-    }
-
     /// Append one authenticated administrative recovery resolution.
     ///
     /// Resolution evidence is validated by the configured authority Plugin and
@@ -2167,6 +2135,41 @@ pub struct ErasureReadSenderV1<'host> {
 }
 
 impl ErasureReadSenderV1<'_> {
+    /// Recover one authoritative, payload-free ERS1 state through the
+    /// coordinator that owns this host's installed generation.
+    ///
+    /// The query is deliberately exposed only from the host read seam: callers
+    /// cannot provide a raw persistence resolver or bypass the configured
+    /// authority and generation fence.
+    ///
+    /// # Errors
+    /// Returns a payload-free recovery, authorization, adapter, or stale
+    /// generation error.
+    pub fn erasure_state(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let authority = self
+            .host
+            .authority
+            .clone()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let coordinator = self
+            .host
+            .coordinator
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let state = {
+            let port =
+                HostedCoordinatorPortV1::new(self.host.store.host_store(), authority.as_ref());
+            let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
+            ErasureVerifiedStateQueryV1::verified_state(&mut state_machine, request)
+                .map_err(map_erasure_error)?
+        };
+        self.host.ensure_generation(self.generation)?;
+        Ok(state)
+    }
+
     /// Run one read-only protected effect while retaining the host's current
     /// Tick Boundary fence and inventory generation for its complete
     /// execution.
@@ -3058,20 +3061,6 @@ mod tests {
         }
     }
 
-    fn lifecycle_extension(
-        request: ErasureReferenceV1,
-        seed: u8,
-    ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
-        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
-            request,
-            scope_commitment: reference(seed),
-            fork: reference(seed.wrapping_add(1)),
-            lineage_rule: reference(seed.wrapping_add(2)),
-            predecessor_extension: None,
-            admission_provenance: reference(seed.wrapping_add(3)),
-        })
-    }
-
     fn lifecycle_resolution(
         request: ErasureReferenceV1,
         seed: u8,
@@ -3177,14 +3166,6 @@ mod tests {
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         assert_eq!(
-            HostedCoordinatorCommandV1::scope_extension(
-                request,
-                lifecycle_extension(request, 83)?,
-            )
-            .execute(&mut coordinator),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        assert_eq!(
             HostedCoordinatorCommandV1::administrative_resolution(
                 request,
                 lifecycle_resolution(request, 87)?,
@@ -3221,10 +3202,6 @@ mod tests {
         );
         assert_eq!(
             sender.acknowledge_erasure(request, lifecycle_acknowledgement(110)),
-            Err(ErasureHostErrorV1::AuthorizationDenied)
-        );
-        assert_eq!(
-            sender.append_erasure_scope_extension(request, lifecycle_extension(request, 115)?),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(

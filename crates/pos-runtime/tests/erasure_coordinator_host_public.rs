@@ -43,7 +43,6 @@ struct TestAuthority {
     deny_topology: AtomicBool,
     allow_rejection: AtomicBool,
     allow_corrected: AtomicBool,
-    allow_scope_extension: AtomicBool,
     allow_administrative_resolution: AtomicBool,
     allow_attempt: AtomicBool,
     allow_dispatch: AtomicBool,
@@ -220,10 +219,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         &self,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.allow_scope_extension
-            .load(Ordering::Acquire)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        Ok(())
     }
 
     fn admit_fork_scope_extension(
@@ -468,22 +464,24 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
-    let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
     let request = test_stage("construct lifecycle request", persistence_request())?;
     let request_reference = request.reference();
     let request_provenance = request.provenance();
-    test_stage(
-        "submit lifecycle request",
-        commands.submit_erasure_request(request, request_provenance),
-    )?;
-    test_stage(
-        "authorize lifecycle request",
-        commands.authorize_erasure_request(request_reference, reference(32)),
-    )?;
-    test_stage(
-        "freeze lifecycle request",
-        commands.freeze_access(request_reference, &freeze_transition()),
-    )?;
+    {
+        let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
+        test_stage(
+            "submit lifecycle request",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize lifecycle request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze lifecycle request",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+    }
     authority.allow_post_freeze();
 
     let target = persistence_target();
@@ -505,61 +503,77 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
             authorization_provenance: reference(32),
         }),
     )?;
-    assert_eq!(
-        test_stage(
+    let receipt = {
+        let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
+        let dispatched = test_stage(
             "dispatch lifecycle destruction",
             commands.dispatch_erasure_destruction(request_reference, &admission),
-        )?
-        .lifecycle(),
-        ErasureLifecycleV1::AwaitingAcknowledgements
-    );
-    test_stage(
-        "acknowledge lifecycle destruction",
-        commands.acknowledge_erasure(
-            request_reference,
-            pos_core::ErasureAcknowledgementV1 {
-                obligation: obligation.reference(),
-                target,
-                owner: target.replica_id,
-                evidence: reference(24),
-                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-            },
-        ),
-    )?;
-    let receipt = test_stage(
-        "finalize lifecycle request",
-        commands.finalize_erasure_request(
-            request_reference,
-            &ErasureReceiptInputV1 {
-                request: reference(0),
-                terminal_state: reference(0),
-                coordinator: reference(0),
-                lifecycle: ErasureLifecycleV1::Complete,
-                freeze_position: 10,
-                acknowledgements: Vec::new(),
-                frozen_targets: Vec::new(),
-                pending_owners: Vec::new(),
-                failed_owners: Vec::new(),
-                inventories: ErasureReceiptInventoriesV1 {
-                    artifacts: vec![completed_inventory(target)],
-                    keys: Vec::new(),
-                    replicas: Vec::new(),
-                    backups: Vec::new(),
+        )?;
+        assert_eq!(
+            dispatched.lifecycle(),
+            ErasureLifecycleV1::AwaitingAcknowledgements
+        );
+        assert!(dispatched.previous_state().is_some());
+        test_stage(
+            "acknowledge lifecycle destruction",
+            commands.acknowledge_erasure(
+                request_reference,
+                pos_core::ErasureAcknowledgementV1 {
+                    obligation: obligation.reference(),
+                    target,
+                    owner: target.replica_id,
+                    evidence: reference(24),
+                    outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
                 },
-                replay_claim: ErasureReplayClaimV1::Exact,
-                policy: reference(0),
-                trust: reference(0),
-                provenance: reference(0),
-                issue_position: 21,
-                signature: reference(25),
-                receipt_digest: reference(0),
-            },
-        ),
-    )?;
+            ),
+        )?;
+        test_stage(
+            "finalize lifecycle request",
+            commands.finalize_erasure_request(
+                request_reference,
+                &ErasureReceiptInputV1 {
+                    request: reference(0),
+                    terminal_state: reference(0),
+                    coordinator: reference(0),
+                    lifecycle: ErasureLifecycleV1::Complete,
+                    freeze_position: 10,
+                    acknowledgements: Vec::new(),
+                    frozen_targets: Vec::new(),
+                    pending_owners: Vec::new(),
+                    failed_owners: Vec::new(),
+                    inventories: ErasureReceiptInventoriesV1 {
+                        artifacts: vec![completed_inventory(target)],
+                        keys: Vec::new(),
+                        replicas: Vec::new(),
+                        backups: Vec::new(),
+                    },
+                    replay_claim: ErasureReplayClaimV1::Exact,
+                    policy: reference(0),
+                    trust: reference(0),
+                    provenance: reference(0),
+                    issue_position: 21,
+                    signature: reference(25),
+                    receipt_digest: reference(0),
+                },
+            ),
+        )?
+    };
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_ne!(receipt.terminal_state(), reference(0));
     assert_ne!(receipt.coordinator(), reference(0));
     assert_ne!(receipt.provenance(), reference(0));
+    let verified = {
+        let mut reads = test_stage("open lifecycle reader", host.read_sender())?;
+        test_stage(
+            "read completed lifecycle state",
+            reads.erasure_state(request_reference),
+        )?
+        .ok_or("completed lifecycle state missing")?
+    };
+    assert_eq!(receipt.request(), request_reference);
+    assert_eq!(receipt.terminal_state(), verified.state().state_digest());
+    assert_eq!(receipt.coordinator(), verified.state().coordinator());
+    assert_eq!(receipt.lifecycle(), verified.lifecycle());
     Ok(())
 }
 
@@ -747,8 +761,7 @@ fn public_sender_reaches_corrected_submission_after_rejection(
 }
 
 #[test]
-fn public_sender_reaches_scope_extension_and_administrative_resolution(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_sender_reaches_administrative_resolution() -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
@@ -763,45 +776,34 @@ fn public_sender_reaches_scope_extension_and_administrative_resolution(
     let request = test_stage("construct resolution request", persistence_request())?;
     let request_reference = request.reference();
     let request_provenance = request.provenance();
-    let mut commands = test_stage("open resolution sender", host.command_sender())?;
-    test_stage(
-        "submit resolution request",
-        commands.submit_erasure_request(request, request_provenance),
-    )?;
-    test_stage(
-        "authorize resolution request",
-        commands.authorize_erasure_request(request_reference, reference(32)),
-    )?;
-    test_stage(
-        "freeze resolution request",
-        commands.freeze_access(request_reference, &freeze_transition()),
-    )?;
+    {
+        let mut commands = test_stage("open resolution sender", host.command_sender())?;
+        test_stage(
+            "submit resolution request",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize resolution request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze resolution request",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+    }
     let scope_commitment = test_stage(
         "derive frozen scope commitment",
         frozen_scope_reference(request_reference),
     )?;
-    authority
-        .allow_scope_extension
-        .store(true, Ordering::Release);
-    let extension = test_stage(
-        "construct scope extension",
-        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
-            request: request_reference,
-            scope_commitment,
-            fork: reference(101),
-            lineage_rule: reference(100),
-            predecessor_extension: None,
-            admission_provenance: reference(102),
-        }),
-    )?;
-    assert_eq!(
+    let before = {
+        let mut reads = test_stage("open pre-resolution reader", host.read_sender())?;
         test_stage(
-            "append scope extension",
-            commands.append_erasure_scope_extension(request_reference, extension),
+            "read pre-resolution state",
+            reads.erasure_state(request_reference),
         )?
-        .lifecycle(),
-        ErasureLifecycleV1::AccessFrozen
-    );
+        .ok_or("pre-resolution state missing")?
+        .manifest_digest()
+    };
     authority
         .allow_administrative_resolution
         .store(true, Ordering::Release);
@@ -821,14 +823,27 @@ fn public_sender_reaches_scope_extension_and_administrative_resolution(
             predecessor_resolution: None,
         }),
     )?;
-    assert_eq!(
+    {
+        let mut commands = test_stage("open resolution sender", host.command_sender())?;
+        assert_eq!(
+            test_stage(
+                "resolve administratively",
+                commands.resolve_erasure_administratively(request_reference, &resolution),
+            )?
+            .lifecycle(),
+            ErasureLifecycleV1::AccessFrozen
+        );
+    }
+    let after = {
+        let mut reads = test_stage("open post-resolution reader", host.read_sender())?;
         test_stage(
-            "resolve administratively",
-            commands.resolve_erasure_administratively(request_reference, &resolution),
+            "read post-resolution state",
+            reads.erasure_state(request_reference),
         )?
-        .lifecycle(),
-        ErasureLifecycleV1::AccessFrozen
-    );
+        .ok_or("post-resolution state missing")?
+        .manifest_digest()
+    };
+    assert_ne!(before, after);
     Ok(())
 }
 
@@ -869,61 +884,76 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
         }),
     )?;
     authority.allow_post_freeze();
-    let mut commands = test_stage("open partial-failure sender", host.command_sender())?;
-    test_stage(
-        "submit partial-failure request",
-        commands.submit_erasure_request(request, request_provenance),
-    )?;
-    test_stage(
-        "authorize partial-failure request",
-        commands.authorize_erasure_request(request_reference, reference(32)),
-    )?;
-    test_stage(
-        "freeze partial-failure request",
-        commands.freeze_access(request_reference, &freeze_transition()),
-    )?;
-    assert_eq!(
+    let receipt = {
+        let mut commands = test_stage("open partial-failure sender", host.command_sender())?;
         test_stage(
+            "submit partial-failure request",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize partial-failure request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze partial-failure request",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+        let dispatched = test_stage(
             "dispatch partial-failure destruction",
             commands.dispatch_erasure_destruction(request_reference, &admission),
-        )?
-        .lifecycle(),
-        ErasureLifecycleV1::AwaitingAcknowledgements
-    );
-    let receipt = test_stage(
-        "finalize partial-failure request",
-        commands.finalize_erasure_request(
-            request_reference,
-            &ErasureReceiptInputV1 {
-                request: reference(0),
-                terminal_state: reference(0),
-                coordinator: reference(0),
-                lifecycle: ErasureLifecycleV1::PartialFailure,
-                freeze_position: 10,
-                acknowledgements: Vec::new(),
-                frozen_targets: Vec::new(),
-                pending_owners: Vec::new(),
-                failed_owners: Vec::new(),
-                inventories: ErasureReceiptInventoriesV1 {
-                    artifacts: vec![completed_inventory(target)],
-                    keys: Vec::new(),
-                    replicas: Vec::new(),
-                    backups: Vec::new(),
+        )?;
+        assert_eq!(
+            dispatched.lifecycle(),
+            ErasureLifecycleV1::AwaitingAcknowledgements
+        );
+        assert!(dispatched.previous_state().is_some());
+        test_stage(
+            "finalize partial-failure request",
+            commands.finalize_erasure_request(
+                request_reference,
+                &ErasureReceiptInputV1 {
+                    request: reference(0),
+                    terminal_state: reference(0),
+                    coordinator: reference(0),
+                    lifecycle: ErasureLifecycleV1::PartialFailure,
+                    freeze_position: 10,
+                    acknowledgements: Vec::new(),
+                    frozen_targets: Vec::new(),
+                    pending_owners: Vec::new(),
+                    failed_owners: Vec::new(),
+                    inventories: ErasureReceiptInventoriesV1 {
+                        artifacts: vec![completed_inventory(target)],
+                        keys: Vec::new(),
+                        replicas: Vec::new(),
+                        backups: Vec::new(),
+                    },
+                    replay_claim: ErasureReplayClaimV1::StructuralOnly,
+                    policy: reference(0),
+                    trust: reference(0),
+                    provenance: reference(0),
+                    issue_position: 21,
+                    signature: reference(25),
+                    receipt_digest: reference(0),
                 },
-                replay_claim: ErasureReplayClaimV1::StructuralOnly,
-                policy: reference(0),
-                trust: reference(0),
-                provenance: reference(0),
-                issue_position: 21,
-                signature: reference(25),
-                receipt_digest: reference(0),
-            },
-        ),
-    )?;
+            ),
+        )?
+    };
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     assert_ne!(receipt.terminal_state(), reference(0));
     assert_ne!(receipt.coordinator(), reference(0));
     assert_ne!(receipt.provenance(), reference(0));
+    let verified = {
+        let mut reads = test_stage("open partial-failure reader", host.read_sender())?;
+        test_stage(
+            "read partial-failure state",
+            reads.erasure_state(request_reference),
+        )?
+        .ok_or("partial-failure state missing")?
+    };
+    assert_eq!(receipt.request(), request_reference);
+    assert_eq!(receipt.terminal_state(), verified.state().state_digest());
+    assert_eq!(receipt.coordinator(), verified.state().coordinator());
+    assert_eq!(receipt.lifecycle(), verified.lifecycle());
     Ok(())
 }
 
