@@ -82,22 +82,39 @@ pub(crate) fn decode_reply(
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
         .map_err(|_| AdapterError::ProtocolFailure)?;
     if is_magic(&value, "SLE1") {
-        if !trailing.is_empty() {
-            return Err(AdapterError::ProtocolFailure);
-        }
-        let local = SandboxLocalError::from_canonical_cbor(control)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
-        let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
-            AdapterError::AuthenticatedEvidenceFailure
-        } else {
-            AdapterError::Unavailable
-        };
-        return Ok(DecodedSelectorReply {
-            observation: Err(error),
-            provenance: None,
-        });
+        return decode_local_reply(control, trailing);
     }
-    let wrapper = array(&value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
+    decode_authenticated_reply(&value, trailing, request, evr1_digest, output_limit)
+}
+
+fn decode_local_reply(
+    control: &[u8],
+    trailing: &[u8],
+) -> Result<DecodedSelectorReply, AdapterError> {
+    if !trailing.is_empty() {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    let local = SandboxLocalError::from_canonical_cbor(control)
+        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
+        AdapterError::AuthenticatedEvidenceFailure
+    } else {
+        AdapterError::Unavailable
+    };
+    Ok(DecodedSelectorReply {
+        observation: Err(error),
+        provenance: None,
+    })
+}
+
+fn decode_authenticated_reply(
+    value: &Value,
+    trailing: &[u8],
+    request: &EncodedSelectorRequest,
+    evr1_digest: [u8; 32],
+    output_limit: u64,
+) -> Result<DecodedSelectorReply, AdapterError> {
+    let wrapper = array(value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
     let fields = array(&wrapper[0], 12).map_err(|_| AdapterError::ProtocolFailure)?;
     if text(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != "SLY1"
         || uint(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)? != 1

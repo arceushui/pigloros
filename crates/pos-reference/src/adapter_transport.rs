@@ -93,10 +93,17 @@ impl Frame {
 /// or the destination cannot accept the complete stream.
 pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<(), TransportError> {
     validate_attempt(attempt)?;
+    write_attempt_frames(&mut writer, attempt)
+}
+
+fn write_attempt_frames(
+    writer: &mut impl Write,
+    attempt: &CaseAttempt,
+) -> Result<(), TransportError> {
     let mut transcript = new_transcript(ATTEMPT_DOMAIN);
     let members = attempt.auxiliary.len() + 2;
     write_transcript_frame(
-        &mut writer,
+        writer,
         Value::Array(vec![
             text_value("EAI1"),
             unsigned(1),
@@ -117,7 +124,7 @@ pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<()
     )?;
     for (index, capability) in attempt.capability_ids.iter().enumerate() {
         write_transcript_frame(
-            &mut writer,
+            writer,
             Value::Array(vec![
                 text_value("EIC1"),
                 unsigned(1),
@@ -127,13 +134,13 @@ pub fn write_attempt(mut writer: impl Write, attempt: &CaseAttempt) -> Result<()
             &mut transcript,
         )?;
     }
-    write_artifact(&mut writer, &mut transcript, 0, 0, &attempt.schema)?;
-    write_artifact(&mut writer, &mut transcript, 1, 0, &attempt.payload)?;
+    write_artifact(writer, &mut transcript, 0, 0, &attempt.schema)?;
+    write_artifact(writer, &mut transcript, 1, 0, &attempt.payload)?;
     for (index, artifact) in attempt.auxiliary.iter().enumerate() {
-        write_artifact(&mut writer, &mut transcript, 2, as_u64(index)?, artifact)?;
+        write_artifact(writer, &mut transcript, 2, as_u64(index)?, artifact)?;
     }
     write_frame(
-        &mut writer,
+        writer,
         Value::Array(vec![
             text_value("EIE1"),
             unsigned(1),
