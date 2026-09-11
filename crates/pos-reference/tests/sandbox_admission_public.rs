@@ -2,12 +2,18 @@
 
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
-use pos_reference::evaluator_protocol::RequiredProviderCapability;
+use pos_reference::evaluator::{AttemptArtifact, AttemptTransportCaps, CaseAttempt};
+use pos_reference::evaluator_protocol::{
+    EvaluationRequest, ImplementationIdentity, OutputCapability, RequiredProviderCapability,
+    SandboxRequirement, SubjectAdapterKind,
+};
+use pos_reference::profile::DeterministicBudget;
 use pos_reference::sandbox_provider_protocol::{
-    AdmissionGrant, AdmittedSandboxProvider, HostCapabilityProfile, LaunchPolicy,
-    ProviderConformanceReport, SandboxAdministratorPolicy, SandboxAdmissionError,
-    SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest, SandboxProviderAdmissionInputs,
-    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTrustSnapshot,
+    AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedAdmissionGrant,
+    HostCapabilityProfile, LaunchPolicy, ProviderConformanceReport, SandboxAdministratorPolicy,
+    SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest,
+    SandboxProviderAdmissionInputs, SandboxProviderReceipt, SandboxRevocationSnapshot,
+    SandboxTrustSnapshot, SelectorGrantCommitment,
 };
 use sha2::{Digest, Sha256};
 
@@ -452,10 +458,26 @@ fn launch_policy(sim1_digest: [u8; 32]) -> TestResult<Vec<u8>> {
             Value::Text("air-gapped".to_owned()),
             integer(1),
             bytes(sim1_digest),
-            Value::Array(vec![Value::Array(vec![integer(0), integer(1)])]),
+            Value::Array(
+                (0..17)
+                    .map(|limit_id| Value::Array(vec![integer(limit_id), integer(2_000)]))
+                    .collect(),
+            ),
             Value::Array(vec![]),
         ]),
     )
+}
+
+fn broker_hard_caps() -> TestResult<Vec<u8>> {
+    encode(&Value::Array(vec![
+        Value::Text("BHC1".to_owned()),
+        integer(1),
+        Value::Array(
+            (0..17)
+                .map(|limit_id| Value::Array(vec![integer(limit_id), integer(2_000)]))
+                .collect(),
+        ),
+    ]))
 }
 
 fn payload_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
@@ -471,24 +493,26 @@ fn execute_request(
     capability_ids: &[&str],
 ) -> TestResult<Vec<u8>> {
     let input = b"input";
+    let evaluation = fixture.evaluation_request(launch)?;
+    let attempt = selector_attempt();
     self_digested_record(
         "SPX1",
         Value::Array(vec![
             Value::Text("SPX1".to_owned()),
             integer(1),
             Value::Array(vec![
-                Value::Bytes(vec![31; 16]),
+                Value::Bytes(evaluation.request_id.to_vec()),
                 bytes(fixture.policy.policy_digest()),
                 integer(fixture.policy.policy_epoch()),
                 Value::Bytes(vec![32; 16]),
             ]),
             Value::Bytes(vec![33; 16]),
-            bytes([34; 32]),
+            bytes(evaluation.request_digest),
             bytes([35; 32]),
             bytes([36; 32]),
             bytes([37; 32]),
-            bytes([38; 32]),
-            bytes([39; 32]),
+            bytes(attempt.fixture_digest),
+            bytes(evaluation.execution_profile_digest),
             bytes(launch.policy_digest),
             bytes(wrapped_digest(&fixture.sim1)?),
             bytes(fixture.policy.policy_digest()),
@@ -517,6 +541,7 @@ fn admission_grant(
     fixture: &Fixture,
     request: &SandboxExecuteRequest,
     launch: &LaunchPolicy,
+    commitment: &SelectorGrantCommitment,
 ) -> TestResult<Vec<u8>> {
     let authority = &request.authority;
     sign_record(
@@ -542,15 +567,49 @@ fn admission_grant(
             integer(fixture.trust.trust_epoch()),
             integer(fixture.revocation.revocation_epoch()),
             integer(fixture.policy.policy_epoch()),
-            bytes([39; 32]),
+            bytes(commitment.effective_limits_digest()),
             bytes(request.adapter_input.digest),
             Value::Array(vec![]),
             bytes(launch.policy_digest),
-            bytes([40; 32]),
+            bytes(commitment.expected_readback_set_digest()),
             Value::Text("runtime".to_owned()),
         ]),
         &fixture.authority.runtime,
     )
+}
+
+fn selector_attempt() -> CaseAttempt {
+    let artifact = |bytes: Vec<u8>| AttemptArtifact {
+        digest: *blake3::hash(&bytes).as_bytes(),
+        bytes,
+    };
+    CaseAttempt {
+        case_id: "case".to_owned(),
+        claim_layer: 1,
+        family: 1,
+        mode: 1,
+        fixture_digest: [38; 32],
+        schema: artifact(vec![1]),
+        payload: artifact(vec![2]),
+        auxiliary: Vec::new(),
+        budget: DeterministicBudget {
+            memory_bytes: 1,
+            cpu_fuel: 1,
+            host_calls: 1,
+            event_count: 1,
+            output_bytes: 1,
+            storage_bytes: 1,
+            execution_steps: 1,
+            simulation_time_ns: 1,
+        },
+        watchdog_ms: 1,
+        network_allowed: false,
+        capability_ids: vec!["execute".to_owned()],
+        transport_caps: AttemptTransportCaps {
+            max_member_bytes: 1,
+            max_attempt_bytes: 3,
+        },
+    }
 }
 
 fn audit_record(
@@ -730,7 +789,7 @@ impl Fixture {
         let required_features = vec!["cgroup-v2".to_owned()];
         let feature_digest = feature_set_digest(&required_features)?;
         let provider_binary = b"exact provider binary".to_vec();
-        let broker_hard_caps = b"broker hard caps".to_vec();
+        let broker_hard_caps = broker_hard_caps()?;
         let binary_digest = *blake3::hash(&provider_binary).as_bytes();
         let provider_record = provider_manifest(&authority, binary_digest, feature_digest)?;
         let scs1 = syscall_set(0)?;
@@ -793,6 +852,99 @@ impl Fixture {
 
     fn admit(&self) -> Result<AdmittedSandboxProvider, SandboxAdmissionError> {
         AdmittedSandboxProvider::admit(&self.policy, &self.trust, &self.revocation, self.inputs())
+    }
+
+    fn evaluation_request(&self, launch: &LaunchPolicy) -> TestResult<EvaluationRequest> {
+        let mut request = EvaluationRequest {
+            request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+            profile_digest: [2; 32],
+            fixture_bundle_digest: [3; 32],
+            subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+            subject_artifact_digest: *blake3::hash(&self.executable).as_bytes(),
+            implementation: ImplementationIdentity {
+                implementation_id: "subject".to_owned(),
+                source_digest: [4; 32],
+                build_digest: [5; 32],
+                binary_digest: [6; 32],
+                public_contract_digest: [7; 32],
+                organization_id: None,
+            },
+            execution_profile_digest: [8; 32],
+            trust_policy_snapshot_digest: [9; 32],
+            output_capability: OutputCapability {
+                capability_digest: [10; 32],
+                report_bytes_limit: 1,
+                diagnostic_bytes_limit: 0,
+            },
+            evaluator_protocol_digest: [11; 32],
+            evaluator_hard_caps_digest: [12; 32],
+            sandbox_requirement: Some(SandboxRequirement {
+                lps1_digest: launch.policy_digest,
+                sim1_digest: wrapped_digest(&self.sim1)?,
+                required_provider_capability: RequiredProviderCapability {
+                    capability_id: "execute".to_owned(),
+                    capability_version: 1,
+                    minimum_strength: 1,
+                },
+                apt1_digest: self.policy.policy_digest(),
+                policy_epoch: self.policy.policy_epoch(),
+            }),
+            request_digest: [13; 32],
+        };
+        request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        Ok(request)
+    }
+
+    fn selector_grant_commitment(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+        request: &SandboxExecuteRequest,
+    ) -> TestResult<SelectorGrantCommitment> {
+        let evaluation = self.evaluation_request(launch)?;
+        let attempt = selector_attempt();
+        Ok(admitted.derive_selector_grant_commitment(
+            image,
+            launch,
+            &evaluation,
+            &attempt,
+            &request.network_plans,
+        )?)
+    }
+
+    fn admission_grant(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+        request: &SandboxExecuteRequest,
+    ) -> TestResult<Vec<u8>> {
+        let commitment = self.selector_grant_commitment(admitted, image, launch, request)?;
+        admission_grant(self, request, launch, &commitment)
+    }
+
+    fn authenticate_grant(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+    ) -> Result<AuthenticatedAdmissionGrant, SandboxAdmissionError> {
+        let evaluation = self
+            .evaluation_request(launch)
+            .map_err(|_| SandboxAdmissionError::ConformanceMismatch)?;
+        let attempt = selector_attempt();
+        let commitment = admitted.derive_selector_grant_commitment(
+            image,
+            launch,
+            &evaluation,
+            &attempt,
+            &request.network_plans,
+        )?;
+        admitted.authenticate_grant(bytes, request, image, launch, &commitment)
     }
 
     fn policy_for_provider(
@@ -1352,8 +1504,9 @@ fn launch_and_execute_admission_reject_each_selected_authority_mismatch() -> Tes
     let changed_request = redigest_unsigned_field(&request_bytes, "SPX1", 10, bytes([99; 32]))?;
     let request = SandboxExecuteRequest::from_canonical_cbor(&changed_request)?;
     assert_eq!(
-        admitted.authenticate_grant(
-            &admission_grant(&fixture, &request, &launch)?,
+        fixture.authenticate_grant(
+            &admitted,
+            &fixture.admission_grant(&admitted, &image, &launch, &request)?,
             &request,
             &image,
             &launch,
@@ -1427,8 +1580,9 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
+    let grant = fixture.authenticate_grant(
+        &admitted,
+        &fixture.admission_grant(&admitted, &image, &launch, &request)?,
         &request,
         &image,
         &launch,
@@ -1459,8 +1613,9 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         &["unsupported"],
     )?)?;
     assert_eq!(
-        admitted.authenticate_grant(
-            &admission_grant(&fixture, &unsupported, &launch)?,
+        fixture.authenticate_grant(
+            &admitted,
+            &fixture.admission_grant(&admitted, &image, &launch, &unsupported)?,
             &unsupported,
             &image,
             &launch,
@@ -1481,8 +1636,9 @@ fn provider_terminal_audit_authority_covers_failure_and_denial_paths() -> TestRe
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
+    let grant = fixture.authenticate_grant(
+        &admitted,
+        &fixture.admission_grant(&admitted, &image, &launch, &request)?,
         &request,
         &image,
         &launch,
@@ -1653,8 +1809,9 @@ fn admission_entry_points_reject_malformed_records() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
+    let grant = fixture.authenticate_grant(
+        &admitted,
+        &fixture.admission_grant(&admitted, &image, &launch, &request)?,
         &request,
         &image,
         &launch,
@@ -1669,8 +1826,8 @@ fn admission_entry_points_reject_malformed_records() -> TestResult {
         .admit_image(b"not-cbor", &fixture.root_image, &fixture.executable)
         .is_err());
     assert!(admitted.admit_launch_policy(b"not-cbor", &image).is_err());
-    assert!(admitted
-        .authenticate_grant(b"not-cbor", &request, &image, &launch)
+    assert!(fixture
+        .authenticate_grant(&admitted, b"not-cbor", &request, &image, &launch)
         .is_err());
     assert!(admitted.authenticate_receipt(b"not-cbor", &grant).is_err());
     assert!(admitted
@@ -1748,6 +1905,87 @@ fn provider_admission_rejects_invalid_required_feature_sets() -> TestResult {
 }
 
 #[test]
+fn selector_derives_elm1_and_rbs1_from_selected_authority() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let commitment = fixture.selector_grant_commitment(&admitted, &image, &launch, &request)?;
+
+    assert_eq!(commitment.effective_limits().len(), 17);
+    assert_eq!(commitment.effective_limits()[0].value, 1);
+    assert_eq!(commitment.effective_limits()[4].value, 1);
+    assert_eq!(commitment.effective_limits()[8].value, 1);
+    assert_eq!(commitment.effective_limits()[9].value, 1);
+    assert!(commitment
+        .effective_limits()
+        .iter()
+        .enumerate()
+        .all(|(limit_id, limit)| usize::from(limit.limit_id) == limit_id));
+
+    let Value::Array(wrapper) = ciborium::from_reader(commitment.expected_readback_set())?
+    else {
+        return Err("RBS1 wrapper must be an array".into());
+    };
+    let Some(Value::Array(unsigned)) = wrapper.first() else {
+        return Err("RBS1 unsigned record must be an array".into());
+    };
+    assert_eq!(unsigned[0], Value::Text("RBS1".to_owned()));
+    assert_eq!(
+        wrapped_digest(commitment.expected_readback_set())?,
+        commitment.expected_readback_set_digest()
+    );
+    assert_eq!(
+        commitment.expected_readback_set_digest(),
+        digest_value(b"PiglorOS.SandboxReadbackSet.v1\0", &Value::Array(unsigned.clone()))?
+    );
+    assert_ne!(
+        commitment.expected_readback_set_digest(),
+        digest_value(b"PiglorOS.RBS1.v1\0", &Value::Array(unsigned.clone()))?
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_grant_rejects_a_foreign_selector_commitment() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let commitment = fixture.selector_grant_commitment(&admitted, &image, &launch, &request)?;
+    let grant = admission_grant(&fixture, &request, &launch, &commitment)?;
+
+    let mut foreign_evaluation = fixture.evaluation_request(&launch)?;
+    foreign_evaluation.execution_profile_digest = [99; 32];
+    foreign_evaluation.output_capability.capability_digest =
+        foreign_evaluation.expected_output_capability_digest()?;
+    foreign_evaluation.request_digest = foreign_evaluation.digest()?;
+    let foreign_commitment = admitted.derive_selector_grant_commitment(
+        &image,
+        &launch,
+        &foreign_evaluation,
+        &selector_attempt(),
+        &request.network_plans,
+    )?;
+
+    assert_eq!(
+        admitted.authenticate_grant(&grant, &request, &image, &launch, &foreign_commitment),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+    Ok(())
+}
+
+#[test]
 fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> TestResult {
     let fixture = Fixture::new()?;
     let admitted = fixture.admit()?;
@@ -1758,10 +1996,12 @@ fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> Te
         &launch,
         &["execute"],
     )?)?;
-    let grant_bytes = admission_grant(&fixture, &request, &launch)?;
+    let grant_bytes = fixture.admission_grant(&admitted, &image, &launch, &request)?;
 
     for (field, replacement) in [
+        (20, bytes([99; 32])),
         (21, bytes([99; 32])),
+        (24, bytes([99; 32])),
         (25, Value::Text("other-runtime".to_owned())),
     ] {
         let changed = resign_unsigned_field(
@@ -1772,12 +2012,12 @@ fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> Te
             &fixture.authority.runtime,
         )?;
         assert_eq!(
-            admitted.authenticate_grant(&changed, &request, &image, &launch),
+            fixture.authenticate_grant(&admitted, &changed, &request, &image, &launch),
             Err(SandboxAdmissionError::ConformanceMismatch)
         );
     }
 
-    let grant = admitted.authenticate_grant(&grant_bytes, &request, &image, &launch)?;
+    let grant = fixture.authenticate_grant(&admitted, &grant_bytes, &request, &image, &launch)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
     for (field, replacement) in [
@@ -1858,16 +2098,17 @@ fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant_bytes = admission_grant(&fixture, &request, &launch)?;
-    assert!(admitted
+    let grant_bytes = fixture.admission_grant(&admitted, &image, &launch, &request)?;
+    assert!(fixture
         .authenticate_grant(
+            &admitted,
             &replace_signed_signature(&grant_bytes, [9; 64])?,
             &request,
             &image,
             &launch,
         )
         .is_err());
-    let grant = admitted.authenticate_grant(&grant_bytes, &request, &image, &launch)?;
+    let grant = fixture.authenticate_grant(&admitted, &grant_bytes, &request, &image, &launch)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
     assert!(admitted
@@ -1905,8 +2146,9 @@ fn audit_record_rejects_every_malformed_wire_field() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
+    let grant = fixture.authenticate_grant(
+        &admitted,
+        &fixture.admission_grant(&admitted, &image, &launch, &request)?,
         &request,
         &image,
         &launch,
