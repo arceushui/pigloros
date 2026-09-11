@@ -4,9 +4,10 @@ use axum::{
     response::IntoResponse,
 };
 use piglor_gateway::{router, AppState, Gateway, GatewayError, LedgerWriteMode, OwnTracksOwnerKey};
+use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    target_closure_digest, CoreError, ErasureAcknowledgementProvenanceV1,
-    ErasureAdministrativeResolutionV1, ErasureAtomicFreezeAdmissionInputV1,
+    CoreError, ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
+    ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAuthorizationDecisionV1, ErasureCorrectionProvenanceV1,
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
     ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
