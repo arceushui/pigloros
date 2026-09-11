@@ -4745,6 +4745,60 @@ impl ErasureStateResolverV1 for SqliteStore {
     }
 }
 
+impl crate::ErasureRejoinPersistencePortV1 for SqliteStore {
+    fn store_rejoin_proof(
+        &mut self,
+        proof: &pos_core::ErasureRejoinProofV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        let bytes = crate::canonical_rejoin_bytes(proof);
+        let inserted = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO erasure_evidence(reference_digest, object_cbor)
+                 VALUES (?1, ?2)",
+                params![proof.reference().digest().as_slice(), bytes.as_slice()],
+            )
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let stored = self
+            .conn
+            .query_row(
+                "SELECT object_cbor FROM erasure_evidence WHERE reference_digest=?1",
+                params![proof.reference().digest().as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if stored.as_slice() != bytes.as_slice() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(if inserted == 1 {
+            ErasureCasOutcomeV1::Applied
+        } else {
+            ErasureCasOutcomeV1::ExactRetry
+        })
+    }
+
+    fn load_rejoin_proof(
+        &self,
+        reference: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureRejoinProofV1>, ErasureErrorV1> {
+        self.conn
+            .query_row(
+                "SELECT object_cbor FROM erasure_evidence WHERE reference_digest=?1",
+                params![reference.digest().as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+            .map(|bytes| pos_core::ErasureRejoinProofV1::from_canonical_cbor(&bytes))
+            .map(|result| {
+                result.and_then(|proof| crate::validate_rejoin_proof_reference(reference, proof))
+            })
+            .transpose()
+    }
+}
+
 impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn complete_erasure_inventory_snapshot(
         &mut self,
@@ -5992,6 +6046,7 @@ use pos_core::geo_cell_admission::{
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::GeoLocationAdmissionFenceV1,
@@ -6112,6 +6167,107 @@ mod tests {
             .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
             .test_err();
         assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
+    }
+
+    #[test]
+    fn rejoin_adapter_rejects_missing_corrupt_and_remapped_evidence() {
+        let proof = crate::test_rejoin_proof();
+        let mut store = new_store();
+        assert_eq!(
+            store.store_rejoin_proof(&proof).test_ok(),
+            ErasureCasOutcomeV1::Applied
+        );
+        assert_eq!(
+            store.store_rejoin_proof(&proof).test_ok(),
+            ErasureCasOutcomeV1::ExactRetry
+        );
+        let remapped = ErasureReferenceV1::from_digest([9; 32]);
+        store
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO erasure_evidence(reference_digest, object_cbor)
+                 VALUES (?1, ?2)",
+                params![
+                    remapped.digest().as_slice(),
+                    proof.to_canonical_cbor().test_ok()
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            store.load_rejoin_proof(remapped),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let missing = ErasureReferenceV1::from_digest([10; 32]);
+        assert_eq!(store.load_rejoin_proof(missing).test_ok(), None);
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_evidence SET object_cbor=?1 WHERE reference_digest=?2",
+                params![vec![0_u8], proof.reference().digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            store.load_rejoin_proof(proof.reference()),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            store.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn rejoin_adapter_closes_sqlite_storage_failures() {
+        let proof = crate::test_rejoin_proof();
+
+        let mut missing_table = new_store();
+        missing_table
+            .conn
+            .execute_batch("DROP TABLE erasure_evidence;")
+            .test_ok();
+        assert_eq!(
+            missing_table.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        let mut wrong_column_type = new_store();
+        wrong_column_type
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER inject_wrong_rejoin_type AFTER INSERT ON erasure_evidence
+                 BEGIN
+                     UPDATE erasure_evidence SET object_cbor=7
+                     WHERE reference_digest=NEW.reference_digest;
+                 END;",
+            )
+            .test_ok();
+        assert_eq!(
+            wrong_column_type.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        let mut ignored_insert = new_store();
+        ignored_insert
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER ignore_rejoin_insert BEFORE INSERT ON erasure_evidence
+                 BEGIN SELECT RAISE(IGNORE); END;",
+            )
+            .test_ok();
+        assert_eq!(
+            ignored_insert.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let failed_read = new_store();
+        failed_read
+            .conn
+            .execute_batch("DROP TABLE erasure_evidence;")
+            .test_ok();
+        assert_eq!(
+            failed_read.load_rejoin_proof(proof.reference()),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
     }
 
     fn destroy_store(

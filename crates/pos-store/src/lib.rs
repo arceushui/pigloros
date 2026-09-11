@@ -54,11 +54,94 @@ pub use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,
-    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event, EventDraft, EventId,
-    GeographicAdmissionAdmin, GeographicAdmissionOutcome, GeographicAdmissionStore,
-    GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind, OwnTracksEnrollmentStore,
-    PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1, WallTime,
+    ErasureCasOutcomeV1, ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event,
+    EventDraft, EventId, GeographicAdmissionAdmin, GeographicAdmissionOutcome,
+    GeographicAdmissionStore, GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind,
+    OwnTracksEnrollmentStore, PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1,
+    WallTime,
 };
+
+/// Local persistence and admission seam for ADR-060 `ERRJ1` rejoin proofs.
+///
+/// The adapter stores the proof's exact canonical bytes under its content
+/// address. It does not authenticate host-owned attestations or decide
+/// topology policy; [`pos_core::ErasureRejoinProofV1::admit`] performs the
+/// structural gate and invokes the caller-supplied verifier. Backends may use
+/// any durable local object table, but must preserve exact bytes and make
+/// retries idempotent.
+pub trait ErasureRejoinPersistencePortV1 {
+    /// Persist one content-addressed proof, returning `ExactRetry` when the
+    /// same bytes were already present.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed erasure error when canonical encoding or storage
+    /// fails, or when an existing address contains different bytes.
+    fn store_rejoin_proof(
+        &mut self,
+        proof: &pos_core::ErasureRejoinProofV1,
+    ) -> Result<pos_core::ErasureCasOutcomeV1, pos_core::ErasureErrorV1>;
+
+    /// Load and validate one exact proof by content address.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed erasure error when stored bytes are malformed or no
+    /// longer authenticate their requested address.
+    fn load_rejoin_proof(
+        &self,
+        reference: pos_core::ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureRejoinProofV1>, pos_core::ErasureErrorV1>;
+
+    /// Admit a stored proof against one terminal receipt using a host-owned
+    /// attestation verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed erasure error when the proof is absent, malformed,
+    /// incomplete, or rejected by the structural gate/verifier.
+    fn admit_rejoin(
+        &self,
+        reference: pos_core::ErasureReferenceV1,
+        receipt: &pos_core::ErasureReceiptV1,
+        verifier: &dyn pos_core::ErasureRejoinAttestationVerifierV1,
+    ) -> Result<pos_core::ErasureRejoinAdmissionV1, pos_core::ErasureErrorV1> {
+        self.load_rejoin_proof(reference)?
+            .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)?
+            .admit(receipt, verifier)
+    }
+}
+
+pub(crate) fn validate_rejoin_proof_reference(
+    reference: pos_core::ErasureReferenceV1,
+    proof: pos_core::ErasureRejoinProofV1,
+) -> Result<pos_core::ErasureRejoinProofV1, pos_core::ErasureErrorV1> {
+    (proof.reference() == reference)
+        .then_some(proof)
+        .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)
+}
+
+pub(crate) fn canonical_rejoin_bytes(proof: &pos_core::ErasureRejoinProofV1) -> Vec<u8> {
+    // The proof constructor already bounds every field and the encoder writes
+    // only to an in-memory Vec, so this serialization path is infallible for a
+    // validated proof. An empty fallback remains fail-closed at decode/admit.
+    proof.to_canonical_cbor().unwrap_or_default()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn test_rejoin_proof() -> pos_core::ErasureRejoinProofV1 {
+    pos_core::ErasureRejoinProofV1::new(pos_core::ErasureRejoinProofInputV1 {
+        request: pos_core::ErasureReferenceV1::from_digest([1; 32]),
+        terminal_receipt: pos_core::ErasureReferenceV1::from_digest([2; 32]),
+        replica_set: pos_core::ErasureReferenceV1::from_digest([3; 32]),
+        replica_id: pos_core::ErasureReferenceV1::from_digest([4; 32]),
+        inventory_generation: pos_core::ErasureReferenceV1::from_digest([5; 32]),
+        entries: Vec::new(),
+        attestation: pos_core::ErasureReferenceV1::from_digest([6; 32]),
+    })
+    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)))
+}
 
 #[cfg(test)]
 const TEST_EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
