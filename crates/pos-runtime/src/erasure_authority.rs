@@ -111,6 +111,27 @@ impl ErasureAuthorityFreezeProfileV1 {
     }
 }
 
+/// Unvalidated input for complete host-trusted authority material.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureAuthorityConfigurationInputV1 {
+    /// Policy revision accepted for all admissions.
+    pub policy: ErasureReferenceV1,
+    /// Trust revision accepted for all admissions.
+    pub trust: ErasureReferenceV1,
+    /// Complete host-resolved topology observations.
+    pub topology: Vec<ErasureAuthorityTopologyBindingV1>,
+    /// Freeze target, scope, and owner profile.
+    pub freeze: ErasureAuthorityFreezeProfileV1,
+    /// Principal allowed to perform administrative resolution.
+    pub principal: ErasureReferenceV1,
+    /// Opaque #187 proof material retained in ERFAA1.
+    pub authorization_evidence: Vec<u8>,
+    /// Provenance used for host-authenticated lifecycle admissions.
+    pub lifecycle_provenance: ErasureReferenceV1,
+    /// Whether this deployment admits pre-freeze rejection decisions.
+    pub allow_rejection: bool,
+}
+
 /// Complete host-trusted material needed by a concrete authority Plugin.
 ///
 /// The values are intentionally opaque references and proof bytes. The
@@ -143,16 +164,17 @@ impl ErasureAuthorityConfigurationV1 {
     ///
     /// Returns a closed provenance or scope error when required host material
     /// is missing or topology bindings are duplicated.
-    pub fn new(
-        policy: ErasureReferenceV1,
-        trust: ErasureReferenceV1,
-        mut topology: Vec<ErasureAuthorityTopologyBindingV1>,
-        freeze: ErasureAuthorityFreezeProfileV1,
-        principal: ErasureReferenceV1,
-        authorization_evidence: Vec<u8>,
-        lifecycle_provenance: ErasureReferenceV1,
-        allow_rejection: bool,
-    ) -> Result<Self, ErasureErrorV1> {
+    pub fn new(input: ErasureAuthorityConfigurationInputV1) -> Result<Self, ErasureErrorV1> {
+        let ErasureAuthorityConfigurationInputV1 {
+            policy,
+            trust,
+            mut topology,
+            freeze,
+            principal,
+            authorization_evidence,
+            lifecycle_provenance,
+            allow_rejection,
+        } = input;
         if !reference_present(policy)
             || !reference_present(trust)
             || !reference_present(principal)

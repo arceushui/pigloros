@@ -45,8 +45,9 @@ pub use driver::{
     RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
 };
 pub use erasure_authority::{
-    ErasureAuthorityConfigurationV1, ErasureAuthorityFreezeProfileV1,
-    ErasureAuthorityTopologyBindingV1, HostConfiguredErasureCoordinatorAuthorityV1,
+    ErasureAuthorityConfigurationInputV1, ErasureAuthorityConfigurationV1,
+    ErasureAuthorityFreezeProfileV1, ErasureAuthorityTopologyBindingV1,
+    HostConfiguredErasureCoordinatorAuthorityV1,
 };
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
