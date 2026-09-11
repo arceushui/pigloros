@@ -12,7 +12,7 @@ use std::path::{Component, Path};
 
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
-use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
+use rustix::fs::{openat2, statat, AtFlags, Mode, OFlags, ResolveFlags};
 
 use super::{SelectorBoundaryError, SANDBOX_SELECTOR_SOCKET};
 use crate::evaluator_protocol::{
@@ -328,6 +328,7 @@ impl InstalledSelectorState {
 
     fn open_at(root: &File) -> Result<Self, SelectorBoundaryError> {
         validate_directory(root)?;
+        ensure_no_pending_recovery(root)?;
         let manifest_file = open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT)?;
         let manifest_bytes = read_complete_file(&manifest_file, MANIFEST_LIMIT)?;
         let manifest = InstallationManifest::from_canonical_cbor(&manifest_bytes)
@@ -393,6 +394,13 @@ impl InstalledSelectorState {
         self.artifacts
             .get(&(kind, identity))
             .ok_or(SelectorBoundaryError::ArtifactInvalid)
+    }
+}
+
+fn ensure_no_pending_recovery(root: &File) -> Result<(), SelectorBoundaryError> {
+    match statat(root, "installation-update.cbor", AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => Ok(()),
+        _ => Err(SelectorBoundaryError::ArtifactInvalid),
     }
 }
 
@@ -797,6 +805,16 @@ mod tests {
         fs::remove_file(linked)?;
         fs::remove_file(&source)?;
         symlink("elsewhere", &source)?;
+        assert!(InstalledSelectorState::open_at(&root).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn pending_recovery_prevents_normal_startup() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        write_state(temporary.path())?;
+        fs::write(temporary.path().join("installation-update.cbor"), [1])?;
+        let root = File::open(temporary.path())?;
         assert!(InstalledSelectorState::open_at(&root).is_err());
         Ok(())
     }
