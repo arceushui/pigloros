@@ -222,17 +222,29 @@ fn evaluation_request_fields_out_of_bounds(request: &EvaluationRequest) -> bool 
         request.request_digest,
     ];
     request.request_id == [0; 16]
-        || (request.sandbox_requirement.is_some()
-            && (request.request_id[..14].iter().all(|byte| *byte == 0)
-                || request.request_id[14..] != [0, 0]))
+        || sandbox_request_id_is_invalid(request)
         || digests.contains(&[0; 32])
-        || request.output_capability.report_bytes_limit == 0
+        || output_capability_is_invalid(request)
+        || sandbox_requirement_is_invalid(request)
+}
+
+fn sandbox_request_id_is_invalid(request: &EvaluationRequest) -> bool {
+    request.sandbox_requirement.is_some()
+        && (request.request_id[..14].iter().all(|byte| *byte == 0)
+            || request.request_id[14..] != [0, 0])
+}
+
+const fn output_capability_is_invalid(request: &EvaluationRequest) -> bool {
+    request.output_capability.report_bytes_limit == 0
         || request.output_capability.report_bytes_limit > 16 * 1024 * 1024
         || request.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
-        || request
-            .sandbox_requirement
-            .as_ref()
-            .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
+}
+
+fn sandbox_requirement_is_invalid(request: &EvaluationRequest) -> bool {
+    request
+        .sandbox_requirement
+        .as_ref()
+        .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
 }
 
 /// Independently declared evaluator/reviewer separation evidence.

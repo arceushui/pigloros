@@ -174,11 +174,14 @@ pub enum EvaluatorError {
 
 impl From<ProtocolError> for EvaluatorError {
     fn from(error: ProtocolError) -> Self {
-        if error == ProtocolError::UnsupportedVersion {
-            Self::UnsupportedVersion
-        } else {
-            Self::Request
-        }
+        map_protocol_error(error)
+    }
+}
+
+const fn map_protocol_error(error: ProtocolError) -> EvaluatorError {
+    match error {
+        ProtocolError::UnsupportedVersion => EvaluatorError::UnsupportedVersion,
+        _ => EvaluatorError::Request,
     }
 }
 
@@ -324,15 +327,30 @@ fn evaluate_cases(
 ) -> Result<Vec<CaseOutcome>, EvaluatorError> {
     let mut outcomes = Vec::new();
     for (ordinal, fixture) in profile.selected_fixtures(request).into_iter().enumerate() {
-        if !fixture.modes.contains(&bundle.mode) {
-            continue;
+        if let Some(outcome) =
+            evaluate_selected_fixture(profile, bundle, request, fixture, ordinal, adapter)?
+        {
+            outcomes.push(outcome);
         }
-        adapter.set_case_ordinal(u16::try_from(ordinal).map_err(|_| EvaluatorError::Profile)?);
-        outcomes.push(evaluate_case(profile, bundle, request, fixture, adapter)?);
     }
     (!outcomes.is_empty())
         .then_some(outcomes)
         .ok_or(EvaluatorError::Profile)
+}
+
+fn evaluate_selected_fixture(
+    profile: &Profile,
+    bundle: &VerifiedBundle,
+    request: &EvaluationRequest,
+    fixture: &Fixture,
+    ordinal: usize,
+    adapter: &mut impl SubjectAdapter,
+) -> Result<Option<CaseOutcome>, EvaluatorError> {
+    if !fixture.modes.contains(&bundle.mode) {
+        return Ok(None);
+    }
+    adapter.set_case_ordinal(u16::try_from(ordinal).map_err(|_| EvaluatorError::Profile)?);
+    evaluate_case(profile, bundle, request, fixture, adapter).map(Some)
 }
 
 fn evaluate_case(
@@ -343,11 +361,7 @@ fn evaluate_case(
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
     let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
-    let observation = adapter.execute(&attempt);
-    let provider_provenance = adapter.take_execution_provenance_digest();
-    if observation == Err(AdapterError::AuthenticatedEvidenceFailure) {
-        return Err(EvaluatorError::AdapterIdentity);
-    }
+    let (observation, provider_provenance) = execute_case(adapter, &attempt)?;
     enforce_observed_coordinate_limit(
         &observation,
         profile.evaluator_hard_caps.max_coordinate_bytes,
@@ -359,6 +373,18 @@ fn evaluate_case(
         observation,
         provenance_digest,
     ))
+}
+
+fn execute_case(
+    adapter: &mut impl SubjectAdapter,
+    attempt: &CaseAttempt,
+) -> Result<(Result<SubjectObservation, AdapterError>, Option<[u8; 32]>), EvaluatorError> {
+    let observation = adapter.execute(attempt);
+    let provider_provenance = adapter.take_execution_provenance_digest();
+    if observation == Err(AdapterError::AuthenticatedEvidenceFailure) {
+        return Err(EvaluatorError::AdapterIdentity);
+    }
+    Ok((observation, provider_provenance))
 }
 
 fn case_provenance(
