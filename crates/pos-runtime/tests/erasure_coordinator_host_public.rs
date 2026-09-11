@@ -665,7 +665,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
         .store(true, Ordering::Release);
     assert_eq!(
         reads.erasure_state(request_reference),
-        Err(ErasureHostErrorV1::RecoveryUnavailable)
+        Err(ErasureHostErrorV1::AuthorizationDenied)
     );
     Ok(())
 }
