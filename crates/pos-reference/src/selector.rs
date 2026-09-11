@@ -217,7 +217,7 @@ mod tests {
             ImplementationIdentity, OutputCapability, SubjectAdapterKind,
         };
 
-        EvaluationRequest {
+        let mut request = EvaluationRequest {
             request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
             profile_digest: [2; 32],
             fixture_bundle_digest: [3; 32],
@@ -242,7 +242,14 @@ mod tests {
             evaluator_hard_caps_digest: [13; 32],
             sandbox_requirement: None,
             request_digest: [14; 32],
-        }
+        };
+        request.output_capability.capability_digest = request
+            .expected_output_capability_digest()
+            .expect("test request has a valid output capability digest");
+        request.request_digest = request
+            .digest()
+            .expect("test request has a valid canonical request digest");
+        request
     }
 
     fn selector_attempt() -> CaseAttempt {
