@@ -11,9 +11,9 @@ use crate::evaluator_protocol::{
     EvaluationRequest,
 };
 use crate::sandbox_provider_protocol::{
-    AdmissionGrant, SandboxAuditRecord, SandboxExecuteRequest, SandboxLocalError,
-    SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderReceipt, SandboxProviderResult,
-    SandboxTerminalOutcome,
+    AdmissionGrant, PayloadDescriptor, SandboxAuditRecord, SandboxExecuteRequest,
+    SandboxLocalError, SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderReceipt,
+    SandboxProviderResult, SandboxTerminalOutcome,
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
@@ -76,6 +76,21 @@ pub(crate) enum SelectorProviderTerminal<'a> {
 pub(crate) struct DecodedSelectorReply {
     pub(crate) observation: Result<SubjectObservation, AdapterError>,
     pub(crate) provenance: Option<[u8; 32]>,
+}
+
+impl DecodedSelectorRequest {
+    /// Returns the descriptor authenticated against the retained EAI1 bytes.
+    ///
+    /// The root composition retains the original bounded stream and passes it
+    /// to the selected provider; this accessor prevents it from re-parsing or
+    /// re-hashing evaluator-controlled bytes while constructing SPX1.
+    #[must_use]
+    pub(crate) const fn input_descriptor(&self) -> PayloadDescriptor {
+        PayloadDescriptor {
+            byte_length: self.input_length,
+            digest: self.input_digest,
+        }
+    }
 }
 
 pub(crate) fn encode_request(
@@ -802,6 +817,13 @@ mod tests {
         assert_eq!(decoded.provider_request_id, encoded.provider_request_id);
         assert_eq!(decoded.attempt_id, encoded.attempt_id);
         assert_eq!(decoded.slx1_digest, encoded.digest);
+        assert_eq!(
+            decoded.input_descriptor(),
+            PayloadDescriptor {
+                byte_length: encoded.attempt_stream.len() as u64,
+                digest: domain_digest(INPUT_DOMAIN, &encoded.attempt_stream),
+            }
+        );
         assert_eq!(decoded.request, original_request);
         assert_eq!(decoded.attempt, original_attempt);
 
