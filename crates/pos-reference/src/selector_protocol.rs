@@ -17,6 +17,7 @@ use crate::sandbox_provider_protocol::{
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
+const SELECTOR_INPUT_LIMIT: usize = 128 * 1024 * 1024;
 const INPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxInputBytes.v1\0";
 const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
@@ -44,6 +45,9 @@ pub(crate) fn encode_request(
 ) -> Result<EncodedSelectorRequest, AdapterError> {
     let mut attempt_stream = Vec::new();
     write_attempt(&mut attempt_stream, attempt).map_err(|_| AdapterError::ProtocolFailure)?;
+    if !selector_input_within_limit(attempt_stream.len()) {
+        return Err(AdapterError::ProtocolFailure);
+    }
     let provider_request_id = derived_id(request.request_id, ordinal);
     let attempt_id = derived_id(request.request_id, ordinal ^ 0x8000);
     let input_digest = domain_digest(INPUT_DOMAIN, &attempt_stream);
@@ -291,6 +295,10 @@ fn descriptor(payload: &[u8], digest: [u8; 32]) -> Value {
     ])
 }
 
+const fn selector_input_within_limit(bytes: usize) -> bool {
+    bytes <= SELECTOR_INPUT_LIMIT
+}
+
 fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain);
@@ -410,6 +418,12 @@ mod tests {
         }
         assert_eq!(provider.len(), usize::from(u16::MAX) + 1);
         assert_eq!(attempts.len(), usize::from(u16::MAX) + 1);
+    }
+
+    #[test]
+    fn selector_input_ceiling_rejects_a_descriptor_above_128_mib() {
+        assert!(selector_input_within_limit(SELECTOR_INPUT_LIMIT));
+        assert!(!selector_input_within_limit(SELECTOR_INPUT_LIMIT + 1));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Fail-closed provider and image admission for the root-owned selector.
 
+use std::ops::Deref;
+
 use ciborium::value::Value;
 
 use crate::evaluator_protocol::RequiredProviderCapability;
@@ -84,6 +86,52 @@ struct DecodedProviderAdmission {
     syscall_set: SandboxSyscallSet,
     host_profile: HostCapabilityProfile,
     conformance_report: ProviderConformanceReport,
+}
+
+/// An AGR1 that the selected provider authenticated for one exact execute request.
+///
+/// This capability is constructed only by [`AdmittedSandboxProvider::authenticate_grant`].
+/// It prevents a separately decoded, merely well-formed AGR1 from entering the
+/// terminal-evidence sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedAdmissionGrant(AdmissionGrant);
+
+impl Deref for AuthenticatedAdmissionGrant {
+    type Target = AdmissionGrant;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// An SPR1 that is bound to one [`AuthenticatedAdmissionGrant`].
+///
+/// This capability is constructed only by
+/// [`AdmittedSandboxProvider::authenticate_receipt`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedSandboxProviderReceipt(SandboxProviderReceipt);
+
+impl Deref for AuthenticatedSandboxProviderReceipt {
+    type Target = SandboxProviderReceipt;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// An SPY1 terminal result bound to authenticated AGR1 and SPR1 evidence.
+///
+/// This capability is constructed only by
+/// [`AdmittedSandboxProvider::authenticate_terminal_result`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedSandboxProviderResult(SandboxProviderResult);
+
+impl Deref for AuthenticatedSandboxProviderResult {
+    type Target = SandboxProviderResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 /// One HCP1 feature probe and the digest of its independently retained evidence.
@@ -643,7 +691,7 @@ impl AdmittedSandboxProvider {
         request: &SandboxExecuteRequest,
         image: &AdmittedSandboxImage,
         launch: &LaunchPolicy,
-    ) -> Result<AdmissionGrant, SandboxAdmissionError> {
+    ) -> Result<AuthenticatedAdmissionGrant, SandboxAdmissionError> {
         self.validate_execute_authority(request, image, launch)?;
         let grant = AdmissionGrant::from_canonical_cbor(bytes)?;
         if grant.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
@@ -700,7 +748,7 @@ impl AdmittedSandboxProvider {
         if actual != expected || !self.supports_capabilities(&request.capability_ids) {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        Ok(grant)
+        Ok(AuthenticatedAdmissionGrant(grant))
     }
 
     /// Authenticate an SPR1 and bind it to the admitted provider and AGR1.
@@ -710,8 +758,8 @@ impl AdmittedSandboxProvider {
     pub fn authenticate_receipt(
         &self,
         bytes: &[u8],
-        grant: &AdmissionGrant,
-    ) -> Result<SandboxProviderReceipt, SandboxAdmissionError> {
+        grant: &AuthenticatedAdmissionGrant,
+    ) -> Result<AuthenticatedSandboxProviderReceipt, SandboxAdmissionError> {
         let receipt = SandboxProviderReceipt::from_canonical_cbor(bytes)?;
         if receipt.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
             return Err(SandboxAdmissionError::ConformanceMismatch);
@@ -752,7 +800,7 @@ impl AdmittedSandboxProvider {
         if actual != expected {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        Ok(receipt)
+        Ok(AuthenticatedSandboxProviderReceipt(receipt))
     }
 
     /// Authenticate a post-admission SPY1 against its exact AGR1 and SPR1.
@@ -764,9 +812,9 @@ impl AdmittedSandboxProvider {
         &self,
         bytes: &[u8],
         request: &SandboxExecuteRequest,
-        grant: &AdmissionGrant,
-        receipt: &SandboxProviderReceipt,
-    ) -> Result<SandboxProviderResult, SandboxAdmissionError> {
+        grant: &AuthenticatedAdmissionGrant,
+        receipt: &AuthenticatedSandboxProviderReceipt,
+    ) -> Result<AuthenticatedSandboxProviderResult, SandboxAdmissionError> {
         let result = SandboxProviderResult::from_canonical_cbor(bytes)?;
         if result.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
             return Err(SandboxAdmissionError::ConformanceMismatch);
@@ -783,7 +831,7 @@ impl AdmittedSandboxProvider {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
         result.validate_receipt_lifecycle(receipt)?;
-        Ok(result)
+        Ok(AuthenticatedSandboxProviderResult(result))
     }
 
     /// Authenticate the complete SAU1 chain referenced by SPR1 and mirrored by SPY1.
@@ -793,8 +841,8 @@ impl AdmittedSandboxProvider {
     pub fn authenticate_audit_chain(
         &self,
         records: &[Vec<u8>],
-        receipt: &SandboxProviderReceipt,
-        result: &SandboxProviderResult,
+        receipt: &AuthenticatedSandboxProviderReceipt,
+        result: &AuthenticatedSandboxProviderResult,
     ) -> Result<Vec<super::SandboxAuditRecord>, SandboxAdmissionError> {
         receipt.verify_signature(&self.runtime_key)?;
         result.verify_signature(&self.runtime_key)?;
