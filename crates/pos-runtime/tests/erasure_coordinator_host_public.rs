@@ -17,12 +17,12 @@ use pos_core::{
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureHostErrorV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
-    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
-    ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
+    ErasureVerifiedTopologyObservationV1, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1, ErasureHostStatusV1};
 use pos_store::StoreConfig;
@@ -408,6 +408,41 @@ fn submit_authorize_freeze(
     Ok(request_reference)
 }
 
+fn assert_terminal_readback(
+    reads: &mut pos_runtime::ErasureReadSenderV1<'_>,
+    receipt: &ErasureReceiptV1,
+    request: ErasureReferenceV1,
+    dispatched_predecessor: ErasureReferenceV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let verified = test_stage(
+        "read terminal lifecycle state",
+        reads.erasure_state(request),
+    )?
+    .ok_or("terminal lifecycle state missing")?;
+    let predecessor = test_stage(
+        "read dispatched lifecycle state",
+        reads.erasure_state_by_digest(dispatched_predecessor),
+    )?
+    .ok_or("dispatched lifecycle state missing")?;
+    assert_eq!(receipt.request(), request);
+    assert_eq!(receipt.terminal_state(), verified.state().state_digest());
+    assert_eq!(receipt.coordinator(), verified.state().coordinator());
+    assert_eq!(receipt.lifecycle(), verified.lifecycle());
+    assert_eq!(
+        predecessor.lifecycle(),
+        ErasureLifecycleV1::DestructionDispatched
+    );
+    assert_eq!(
+        verified.state().previous_state(),
+        Some(dispatched_predecessor)
+    );
+    test_stage(
+        "validate dispatched lifecycle predecessor",
+        verified.state().validate_predecessor(&predecessor),
+    )?;
+    Ok(())
+}
+
 fn test_stage<T, E: std::fmt::Debug>(
     stage: &str,
     result: Result<T, E>,
@@ -550,7 +585,9 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
             dispatched.lifecycle(),
             ErasureLifecycleV1::AwaitingAcknowledgements
         );
-        assert!(dispatched.previous_state().is_some());
+        let predecessor = dispatched
+            .previous_state()
+            .ok_or("dispatched state has no predecessor")?;
         test_stage(
             "acknowledge lifecycle destruction",
             commands.acknowledge_erasure(
@@ -575,23 +612,20 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
                 ),
             ),
         )?
+        .map(|receipt| (receipt, predecessor))
     };
+    let (receipt, dispatched_predecessor) = receipt;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_ne!(receipt.terminal_state(), reference(0));
     assert_ne!(receipt.coordinator(), reference(0));
     assert_ne!(receipt.provenance(), reference(0));
-    let verified = {
-        let mut reads = test_stage("open lifecycle reader", host.read_sender())?;
-        test_stage(
-            "read completed lifecycle state",
-            reads.erasure_state(request_reference),
-        )?
-        .ok_or("completed lifecycle state missing")?
-    };
-    assert_eq!(receipt.request(), request_reference);
-    assert_eq!(receipt.terminal_state(), verified.state().state_digest());
-    assert_eq!(receipt.coordinator(), verified.state().coordinator());
-    assert_eq!(receipt.lifecycle(), verified.lifecycle());
+    let mut reads = test_stage("open lifecycle reader", host.read_sender())?;
+    assert_terminal_readback(
+        &mut reads,
+        &receipt,
+        request_reference,
+        dispatched_predecessor,
+    )?;
     Ok(())
 }
 
@@ -779,6 +813,40 @@ fn public_sender_reaches_corrected_submission_after_rejection(
 }
 
 #[test]
+fn public_read_sender_reports_missing_request_and_missing_authority(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
+    let mut host = test_stage(
+        "open read-contract host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut reads = test_stage("open read-contract sender", host.read_sender())?;
+    assert_eq!(
+        test_stage("read missing request", reads.erasure_state(reference(250)),)?,
+        None
+    );
+
+    let mut empty_host = test_stage(
+        "open authority-free read host",
+        ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut empty_reads = test_stage("open authority-free reader", empty_host.read_sender())?;
+    assert_eq!(
+        empty_reads.erasure_state(reference(250)),
+        Err(pos_runtime::ErasureHostErrorV1::AuthorizationDenied)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_sender_reaches_administrative_resolution() -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
@@ -911,7 +979,9 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
             dispatched.lifecycle(),
             ErasureLifecycleV1::AwaitingAcknowledgements
         );
-        assert!(dispatched.previous_state().is_some());
+        let predecessor = dispatched
+            .previous_state()
+            .ok_or("dispatched state has no predecessor")?;
         test_stage(
             "finalize partial-failure request",
             commands.finalize_erasure_request(
@@ -923,23 +993,20 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
                 ),
             ),
         )?
+        .map(|receipt| (receipt, predecessor))
     };
+    let (receipt, dispatched_predecessor) = receipt;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     assert_ne!(receipt.terminal_state(), reference(0));
     assert_ne!(receipt.coordinator(), reference(0));
     assert_ne!(receipt.provenance(), reference(0));
-    let verified = {
-        let mut reads = test_stage("open partial-failure reader", host.read_sender())?;
-        test_stage(
-            "read partial-failure state",
-            reads.erasure_state(request_reference),
-        )?
-        .ok_or("partial-failure state missing")?
-    };
-    assert_eq!(receipt.request(), request_reference);
-    assert_eq!(receipt.terminal_state(), verified.state().state_digest());
-    assert_eq!(receipt.coordinator(), verified.state().coordinator());
-    assert_eq!(receipt.lifecycle(), verified.lifecycle());
+    let mut reads = test_stage("open partial-failure reader", host.read_sender())?;
+    assert_terminal_readback(
+        &mut reads,
+        &receipt,
+        request_reference,
+        dispatched_predecessor,
+    )?;
     Ok(())
 }
 

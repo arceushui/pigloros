@@ -873,6 +873,25 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn health_reports_closed_erasure_host_unready() {
+        let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        let (status, json) = json_request(
+            router(AppState {
+                gateway,
+                ledger_view: LedgerView::default(),
+                ledger_write: LedgerWriteMode::Disabled,
+            }),
+            "GET",
+            "/health",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["ok"], false);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn health_reports_executor_unready_after_shutdown() {
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,

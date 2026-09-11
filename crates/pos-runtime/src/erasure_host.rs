@@ -2170,6 +2170,30 @@ impl ErasureReadSenderV1<'_> {
         Ok(state)
     }
 
+    /// Resolve one payload-free ERS1 state by its durable digest through the
+    /// generation-bound host store.
+    ///
+    /// This is intentionally separate from [`Self::erasure_state`]: callers
+    /// use the request query for the independently verified current snapshot,
+    /// while this resolver is for checking an already-linked predecessor.
+    ///
+    /// # Errors
+    /// Returns a payload-free adapter, recovery, or stale generation error.
+    pub fn erasure_state_by_digest(
+        &mut self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let state = self
+            .host
+            .store
+            .host_store()
+            .resolve_state(digest)
+            .map_err(map_erasure_error)?;
+        self.host.ensure_generation(self.generation)?;
+        Ok(state)
+    }
+
     /// Run one read-only protected effect while retaining the host's current
     /// Tick Boundary fence and inventory generation for its complete
     /// execution.
