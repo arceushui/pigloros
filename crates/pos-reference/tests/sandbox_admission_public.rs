@@ -891,7 +891,8 @@ impl Fixture {
             }),
             request_digest: [13; 32],
         };
-        request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
         request.request_digest = request.digest()?;
         Ok(request)
     }
@@ -1928,8 +1929,7 @@ fn selector_derives_elm1_and_rbs1_from_selected_authority() -> TestResult {
         .enumerate()
         .all(|(limit_id, limit)| usize::from(limit.limit_id) == limit_id));
 
-    let Value::Array(wrapper) = ciborium::from_reader(commitment.expected_readback_set())?
-    else {
+    let Value::Array(wrapper) = ciborium::from_reader(commitment.expected_readback_set())? else {
         return Err("RBS1 wrapper must be an array".into());
     };
     let Some(Value::Array(unsigned)) = wrapper.first() else {
@@ -1942,7 +1942,10 @@ fn selector_derives_elm1_and_rbs1_from_selected_authority() -> TestResult {
     );
     assert_eq!(
         commitment.expected_readback_set_digest(),
-        digest_value(b"PiglorOS.SandboxReadbackSet.v1\0", &Value::Array(unsigned.clone()))?
+        digest_value(
+            b"PiglorOS.SandboxReadbackSet.v1\0",
+            &Value::Array(unsigned.clone())
+        )?
     );
     assert_ne!(
         commitment.expected_readback_set_digest(),
