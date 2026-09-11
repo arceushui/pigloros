@@ -44,8 +44,9 @@ pub use driver::{
     RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
 };
 pub use erasure_host::{
-    ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1,
-    ErasureExecutionHostV1, ErasureHostStatusV1, ErasureReadSenderV1,
+    ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
+    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
+    ErasureReadSenderV1,
 };
 pub use error::{ActionSubmissionError, RuntimeError};
 pub use recorder::{RecordedOutput, Recorder, RunMode};

@@ -199,18 +199,19 @@ fn gateway_for_startup(
     config: StoreConfig,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
-    gateway_for_startup_with_recovery(sqlite_path, config, owntracks_owner_key, None)
+    let composition = ErasureCoordinatorCompositionV1::closed();
+    gateway_for_startup_with_recovery(sqlite_path, config, owntracks_owner_key, &composition)
 }
 
 fn gateway_for_startup_with_recovery(
     sqlite_path: Option<&str>,
     config: StoreConfig,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
-    composition: Option<&ErasureCoordinatorCompositionV1>,
+    composition: &ErasureCoordinatorCompositionV1,
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
     match (owntracks_owner_key, sqlite_path) {
         (Some(owner_key), Some(path)) => {
-            let host = ErasureExecutionHostV1::open_gateway_with_recovery(
+            let host = ErasureExecutionHostV1::open_gateway_with_authority(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
                 },
@@ -221,7 +222,7 @@ fn gateway_for_startup_with_recovery(
             Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
         }
         (None, _) => {
-            let host = ErasureExecutionHostV1::open_with_recovery(
+            let host = ErasureExecutionHostV1::open_with_authority(
                 config,
                 composition,
                 ERASURE_MAX_INVENTORY_REQUESTS,
