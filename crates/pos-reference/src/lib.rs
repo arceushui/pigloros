@@ -22,6 +22,8 @@ pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
 pub mod profile;
+#[cfg(unix)]
+pub(crate) mod provider_transport;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
