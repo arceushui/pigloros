@@ -47,6 +47,7 @@ pub(crate) struct AuthenticatedProviderExecution {
     receipt: AuthenticatedSandboxProviderReceipt,
     result: AuthenticatedSandboxProviderResult,
     audit: Vec<SandboxAuditRecord>,
+    frames: AuthenticatedProviderFrames,
     output: Option<StagedProviderOutput>,
 }
 
@@ -75,16 +76,88 @@ impl AuthenticatedProviderExecution {
         &self.audit
     }
 
-    /// Returns staged output after every provider evidence check has passed.
+    /// Returns the exact authenticated AGR1 frame bytes for root SLY1 composition.
     #[must_use]
-    pub(crate) fn output_mut(&mut self) -> Option<&mut StagedProviderOutput> {
-        self.output.as_mut()
+    pub(crate) fn agr1_bytes(&self) -> &[u8] {
+        self.frames.agr1()
+    }
+
+    /// Returns the exact authenticated SPR1 frame bytes for root SLY1 composition.
+    #[must_use]
+    pub(crate) fn spr1_bytes(&self) -> &[u8] {
+        self.frames.spr1()
+    }
+
+    /// Returns the exact authenticated terminal SPY1 frame bytes for root SLY1 composition.
+    #[must_use]
+    pub(crate) fn spy1_bytes(&self) -> &[u8] {
+        self.frames.spy1()
+    }
+
+    /// Returns exact authenticated SAU1 frame bytes in received order for root SLY1 composition.
+    #[must_use]
+    pub(crate) fn sau1_frames(&self) -> &[Vec<u8>] {
+        self.frames.sau1()
+    }
+
+    /// Gives root composition the verified output descriptor and a stream of its staged bytes.
+    ///
+    /// The descriptor and stream are borrowed from the same authenticated staging object, so a
+    /// root SLY1 encoder cannot receive an unbound output stream. No staged file handle escapes.
+    ///
+    /// # Errors
+    /// Returns a closed I/O failure when staging cannot be rewound or read, or when `compose`
+    /// rejects the descriptor or output stream.
+    pub(crate) fn with_verified_output<T>(
+        &mut self,
+        compose: impl FnOnce(&PayloadDescriptor, &mut dyn Read) -> Result<T, SelectorBoundaryError>,
+    ) -> Result<Option<T>, SelectorBoundaryError> {
+        self.output
+            .as_mut()
+            .map(|output| output.with_reader(compose))
+            .transpose()
+    }
+}
+
+/// Exact provider evidence frames retained only after their semantic authentication succeeds.
+#[derive(Debug)]
+struct AuthenticatedProviderFrames {
+    agr1: Vec<u8>,
+    spr1: Vec<u8>,
+    spy1: Vec<u8>,
+    sau1: Vec<Vec<u8>>,
+}
+
+impl AuthenticatedProviderFrames {
+    fn new(agr1: Vec<u8>, spr1: Vec<u8>, spy1: Vec<u8>, sau1: Vec<Vec<u8>>) -> Self {
+        Self {
+            agr1,
+            spr1,
+            spy1,
+            sau1,
+        }
+    }
+
+    fn agr1(&self) -> &[u8] {
+        &self.agr1
+    }
+
+    fn spr1(&self) -> &[u8] {
+        &self.spr1
+    }
+
+    fn spy1(&self) -> &[u8] {
+        &self.spy1
+    }
+
+    fn sau1(&self) -> &[Vec<u8>] {
+        &self.sau1
     }
 }
 
 /// Root-owned staged provider output that cannot be read before authentication.
 #[derive(Debug)]
-pub(crate) struct StagedProviderOutput {
+struct StagedProviderOutput {
     file: tempfile::NamedTempFile,
     descriptor: PayloadDescriptor,
 }
@@ -94,32 +167,18 @@ impl StagedProviderOutput {
         Self { file, descriptor }
     }
 
-    /// Returns the authenticated output descriptor.
-    #[must_use]
-    pub(crate) const fn descriptor(&self) -> &PayloadDescriptor {
-        &self.descriptor
-    }
-
-    /// Copies the staged, authenticated output to the selector-owned caller.
+    /// Provides the authenticated descriptor and exact staged bytes together.
     ///
     /// # Errors
-    /// Returns a closed I/O failure if staging or destination I/O fails.
-    pub(crate) fn copy_to(&mut self, writer: &mut impl Write) -> Result<(), SelectorBoundaryError> {
+    /// Returns a closed I/O failure if staging cannot be rewound or read, or if `compose` fails.
+    fn with_reader<T>(
+        &mut self,
+        compose: impl FnOnce(&PayloadDescriptor, &mut dyn Read) -> Result<T, SelectorBoundaryError>,
+    ) -> Result<T, SelectorBoundaryError> {
         let file = self.file.as_file_mut();
         file.seek(SeekFrom::Start(0))
             .map_err(|_| SelectorBoundaryError::Io)?;
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|_| SelectorBoundaryError::Io)?;
-            if read == 0 {
-                return Ok(());
-            }
-            writer
-                .write_all(&buffer[..read])
-                .map_err(|_| SelectorBoundaryError::Io)?;
-        }
+        compose(&self.descriptor, file)
     }
 }
 
@@ -432,6 +491,12 @@ fn read_admitted_response(
         receipt,
         result,
         audit,
+        frames: AuthenticatedProviderFrames::new(
+            grant_bytes,
+            receipt_bytes,
+            result_bytes,
+            audit_bytes,
+        ),
         output,
     })
 }
@@ -773,6 +838,48 @@ mod tests {
         let (_, chunks, terminal) = read_output_frames(&mut reader, &deadline)?;
         assert!(chunks.is_empty());
         assert_eq!(terminal, result);
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_frames_preserve_exact_record_bytes_and_sau1_order() {
+        let frames = AuthenticatedProviderFrames::new(
+            b"exact agr1".to_vec(),
+            b"exact spr1".to_vec(),
+            b"exact spy1".to_vec(),
+            vec![b"first sau1".to_vec(), b"second sau1".to_vec()],
+        );
+
+        assert_eq!(frames.agr1(), b"exact agr1");
+        assert_eq!(frames.spr1(), b"exact spr1");
+        assert_eq!(frames.spy1(), b"exact spy1");
+        assert_eq!(
+            frames.sau1(),
+            &[b"first sau1".to_vec(), b"second sau1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn staged_output_keeps_descriptor_bound_to_the_stream() -> TestResult {
+        let bytes = b"verified output";
+        let descriptor = PayloadDescriptor {
+            byte_length: u64::try_from(bytes.len()).expect("test length fits u64"),
+            digest: payload_digest(PayloadDirection::Output, bytes),
+        };
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(bytes)?;
+        let mut output = StagedProviderOutput::new(file, descriptor.clone());
+
+        let streamed = output.with_reader(|bound_descriptor, reader| {
+            let mut streamed = Vec::new();
+            reader
+                .read_to_end(&mut streamed)
+                .map_err(|_| SelectorBoundaryError::Io)?;
+            assert_eq!(bound_descriptor, &descriptor);
+            Ok(streamed)
+        })?;
+
+        assert_eq!(streamed, bytes);
         Ok(())
     }
 
