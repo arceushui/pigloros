@@ -21,12 +21,12 @@ pub enum SandboxProviderOperation {
 impl SandboxProviderOperation {
     const ALL: [Self; 4] = [Self::Describe, Self::Execute, Self::Cancel, Self::Reconcile];
 
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
-        if code < Self::ALL.len() as u64 {
-            Ok(Self::ALL[code as usize])
-        } else {
-            Err(SandboxProviderProtocolError::FieldOutOfBounds)
-        }
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
     }
 }
 
@@ -58,12 +58,12 @@ impl SandboxLocalErrorCode {
         Self::ProviderEvidenceInvalid,
     ];
 
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
-        if code < Self::ALL.len() as u64 {
-            Ok(Self::ALL[code as usize])
-        } else {
-            Err(SandboxProviderProtocolError::FieldOutOfBounds)
-        }
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
     }
 }
 
