@@ -1,14 +1,12 @@
 //! Root-owned immutable artifact and selector-socket boundary.
 
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rustix::fd::AsFd;
-use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
 use rustix::net::sockopt::socket_peercred;
 
 use crate::evaluator::{AdapterError, CaseAttempt, SubjectAdapter, SubjectObservation};
@@ -17,87 +15,10 @@ use crate::selector_protocol::{decode_reply, encode_request, EncodedSelectorRequ
 
 /// Fixed root-owned selector endpoint. It is not configurable by an evaluator.
 pub const SANDBOX_SELECTOR_SOCKET: &str = "/run/pigloros/sandbox-provider.sock";
-/// Fixed digest-addressed installation root.
-pub const SANDBOX_ARTIFACT_ROOT: &str = "/var/lib/pigloros/sandbox";
 
-const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const FORBIDDEN_WRITE_MODE: u32 = 0o222;
 const SELECTOR_SOCKET_MODE: u32 = 0o600;
 const MAX_SELECTOR_TRAILING_BYTES: u64 = 129 * 1024 * 1024;
-
-/// Closed classes in the immutable sandbox artifact store.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SandboxArtifactKind {
-    /// Canonical signed authority and policy records.
-    Authority,
-    /// Exact provider executables.
-    Provider,
-    /// Exact signed root images.
-    Image,
-}
-
-impl SandboxArtifactKind {
-    const fn directory(self) -> &'static str {
-        match self {
-            Self::Authority => "authority",
-            Self::Provider => "providers",
-            Self::Image => "images",
-        }
-    }
-}
-
-/// An opened digest-addressed artifact whose descriptor survives pathname replacement.
-#[derive(Debug)]
-pub struct ImmutableSandboxArtifact {
-    file: File,
-    digest: [u8; 32],
-    length: u64,
-}
-
-impl ImmutableSandboxArtifact {
-    /// Open one root-owned artifact beneath the fixed installation root.
-    ///
-    /// # Errors
-    /// Rejects unsupported hosts, symlinks, mutable/non-root paths, non-regular
-    /// files, incorrect digest-addressing, oversized bytes, and digest mismatch.
-    pub fn open(
-        kind: SandboxArtifactKind,
-        digest: [u8; 32],
-    ) -> Result<Self, SelectorBoundaryError> {
-        open_under(Path::new(SANDBOX_ARTIFACT_ROOT), kind, digest, 0)
-    }
-
-    /// Exact verified content digest.
-    #[must_use]
-    pub const fn digest(&self) -> [u8; 32] {
-        self.digest
-    }
-
-    /// Exact verified byte length.
-    #[must_use]
-    pub const fn length(&self) -> u64 {
-        self.length
-    }
-
-    /// Read the held immutable descriptor from its beginning.
-    ///
-    /// # Errors
-    /// Returns a closed I/O failure if the retained file cannot be cloned or read.
-    pub fn read_bytes(&self) -> Result<Vec<u8>, SelectorBoundaryError> {
-        let mut file = self
-            .file
-            .try_clone()
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        let mut bytes = Vec::with_capacity(
-            usize::try_from(self.length).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
-        );
-        file.seek(SeekFrom::Start(0))
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        file.read_to_end(&mut bytes)
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        Ok(bytes)
-    }
-}
 
 /// Root-authenticated transport to the single selected provider.
 #[derive(Debug)]
@@ -249,83 +170,6 @@ pub enum SelectorBoundaryError {
     Io,
 }
 
-fn open_under(
-    root: &Path,
-    kind: SandboxArtifactKind,
-    digest: [u8; 32],
-    expected_uid: u32,
-) -> Result<ImmutableSandboxArtifact, SelectorBoundaryError> {
-    let root = File::open(root).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    validate_owned_directory(&root, expected_uid)?;
-    let directory = openat2(
-        &root,
-        kind.directory(),
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )
-    .map(File::from)
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    validate_owned_directory(&directory, expected_uid)?;
-    let name = digest_name(digest);
-    let mut file = openat2(
-        &directory,
-        name.as_str(),
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )
-    .map(File::from)
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    if !metadata.is_file()
-        || metadata.uid() != expected_uid
-        || metadata.mode() & FORBIDDEN_WRITE_MODE != 0
-        || metadata.len() > MAX_ARTIFACT_BYTES
-    {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|_| SelectorBoundaryError::Io)?;
-    if blake3::hash(&bytes).as_bytes() != &digest {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| SelectorBoundaryError::Io)?;
-    Ok(ImmutableSandboxArtifact {
-        file,
-        digest,
-        length: metadata.len(),
-    })
-}
-
-fn validate_owned_directory(file: &File, expected_uid: u32) -> Result<(), SelectorBoundaryError> {
-    let metadata = file
-        .metadata()
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    if metadata.is_dir()
-        && metadata.uid() == expected_uid
-        && metadata.mode() & FORBIDDEN_WRITE_MODE == 0
-    {
-        Ok(())
-    } else {
-        Err(SelectorBoundaryError::ArtifactInvalid)
-    }
-}
-
-fn digest_name(digest: [u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut name = String::with_capacity(64);
-    for byte in digest {
-        name.push(char::from(HEX[usize::from(byte >> 4)]));
-        name.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    name
-}
-
 fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoundaryError> {
     connect_at_with(path, expected_uid, |socket_path| {
         UnixStream::connect(socket_path)
@@ -363,7 +207,6 @@ fn connect_at_with(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::os::fd::OwnedFd;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
     use std::thread;
@@ -499,153 +342,6 @@ mod tests {
         let declared_length =
             u32::try_from(control.len()).map_err(|_| AdapterError::ProtocolFailure)?;
         invoke_with_framed_reply(declared_length, control, trailing)
-    }
-
-    #[test]
-    fn immutable_artifact_retains_verified_descriptor() -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let root = temporary.path();
-        let provider_directory = root.join("providers");
-        std::fs::create_dir(&provider_directory)?;
-        let payload = b"provider";
-        let digest = *blake3::hash(payload).as_bytes();
-        let path = provider_directory.join(digest_name(digest));
-        std::fs::write(&path, payload)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
-        std::fs::set_permissions(&provider_directory, std::fs::Permissions::from_mode(0o500))?;
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
-        let uid = std::fs::metadata(root)?.uid();
-
-        let artifact = open_under(root, SandboxArtifactKind::Provider, digest, uid)?;
-        assert_eq!(artifact.digest(), digest);
-        assert_eq!(artifact.length(), u64::try_from(payload.len())?);
-        assert_eq!(artifact.read_bytes()?, payload);
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&provider_directory, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(())
-    }
-
-    #[test]
-    fn immutable_artifact_reports_a_retained_descriptor_read_failure(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let artifact = ImmutableSandboxArtifact {
-            file: File::open(temporary.path())?,
-            digest: [1; 32],
-            length: 0,
-        };
-        assert_eq!(artifact.read_bytes(), Err(SelectorBoundaryError::Io));
-        let (stream, _peer) = UnixStream::pair()?;
-        let artifact = ImmutableSandboxArtifact {
-            file: File::from(OwnedFd::from(stream)),
-            digest: [1; 32],
-            length: 0,
-        };
-        assert_eq!(artifact.read_bytes(), Err(SelectorBoundaryError::Io));
-        Ok(())
-    }
-
-    #[test]
-    fn artifact_kind_directories_are_closed_and_stable() {
-        assert_eq!(SandboxArtifactKind::Authority.directory(), "authority");
-        assert_eq!(SandboxArtifactKind::Provider.directory(), "providers");
-        assert_eq!(SandboxArtifactKind::Image.directory(), "images");
-    }
-
-    #[test]
-    fn immutable_artifact_rejects_invalid_path_components() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let temporary = tempfile::tempdir()?;
-        let root = temporary.path();
-        let uid = std::fs::metadata(root)?.uid();
-        assert_eq!(
-            open_under(
-                &root.join("missing"),
-                SandboxArtifactKind::Authority,
-                [1; 32],
-                uid
-            )
-            .map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        assert_eq!(
-            open_under(
-                root,
-                SandboxArtifactKind::Authority,
-                [1; 32],
-                uid.wrapping_add(1)
-            )
-            .map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
-        assert_eq!(
-            open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-        let authority = root.join("authority");
-        std::fs::create_dir(&authority)?;
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
-        assert_eq!(
-            open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o500))?;
-        assert_eq!(
-            open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o700))?;
-        let digest_path = authority.join(digest_name([1; 32]));
-        std::fs::create_dir(&digest_path)?;
-        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o500))?;
-        assert_eq!(
-            open_under(root, SandboxArtifactKind::Authority, [1; 32], uid).map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::remove_dir(&digest_path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn immutable_artifact_rejects_mutable_or_mismatched_content(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let root = temporary.path();
-        let image_directory = root.join("images");
-        std::fs::create_dir(&image_directory)?;
-        let claimed = *blake3::hash(b"claimed").as_bytes();
-        let path = image_directory.join(digest_name(claimed));
-        std::fs::write(&path, b"changed")?;
-        let uid = std::fs::metadata(root)?.uid();
-        assert_eq!(
-            open_under(root, SandboxArtifactKind::Image, claimed, uid).map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
-        std::fs::set_permissions(&image_directory, std::fs::Permissions::from_mode(0o500))?;
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o500))?;
-        assert_eq!(
-            open_under(root, SandboxArtifactKind::Image, claimed, uid).map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&image_directory, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(())
-    }
-
-    #[test]
-    fn fixed_artifact_root_rejects_an_uninstalled_digest() {
-        assert_eq!(
-            ImmutableSandboxArtifact::open(SandboxArtifactKind::Provider, [0; 32]).map(|_| ()),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
     }
 
     #[test]
