@@ -820,6 +820,312 @@ mod tests {
         })
     }
 
+    struct ProviderAuthority {
+        root: SigningKey,
+        policy: SigningKey,
+        release: SigningKey,
+        runtime: SigningKey,
+        reviewer: SigningKey,
+    }
+
+    fn provider_authority() -> ProviderAuthority {
+        ProviderAuthority {
+            root: SigningKey::from_bytes(&[1; 32]),
+            policy: SigningKey::from_bytes(&[2; 32]),
+            release: SigningKey::from_bytes(&[3; 32]),
+            runtime: SigningKey::from_bytes(&[4; 32]),
+            reviewer: SigningKey::from_bytes(&[5; 32]),
+        }
+    }
+
+    fn ordered(values: Vec<Value>) -> TestResult<Vec<Value>> {
+        let mut encoded = values
+            .into_iter()
+            .map(|value| encode(&value).map(|bytes| (bytes, value)))
+            .collect::<Result<Vec<_>, _>>()?;
+        encoded.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(encoded.into_iter().map(|(_, value)| value).collect())
+    }
+
+    fn trust_key(id: &str, role: u64, key: &SigningKey) -> Value {
+        Value::Array(vec![
+            Value::Text(id.to_owned()),
+            integer(role),
+            Value::Bytes(key.verifying_key().to_bytes().to_vec()),
+            integer(2),
+        ])
+    }
+
+    fn provider_trust(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
+        let keys = ordered(vec![
+            trust_key("policy", 1, &authority.policy),
+            trust_key("release", 2, &authority.release),
+            trust_key("runtime", 3, &authority.runtime),
+            trust_key("reviewer", 4, &authority.reviewer),
+        ])?;
+        sign_record(
+            "TRS1",
+            Value::Array(vec![
+                Value::Text("TRS1".to_owned()),
+                integer(1),
+                integer(2),
+                Value::Array(keys),
+                Value::Array(Vec::new()),
+                Value::Text("root".to_owned()),
+            ]),
+            &authority.root,
+        )
+    }
+
+    fn provider_revocation(
+        authority: &ProviderAuthority,
+        trust_digest: [u8; 32],
+    ) -> TestResult<Vec<u8>> {
+        sign_record(
+            "RVS1",
+            Value::Array(vec![
+                Value::Text("RVS1".to_owned()),
+                integer(1),
+                digest(trust_digest),
+                integer(3),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                Value::Text("policy".to_owned()),
+            ]),
+            &authority.policy,
+        )
+    }
+
+    fn feature_digest(features: &[String]) -> TestResult<[u8; 32]> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.RequiredHostFeatureSet.v1\0");
+        hasher.update(&encode(&Value::Array(
+            features
+                .iter()
+                .map(|feature| Value::Text(feature.clone()))
+                .collect(),
+        ))?);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    fn provider_manifest(
+        authority: &ProviderAuthority,
+        binary_digest: [u8; 32],
+        features_digest: [u8; 32],
+    ) -> TestResult<Vec<u8>> {
+        sign_record(
+            "SPM1",
+            Value::Array(vec![
+                Value::Text("SPM1".to_owned()),
+                integer(1),
+                Value::Text("provider".to_owned()),
+                digest([10; 32]),
+                digest([11; 32]),
+                digest(binary_digest),
+                digest([12; 32]),
+                Value::Text("runtime".to_owned()),
+                Value::Array(vec![Value::Array(vec![
+                    Value::Text("execute".to_owned()),
+                    integer(1),
+                    integer(1),
+                ])]),
+                Value::Array(vec![integer(0)]),
+                digest([13; 32]),
+                digest([14; 32]),
+                digest([15; 32]),
+                digest([16; 32]),
+                integer(2),
+                digest([17; 32]),
+                digest(features_digest),
+                Value::Text("release".to_owned()),
+            ]),
+            &authority.release,
+        )
+    }
+
+    fn syscall_record() -> TestResult<Vec<u8>> {
+        let unsigned = Value::Array(vec![
+            Value::Text("SCS1".to_owned()),
+            integer(1),
+            integer(0),
+            Value::Array(vec![Value::Text("read".to_owned())]),
+            Value::Array(vec![Value::Text("read".to_owned())]),
+        ]);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.SCS1.v1\0");
+        hasher.update(&encode(&unsigned)?);
+        Ok(encode(&Value::Array(vec![
+            unsigned,
+            digest(*hasher.finalize().as_bytes()),
+        ]))?)
+    }
+
+    fn host_profile(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
+        sign_record(
+            "HCP1",
+            Value::Array(vec![
+                Value::Text("HCP1".to_owned()),
+                integer(1),
+                integer(0),
+                Value::Text("6.12.0".to_owned()),
+                Value::Array(vec![Value::Array(vec![
+                    Value::Text("cgroup-v2".to_owned()),
+                    integer(1),
+                    digest([18; 32]),
+                ])]),
+                digest([19; 32]),
+                digest([20; 32]),
+                digest([21; 32]),
+                Value::Text("runtime".to_owned()),
+            ]),
+            &authority.runtime,
+        )
+    }
+
+    fn conformance_report(
+        authority: &ProviderAuthority,
+        binary_digest: [u8; 32],
+        features_digest: [u8; 32],
+        host_profile_digest: [u8; 32],
+    ) -> TestResult<Vec<u8>> {
+        let capability = Value::Array(vec![
+            Value::Text("execute".to_owned()),
+            integer(1),
+            integer(1),
+        ]);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.ProviderCapabilitySet.v1\0");
+        hasher.update(&encode(&Value::Array(vec![capability]))?);
+        sign_record(
+            "PCR1",
+            Value::Array(vec![
+                Value::Text("PCR1".to_owned()),
+                integer(1),
+                digest([17; 32]),
+                digest(binary_digest),
+                digest([12; 32]),
+                digest(*hasher.finalize().as_bytes()),
+                digest(features_digest),
+                integer(0),
+                digest(host_profile_digest),
+                integer(0),
+                Value::Text("reviewer".to_owned()),
+            ]),
+            &authority.reviewer,
+        )
+    }
+
+    fn provider_policy(
+        authority: &ProviderAuthority,
+        trust_digest: [u8; 32],
+        revocation_digest: [u8; 32],
+        provider_manifest: [u8; 32],
+        provider_binary: [u8; 32],
+        hard_caps: [u8; 32],
+        conformance_report: [u8; 32],
+        syscall_set: [u8; 32],
+    ) -> TestResult<Vec<u8>> {
+        sign_record(
+            "APT1",
+            Value::Array(vec![
+                Value::Text("APT1".to_owned()),
+                integer(1),
+                integer(4),
+                digest(provider_manifest),
+                digest(provider_binary),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                digest(hard_caps),
+                digest([17; 32]),
+                digest(conformance_report),
+                digest(trust_digest),
+                digest(revocation_digest),
+                integer(2),
+                integer(3),
+                digest(syscall_set),
+                Value::Text("policy".to_owned()),
+            ]),
+            &authority.policy,
+        )
+    }
+
+    fn admitted_state() -> TestResult<InstalledSelectorState> {
+        let authority = provider_authority();
+        let trust = provider_trust(&authority)?;
+        let trust_digest = signed_record_digest(&trust)?;
+        let revocation = provider_revocation(&authority, trust_digest)?;
+        let revocation_digest = signed_record_digest(&revocation)?;
+        let features = vec!["cgroup-v2".to_owned()];
+        let features_digest = feature_digest(&features)?;
+        let provider_binary = b"exact provider binary";
+        let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
+        let hard_caps = b"broker hard caps";
+        let hard_caps_digest = *blake3::hash(hard_caps).as_bytes();
+        let manifest = provider_manifest(&authority, provider_binary_digest, features_digest)?;
+        let manifest_digest = signed_record_digest(&manifest)?;
+        let syscall = syscall_record()?;
+        let syscall_digest = signed_record_digest(&syscall)?;
+        let host = host_profile(&authority)?;
+        let host_digest = signed_record_digest(&host)?;
+        let report = conformance_report(
+            &authority,
+            provider_binary_digest,
+            features_digest,
+            host_digest,
+        )?;
+        let report_digest = signed_record_digest(&report)?;
+        let policy = provider_policy(
+            &authority,
+            trust_digest,
+            revocation_digest,
+            manifest_digest,
+            provider_binary_digest,
+            hard_caps_digest,
+            report_digest,
+            syscall_digest,
+        )?;
+        let policy_digest = signed_record_digest(&policy)?;
+        let artifacts = [
+            (0, trust_digest, trust.as_slice()),
+            (1, revocation_digest, revocation.as_slice()),
+            (2, policy_digest, policy.as_slice()),
+            (3, manifest_digest, manifest.as_slice()),
+            (4, report_digest, report.as_slice()),
+            (5, [17; 32], b"conformance-profile".as_slice()),
+            (6, host_digest, host.as_slice()),
+            (7, syscall_digest, syscall.as_slice()),
+            (10, hard_caps_digest, hard_caps.as_slice()),
+            (11, provider_binary_digest, provider_binary.as_slice()),
+        ];
+        let mut installed = BTreeMap::new();
+        for (kind, identity, bytes) in artifacts {
+            let artifact = held_artifact(kind, identity, bytes)?;
+            installed.insert((artifact.object.kind, artifact.object.identity), artifact);
+        }
+        let objects = installed
+            .values()
+            .map(|artifact| artifact.object.clone())
+            .collect();
+        Ok(InstalledSelectorState {
+            manifest_file: tempfile::NamedTempFile::new()?.into_file(),
+            manifest_bytes: Vec::new(),
+            manifest: InstallationManifest {
+                root_key_id: "root".to_owned(),
+                root_public_key: authority.root.verifying_key().to_bytes(),
+                trust_digest,
+                revocation_digest,
+                policy_digest,
+                execute_socket: "/run/pigloros/provider-execute.sock".to_owned(),
+                control_socket: "/run/pigloros/provider-control.sock".to_owned(),
+                required_features: features,
+                objects,
+                digest: [1; 32],
+            },
+            artifacts: installed,
+        })
+    }
+
     #[test]
     fn decodes_closed_canonical_manifest() -> TestResult {
         let manifest = InstallationManifest::from_canonical_cbor(&encode_manifest(unsigned(
@@ -1012,6 +1318,16 @@ mod tests {
     fn provider_admission_rejects_untrusted_installed_provider_records() -> TestResult {
         let bootstrap = authenticated_state()?.authenticate_bootstrap()?;
         assert!(bootstrap.admit_provider().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_admission_accepts_complete_retained_sic1_artifacts() -> TestResult {
+        let admitted = admitted_state()?
+            .authenticate_bootstrap()?
+            .admit_provider()?;
+        assert_eq!(admitted.provider().manifest().provider_id, "provider");
+        assert_eq!(admitted.provider().host_profile().kernel_release, "6.12.0");
         Ok(())
     }
 }
