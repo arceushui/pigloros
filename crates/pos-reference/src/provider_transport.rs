@@ -20,10 +20,8 @@ use rustix::net::sockopt::{socket_error, socket_peercred};
 use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
 use crate::sandbox_provider_protocol::{
-    AuthenticatedAdmissionGrant, AuthenticatedSandboxProviderReceipt,
-    AuthenticatedSandboxProviderResult, PayloadDescriptor, PayloadDirection,
-    PayloadStreamValidator, SandboxAuditRecord, SandboxExecuteRequest, SandboxPayloadChunk,
-    SelectorGrantCommitment,
+    PayloadDescriptor, PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest,
+    SandboxPayloadChunk, SelectorGrantCommitment,
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::open_directory_chain;
@@ -43,39 +41,11 @@ pub(crate) struct ProviderTransport {
 /// Complete provider evidence authenticated against an admitted selector provider.
 #[derive(Debug)]
 pub(crate) struct AuthenticatedProviderExecution {
-    grant: AuthenticatedAdmissionGrant,
-    receipt: AuthenticatedSandboxProviderReceipt,
-    result: AuthenticatedSandboxProviderResult,
-    audit: Vec<SandboxAuditRecord>,
     frames: AuthenticatedProviderFrames,
     output: Option<StagedProviderOutput>,
 }
 
 impl AuthenticatedProviderExecution {
-    /// Returns the authenticated AGR1 evidence.
-    #[must_use]
-    pub(crate) const fn grant(&self) -> &AuthenticatedAdmissionGrant {
-        &self.grant
-    }
-
-    /// Returns the authenticated SPR1 evidence.
-    #[must_use]
-    pub(crate) const fn receipt(&self) -> &AuthenticatedSandboxProviderReceipt {
-        &self.receipt
-    }
-
-    /// Returns the authenticated terminal SPY1 evidence.
-    #[must_use]
-    pub(crate) const fn result(&self) -> &AuthenticatedSandboxProviderResult {
-        &self.result
-    }
-
-    /// Returns the authenticated ordered SAU1 evidence chain.
-    #[must_use]
-    pub(crate) fn audit(&self) -> &[SandboxAuditRecord] {
-        &self.audit
-    }
-
     /// Returns the exact authenticated AGR1 frame bytes for root SLY1 composition.
     #[must_use]
     pub(crate) fn agr1_bytes(&self) -> &[u8] {
@@ -482,15 +452,11 @@ fn read_admitted_response(
         .authenticate_terminal_result(&result_bytes, request, &grant, &receipt)
         .map_err(|_| ReceiveFailure::Invalid)?;
     ensure_eof(stream, deadline)?;
-    let audit = provider
+    provider
         .authenticate_audit_chain(&audit_bytes, &receipt, &result)
         .map_err(|_| ReceiveFailure::Invalid)?;
     let output = stage_output(file, chunks, request, &result)?;
     Ok(AuthenticatedProviderExecution {
-        grant,
-        receipt,
-        result,
-        audit,
         frames: AuthenticatedProviderFrames::new(
             grant_bytes,
             receipt_bytes,
