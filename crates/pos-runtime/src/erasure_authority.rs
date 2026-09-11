@@ -18,11 +18,11 @@ use pos_core::{
     ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
     ErasureInventoryCategoryV1, ErasureLifecycleV1, ErasureObligationInputV1,
-    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1,
-    TimelineId, TimelineMeta,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
+    ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureStateTransitionV1,
+    ErasureVerifiedTopologyObservationV1, TimelineId, TimelineMeta,
 };
 
 use super::erasure_host::ErasureCoordinatorAuthorityV1;
