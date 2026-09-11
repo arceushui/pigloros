@@ -26,7 +26,9 @@ use pos_core::{
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, OwnTracksIngressStore};
-use pos_runtime::{ActionSubmissionError, ErasureExecutionHostV1, PluginRegistry};
+use pos_runtime::{
+    ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
+};
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -71,7 +73,7 @@ mod lifecycle_coverage_tests {
     };
     use pos_core::{CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
     use pos_runtime::ErasureExecutionHostV1;
-    use pos_store::memory::MemoryStore;
+    use pos_store::{memory::MemoryStore, StoreConfig};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio::sync::{mpsc, Notify, Semaphore};
@@ -94,6 +96,25 @@ mod lifecycle_coverage_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(final_state, LifecycleState::Unhealthy { .. }));
+    }
+
+    #[test]
+    fn executor_store_reports_payload_free_erasure_status() {
+        let generic = ExecutorStore::Generic(Box::new(MemoryStore::new()));
+        assert_eq!(
+            generic.erasure_status(),
+            pos_runtime::ErasureHostStatusV1::Closed
+        );
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let host = ExecutorStore::Host(Box::new(host));
+        assert_eq!(
+            host.erasure_status(),
+            pos_runtime::ErasureHostStatusV1::Ready
+        );
     }
 
     #[test]
@@ -418,6 +439,9 @@ enum Command {
         timeline: TimelineId,
         reply: oneshot::Sender<Result<Seq, StoreExecutorError>>,
     },
+    ErasureStatus {
+        reply: oneshot::Sender<Result<ErasureHostStatusV1, StoreExecutorError>>,
+    },
     #[cfg(test)]
     Panic {
         reply: oneshot::Sender<Result<(), StoreExecutorError>>,
@@ -445,7 +469,10 @@ impl Command {
 
     const fn is_read(&self) -> bool {
         match self {
-            Self::RootCount { .. } | Self::Read { .. } | Self::ProtectedLogicalHead { .. } => true,
+            Self::RootCount { .. }
+            | Self::Read { .. }
+            | Self::ProtectedLogicalHead { .. }
+            | Self::ErasureStatus { .. } => true,
             #[cfg(test)]
             Self::ReadOne { .. } | Self::GetTimeline { .. } | Self::PanicRead { .. } => true,
             _ => false,
@@ -601,6 +628,20 @@ enum ExecutorStore {
     Generic(Box<dyn EventStore>),
     #[cfg(test)]
     Gateway(GatewayExecutorStore),
+}
+
+impl ExecutorStore {
+    fn erasure_status(&self) -> ErasureHostStatusV1 {
+        match self {
+            Self::Host(host) => host.status(),
+            #[cfg(test)]
+            // Test-only compatibility stores do not own an
+            // `ErasureExecutionHostV1`, so they must not claim recovered
+            // readiness.  Their event-store gate is intentionally permissive
+            // for unrelated Gateway tests, but that is not recovery evidence.
+            Self::Generic(_) | Self::Gateway(_) => ErasureHostStatusV1::Closed,
+        }
+    }
 }
 
 impl ExecutorStore {
@@ -1610,6 +1651,10 @@ impl StoreExecutor {
             reply
         })
     }
+
+    pub(crate) async fn erasure_status(&self) -> Result<ErasureHostStatusV1, StoreExecutorError> {
+        submit!(self, |reply| Command::ErasureStatus { reply })
+    }
 }
 
 async fn await_command_result<T, E>(
@@ -1903,7 +1948,14 @@ fn select_pending_index(pending: &[CommandEnvelope], reads_since_write: u8) -> u
     )
 }
 
+// Keep the exhaustive timeout dispatch below the worker's complexity budget;
+// the named seam also lets the timeout path be tested without running the
+// worker loop.
 fn expire_command(command: Command) {
+    expire_command_impl(command);
+}
+
+fn expire_command_impl(command: Command) {
     match command {
         Command::PrepareOwnTracksIngress { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
@@ -1952,6 +2004,9 @@ fn expire_command(command: Command) {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::ProtectedLogicalHead { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
+        Command::ErasureStatus { reply } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         #[cfg(test)]
@@ -2055,7 +2110,13 @@ enum CommandExecution {
     Completed,
 }
 
+// Keep the exhaustive command dispatch below the worker's complexity budget;
+// the worker remains responsible only for sequencing and panic containment.
 fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
+    execute_command_impl(state, command)
+}
+
+fn execute_command_impl(state: &mut ExecutorState, command: Command) -> CommandExecution {
     match command {
         Command::PrepareOwnTracksIngress {
             basic_handle,
@@ -2080,7 +2141,9 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         Command::PendingAppendIdentityCleanup { reply } => {
             execute_pending_append_identity_cleanup_command(state, reply);
         }
-        Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),
+        Command::RootCount { maximum, reply } => {
+            execute_root_count_command(state, maximum, reply);
+        }
         Command::Create { name, reply } => execute_create_command(state, &name, reply),
         Command::Read {
             timeline,
@@ -2125,6 +2188,9 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         }
         Command::ProtectedLogicalHead { timeline, reply } => {
             send_store_result(reply, state.store.protected_logical_head(timeline));
+        }
+        Command::ErasureStatus { reply } => {
+            drop(reply.send(Ok(state.store.erasure_status())));
         }
         #[cfg(test)]
         Command::Panic { reply } | Command::PanicRead { reply } => {
@@ -3832,6 +3898,9 @@ mod tests {
             },
             receiver,
         );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(Command::ErasureStatus { reply }, receiver);
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::Panic { reply }, receiver);

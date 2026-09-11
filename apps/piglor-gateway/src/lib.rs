@@ -44,7 +44,9 @@ use pos_core::{
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
-use pos_runtime::{ActionSubmissionError, ErasureExecutionHostV1, PluginRegistry};
+use pos_runtime::{
+    ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::hash_map::DefaultHasher,
@@ -1680,6 +1682,17 @@ impl Gateway {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.store.is_ready()
+    }
+
+    /// Return the payload-free erasure recovery status owned by the Gateway's
+    /// store executor. This status remains readable while individual
+    /// protected operations are denied by containment.
+    ///
+    /// # Errors
+    /// Returns a typed executor lifecycle error when the store worker is
+    /// closed, unhealthy, saturated, or the bounded command deadline expires.
+    pub async fn erasure_status(&self) -> Result<ErasureHostStatusV1, GatewayError> {
+        self.store.erasure_status().await.map_err(Into::into)
     }
 
     /// Return whether this Gateway has a provider-neutral host authorizer.
@@ -6744,6 +6757,7 @@ mod coverage_entrypoints {
             ERASURE_MAX_INVENTORY_REQUESTS,
         )?;
         let gateway = Gateway::new_with_erasure_host(host)?;
+        assert_eq!(gateway.erasure_status().await?, ErasureHostStatusV1::Ready);
         let timeline = gateway.create_timeline("host-owned-gateway").await?;
         let entity = EntityId::new();
         gateway

@@ -22,6 +22,7 @@ use pos_core::{
     ActionRejected, CoreError,
 };
 use pos_plugin_ledger::NewPrediction;
+use pos_runtime::ErasureHostStatusV1;
 use serde_json::json;
 use std::net::SocketAddr;
 
@@ -157,12 +158,22 @@ async fn ledger_page(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    if state.gateway.is_ready() {
+    let ready = matches!(
+        (
+            state.gateway.is_ready(),
+            state.gateway.erasure_status().await,
+        ),
+        (true, Ok(ErasureHostStatusV1::Ready))
+    );
+    if ready {
         (StatusCode::OK, Json(json!({ "ok": true })))
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "ok": false, "error": "store executor not ready" })),
+            Json(json!({
+                "ok": false,
+                "error": "store executor or erasure host not ready"
+            })),
         )
     }
 }
@@ -518,6 +529,7 @@ mod tests {
         ids::{EntityId, TimelineId},
     };
     use pos_plugin_ledger::LedgerStore;
+    use pos_runtime::ErasureExecutionHostV1;
     use pos_store::{open_store, StoreConfig};
     use std::path::PathBuf;
     use tower::ServiceExt;
@@ -585,7 +597,12 @@ mod tests {
     }
 
     fn spectator_test_app() -> Router {
-        let gw = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gw = Gateway::new_with_erasure_host(host).test_ok();
         spectator_router(AppState {
             gateway: gw,
             ledger_view: LedgerView::default(),
@@ -836,15 +853,55 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn health_ok() {
-        let (status, json) = json_request(test_app(), "GET", "/health", None).await;
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let (status, json) = json_request(
+            router(AppState {
+                gateway,
+                ledger_view: LedgerView::default(),
+                ledger_write: LedgerWriteMode::Disabled,
+            }),
+            "GET",
+            "/health",
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
     }
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn health_reports_executor_unready_after_shutdown() {
+    async fn health_reports_closed_erasure_host_unready() {
         let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        let (status, json) = json_request(
+            router(AppState {
+                gateway,
+                ledger_view: LedgerView::default(),
+                ledger_write: LedgerWriteMode::Disabled,
+            }),
+            "GET",
+            "/health",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["ok"], false);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn health_reports_executor_unready_after_shutdown() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
         gateway.shutdown().await.test_ok();
         let (status, json) = json_request(
             router(AppState {

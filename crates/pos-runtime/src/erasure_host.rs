@@ -8,7 +8,7 @@ use pos_core::{
         AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
         PurgeOutcome, SeqRange,
     },
-    ConsentAppendPermit, CoreError, ErasureAcknowledgementProvenanceV1,
+    ConsentAppendPermit, CoreError, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionV1, ErasureAtomicFreezeResultV1,
     ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1, ErasureCasEffectV1,
     ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureCoordinatorPortV1,
@@ -17,12 +17,12 @@ use pos_core::{
     ErasureForkRecoveryV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureGate,
     ErasureHostErrorV1, ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1,
-    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReceiptInputV1,
+    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptV1,
     ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
     ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedEmptyInventoryQueryV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1,
-    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
+    ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
     KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
     KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1,
     PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
@@ -43,6 +43,35 @@ enum HostStateV1 {
         request_count: usize,
     },
     Poisoned,
+}
+
+/// Payload-free recovery status for an erasure execution host.
+///
+/// This status is safe to expose from health and minimized-status endpoints:
+/// it carries no request, subject, selector, scope, or event data. A `Ready`
+/// host may still report containment denials for individual protected
+/// operations after `AccessFrozen`; status describes host recovery, not the
+/// lifecycle of any one request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureHostStatusV1 {
+    /// Complete verified recovery has not been installed.
+    Closed,
+    /// Complete verified recovery is installed and the host accepts commands.
+    Ready,
+    /// A persistence or publication boundary became uncertain; the host is
+    /// permanently fail-closed until restarted from durable evidence.
+    Poisoned,
+}
+
+struct IdentifiedForkTransitionInput<'a> {
+    operation: ErasureReferenceV1,
+    parent: TimelineId,
+    child: &'a TimelineMeta,
+    current_generation: ErasureReferenceV1,
+    current_inventory: &'a ErasureVerifiedInventoryV1,
+    authority: &'a dyn ErasureCoordinatorAuthorityV1,
+    coordinator: ErasureReferenceV1,
+    maximum_requests: usize,
 }
 
 struct OneShotInventoryV1(Option<ErasureVerifiedInventoryV1>);
@@ -474,7 +503,15 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
     }
 }
 
+#[derive(Clone)]
 enum HostedCoordinatorCommandV1 {
+    Submission(HostedSubmissionCommandV1),
+    Retry(HostedRetryCommandV1),
+    Resolution(HostedResolutionCommandV1),
+}
+
+#[derive(Clone)]
+enum HostedSubmissionCommandV1 {
     Submit {
         request: ErasureRequestV1,
         provenance: ErasureReferenceV1,
@@ -489,7 +526,113 @@ enum HostedCoordinatorCommandV1 {
     },
 }
 
+#[derive(Clone)]
+enum HostedRetryCommandV1 {
+    Reject {
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    },
+    SubmitCorrected {
+        request: ErasureRequestV1,
+        correction: ErasureCorrectionProvenanceV1,
+    },
+    DispatchAttempt {
+        request: ErasureReferenceV1,
+        admission: ErasureRetryAdmissionV1,
+    },
+}
+
+#[derive(Clone)]
+enum HostedResolutionCommandV1 {
+    Acknowledge {
+        request: ErasureReferenceV1,
+        acknowledgement: ErasureAcknowledgementV1,
+    },
+    AdministrativeResolution {
+        request: ErasureReferenceV1,
+        resolution: ErasureAdministrativeResolutionV1,
+    },
+}
+
 impl HostedCoordinatorCommandV1 {
+    const fn submit(request: ErasureRequestV1, provenance: ErasureReferenceV1) -> Self {
+        Self::Submission(HostedSubmissionCommandV1::Submit {
+            request,
+            provenance,
+        })
+    }
+
+    const fn authorize(request: ErasureReferenceV1, provenance: ErasureReferenceV1) -> Self {
+        Self::Submission(HostedSubmissionCommandV1::Authorize {
+            request,
+            provenance,
+        })
+    }
+
+    const fn freeze(request: ErasureReferenceV1, transition: ErasureStateTransitionV1) -> Self {
+        Self::Submission(HostedSubmissionCommandV1::Freeze {
+            request,
+            transition,
+        })
+    }
+
+    const fn reject(request: ErasureReferenceV1, provenance: ErasureReferenceV1) -> Self {
+        Self::Retry(HostedRetryCommandV1::Reject {
+            request,
+            provenance,
+        })
+    }
+
+    const fn submit_corrected(
+        request: ErasureRequestV1,
+        correction: ErasureCorrectionProvenanceV1,
+    ) -> Self {
+        Self::Retry(HostedRetryCommandV1::SubmitCorrected {
+            request,
+            correction,
+        })
+    }
+
+    const fn dispatch_attempt(
+        request: ErasureReferenceV1,
+        admission: ErasureRetryAdmissionV1,
+    ) -> Self {
+        Self::Retry(HostedRetryCommandV1::DispatchAttempt { request, admission })
+    }
+
+    const fn acknowledge(
+        request: ErasureReferenceV1,
+        acknowledgement: ErasureAcknowledgementV1,
+    ) -> Self {
+        Self::Resolution(HostedResolutionCommandV1::Acknowledge {
+            request,
+            acknowledgement,
+        })
+    }
+
+    const fn administrative_resolution(
+        request: ErasureReferenceV1,
+        resolution: ErasureAdministrativeResolutionV1,
+    ) -> Self {
+        Self::Resolution(HostedResolutionCommandV1::AdministrativeResolution {
+            request,
+            resolution,
+        })
+    }
+
+    fn execute(
+        self,
+        coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        match self {
+            Self::Submission(command) => HostedSubmissionCommandV1::execute(command, coordinator),
+            Self::Retry(command) => HostedRetryCommandV1::execute(command, coordinator),
+            Self::Resolution(command) => HostedResolutionCommandV1::execute(command, coordinator),
+        }
+    }
+}
+
+impl HostedSubmissionCommandV1 {
     fn execute(
         self,
         coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
@@ -507,6 +650,45 @@ impl HostedCoordinatorCommandV1 {
                 request,
                 transition,
             } => coordinator.freeze_inventory(request, &transition),
+        }
+    }
+}
+
+impl HostedRetryCommandV1 {
+    fn execute(
+        self,
+        coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        match self {
+            Self::Reject {
+                request,
+                provenance,
+            } => coordinator.reject(request, provenance),
+            Self::SubmitCorrected {
+                request,
+                correction,
+            } => coordinator.submit_corrected(request, correction),
+            Self::DispatchAttempt { request, admission } => {
+                coordinator.dispatch_attempt(request, &admission)
+            }
+        }
+    }
+}
+
+impl HostedResolutionCommandV1 {
+    fn execute(
+        self,
+        coordinator: &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        match self {
+            Self::Acknowledge {
+                request,
+                acknowledgement,
+            } => coordinator.acknowledge(request, acknowledgement),
+            Self::AdministrativeResolution {
+                request,
+                resolution,
+            } => coordinator.resolve_administratively(request, &resolution),
         }
     }
 }
@@ -590,6 +772,17 @@ impl ErasureExecutionHostV1 {
         self.gate.poison();
         self.state = HostStateV1::Poisoned;
         self.inventory = None;
+    }
+
+    /// Return the payload-free recovery status for health/minimized-status
+    /// consumers.
+    #[must_use]
+    pub const fn status(&self) -> ErasureHostStatusV1 {
+        match self.state {
+            HostStateV1::Closed => ErasureHostStatusV1::Closed,
+            HostStateV1::Ready { .. } => ErasureHostStatusV1::Ready,
+            HostStateV1::Poisoned => ErasureHostStatusV1::Poisoned,
+        }
     }
 
     /// Bind an owned store to one fail-closed gate.
@@ -1028,76 +1221,17 @@ impl ErasureExecutionHostV1 {
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let child = TimelineMeta::forked_from(parent, at_seq, name);
-        let gate = Arc::clone(&self.gate);
-        let mut transition_error = None;
-        let publication = {
-            let mut fenced_transition = || {
-                let transition = (|| {
-                    if let Some(recovered) =
-                        self.store.host_store().recover_fork_admission(operation)?
-                    {
-                        if recovered.successor_generation() != current_generation {
-                            return Err(ErasureErrorV1::PolicyConflict);
-                        }
-                        return Ok((
-                            current_inventory.clone(),
-                            Timeline::new(recovered.child().clone()),
-                        ));
-                    }
-                    let requirements = current_inventory.fork_scope_requirements(parent)?;
-                    let child_scope = authority.resolve_fork_child_scope(parent, &child)?;
-                    let input = ErasureForkAdmissionInputV1 {
-                        operation,
-                        expected_inventory_generation: current_generation,
-                        child_scope,
-                        child: child.clone(),
-                    };
-                    let admissions = {
-                        let port = HostedCoordinatorPortV1::new(
-                            self.store.host_store(),
-                            authority.as_ref(),
-                        );
-                        let mut state_machine =
-                            ErasureCoordinatorStateMachineV1::new(port, coordinator);
-                        requirements
-                            .into_iter()
-                            .map(|requirement| {
-                                authority
-                                    .resolve_fork_scope_extension(requirement, &input)
-                                    .and_then(|extension| {
-                                        state_machine.prepare_fork_admission(
-                                            requirement.request(),
-                                            extension,
-                                            input.clone(),
-                                        )
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
-                    };
-                    let batch = current_inventory
-                        .clone()
-                        .prepare_fork_batch(input, admissions)?;
-                    let successor = batch.successor_inventory().clone();
-                    match self.store.host_store().commit_fork_admission(batch)? {
-                        ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
-                            Ok((successor, Timeline::new(child.clone())))
-                        }
-                    }
-                })();
-                if let Err(error) = transition {
-                    transition_error = Some(error);
-                }
-                transition
-            };
-            gate.install_from_verified_inventory_transition(&mut fenced_transition)
+        let transition = IdentifiedForkTransitionInput {
+            operation,
+            parent,
+            child: &child,
+            current_generation,
+            current_inventory: &current_inventory,
+            authority: authority.as_ref(),
+            coordinator,
+            maximum_requests,
         };
-        let (inventory, timeline) = match publication {
-            Ok(publication) => publication,
-            Err(error) => {
-                self.poison();
-                return Err(transition_error.map_or_else(|| error.into(), map_erasure_error));
-            }
-        };
+        let (inventory, timeline) = self.apply_identified_fork_transition(&transition)?;
         let generation = inventory.generation();
         let request_count = inventory.request_count();
         self.inventory = Some(inventory);
@@ -1109,10 +1243,95 @@ impl ErasureExecutionHostV1 {
         Ok((timeline, generation))
     }
 
-    fn apply_coordinator_command(
+    fn apply_identified_fork_transition(
         &mut self,
-        command: HostedCoordinatorCommandV1,
-    ) -> Result<(ErasureStateV1, ErasureReferenceV1), ErasureHostErrorV1> {
+        input: &IdentifiedForkTransitionInput<'_>,
+    ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureHostErrorV1> {
+        let gate = Arc::clone(&self.gate);
+        let mut transition_error = None;
+        let publication = {
+            let mut fenced_transition = || {
+                let transition = (|| {
+                    if let Some(recovered) = self
+                        .store
+                        .host_store()
+                        .recover_fork_admission(input.operation)?
+                    {
+                        if recovered.successor_generation() != input.current_generation {
+                            return Err(ErasureErrorV1::PolicyConflict);
+                        }
+                        return Ok((
+                            input.current_inventory.clone(),
+                            Timeline::new(recovered.child().clone()),
+                        ));
+                    }
+                    let requirements = input
+                        .current_inventory
+                        .fork_scope_requirements(input.parent)?;
+                    let child_scope = input
+                        .authority
+                        .resolve_fork_child_scope(input.parent, input.child)?;
+                    let admission_input = ErasureForkAdmissionInputV1 {
+                        operation: input.operation,
+                        expected_inventory_generation: input.current_generation,
+                        child_scope,
+                        child: input.child.clone(),
+                    };
+                    let admissions = {
+                        let port =
+                            HostedCoordinatorPortV1::new(self.store.host_store(), input.authority);
+                        let mut state_machine =
+                            ErasureCoordinatorStateMachineV1::new(port, input.coordinator);
+                        requirements
+                            .into_iter()
+                            .map(|requirement| {
+                                input
+                                    .authority
+                                    .resolve_fork_scope_extension(requirement, &admission_input)
+                                    .and_then(|extension| {
+                                        state_machine.prepare_fork_admission(
+                                            requirement.request(),
+                                            extension,
+                                            admission_input.clone(),
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    let batch = input
+                        .current_inventory
+                        .clone()
+                        .prepare_fork_batch(admission_input, admissions)?;
+                    let successor = batch.successor_inventory().clone();
+                    match self.store.host_store().commit_fork_admission(batch)? {
+                        ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
+                            Ok((successor, Timeline::new(input.child.clone())))
+                        }
+                    }
+                })();
+                if let Err(error) = transition {
+                    transition_error = Some(error);
+                }
+                transition
+            };
+            gate.install_from_verified_inventory_transition(&mut fenced_transition)
+        };
+        match publication {
+            Ok(publication) => Ok(publication),
+            Err(error) => Err(self.handle_transition_failure(
+                transition_error,
+                error.into(),
+                input.maximum_requests,
+            )),
+        }
+    }
+
+    fn apply_coordinator_transition<T>(
+        &mut self,
+        mut transition: impl FnMut(
+            &mut ErasureCoordinatorStateMachineV1<HostedCoordinatorPortV1<'_>>,
+        ) -> Result<T, ErasureErrorV1>,
+    ) -> Result<(T, ErasureReferenceV1), ErasureHostErrorV1> {
         let (_, maximum_requests, _) = self.ready_state()?;
         let authority = self
             .authority
@@ -1123,22 +1342,17 @@ impl ErasureExecutionHostV1 {
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
         let gate = Arc::clone(&self.gate);
         let mut transition_error = None;
-        let mut command = Some(command);
         let publication = {
             let mut fenced_transition = || {
                 let port =
                     HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
                 let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
-                match command
-                    .take()
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)?
-                    .execute(&mut state_machine)
-                    .and_then(|state| {
-                        state_machine
-                            .verified_inventory(maximum_requests)
-                            .map(|inventory| (state, inventory))
-                    }) {
-                    Ok((state, inventory)) => Ok((inventory, state)),
+                match transition(&mut state_machine).and_then(|result| {
+                    state_machine
+                        .verified_inventory(maximum_requests)
+                        .map(|inventory| (result, inventory))
+                }) {
+                    Ok((result, inventory)) => Ok((inventory, result)),
                     Err(error) => {
                         transition_error = Some(error);
                         Err(error)
@@ -1147,11 +1361,14 @@ impl ErasureExecutionHostV1 {
             };
             gate.install_from_verified_inventory_transition(&mut fenced_transition)
         };
-        let (inventory, state) = match publication {
+        let (inventory, result) = match publication {
             Ok(publication) => publication,
             Err(error) => {
-                self.poison();
-                return Err(transition_error.map_or_else(|| error.into(), map_erasure_error));
+                return Err(self.handle_transition_failure(
+                    transition_error,
+                    error.into(),
+                    maximum_requests,
+                ));
             }
         };
         let generation = inventory.generation();
@@ -1162,7 +1379,42 @@ impl ErasureExecutionHostV1 {
             maximum_requests,
             request_count,
         };
-        Ok((state, generation))
+        Ok((result, generation))
+    }
+
+    fn handle_transition_failure(
+        &mut self,
+        transition_error: Option<ErasureErrorV1>,
+        publication_error: ErasureHostErrorV1,
+        maximum_requests: usize,
+    ) -> ErasureHostErrorV1 {
+        let mapped = transition_error.map_or(publication_error, map_erasure_error);
+        if transition_error.is_some_and(is_non_poisoning_transition_error)
+            && self
+                .install_inventory_from_coordinator(maximum_requests)
+                .is_ok()
+        {
+            return mapped;
+        }
+        self.poison();
+        mapped
+    }
+
+    fn apply_coordinator_command(
+        &mut self,
+        command: &HostedCoordinatorCommandV1,
+    ) -> Result<(ErasureStateV1, ErasureReferenceV1), ErasureHostErrorV1> {
+        self.apply_coordinator_transition(|state_machine| command.clone().execute(state_machine))
+    }
+
+    fn apply_finalize_command(
+        &mut self,
+        request: ErasureReferenceV1,
+        input: &ErasureReceiptInputV1,
+    ) -> Result<(ErasureReceiptV1, ErasureReferenceV1), ErasureHostErrorV1> {
+        self.apply_coordinator_transition(|state_machine| {
+            state_machine.finalize(request, input.clone())
+        })
     }
 
     /// Recover a new store only when its complete durable request set is empty.
@@ -1249,6 +1501,27 @@ pub struct ErasureCommandSenderV1<'host> {
 }
 
 impl ErasureCommandSenderV1<'_> {
+    fn apply_state_command(
+        &mut self,
+        command: &HostedCoordinatorCommandV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (state, generation) = self.host.apply_coordinator_command(command)?;
+        self.generation = generation;
+        Ok(state)
+    }
+
+    fn apply_receipt_command(
+        &mut self,
+        request: ErasureReferenceV1,
+        input: &ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let (receipt, generation) = self.host.apply_finalize_command(request, input)?;
+        self.generation = generation;
+        Ok(receipt)
+    }
+
     /// Run one protected effect while retaining the host's current Tick
     /// Boundary fence for its complete execution.
     ///
@@ -1432,15 +1705,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureRequestV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::Submit {
-                    request,
-                    provenance,
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(&HostedCoordinatorCommandV1::submit(request, provenance))
     }
 
     /// Authenticate and persist an authorization decision through the
@@ -1454,15 +1719,7 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::Authorize {
-                    request,
-                    provenance,
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(&HostedCoordinatorCommandV1::authorize(request, provenance))
     }
 
     /// Atomically persist an admitted access freeze and publish the successor
@@ -1482,15 +1739,121 @@ impl ErasureCommandSenderV1<'_> {
         request: ErasureReferenceV1,
         transition: &ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
-        let (state, generation) =
-            self.host
-                .apply_coordinator_command(HostedCoordinatorCommandV1::Freeze {
-                    request,
-                    transition: transition.clone(),
-                })?;
-        self.generation = generation;
-        Ok(state)
+        self.apply_state_command(&HostedCoordinatorCommandV1::freeze(
+            request,
+            transition.clone(),
+        ))
+    }
+
+    /// Reject one submitted erasure request through the host-owned coordinator.
+    ///
+    /// Rejection is a pre-freeze lifecycle decision. The command remains
+    /// generation-bound and publishes the successor inventory before returning
+    /// the new state.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error and poisons an uncertain persistence/publication outcome.
+    pub fn reject_erasure_request(
+        &mut self,
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.apply_state_command(&HostedCoordinatorCommandV1::reject(request, provenance))
+    }
+
+    /// Submit a corrected replacement for a previously rejected request.
+    ///
+    /// The correction provenance remains inside the coordinator command so the
+    /// rejected predecessor and its authorization evidence are checked before
+    /// any new ERQ1 state is persisted.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error and poisons an uncertain persistence/publication outcome.
+    pub fn submit_corrected_erasure_request(
+        &mut self,
+        request: ErasureRequestV1,
+        correction: ErasureCorrectionProvenanceV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.apply_state_command(&HostedCoordinatorCommandV1::submit_corrected(
+            request, correction,
+        ))
+    }
+
+    /// Admit and dispatch one durable destruction attempt.
+    ///
+    /// The coordinator persists the idempotent outbox admission before the
+    /// authority Plugin receives the destruction commands. Exact retries remain
+    /// available through the same generation-bound host sender.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error and poisons an uncertain persistence/publication outcome.
+    pub fn dispatch_erasure_destruction(
+        &mut self,
+        request: ErasureReferenceV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.apply_state_command(&HostedCoordinatorCommandV1::dispatch_attempt(
+            request,
+            admission.clone(),
+        ))
+    }
+
+    /// Persist one owner acknowledgement for the active destruction attempt.
+    ///
+    /// The acknowledgement is checked against the recovered obligation and
+    /// active attempt before the successor inventory is published.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error and poisons an uncertain persistence/publication outcome.
+    pub fn acknowledge_erasure(
+        &mut self,
+        request: ErasureReferenceV1,
+        acknowledgement: ErasureAcknowledgementV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.apply_state_command(&HostedCoordinatorCommandV1::acknowledge(
+            request,
+            acknowledgement,
+        ))
+    }
+
+    /// Append one authenticated administrative recovery resolution.
+    ///
+    /// Resolution evidence is validated by the configured authority Plugin and
+    /// committed through the same host-owned coordinator fence.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error and poisons an uncertain persistence/publication outcome.
+    pub fn resolve_erasure_administratively(
+        &mut self,
+        request: ErasureReferenceV1,
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<ErasureStateV1, ErasureHostErrorV1> {
+        self.apply_state_command(&HostedCoordinatorCommandV1::administrative_resolution(
+            request,
+            resolution.clone(),
+        ))
+    }
+
+    /// Commit and return one payload-free terminal ERC1 receipt.
+    ///
+    /// Receipt construction and admission stay inside the host-owned
+    /// coordinator fence. The returned receipt is therefore derived from the
+    /// successor inventory that was published for this sender generation.
+    ///
+    /// # Errors
+    /// Returns a payload-free authorization, conflict, adapter, or recovery
+    /// error and poisons an uncertain persistence/publication outcome.
+    pub fn finalize_erasure_request(
+        &mut self,
+        request: ErasureReferenceV1,
+        input: &ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureHostErrorV1> {
+        self.apply_receipt_command(request, input)
     }
 
     /// Recover the original durable Fork result after a lost reply or restart.
@@ -1778,6 +2141,72 @@ pub struct ErasureReadSenderV1<'host> {
 }
 
 impl ErasureReadSenderV1<'_> {
+    /// Recover one authoritative, payload-free ERS1 state through the
+    /// coordinator that owns this host's installed generation.
+    ///
+    /// The query is deliberately exposed only from the host read seam: callers
+    /// cannot provide a raw persistence resolver or bypass the configured
+    /// authority and installed-generation ownership. The sender holds an
+    /// exclusive host borrow for the query, so the captured generation cannot
+    /// become stale during this call.
+    ///
+    /// # Errors
+    /// Returns a payload-free recovery, authorization, or adapter error.
+    pub fn erasure_state(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureHostErrorV1> {
+        let Some((authority, coordinator)) = self.host.authority.clone().zip(self.host.coordinator)
+        else {
+            return Err(ErasureHostErrorV1::AuthorizationDenied);
+        };
+        let state = {
+            let port =
+                HostedCoordinatorPortV1::new(self.host.store.host_store(), authority.as_ref());
+            let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
+            ErasureVerifiedStateQueryV1::verified_state(&mut state_machine, request)
+                .map_err(map_erasure_error)?
+        };
+        Ok(state)
+    }
+
+    /// Recover one request's validated ERS1 history through the host-owned
+    /// coordinator and persistence boundary.
+    ///
+    /// The current state is recovered through the configured authority first;
+    /// each predecessor is then resolved only through the same host store and
+    /// validated against its successor before it is returned. Callers cannot
+    /// ask for an arbitrary digest or bypass the request binding.
+    ///
+    /// # Errors
+    /// Returns a payload-free recovery, provenance, or adapter error when the
+    /// chain cannot be verified.
+    pub fn erasure_state_history(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<Vec<ErasureStateV1>>, ErasureHostErrorV1> {
+        let Some(current) = self.erasure_state(request)? else {
+            return Ok(None);
+        };
+        let mut history = vec![current.state().clone()];
+        let mut successor = current.state().clone();
+        while let Some(predecessor_digest) = successor.previous_state() {
+            let predecessor = self
+                .host
+                .store
+                .host_store()
+                .resolve_state(predecessor_digest)
+                .map_err(map_erasure_error)?
+                .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+            successor
+                .validate_predecessor(&predecessor)
+                .map_err(map_erasure_error)?;
+            history.push(predecessor.clone());
+            successor = predecessor;
+        }
+        Ok(Some(history))
+    }
+
     /// Run one read-only protected effect while retaining the host's current
     /// Tick Boundary fence and inventory generation for its complete
     /// execution.
@@ -1953,17 +2382,32 @@ impl<T> MapStoreErrorV1<T> for Result<T, CoreError> {
     }
 }
 
-const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
+#[derive(Clone, Copy)]
+struct ErasureErrorDispositionV1 {
+    host_error: ErasureHostErrorV1,
+    preserves_ready_host: bool,
+}
+
+const fn erasure_error_disposition(error: ErasureErrorV1) -> ErasureErrorDispositionV1 {
     match error {
-        ErasureErrorV1::Unauthorized => ErasureHostErrorV1::AuthorizationDenied,
+        ErasureErrorV1::Unauthorized => ErasureErrorDispositionV1 {
+            host_error: ErasureHostErrorV1::AuthorizationDenied,
+            preserves_ready_host: true,
+        },
         ErasureErrorV1::ScopeInvalid | ErasureErrorV1::PolicyConflict => {
-            ErasureHostErrorV1::Conflict
+            ErasureErrorDispositionV1 {
+                host_error: ErasureHostErrorV1::Conflict,
+                preserves_ready_host: true,
+            }
         }
         ErasureErrorV1::InvalidEncoding
         | ErasureErrorV1::UnsupportedVersion
         | ErasureErrorV1::AccessFreezeFailed
         | ErasureErrorV1::TrustSnapshotInvalid
-        | ErasureErrorV1::ProvenanceMissing => ErasureHostErrorV1::RecoveryUnavailable,
+        | ErasureErrorV1::ProvenanceMissing => ErasureErrorDispositionV1 {
+            host_error: ErasureHostErrorV1::RecoveryUnavailable,
+            preserves_ready_host: true,
+        },
         ErasureErrorV1::KeyRegistryUnavailable
         | ErasureErrorV1::KeyDestructionFailed
         | ErasureErrorV1::ArtifactDeletionFailed
@@ -1971,8 +2415,19 @@ const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
         | ErasureErrorV1::ReplicaNegativeAcknowledgement
         | ErasureErrorV1::BackupInventoryIncomplete
         | ErasureErrorV1::BackupDeletionPending
-        | ErasureErrorV1::ReceiptCommitFailed => ErasureHostErrorV1::AdapterFailure,
+        | ErasureErrorV1::ReceiptCommitFailed => ErasureErrorDispositionV1 {
+            host_error: ErasureHostErrorV1::AdapterFailure,
+            preserves_ready_host: false,
+        },
     }
+}
+
+const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
+    erasure_error_disposition(error).host_error
+}
+
+const fn is_non_poisoning_transition_error(error: ErasureErrorV1) -> bool {
+    erasure_error_disposition(error).preserves_ready_host
 }
 
 #[cfg(test)]
@@ -1991,6 +2446,9 @@ mod tests {
     };
 
     use pos_store::memory::MemoryStore;
+    const fn reference(seed: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([seed; 32])
+    }
 
     fn verified_empty_inventory(
         snapshot: ErasurePersistenceInventorySnapshotV1,
@@ -2015,6 +2473,168 @@ mod tests {
     struct FaultStoreV1 {
         inner: MemoryStore,
         fault: FaultModeV1,
+        resolve_control: Arc<ResolveStateControlV1>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ResolveStateFaultV1 {
+        Adapter {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+        Missing {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+        Wrong {
+            requested: ErasureReferenceV1,
+            replacement: ErasureReferenceV1,
+            seen: bool,
+        },
+    }
+
+    #[derive(Clone, Copy)]
+    enum ResolveStateFaultOutcomeV1 {
+        Adapter,
+        Missing,
+        Wrong(ErasureReferenceV1),
+    }
+
+    #[derive(Clone, Copy)]
+    enum ResolveStateOccurrenceFaultV1 {
+        Adapter {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+        Missing {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+    }
+
+    struct ResolveStateControlV1 {
+        fault: std::sync::Mutex<Option<ResolveStateFaultV1>>,
+    }
+
+    impl ResolveStateFaultV1 {
+        const fn occurrence(self) -> Option<ResolveStateOccurrenceFaultV1> {
+            match self {
+                Self::Adapter {
+                    requested,
+                    occurrence,
+                } => Some(ResolveStateOccurrenceFaultV1::Adapter {
+                    requested,
+                    occurrence,
+                }),
+                Self::Missing {
+                    requested,
+                    occurrence,
+                } => Some(ResolveStateOccurrenceFaultV1::Missing {
+                    requested,
+                    occurrence,
+                }),
+                Self::Wrong { .. } => None,
+            }
+        }
+
+        const fn reset(self) -> Self {
+            match self {
+                Self::Wrong {
+                    requested,
+                    replacement,
+                    ..
+                } => Self::Wrong {
+                    requested,
+                    replacement,
+                    seen: false,
+                },
+                other => other,
+            }
+        }
+    }
+
+    impl ResolveStateOccurrenceFaultV1 {
+        fn next_occurrence(self, digest: ErasureReferenceV1) -> Option<usize> {
+            match self {
+                Self::Adapter {
+                    requested,
+                    occurrence,
+                }
+                | Self::Missing {
+                    requested,
+                    occurrence,
+                } => (requested == digest).then_some(occurrence.saturating_sub(1)),
+            }
+        }
+        const fn with_occurrence(self, occurrence: usize) -> ResolveStateFaultV1 {
+            match self {
+                Self::Adapter { requested, .. } => ResolveStateFaultV1::Adapter {
+                    requested,
+                    occurrence,
+                },
+                Self::Missing { requested, .. } => ResolveStateFaultV1::Missing {
+                    requested,
+                    occurrence,
+                },
+            }
+        }
+
+        const fn fault_outcome(self) -> ResolveStateFaultOutcomeV1 {
+            match self {
+                Self::Adapter { .. } => ResolveStateFaultOutcomeV1::Adapter,
+                Self::Missing { .. } => ResolveStateFaultOutcomeV1::Missing,
+            }
+        }
+    }
+
+    impl ResolveStateControlV1 {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                fault: std::sync::Mutex::new(None),
+            })
+        }
+
+        fn set_fault(&self, fault: ResolveStateFaultV1) {
+            if let Ok(mut configured) = self.fault.lock() {
+                *configured = Some(fault.reset());
+            }
+        }
+
+        fn outcome(&self, digest: ErasureReferenceV1) -> Option<ResolveStateFaultOutcomeV1> {
+            let Ok(mut configured) = self.fault.lock() else {
+                return None;
+            };
+            let fault = (*configured)?;
+            if let Some(occurrence_fault) = fault.occurrence() {
+                if let Some(remaining) = occurrence_fault.next_occurrence(digest) {
+                    if remaining == 0 {
+                        *configured = None;
+                        return Some(occurrence_fault.fault_outcome());
+                    }
+                    *configured = Some(occurrence_fault.with_occurrence(remaining));
+                    return None;
+                }
+            }
+            if let ResolveStateFaultV1::Wrong {
+                requested,
+                replacement,
+                seen,
+            } = fault
+            {
+                if requested != digest {
+                    return None;
+                }
+                if seen {
+                    return Some(ResolveStateFaultOutcomeV1::Wrong(replacement));
+                }
+                *configured = Some(ResolveStateFaultV1::Wrong {
+                    requested,
+                    replacement,
+                    seen: true,
+                });
+            }
+            None
+        }
     }
 
     impl pos_core::EventStore for FaultStoreV1 {
@@ -2170,6 +2790,16 @@ mod tests {
             &self,
             digest: ErasureReferenceV1,
         ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
+            match self.resolve_control.outcome(digest) {
+                Some(ResolveStateFaultOutcomeV1::Adapter) => {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+                Some(ResolveStateFaultOutcomeV1::Missing) => return Ok(None),
+                Some(ResolveStateFaultOutcomeV1::Wrong(replacement)) => {
+                    return self.inner.resolve_state(replacement);
+                }
+                None => {}
+            }
             self.inner.resolve_state(digest)
         }
     }
@@ -2179,7 +2809,11 @@ mod tests {
             &self,
             request: ErasureReferenceV1,
         ) -> Result<Option<pos_core::StoredErasureManifestV1>, ErasureErrorV1> {
-            self.inner.read_manifest(request)
+            if self.fault == FaultModeV1::NonemptyRequestInventory {
+                Err(ErasureErrorV1::ProvenanceMissing)
+            } else {
+                self.inner.read_manifest(request)
+            }
         }
 
         fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
@@ -2293,9 +2927,13 @@ mod tests {
         fn verified_topology_observation(
             &self,
             _request: ErasureReferenceV1,
-            _manifest_digest: ErasureReferenceV1,
+            manifest_digest: ErasureReferenceV1,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-            Err(ErasureErrorV1::Unauthorized)
+            Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+                manifest_digest,
+                Vec::new(),
+                Vec::new(),
+            )))
         }
 
         fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
@@ -2309,6 +2947,141 @@ mod tests {
             _decision: ErasureAuthorizationDecisionV1,
         ) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_corrected_submission(
+            &self,
+            _request: &ErasureRequestV1,
+            _correction: &ErasureCorrectionProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_atomic_freeze(
+            &self,
+            _request: ErasureReferenceV1,
+            _requested: &ErasureStateTransitionV1,
+        ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_fork_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+            _input: &ErasureForkAdmissionInputV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn resolve_fork_child_scope(
+            &self,
+            _parent: TimelineId,
+            _child: &TimelineMeta,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn resolve_fork_scope_extension(
+            &self,
+            _requirement: ErasureForkScopeRequirementV1,
+            _input: &ErasureForkAdmissionInputV1,
+        ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn dispatch_destruction(
+            &self,
+            _request: ErasureReferenceV1,
+            _commands: &[ErasureDestructionCommandV1],
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_attempt(
+            &self,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_acknowledgement(
+            &self,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+
+    struct RejectedCoordinatorAuthorityV1;
+
+    impl ErasureFreezeAuthorizationVerifierV1 for RejectedCoordinatorAuthorityV1 {
+        fn validate_freeze_authorization(
+            &self,
+            _admission: &ErasureFreezeAdmissionEvidenceV1,
+            _authorization: &ErasureFreezeAuthorizationEvidenceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+
+    impl ErasureRecoveryAuthorizationVerifierV1 for RejectedCoordinatorAuthorityV1 {
+        fn validate_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+
+    impl ErasureCoordinatorAuthorityV1 for RejectedCoordinatorAuthorityV1 {
+        fn verified_topology_observation(
+            &self,
+            _request: ErasureReferenceV1,
+            manifest_digest: ErasureReferenceV1,
+        ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+                manifest_digest,
+                Vec::new(),
+                Vec::new(),
+            )))
+        }
+
+        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn admit_authorization(
+            &self,
+            _request: ErasureReferenceV1,
+            _provenance: ErasureReferenceV1,
+            _decision: ErasureAuthorizationDecisionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
         }
 
         fn admit_corrected_submission(
@@ -2556,9 +3329,24 @@ mod tests {
     }
 
     #[test]
+    fn hosted_coordinator_port_retains_recovery_failures() -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        let request = reference(34);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
+        assert_eq!(
+            coordinator.verified_inventory(4),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        drop(coordinator);
+        assert_eq!(store.recovery_error_refs(request)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn hosted_coordinator_port_fails_closed_for_unverified_request_topology() {
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &ForkChildAuthorityV1);
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::Unauthorized)
@@ -2580,11 +3368,236 @@ mod tests {
         })
     }
 
+    fn lifecycle_correction(
+        request: ErasureReferenceV1,
+        seed: u8,
+    ) -> Result<ErasureCorrectionProvenanceV1, ErasureErrorV1> {
+        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request,
+            rejected_terminal_state: reference(seed),
+            correction_reason: reference(seed.wrapping_add(1)),
+            authorization_provenance: reference(seed.wrapping_add(2)),
+        })
+    }
+
+    fn lifecycle_admission(
+        request: ErasureReferenceV1,
+        seed: u8,
+    ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+        ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            request,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![reference(seed)],
+            command_identities: vec![reference(seed.wrapping_add(1))],
+            policy: reference(seed.wrapping_add(2)),
+            trust: reference(seed.wrapping_add(3)),
+            admitted_position: 1,
+            deadline_position: 2,
+            authorization_provenance: reference(seed.wrapping_add(4)),
+        })
+    }
+
+    fn lifecycle_acknowledgement(seed: u8) -> ErasureAcknowledgementV1 {
+        let target = pos_core::ErasureRequiredTargetV1 {
+            artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
+            artifact_digest: reference(seed),
+            key_role: pos_core::ErasureKeyRoleV1::DataEncryption,
+            key_digest: reference(seed.wrapping_add(1)),
+            replica_set: reference(seed.wrapping_add(2)),
+            replica_id: reference(seed.wrapping_add(3)),
+        };
+        ErasureAcknowledgementV1 {
+            obligation: reference(seed.wrapping_sub(1)),
+            target,
+            owner: target.replica_id,
+            evidence: reference(seed.wrapping_add(4)),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        }
+    }
+
+    fn lifecycle_resolution(
+        request: ErasureReferenceV1,
+        seed: u8,
+    ) -> Result<ErasureAdministrativeResolutionV1, ErasureErrorV1> {
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request,
+            affected_digests: vec![reference(seed)],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: reference(seed.wrapping_add(1)),
+            policy: reference(seed.wrapping_add(2)),
+            trust: reference(seed.wrapping_add(3)),
+            principal: reference(seed.wrapping_add(4)),
+            authorization_provenance: reference(seed.wrapping_add(5)),
+            reason: reference(seed.wrapping_add(6)),
+            issue_position: 1,
+            predecessor_resolution: None,
+        })
+    }
+
+    fn lifecycle_receipt(request: ErasureReferenceV1, seed: u8) -> ErasureReceiptInputV1 {
+        ErasureReceiptInputV1 {
+            request,
+            terminal_state: reference(seed),
+            coordinator: reference(seed.wrapping_add(1)),
+            lifecycle: pos_core::ErasureLifecycleV1::Complete,
+            freeze_position: 10,
+            acknowledgements: Vec::new(),
+            frozen_targets: Vec::new(),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            inventories: ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            policy: reference(seed.wrapping_add(2)),
+            trust: reference(seed.wrapping_add(3)),
+            provenance: reference(seed.wrapping_add(4)),
+            issue_position: 1,
+            signature: reference(seed.wrapping_add(5)),
+            receipt_digest: reference(0),
+        }
+    }
+
+    struct RejectedHostFixtureV1 {
+        host: ErasureExecutionHostV1,
+        resolve_control: Arc<ResolveStateControlV1>,
+        request: ErasureReferenceV1,
+        rejected_digest: ErasureReferenceV1,
+        predecessor_digest: ErasureReferenceV1,
+    }
+
+    fn rejected_host_with_resolve_control() -> Result<RejectedHostFixtureV1, ErasureHostErrorV1> {
+        let (mut store, resolve_control) = fault_store_with_control(FaultModeV1::Recovery);
+        let authority = RejectedCoordinatorAuthorityV1;
+        let request = coordinator_request().map_err(map_erasure_error)?;
+        let request_reference = request.reference();
+        let rejected = {
+            let port = HostedCoordinatorPortV1::new(&mut store, &authority);
+            let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+                port,
+                ErasureReferenceV1::from_digest([30; 32]),
+            );
+            coordinator
+                .submit(request.clone(), request.provenance())
+                .map_err(map_erasure_error)?;
+            coordinator
+                .reject(request_reference, reference(31))
+                .map_err(map_erasure_error)?
+        };
+        let rejected_digest = rejected.state_digest();
+        let predecessor_digest = rejected
+            .previous_state()
+            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+        let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))?;
+        host.authority = Some(Arc::new(RejectedCoordinatorAuthorityV1));
+        host.coordinator = Some(reference(30));
+        host.install_inventory_from_coordinator(4)?;
+        Ok(RejectedHostFixtureV1 {
+            host,
+            resolve_control,
+            request: request_reference,
+            rejected_digest,
+            predecessor_digest,
+        })
+    }
+
+    #[test]
+    fn read_sender_fails_closed_for_recovery_and_history_adapter_faults(
+    ) -> Result<(), ErasureHostErrorV1> {
+        let RejectedHostFixtureV1 {
+            mut host,
+            resolve_control: control,
+            request,
+            rejected_digest,
+            predecessor_digest,
+        } = rejected_host_with_resolve_control()?;
+        control.set_fault(ResolveStateFaultV1::Adapter {
+            requested: predecessor_digest,
+            occurrence: 1,
+        });
+        assert_eq!(
+            host.read_sender()?.erasure_state(request),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+
+        control.set_fault(ResolveStateFaultV1::Missing {
+            requested: predecessor_digest,
+            occurrence: 2,
+        });
+        assert_eq!(
+            host.read_sender()?.erasure_state_history(request),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+
+        control.set_fault(ResolveStateFaultV1::Adapter {
+            requested: predecessor_digest,
+            occurrence: 2,
+        });
+        assert_eq!(
+            host.read_sender()?.erasure_state_history(request),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+
+        control.set_fault(ResolveStateFaultV1::Wrong {
+            requested: predecessor_digest,
+            replacement: rejected_digest,
+            seen: false,
+        });
+        assert_eq!(
+            host.read_sender()?.erasure_state_history(request),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_sender_exposes_every_post_freeze_command() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )?;
+        let request = reference(101);
+        let mut sender = host.command_sender()?;
+        assert_eq!(
+            sender.reject_erasure_request(request, reference(132)),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.submit_corrected_erasure_request(
+                coordinator_request()?,
+                lifecycle_correction(request, 102)?,
+            ),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.dispatch_erasure_destruction(request, &lifecycle_admission(request, 105)?),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.acknowledge_erasure(request, lifecycle_acknowledgement(110)),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.resolve_erasure_administratively(request, &lifecycle_resolution(request, 119)?),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(
+            sender.finalize_erasure_request(request, &lifecycle_receipt(request, 126)),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        Ok(())
+    }
+
     #[test]
     fn hosted_coordinator_port_delegates_submission_and_scope_authority(
     ) -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &ForkChildAuthorityV1);
         let request = ErasureReferenceV1::from_digest([71; 32]);
         let request_object = coordinator_request()?;
         let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
@@ -2726,11 +3739,20 @@ mod tests {
         Ok(())
     }
 
+    fn fault_store_with_control(fault: FaultModeV1) -> (FaultStoreV1, Arc<ResolveStateControlV1>) {
+        let resolve_control = ResolveStateControlV1::new();
+        (
+            FaultStoreV1 {
+                inner: MemoryStore::new().without_erasure_gate(),
+                fault,
+                resolve_control: Arc::clone(&resolve_control),
+            },
+            resolve_control,
+        )
+    }
+
     fn fault_store(fault: FaultModeV1) -> FaultStoreV1 {
-        FaultStoreV1 {
-            inner: MemoryStore::new().without_erasure_gate(),
-            fault,
-        }
+        fault_store_with_control(fault).0
     }
 
     struct FailingInventoryV1;
@@ -2753,6 +3775,7 @@ mod tests {
             closed.read_sender(),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
+        assert_eq!(closed.status(), ErasureHostStatusV1::Closed);
         assert_eq!(
             closed.bind_consent_authority(ConsentAuthority::new().append_permit()),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
@@ -2765,6 +3788,9 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(ready.read_sender().is_ok());
         assert!(ready.command_sender().is_ok());
+        assert_eq!(ready.status(), ErasureHostStatusV1::Ready);
+        ready.poison();
+        assert_eq!(ready.status(), ErasureHostStatusV1::Poisoned);
     }
 
     #[test]
@@ -3222,6 +4248,30 @@ mod tests {
         ] {
             assert_eq!(map_erasure_error(error), ErasureHostErrorV1::AdapterFailure);
         }
+        for error in [
+            ErasureErrorV1::InvalidEncoding,
+            ErasureErrorV1::UnsupportedVersion,
+            ErasureErrorV1::Unauthorized,
+            ErasureErrorV1::ScopeInvalid,
+            ErasureErrorV1::PolicyConflict,
+            ErasureErrorV1::AccessFreezeFailed,
+            ErasureErrorV1::TrustSnapshotInvalid,
+            ErasureErrorV1::ProvenanceMissing,
+        ] {
+            assert!(is_non_poisoning_transition_error(error));
+        }
+        for error in [
+            ErasureErrorV1::KeyRegistryUnavailable,
+            ErasureErrorV1::KeyDestructionFailed,
+            ErasureErrorV1::ArtifactDeletionFailed,
+            ErasureErrorV1::ReplicaTimeout,
+            ErasureErrorV1::ReplicaNegativeAcknowledgement,
+            ErasureErrorV1::BackupInventoryIncomplete,
+            ErasureErrorV1::BackupDeletionPending,
+            ErasureErrorV1::ReceiptCommitFailed,
+        ] {
+            assert!(!is_non_poisoning_transition_error(error));
+        }
     }
 
     #[test]
@@ -3401,6 +4451,13 @@ mod tests {
         };
         assert_eq!(
             sender.freeze_access(ErasureReferenceV1::from_digest([39; 32]), &transition),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            sender.finalize_erasure_request(
+                ErasureReferenceV1::from_digest([40; 32]),
+                &lifecycle_receipt(ErasureReferenceV1::from_digest([40; 32]), 41),
+            ),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
     }
@@ -4100,7 +5157,7 @@ mod tests {
                 )),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        assert_eq!(rejected_submit.state, HostStateV1::Poisoned);
+        assert_eq!(rejected_submit.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]
@@ -4155,10 +5212,10 @@ mod tests {
             ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
-            closed.apply_coordinator_command(HostedCoordinatorCommandV1::Authorize {
-                request: ErasureReferenceV1::from_digest([134; 32]),
-                provenance: ErasureReferenceV1::from_digest([135; 32]),
-            }),
+            closed.apply_coordinator_command(&HostedCoordinatorCommandV1::authorize(
+                ErasureReferenceV1::from_digest([134; 32]),
+                ErasureReferenceV1::from_digest([135; 32]),
+            )),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
     }
@@ -4210,18 +5267,18 @@ mod tests {
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         poison_fence_mutex(&command.gate, command_timeline.id());
         assert_eq!(
-            command.apply_coordinator_command(HostedCoordinatorCommandV1::Submit {
-                request: coordinator_request().unwrap_or_else(|error| {
+            command.apply_coordinator_command(&HostedCoordinatorCommandV1::submit(
+                coordinator_request().unwrap_or_else(|error| {
                     std::panic::resume_unwind(Box::new(format!("{error:?}")))
                 }),
-                provenance: ErasureReferenceV1::from_digest([139; 32]),
-            }),
+                ErasureReferenceV1::from_digest([139; 32]),
+            )),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
     }
 
     #[test]
-    fn identified_fork_authority_failure_poisons_the_host() {
+    fn identified_fork_authority_denial_preserves_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             4,
@@ -4243,7 +5300,7 @@ mod tests {
                 )),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        assert_eq!(host.state, HostStateV1::Poisoned);
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]
@@ -4283,7 +5340,7 @@ mod tests {
     }
 
     #[test]
-    fn identified_fork_reports_a_missing_parent_and_poisoned_host() {
+    fn identified_fork_reports_a_missing_parent_without_poisoning_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             4,
@@ -4301,7 +5358,7 @@ mod tests {
                 )),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
-        assert_eq!(host.state, HostStateV1::Poisoned);
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]
