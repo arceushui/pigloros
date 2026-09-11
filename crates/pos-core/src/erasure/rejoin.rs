@@ -251,7 +251,7 @@ impl ErasureRejoinProofV1 {
     pub fn admit(
         &self,
         receipt: &ErasureReceiptV1,
-        verifier: &impl ErasureRejoinAttestationVerifierV1,
+        verifier: &dyn ErasureRejoinAttestationVerifierV1,
     ) -> Result<ErasureRejoinAdmissionV1, ErasureErrorV1> {
         let request_matches = self.request() == receipt.request();
         let receipt_matches = self.terminal_receipt() == receipt.receipt_digest();
