@@ -5,6 +5,7 @@
 //! selector composition must authenticate before exposing its evaluator socket.
 
 pub mod authority;
+pub(crate) mod cases;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -694,7 +695,14 @@ mod tests {
     use ciborium::value::Value;
     use ed25519_dalek::{Signer, SigningKey};
 
+    use crate as pos_reference;
+    use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
+
+    use super::authority::AuthenticatedSelectorBootstrap;
     use super::*;
+
+    #[path = "../../../tests/support/mod.rs"]
+    mod installed_case_support;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -1775,6 +1783,102 @@ mod tests {
         assert_eq!(admitted.bootstrap().policy().policy_epoch(), 4);
         assert_eq!(admitted.provider().manifest().provider_id, "provider");
         assert_eq!(admitted.provider().host_profile().kernel_release, "6.12.0");
+        Ok(())
+    }
+
+    fn retain_case_artifact(
+        state: &mut InstalledSelectorState,
+        kind: u8,
+        identity: [u8; 32],
+        bytes: &[u8],
+    ) -> TestResult {
+        let artifact = held_artifact(kind, identity, bytes)?;
+        let key = (artifact.object.kind, artifact.object.identity);
+        state.manifest.objects.push(artifact.object.clone());
+        state
+            .manifest
+            .objects
+            .sort_by_key(|object| (object.kind, object.identity));
+        state.artifacts.insert(key, artifact);
+        Ok(())
+    }
+
+    fn installed_case_bootstrap(
+        corpus: &installed_case_support::Corpus,
+    ) -> TestResult<(EvaluationRequest, AuthenticatedSelectorBootstrap)> {
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut state = authenticated_state()?;
+        retain_case_artifact(
+            &mut state,
+            14,
+            request.fixture_bundle_digest,
+            &corpus.archive,
+        )?;
+        retain_case_artifact(
+            &mut state,
+            15,
+            request.trust_policy_snapshot_digest,
+            &corpus.trust_policy,
+        )?;
+        state
+            .authenticate_bootstrap()
+            .map(|bootstrap| (request, bootstrap))
+            .map_err(Into::into)
+    }
+
+    fn rebound(mut request: EvaluationRequest) -> TestResult<EvaluationRequest> {
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        Ok(request)
+    }
+
+    #[test]
+    fn retained_sic1_descriptors_reconstruct_the_evr1_selected_case() -> TestResult {
+        let corpus = installed_case_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        let resolved = bootstrap.resolve_installed_case(&request, 0)?;
+        assert_eq!(resolved.bundle_digest(), request.fixture_bundle_digest);
+        assert_eq!(resolved.profile_digest(), request.profile_digest);
+        assert_ne!(resolved.fixture_contract_digest(), [0; 32]);
+        assert_eq!(resolved.attempt().case_id, "case-0");
+        assert_eq!(resolved.attempt().mode, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn retained_sic1_case_resolution_rejects_foreign_identity_and_case_selection() -> TestResult {
+        let corpus = installed_case_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        assert!(bootstrap.resolve_installed_case(&request, 7).is_err());
+        for request in [
+            rebound(EvaluationRequest {
+                subject_adapter: SubjectAdapterKind::PublicGatewayProtocol,
+                ..request.clone()
+            })?,
+            rebound(EvaluationRequest {
+                fixture_bundle_digest: [99; 32],
+                ..request
+            })?,
+        ] {
+            assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_sic1_case_resolution_enforces_preflight_and_verified_closure() -> TestResult {
+        let invalid_signature = installed_case_support::corpus_with_bundle_mutation(
+            installed_case_support::BundleMutation::Signature,
+        )?;
+        let (request, bootstrap) = installed_case_bootstrap(&invalid_signature)?;
+        assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
+
+        let cap_violation = installed_case_support::corpus_with_profile_mutation(
+            installed_case_support::ProfileMutation::SelectedClosureCapBoundary(0),
+        )?;
+        let (request, bootstrap) = installed_case_bootstrap(&cap_violation)?;
+        assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
         Ok(())
     }
 }
