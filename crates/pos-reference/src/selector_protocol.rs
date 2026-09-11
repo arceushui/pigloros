@@ -127,7 +127,8 @@ fn decode_authenticated_reply(
     {
         return Err(AdapterError::ProtocolFailure);
     }
-    let unsigned = canonical_control(&wrapper[0]);
+    let unsigned =
+        encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
     if fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?
         != domain_digest(SLY1_DOMAIN, &unsigned)
     {
@@ -288,11 +289,6 @@ fn descriptor(payload: &[u8], digest: [u8; 32]) -> Value {
         integer(payload.len() as u64),
         Value::Bytes(digest.to_vec()),
     ])
-}
-
-fn canonical_control(value: &Value) -> Vec<u8> {
-    encode_with_limit(value, CONTROL_LIMIT)
-        .expect("re-encoding a bounded canonical control value cannot exceed its source bound")
 }
 
 fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
