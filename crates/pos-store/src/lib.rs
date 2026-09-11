@@ -125,7 +125,7 @@ pub(crate) fn validate_rejoin_proof_reference(
 pub(crate) fn canonical_rejoin_bytes(proof: &pos_core::ErasureRejoinProofV1) -> Vec<u8> {
     proof
         .to_canonical_cbor()
-        .unwrap_or_else(|_| unreachable!("validated ERRJ1 proof must encode"))
+        .unwrap_or_else(|_| std::panic::panic_any("validated ERRJ1 proof must encode"))
 }
 
 #[cfg(test)]
