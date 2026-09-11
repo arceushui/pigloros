@@ -2149,7 +2149,6 @@ impl ErasureReadSenderV1<'_> {
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedStateV1>, ErasureHostErrorV1> {
-        self.host.ensure_generation(self.generation)?;
         let Some((authority, coordinator)) = self.host.authority.clone().zip(self.host.coordinator)
         else {
             return Err(ErasureHostErrorV1::AuthorizationDenied);
