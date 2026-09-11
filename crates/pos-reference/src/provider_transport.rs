@@ -45,6 +45,15 @@ pub(crate) struct AuthenticatedProviderExecution {
     output: Option<StagedProviderOutput>,
 }
 
+/// One selected-provider terminal authenticated against the exact SPX1 request.
+#[derive(Debug)]
+pub(crate) enum AuthenticatedProviderTerminal {
+    /// AGR1, SPR1, SPY1, and SAU1 complete provider evidence.
+    Execution(AuthenticatedProviderExecution),
+    /// Exact selected-runtime-signed SPE1 bytes bound to the submitted SPX1.
+    Error(Vec<u8>),
+}
+
 impl AuthenticatedProviderExecution {
     /// Returns the exact authenticated AGR1 frame bytes for root SLY1 composition.
     #[must_use]
@@ -241,7 +250,7 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &[u8],
         watchdog: Duration,
-    ) -> Result<AuthenticatedProviderExecution, SelectorBoundaryError> {
+    ) -> Result<AuthenticatedProviderTerminal, SelectorBoundaryError> {
         let request = SandboxExecuteRequest::from_canonical_cbor(spx1)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
         validate_input(&request.adapter_input, input)?;
@@ -278,7 +287,7 @@ impl ProviderTransport {
         input: &[u8],
         deadline: &Deadline,
         retained_grant: &mut Option<Vec<u8>>,
-    ) -> Result<AuthenticatedProviderExecution, ReceiveFailure> {
+    ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
         let mut stream = self
             .endpoint
             .connect(deadline.remaining()?)
@@ -409,7 +418,7 @@ fn read_response(
     request: &SandboxExecuteRequest,
     deadline: &Deadline,
     retained_grant: &mut Option<Vec<u8>>,
-) -> Result<AuthenticatedProviderExecution, ReceiveFailure> {
+) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
     let first = read_frame(stream, deadline)?.ok_or(ReceiveFailure::Incomplete)?;
     match record_magic(&first)?.as_str() {
         "AGR1" => read_admitted_response(
@@ -421,7 +430,8 @@ fn read_response(
             retained_grant,
             first,
         ),
-        "SPE1" | "SPY1" => {
+        "SPE1" => read_error_response(stream, admitted, request, deadline, first),
+        "SPY1" => {
             ensure_eof(stream, deadline)?;
             Err(ReceiveFailure::Invalid)
         }
@@ -437,7 +447,7 @@ fn read_admitted_response(
     deadline: &Deadline,
     retained_grant: &mut Option<Vec<u8>>,
     grant_bytes: Vec<u8>,
-) -> Result<AuthenticatedProviderExecution, ReceiveFailure> {
+) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
     verify_retained_grant(retained_grant, &grant_bytes)?;
     let provider = admitted.provider();
     let grant = provider
@@ -456,15 +466,32 @@ fn read_admitted_response(
         .authenticate_audit_chain(&audit_bytes, &receipt, &result)
         .map_err(|_| ReceiveFailure::Invalid)?;
     let output = stage_output(file, chunks, request, &result)?;
-    Ok(AuthenticatedProviderExecution {
-        frames: AuthenticatedProviderFrames::new(
-            grant_bytes,
-            receipt_bytes,
-            result_bytes,
-            audit_bytes,
-        ),
-        output,
-    })
+    Ok(AuthenticatedProviderTerminal::Execution(
+        AuthenticatedProviderExecution {
+            frames: AuthenticatedProviderFrames::new(
+                grant_bytes,
+                receipt_bytes,
+                result_bytes,
+                audit_bytes,
+            ),
+            output,
+        },
+    ))
+}
+
+fn read_error_response(
+    stream: &mut UnixStream,
+    admitted: &AdmittedSelectorProvider,
+    request: &SandboxExecuteRequest,
+    deadline: &Deadline,
+    error_bytes: Vec<u8>,
+) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
+    ensure_eof(stream, deadline)?;
+    admitted
+        .provider()
+        .authenticate_selector_error(&error_bytes, request)
+        .map_err(|_| ReceiveFailure::Invalid)?;
+    Ok(AuthenticatedProviderTerminal::Error(error_bytes))
 }
 
 fn verify_retained_grant(

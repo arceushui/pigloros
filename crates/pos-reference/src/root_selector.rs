@@ -16,7 +16,9 @@ use std::time::Duration;
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 
-use crate::provider_transport::{AuthenticatedProviderExecution, ProviderTransport};
+use crate::provider_transport::{
+    AuthenticatedProviderExecution, AuthenticatedProviderTerminal, ProviderTransport,
+};
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, ExecuteAuthority, LaunchPolicy, RequestAuthority, SandboxExecuteRequest,
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
@@ -150,7 +152,7 @@ impl RootSelectorService {
             Ok(bytes) => bytes,
             Err(_) => return write_authority_mismatch(stream, &decoded),
         };
-        let execution = match self.transport.execute(
+        let terminal = match self.transport.execute(
             &self.admitted,
             &commitment,
             &spx1,
@@ -160,7 +162,14 @@ impl RootSelectorService {
             Ok(execution) => execution,
             Err(_) => return write_provider_unavailable(stream, &decoded),
         };
-        write_authenticated_execution(stream, &decoded, &spx1, execution)
+        match terminal {
+            AuthenticatedProviderTerminal::Execution(execution) => {
+                write_authenticated_execution(stream, &decoded, &spx1, execution)
+            }
+            AuthenticatedProviderTerminal::Error(error) => {
+                write_authenticated_error(stream, &decoded, &spx1, &error)
+            }
+        }
     }
 }
 
@@ -307,6 +316,23 @@ fn write_authenticated_execution(
                 audit_records: execution.sau1_frames(),
                 output: output.as_deref(),
             },
+        },
+    )
+    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    write_reply(stream, reply)
+}
+
+fn write_authenticated_error(
+    stream: &mut UnixStream,
+    decoded: &DecodedSelectorRequest,
+    spx1: &[u8],
+    error: &[u8],
+) -> Result<(), SelectorBoundaryError> {
+    let reply = encode_authenticated_reply(
+        decoded,
+        AuthenticatedSelectorReply {
+            execute_request: spx1,
+            terminal: SelectorProviderTerminal::Error { error },
         },
     )
     .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;

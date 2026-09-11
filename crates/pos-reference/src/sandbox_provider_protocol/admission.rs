@@ -15,10 +15,10 @@ use super::codec::{
 use super::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, LaunchPolicy, ProviderCapability,
     ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxExecuteRequest,
-    SandboxExecutionMode, SandboxLimit, SandboxProviderManifest, SandboxProviderProtocolError,
-    SandboxProviderReceipt, SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet,
-    SandboxTerminalOutcome, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
-    SignedImageManifest,
+    SandboxExecutionMode, SandboxLimit, SandboxProviderError, SandboxProviderManifest,
+    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult,
+    SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError,
+    SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
@@ -958,6 +958,30 @@ impl AdmittedSandboxProvider {
         }
         result.validate_receipt_lifecycle(receipt)?;
         Ok(AuthenticatedSandboxProviderResult(result))
+    }
+
+    /// Authenticate a pre-admission SPE1 against one exact selector-owned SPX1.
+    ///
+    /// # Errors
+    /// Rejects a forged, unbound, non-execute, or foreign-provider failure.
+    pub(crate) fn authenticate_selector_error(
+        &self,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+    ) -> Result<(), SandboxAdmissionError> {
+        let error = SandboxProviderError::from_canonical_cbor(bytes)?;
+        if error.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        error.verify_signature(&self.runtime_key)?;
+        if error.operation != Some(1)
+            || error.request_id != Some(request.request.request_id)
+            || error.request_digest != Some(request.request_digest)
+            || error.attempt_id != Some(request.attempt_id)
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        Ok(())
     }
 
     /// Authenticate the complete SAU1 chain referenced by SPR1 and mirrored by SPY1.
