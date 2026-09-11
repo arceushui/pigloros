@@ -212,7 +212,7 @@ mod tests {
 
     use super::*;
 
-    fn selector_request() -> EvaluationRequest {
+    fn selector_request() -> Result<EvaluationRequest, AdapterError> {
         use crate::evaluator_protocol::{
             ImplementationIdentity, OutputCapability, SubjectAdapterKind,
         };
@@ -245,11 +245,11 @@ mod tests {
         };
         request.output_capability.capability_digest = request
             .expected_output_capability_digest()
-            .expect("test request has a valid output capability digest");
+            .map_err(|_| AdapterError::ProtocolFailure)?;
         request.request_digest = request
             .digest()
-            .expect("test request has a valid canonical request digest");
-        request
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        Ok(request)
     }
 
     fn selector_attempt() -> CaseAttempt {
@@ -330,7 +330,7 @@ mod tests {
             stream.write_all(&control)?;
             stream.write_all(&trailing)
         });
-        let request = selector_request();
+        let request = selector_request()?;
         let attempt = selector_attempt();
         let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
         let result = SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]);
@@ -420,14 +420,15 @@ mod tests {
     }
 
     #[test]
-    fn selector_request_rejects_a_zero_watchdog() {
-        let request = selector_request();
+    fn selector_request_rejects_a_zero_watchdog() -> Result<(), AdapterError> {
+        let request = selector_request()?;
         let mut attempt = selector_attempt();
         attempt.watchdog_ms = 0;
         assert_eq!(
             encode_request(&request, b"evr1", &attempt, 0).map(|_| ()),
             Err(AdapterError::ProtocolFailure)
         );
+        Ok(())
     }
 
     #[test]
@@ -441,7 +442,7 @@ mod tests {
             std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
         )?;
         let uid = std::fs::metadata(&socket)?.uid();
-        let request = selector_request();
+        let request = selector_request()?;
         let mut attempt = selector_attempt();
         let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
         attempt.watchdog_ms = 0;
@@ -469,7 +470,7 @@ mod tests {
             drop(stream);
             Ok(())
         });
-        let request = selector_request();
+        let request = selector_request()?;
         let attempt = selector_attempt();
         let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
         assert_eq!(
@@ -502,7 +503,7 @@ mod tests {
             thread::sleep(Duration::from_millis(250));
             Ok(())
         });
-        let request = selector_request();
+        let request = selector_request()?;
         let mut attempt = selector_attempt();
         attempt.watchdog_ms = 50;
         let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
@@ -516,7 +517,7 @@ mod tests {
 
     #[test]
     fn selector_adapter_requires_an_explicit_case_ordinal() -> Result<(), AdapterError> {
-        let request = selector_request();
+        let request = selector_request()?;
         let mut adapter = SelectorAdapter::new(request.clone())?;
         assert_eq!(adapter.kind(), request.subject_adapter);
         assert_eq!(
@@ -573,7 +574,7 @@ mod tests {
             stream.write_all(&control_length.to_be_bytes())?;
             stream.write_all(&control)
         });
-        let request = selector_request();
+        let request = selector_request()?;
         let attempt = selector_attempt();
         let mut adapter = SelectorAdapter::new(request)?;
         adapter.set_case_ordinal(7);
