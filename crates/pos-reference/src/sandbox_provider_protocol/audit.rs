@@ -153,3 +153,55 @@ fn event_authority_matches(record: &SandboxAuditRecord, receipt: &SandboxProvide
     };
     expected.is_some_and(|expected| expected == record.authority_digests)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::sandbox_provider_protocol::ReceiptAuthority;
+
+    #[test]
+    fn audit_authority_rejects_an_unsupported_event_code() {
+        let record = SandboxAuditRecord {
+            attempt_id: [1; 16],
+            sequence: 0,
+            event_code: 14,
+            authority_digests: Vec::new(),
+            previous_digest: None,
+            runtime_attestation_key_id: "runtime-key".to_owned(),
+            record_digest: [2; 32],
+            signature: [0; 64],
+        };
+        let receipt = SandboxProviderReceipt {
+            attempt_id: [1; 16],
+            authority: ReceiptAuthority {
+                agr1_digest: [3; 32],
+                spm1_digest: [4; 32],
+                provider_binary_digest: [5; 32],
+                lps1_digest: [6; 32],
+                sim1_digest: [7; 32],
+                apt1_digest: [8; 32],
+                trs1_digest: [9; 32],
+                rvs1_digest: [10; 32],
+            },
+            trust_epoch: 1,
+            revocation_epoch: 1,
+            policy_epoch: 1,
+            hcp1_digest: [11; 32],
+            elm1_digest: [12; 32],
+            network_transcript_digests: Vec::new(),
+            ready1_digest: None,
+            release1_digest: None,
+            requested_configuration_evidence: [13; 32],
+            kernel_observation_evidence: [14; 32],
+            negative_probe_evidence: [15; 32],
+            termination_evidence: [16; 32],
+            sau1_digest: [17; 32],
+            runtime_attestation_key_id: "runtime-key".to_owned(),
+            receipt_digest: [18; 32],
+            signature: [0; 64],
+        };
+
+        assert!(!event_authority_matches(&record, &receipt));
+    }
+}

@@ -1234,6 +1234,13 @@ mod tests {
             decode_reply(&control, &[], &encoded, [14; 32], 1024),
             Err(AdapterError::ProtocolFailure)
         );
+        let mut wrong_type_error = fields.clone();
+        wrong_type_error[7] = Value::Null;
+        let (control, _) = protocol_record("SLY1", wrong_type_error, false)?;
+        assert_eq!(
+            decode_reply(&control, &[], &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
         let mut with_evidence = fields;
         with_evidence[8] = Value::Bytes(vec![1]);
         let (control, _) = protocol_record("SLY1", with_evidence, false)?;
