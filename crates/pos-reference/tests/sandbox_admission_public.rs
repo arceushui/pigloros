@@ -1883,6 +1883,8 @@ fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
             &receipt,
         )
         .is_err());
+    let result =
+        admitted.authenticate_terminal_result(&result_bytes, &request, &grant, &receipt)?;
 
     let mut forged_audit = audit;
     forged_audit[0] = replace_signed_signature(&forged_audit[0], [9; 64])?;
