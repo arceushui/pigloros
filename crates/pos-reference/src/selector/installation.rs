@@ -520,7 +520,11 @@ fn require_preferred_order(values: &[Value]) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn open_directory_chain(
+/// Open one root-owned relative directory chain without following links.
+///
+/// This is crate-private because selector composition alone may validate the
+/// fixed SIC1-owned provider endpoint beneath the retained installation root.
+pub(crate) fn open_directory_chain(
     mut directory: File,
     relative: &Path,
     expected_owner: u32,
