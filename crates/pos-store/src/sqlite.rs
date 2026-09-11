@@ -4792,6 +4792,12 @@ impl crate::ErasureRejoinPersistencePortV1 for SqliteStore {
             .optional()
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
             .map(|bytes| pos_core::ErasureRejoinProofV1::from_canonical_cbor(&bytes))
+            .transpose()?
+            .map(|proof| {
+                (proof.reference() == reference)
+                    .then_some(proof)
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
             .transpose()
     }
 }
@@ -6043,6 +6049,7 @@ use pos_core::geo_cell_admission::{
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::GeoLocationAdmissionFenceV1,
@@ -6163,6 +6170,53 @@ mod tests {
             .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
             .test_err();
         assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
+    }
+
+    #[test]
+    fn rejoin_adapter_rejects_missing_corrupt_and_remapped_evidence() {
+        let proof = crate::test_rejoin_proof();
+        let mut store = new_store();
+        assert_eq!(
+            store.store_rejoin_proof(&proof).test_ok(),
+            ErasureCasOutcomeV1::Applied
+        );
+        assert_eq!(
+            store.store_rejoin_proof(&proof).test_ok(),
+            ErasureCasOutcomeV1::ExactRetry
+        );
+        let remapped = ErasureReferenceV1::from_digest([9; 32]);
+        store
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO erasure_evidence(reference_digest, object_cbor)
+                 VALUES (?1, ?2)",
+                params![
+                    remapped.digest().as_slice(),
+                    proof.to_canonical_cbor().test_ok()
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            store.load_rejoin_proof(remapped),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let missing = ErasureReferenceV1::from_digest([10; 32]);
+        assert_eq!(store.load_rejoin_proof(missing).test_ok(), None);
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_evidence SET object_cbor=?1 WHERE reference_digest=?2",
+                params![vec![0_u8], proof.reference().digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            store.load_rejoin_proof(proof.reference()),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            store.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
     }
 
     fn destroy_store(

@@ -113,6 +113,20 @@ pub trait ErasureRejoinPersistencePortV1 {
 }
 
 #[cfg(test)]
+pub(crate) fn test_rejoin_proof() -> pos_core::ErasureRejoinProofV1 {
+    pos_core::ErasureRejoinProofV1::new(pos_core::ErasureRejoinProofInputV1 {
+        request: pos_core::ErasureReferenceV1::from_digest([1; 32]),
+        terminal_receipt: pos_core::ErasureReferenceV1::from_digest([2; 32]),
+        replica_set: pos_core::ErasureReferenceV1::from_digest([3; 32]),
+        replica_id: pos_core::ErasureReferenceV1::from_digest([4; 32]),
+        inventory_generation: pos_core::ErasureReferenceV1::from_digest([5; 32]),
+        entries: Vec::new(),
+        attestation: pos_core::ErasureReferenceV1::from_digest([6; 32]),
+    })
+    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)))
+}
+
+#[cfg(test)]
 const TEST_EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
     pos_core::ErasureReferenceV1::from_digest([211; 32]);
 

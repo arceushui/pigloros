@@ -46,7 +46,12 @@ const fn inventory(
     }
 }
 
-fn fixture() -> Result<(ErasureReceiptV1, ErasureRejoinProofV1), ErasureErrorV1> {
+struct RejoinFixture {
+    receipt: ErasureReceiptV1,
+    proof: ErasureRejoinProofV1,
+}
+
+fn fixture() -> Result<RejoinFixture, ErasureErrorV1> {
     let replica_target = target(10);
     let backup_target = target(20);
     let replica_owner = reference(100);
@@ -124,7 +129,7 @@ fn fixture() -> Result<(ErasureReceiptV1, ErasureRejoinProofV1), ErasureErrorV1>
         ],
         attestation: reference(201),
     })?;
-    Ok((receipt, proof))
+    Ok(RejoinFixture { receipt, proof })
 }
 
 struct FixtureVerifier;
@@ -138,7 +143,7 @@ impl ErasureRejoinAttestationVerifierV1 for FixtureVerifier {
 }
 
 fn exercise_store<S: ErasureRejoinPersistencePortV1>(store: &mut S) -> Result<(), ErasureErrorV1> {
-    let (receipt, proof) = fixture()?;
+    let RejoinFixture { receipt, proof } = fixture()?;
     assert_eq!(
         store.store_rejoin_proof(&proof)?,
         ErasureCasOutcomeV1::Applied
@@ -162,6 +167,17 @@ fn memory_adapter_persists_idempotently_and_admits_complete_fixture() -> Result<
     exercise_store(&mut MemoryStore::new())
 }
 
+#[test]
+fn missing_proof_is_not_admitted() -> Result<(), ErasureErrorV1> {
+    let RejoinFixture { receipt, proof } = fixture()?;
+    let store = MemoryStore::new();
+    assert_eq!(
+        store.admit_rejoin(proof.reference(), &receipt, &FixtureVerifier),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_adapter_survives_restart_and_admits_complete_fixture() -> Result<(), ErasureErrorV1> {
@@ -176,7 +192,7 @@ fn sqlite_adapter_survives_restart_and_admits_complete_fixture() -> Result<(), E
         exercise_store(&mut store)?;
     }
     let mut reopened = SqliteStore::open(path).map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-    let (receipt, proof) = fixture()?;
+    let RejoinFixture { receipt, proof } = fixture()?;
     assert_eq!(
         reopened.store_rejoin_proof(&proof)?,
         ErasureCasOutcomeV1::ExactRetry
