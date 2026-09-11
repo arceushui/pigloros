@@ -10,8 +10,16 @@ struct HostedExperimentStore {
 
 impl HostedExperimentStore {
     fn open(config: pos_store::StoreConfig) -> Result<Self, ErasureHostErrorV1> {
-        pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+        Self::open_with_recovery(config, None)
+    }
+
+    fn open_with_recovery(
+        config: pos_store::StoreConfig,
+        composition: Option<&pos_runtime::ErasureCoordinatorCompositionV1>,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        pos_runtime::ErasureExecutionHostV1::open_with_recovery(
             config,
+            composition,
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .map(|host| {
