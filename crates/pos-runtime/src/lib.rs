@@ -26,7 +26,6 @@
 
 pub mod composition;
 pub mod driver;
-pub mod erasure_authority;
 pub mod erasure_host;
 pub mod error;
 pub mod recorder;
@@ -43,10 +42,6 @@ pub use composition::{
 pub use driver::{
     Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey, RecoveryEvent,
     RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
-};
-pub use erasure_authority::{
-    ErasureAuthorityConfigurationV1, ErasureAuthorityFreezeProfileV1,
-    ErasureAuthorityTopologyBindingV1, HostConfiguredErasureCoordinatorAuthorityV1,
 };
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
