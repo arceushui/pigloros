@@ -1551,6 +1551,14 @@ fn compatibility_recovery_without_composition_remains_empty_only(
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?);
+    let legacy_read_only_host = test_stage(
+        "open legacy verified-empty read-only host",
+        ErasureExecutionHostV1::open_read_only_verified_empty(
+            &path_text,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(legacy_read_only_host.status(), ErasureHostStatusV1::Ready);
     let read_only_host = test_stage(
         "open compatibility read-only host",
         ErasureExecutionHostV1::open_read_only_with_recovery(
