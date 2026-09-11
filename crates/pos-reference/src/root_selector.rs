@@ -263,7 +263,7 @@ fn fresh_nonce() -> Result<[u8; 16], SelectorBoundaryError> {
     let mut nonce = [0_u8; 16];
     let mut remaining = nonce.as_mut_slice();
     while !remaining.is_empty() {
-        let received = getrandom(remaining, GetRandomFlags::empty())
+        let received = getrandom(&mut *remaining, GetRandomFlags::empty())
             .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
         if received == 0 {
             return Err(SelectorBoundaryError::SelectorUnavailable);
