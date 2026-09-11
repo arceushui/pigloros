@@ -322,12 +322,14 @@ fn request_identity(bytes: &[u8]) -> Result<RequestIdentity, SandboxProviderProt
 }
 
 fn validate_cancelled_attempts(attempts: &[[u8; 16]]) -> Result<(), SandboxProviderProtocolError> {
-    if attempts.len() > 256
-        || attempts.contains(&[0; 16])
-        || !attempts.windows(2).all(|pair| pair[0] < pair[1])
-    {
-        Err(SandboxProviderProtocolError::NonCanonicalOrder)
-    } else {
-        Ok(())
+    if attempts.len() > 256 {
+        return Err(SandboxProviderProtocolError::NonCanonicalOrder);
     }
+    if attempts.contains(&[0; 16]) {
+        return Err(SandboxProviderProtocolError::NonCanonicalOrder);
+    }
+    if !attempts.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(SandboxProviderProtocolError::NonCanonicalOrder);
+    }
+    Ok(())
 }
