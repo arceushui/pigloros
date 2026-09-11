@@ -1393,11 +1393,8 @@ impl crate::ErasureRejoinPersistencePortV1 for MemoryStore {
         self.erasure_evidence
             .get(&reference)
             .map(|bytes| pos_core::ErasureRejoinProofV1::from_canonical_cbor(bytes))
-            .transpose()?
-            .map(|proof| {
-                (proof.reference() == reference)
-                    .then_some(proof)
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .map(|result| {
+                result.and_then(|proof| crate::validate_rejoin_proof_reference(reference, proof))
             })
             .transpose()
     }

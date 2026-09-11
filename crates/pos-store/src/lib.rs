@@ -112,6 +112,15 @@ pub trait ErasureRejoinPersistencePortV1 {
     }
 }
 
+pub(crate) fn validate_rejoin_proof_reference(
+    reference: pos_core::ErasureReferenceV1,
+    proof: pos_core::ErasureRejoinProofV1,
+) -> Result<pos_core::ErasureRejoinProofV1, pos_core::ErasureErrorV1> {
+    (proof.reference() == reference)
+        .then_some(proof)
+        .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)
+}
+
 #[cfg(test)]
 pub(crate) fn test_rejoin_proof() -> pos_core::ErasureRejoinProofV1 {
     pos_core::ErasureRejoinProofV1::new(pos_core::ErasureRejoinProofInputV1 {
