@@ -2,50 +2,25 @@
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
-    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureAuthorizationDecisionV1,
-    ErasureDestructionCommandV1, ErasureForkAdmissionInputV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInputV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequiredTargetV1,
-    ErasureRetryAdmissionInputV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
+    destruction_command_reference, ErasureAcknowledgementProvenanceInputV1,
+    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
+    ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1, ErasureForkAdmissionInputV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1, ErasureReceiptInputV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq,
+    TimelineId, TimelineMeta,
 };
 use pos_runtime::{
-    ErasureAuthorityConfigurationInputV1, ErasureAuthorityConfigurationV1,
-    ErasureAuthorityFreezeProfileV1, ErasureAuthorityTopologyBindingV1,
-    ErasureCoordinatorAuthorityV1, HostConfiguredErasureCoordinatorAuthorityV1,
+    ErasureAuthorityConfigurationV1, ErasureAuthorityFreezeProfileV1,
+    ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
+    HostConfiguredErasureCoordinatorAuthorityV1,
 };
 
-const fn reference(value: u8) -> ErasureReferenceV1 {
-    ErasureReferenceV1::from_digest([value; 32])
-}
+#[path = "../../pos-core/tests/support/erasure.rs"]
+mod erasure_support;
 
-fn persistence_request() -> Result<pos_core::ErasureRequestV1, pos_core::ErasureErrorV1> {
-    pos_core::ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: reference(1),
-        subject: reference(2),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(3)],
-        requester: reference(4),
-        authorization: reference(5),
-        policy: reference(6),
-        request_position: 9,
-        horizon_position: 20,
-        provenance: reference(7),
-    })
-}
-
-const fn persistence_target() -> ErasureRequiredTargetV1 {
-    ErasureRequiredTargetV1 {
-        artifact_class: ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(10),
-        key_role: ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(11),
-        replica_set: reference(12),
-        replica_id: reference(13),
-    }
-}
+use erasure_support::{persistence_request, persistence_target, reference, retry_admission};
 
 fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn std::error::Error>> {
     let request = reference(1);
@@ -61,17 +36,16 @@ fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn st
         ErasureAuthorityTopologyBindingV1::new(request, TimelineId::new(), Some(reference(9))),
         ErasureAuthorityTopologyBindingV1::new(request, TimelineId::new(), None),
     ];
-    let configuration =
-        ErasureAuthorityConfigurationV1::new(ErasureAuthorityConfigurationInputV1 {
-            policy: reference(6),
-            trust: reference(8),
-            topology,
-            freeze: profile,
-            principal: reference(40),
-            authorization_evidence: b"host-proof".to_vec(),
-            lifecycle_provenance: reference(7),
-            allow_rejection: true,
-        })?;
+    let configuration = ErasureAuthorityConfigurationV1::new(
+        reference(6),
+        reference(8),
+        topology,
+        profile,
+        reference(40),
+        b"host-proof".to_vec(),
+        reference(7),
+        true,
+    )?;
     Ok(HostConfiguredErasureCoordinatorAuthorityV1::new(
         configuration,
     )?)
@@ -133,20 +107,11 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
         .collect::<Vec<_>>();
     authority.dispatch_destruction(request_reference, &commands)?;
 
-    let retry = pos_core::ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+    let retry = retry_admission(erasure_support::RetryAdmissionFixture {
         request: request_reference,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: admission
-            .obligations()
-            .iter()
-            .map(pos_core::ErasureObligationV1::reference)
-            .collect(),
-        command_identities: admission
-            .obligations()
-            .iter()
-            .map(pos_core::ErasureObligationV1::command_identity)
-            .collect(),
+        obligations: admission.obligations(),
         policy: reference(6),
         trust: reference(8),
         admitted_position: 10,
