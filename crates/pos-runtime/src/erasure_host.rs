@@ -2533,7 +2533,7 @@ mod tests {
                     requested,
                     occurrence,
                 }),
-                ResolveStateFaultV1::Wrong { .. } => None,
+                Self::Wrong { .. } => None,
             }
         }
 
@@ -2604,9 +2604,7 @@ mod tests {
             let Ok(mut configured) = self.fault.lock() else {
                 return None;
             };
-            let Some(fault) = *configured else {
-                return None;
-            };
+            let fault = (*configured)?;
             if let Some(occurrence_fault) = fault.occurrence() {
                 if let Some(remaining) = occurrence_fault.next_occurrence(digest) {
                     if remaining == 0 {
