@@ -77,34 +77,8 @@ fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn st
     )?)
 }
 
-fn admitted_freeze(
-    authority: &HostConfiguredErasureCoordinatorAuthorityV1,
-    request: ErasureReferenceV1,
-) -> Result<Box<pos_core::ErasureAtomicFreezeAdmissionV1>, Box<dyn std::error::Error>> {
-    let result = authority.admit_atomic_freeze(
-        request,
-        &ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::AccessFrozen,
-            freeze_position: Some(10),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: ErasureReplayClaimV1::Exact,
-            provenance: reference(7),
-        },
-    )?;
-    let pos_core::ErasureAtomicFreezeResultV1::Admitted(admission) = result else {
-        return Err("configured authority unexpectedly rejected freeze".into());
-    };
-    authority.validate_freeze_authorization(
-        admission.freeze_admission_evidence(),
-        admission.freeze_authorization_evidence(),
-    )?;
-    Ok(admission)
-}
-
 #[test]
-fn configured_authority_admits_request_and_freeze() -> Result<(), Box<dyn std::error::Error>> {
+fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn std::error::Error>> {
     let authority = authority()?;
     let request = persistence_request()?;
     let request_reference = request.reference();
@@ -120,6 +94,7 @@ fn configured_authority_admits_request_and_freeze() -> Result<(), Box<dyn std::e
         reference(7),
         ErasureAuthorizationDecisionV1::Authorized,
     )?;
+
     let correction = pos_core::ErasureCorrectionProvenanceV1::new(
         pos_core::ErasureCorrectionProvenanceInputV1 {
             rejected_request: request_reference,
@@ -129,32 +104,35 @@ fn configured_authority_admits_request_and_freeze() -> Result<(), Box<dyn std::e
         },
     )?;
     authority.admit_corrected_submission(&request, &correction)?;
-    admitted_freeze(&authority, request_reference)?;
-    Ok(())
-}
 
-#[test]
-fn configured_authority_admits_post_freeze_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
-    let authority = authority()?;
-    let request_reference = reference(1);
-    let admission = admitted_freeze(&authority, request_reference)?;
+    let transition = ErasureStateTransitionV1 {
+        lifecycle: ErasureLifecycleV1::AccessFrozen,
+        freeze_position: Some(10),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        acknowledged_targets: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        provenance: reference(7),
+    };
+    let result = authority.admit_atomic_freeze(request_reference, &transition)?;
+    let admission = match result {
+        pos_core::ErasureAtomicFreezeResultV1::Admitted(admission) => admission,
+        pos_core::ErasureAtomicFreezeResultV1::Rejected(_) => {
+            return Err("configured authority unexpectedly rejected freeze".into())
+        }
+    };
+    authority.validate_freeze_authorization(
+        admission.freeze_admission_evidence(),
+        admission.freeze_authorization_evidence(),
+    )?;
+
     let commands = admission
         .obligations()
         .iter()
         .map(|obligation| ErasureDestructionCommandV1::from_obligation(obligation, reference(7)))
         .collect::<Vec<_>>();
     authority.dispatch_destruction(request_reference, &commands)?;
-    admit_attempt_and_ack(&authority, request_reference, &admission)?;
-    admit_receipt(&authority, request_reference)?;
-    admit_resolution_and_fork(&authority, request_reference)?;
-    Ok(())
-}
 
-fn admit_attempt_and_ack(
-    authority: &HostConfiguredErasureCoordinatorAuthorityV1,
-    request_reference: ErasureReferenceV1,
-    admission: &pos_core::ErasureAtomicFreezeAdmissionV1,
-) -> Result<(), Box<dyn std::error::Error>> {
     let retry = pos_core::ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
         request: request_reference,
         attempt_ordinal: 0,
@@ -193,13 +171,7 @@ fn admit_attempt_and_ack(
             trust: reference(8),
         })?;
     authority.admit_acknowledgement(&acknowledgement)?;
-    Ok(())
-}
 
-fn admit_receipt(
-    authority: &HostConfiguredErasureCoordinatorAuthorityV1,
-    request_reference: ErasureReferenceV1,
-) -> Result<(), Box<dyn std::error::Error>> {
     let receipt = ErasureReceiptInputV1 {
         request: request_reference,
         terminal_state: reference(54),
@@ -225,13 +197,7 @@ fn admit_receipt(
         receipt_digest: reference(57),
     };
     authority.admit_receipt(&receipt)?;
-    Ok(())
-}
 
-fn admit_resolution_and_fork(
-    authority: &HostConfiguredErasureCoordinatorAuthorityV1,
-    request_reference: ErasureReferenceV1,
-) -> Result<(), Box<dyn std::error::Error>> {
     let resolution =
         ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
             request: request_reference,
