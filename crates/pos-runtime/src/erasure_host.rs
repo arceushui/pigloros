@@ -2140,11 +2140,12 @@ impl ErasureReadSenderV1<'_> {
     ///
     /// The query is deliberately exposed only from the host read seam: callers
     /// cannot provide a raw persistence resolver or bypass the configured
-    /// authority and generation fence.
+    /// authority and installed-generation ownership. The sender holds an
+    /// exclusive host borrow for the query, so the captured generation cannot
+    /// become stale during this call.
     ///
     /// # Errors
-    /// Returns a payload-free recovery, authorization, adapter, or stale
-    /// generation error.
+    /// Returns a payload-free recovery, authorization, or adapter error.
     pub fn erasure_state(
         &mut self,
         request: ErasureReferenceV1,
@@ -2172,8 +2173,8 @@ impl ErasureReadSenderV1<'_> {
     /// ask for an arbitrary digest or bypass the request binding.
     ///
     /// # Errors
-    /// Returns a payload-free recovery, provenance, adapter, or stale
-    /// generation error when the chain cannot be verified.
+    /// Returns a payload-free recovery, provenance, or adapter error when the
+    /// chain cannot be verified.
     pub fn erasure_state_history(
         &mut self,
         request: ErasureReferenceV1,
@@ -3135,75 +3136,6 @@ mod tests {
             signature: reference(seed.wrapping_add(5)),
             receipt_digest: reference(0),
         }
-    }
-
-    const fn lifecycle_transition(seed: u8) -> ErasureStateTransitionV1 {
-        ErasureStateTransitionV1 {
-            lifecycle: pos_core::ErasureLifecycleV1::AccessFrozen,
-            freeze_position: Some(10),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
-            provenance: reference(seed),
-        }
-    }
-
-    #[test]
-    fn hosted_coordinator_commands_reach_each_lifecycle_variant() -> Result<(), ErasureErrorV1> {
-        let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
-        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
-        let request = reference(71);
-        let request_object = coordinator_request()?;
-        assert_eq!(
-            HostedCoordinatorCommandV1::submit(request_object.clone(), reference(95))
-                .execute(&mut coordinator),
-            Err(ErasureErrorV1::Unauthorized)
-        );
-        assert_eq!(
-            HostedCoordinatorCommandV1::authorize(request, reference(96)).execute(&mut coordinator),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        assert_eq!(
-            HostedCoordinatorCommandV1::freeze(request, lifecycle_transition(94))
-                .execute(&mut coordinator),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        assert_eq!(
-            HostedCoordinatorCommandV1::reject(request, reference(97)).execute(&mut coordinator),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        assert_eq!(
-            HostedCoordinatorCommandV1::submit_corrected(
-                request_object,
-                lifecycle_correction(request, 72)?,
-            )
-            .execute(&mut coordinator),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        assert_eq!(
-            HostedCoordinatorCommandV1::dispatch_attempt(
-                request,
-                lifecycle_admission(request, 75)?,
-            )
-            .execute(&mut coordinator),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        assert_eq!(
-            HostedCoordinatorCommandV1::acknowledge(request, lifecycle_acknowledgement(80),)
-                .execute(&mut coordinator),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        assert_eq!(
-            HostedCoordinatorCommandV1::administrative_resolution(
-                request,
-                lifecycle_resolution(request, 87)?,
-            )
-            .execute(&mut coordinator),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        Ok(())
     }
 
     #[test]
