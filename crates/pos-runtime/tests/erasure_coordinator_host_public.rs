@@ -355,7 +355,7 @@ const fn completed_inventory(
     }
 }
 
-const fn receipt_input(
+fn receipt_input(
     target: pos_core::ErasureRequiredTargetV1,
     lifecycle: ErasureLifecycleV1,
     replay_claim: ErasureReplayClaimV1,
