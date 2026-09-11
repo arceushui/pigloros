@@ -2009,6 +2009,11 @@ fn local_errors_round_trip_every_legal_phase_and_failure_code() -> TestResult {
         ),
         (
             SandboxLocalErrorPhaseV1::BeforeSpx1,
+            SandboxLocalErrorCodeV1::PolicyUnavailable,
+            true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::BeforeSpx1,
             SandboxLocalErrorCodeV1::InvalidSelectorRequest,
             false,
         ),
