@@ -1173,7 +1173,7 @@ impl SelectorGrantCommitment {
     }
 }
 
-fn selector_commitment_authority(
+const fn selector_commitment_authority(
     provider: &AdmittedSandboxProvider,
     image: &AdmittedSandboxImage,
     launch: &LaunchPolicy,
@@ -1261,7 +1261,7 @@ fn derive_effective_limits(
     Ok(limits)
 }
 
-fn attempt_limit(limit_id: u8, attempt: &CaseAttempt) -> u64 {
+const fn attempt_limit(limit_id: u8, attempt: &CaseAttempt) -> u64 {
     match limit_id {
         0 => attempt.budget.memory_bytes,
         4 => attempt.watchdog_ms,
