@@ -723,6 +723,29 @@ mod tests {
     }
 
     #[test]
+    fn selector_transport_defensively_rejects_a_zero_socket_timeout(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        let request = selector_request();
+        let mut attempt = selector_attempt();
+        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
+        attempt.watchdog_ms = 0;
+        assert_eq!(
+            SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
+            Err(AdapterError::Unavailable)
+        );
+        drop(listener);
+        Ok(())
+    }
+
+    #[test]
     fn selector_transport_rejects_a_peer_that_closes_without_a_reply(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
@@ -861,6 +884,13 @@ mod tests {
         );
         assert_eq!(
             invoke_with_reply(local_unavailable()?, vec![1]),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            invoke_with_reply(
+                local_unavailable()?,
+                vec![0; usize::try_from(MAX_SELECTOR_TRAILING_BYTES + 1)?],
+            ),
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(
