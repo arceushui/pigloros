@@ -74,6 +74,11 @@ pub struct ErasureAuthorityFreezeProfileV1 {
 
 impl ErasureAuthorityFreezeProfileV1 {
     /// Validate and canonicalize one host-owned freeze profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed scope error when the scope, target, owner, or child
+    /// references are empty, duplicated, or malformed.
     pub fn new(
         mut scope_members: Vec<ErasureReferenceV1>,
         mut targets: Vec<pos_core::ErasureRequiredTargetV1>,
@@ -133,6 +138,11 @@ pub struct ErasureAuthorityConfigurationV1 {
 
 impl ErasureAuthorityConfigurationV1 {
     /// Validate and canonicalize host configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provenance or scope error when required host material
+    /// is missing or topology bindings are duplicated.
     pub fn new(
         policy: ErasureReferenceV1,
         trust: ErasureReferenceV1,
@@ -189,6 +199,11 @@ pub struct HostConfiguredErasureCoordinatorAuthorityV1 {
 
 impl HostConfiguredErasureCoordinatorAuthorityV1 {
     /// Construct an authority from independently authenticated host material.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provenance error when no topology bindings were
+    /// supplied.
     pub fn new(configuration: ErasureAuthorityConfigurationV1) -> Result<Self, ErasureErrorV1> {
         if configuration.topology.is_empty() {
             return Err(ErasureErrorV1::ProvenanceMissing);
@@ -212,7 +227,7 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
             .ok_or(ErasureErrorV1::PolicyConflict)
     }
 
-    fn check_request_reference(&self, request: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
+    fn check_request_reference(request: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
         reference_present(request)
             .then_some(())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
@@ -338,14 +353,14 @@ impl ErasureRecoveryAuthorizationVerifierV1 for HostConfiguredErasureCoordinator
         &self,
         extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(extension.request())?;
+        Self::check_request_reference(extension.request())?;
         for reference in [
             extension.scope_commitment(),
             extension.fork(),
             extension.lineage_rule(),
             extension.admission_provenance(),
         ] {
-            self.check_request_reference(reference)?;
+            Self::check_request_reference(reference)?;
         }
         self.check_lifecycle_provenance(extension.admission_provenance())
     }
@@ -364,8 +379,8 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        self.check_request_reference(request)?;
-        self.check_request_reference(manifest_digest)?;
+        Self::check_request_reference(request)?;
+        Self::check_request_reference(manifest_digest)?;
         let mut bindings = Vec::new();
         let mut unaffected = Vec::new();
         for entry in self
@@ -390,8 +405,8 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
     }
 
     fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(request.reference())?;
-        self.check_request_reference(request.provenance())?;
+        Self::check_request_reference(request.reference())?;
+        Self::check_request_reference(request.provenance())?;
         self.check_policy_trust(request.policy(), self.configuration.trust)
     }
 
@@ -401,7 +416,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         provenance: ErasureReferenceV1,
         decision: ErasureAuthorizationDecisionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(request)?;
+        Self::check_request_reference(request)?;
         self.check_lifecycle_provenance(provenance)?;
         if matches!(decision, ErasureAuthorizationDecisionV1::Rejected)
             && !self.configuration.allow_rejection
@@ -426,7 +441,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             correction.authorization_provenance(),
             correction.reference(),
         ] {
-            self.check_request_reference(reference)?;
+            Self::check_request_reference(reference)?;
         }
         self.check_lifecycle_provenance(correction.authorization_provenance())
     }
@@ -436,7 +451,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
-        self.check_request_reference(request)?;
+        Self::check_request_reference(request)?;
         if requested.lifecycle != ErasureLifecycleV1::AccessFrozen {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -465,7 +480,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             input.expected_inventory_generation,
             input.child_scope,
         ] {
-            self.check_request_reference(reference)?;
+            Self::check_request_reference(reference)?;
         }
         (extension.fork() == input.child_scope)
             .then_some(())
@@ -490,7 +505,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
-        self.check_request_reference(requirement.request())?;
+        Self::check_request_reference(requirement.request())?;
         for reference in [
             requirement.scope_commitment(),
             requirement.lineage_rule(),
@@ -498,7 +513,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             input.expected_inventory_generation,
             input.child_scope,
         ] {
-            self.check_request_reference(reference)?;
+            Self::check_request_reference(reference)?;
         }
         (input.child_scope == self.configuration.freeze.child_scope)
             .then_some(())
@@ -517,7 +532,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(resolution.request())?;
+        Self::check_request_reference(resolution.request())?;
         self.check_policy_trust(resolution.policy(), resolution.trust())?;
         (resolution.principal() == self.configuration.principal)
             .then_some(())
@@ -532,7 +547,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         .chain(resolution.affected_digests().iter().copied())
         .chain(resolution.predecessor_resolution())
         {
-            self.check_request_reference(reference)?;
+            Self::check_request_reference(reference)?;
         }
         Ok(())
     }
@@ -542,14 +557,14 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         request: ErasureReferenceV1,
         commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(request)?;
+        Self::check_request_reference(request)?;
         if commands.is_empty() {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         for command in commands {
             self.check_lifecycle_provenance(command.provenance)?;
             for reference in [command.obligation, command.owner, command.command] {
-                self.check_request_reference(reference)?;
+                Self::check_request_reference(reference)?;
             }
             (command.owner == category_owner(self.configuration.freeze.owners, command.category))
                 .then_some(())
@@ -565,7 +580,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-        self.check_request_reference(admission.request())?;
+        Self::check_request_reference(admission.request())?;
         self.check_policy_trust(admission.policy(), admission.trust())?;
         self.check_lifecycle_provenance(admission.authorization_provenance())?;
         if admission.unresolved_obligations().len() != admission.command_identities().len() {
@@ -577,7 +592,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             .chain(admission.command_identities().iter())
             .copied()
         {
-            self.check_request_reference(reference)?;
+            Self::check_request_reference(reference)?;
         }
         Ok(ErasureAttemptQuotaReservationV1::new(
             admission.reference(),
@@ -589,7 +604,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         &self,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(acknowledgement.request())?;
+        Self::check_request_reference(acknowledgement.request())?;
         self.check_policy_trust(acknowledgement.policy(), acknowledgement.trust())?;
         for reference in [
             acknowledgement.command(),
@@ -600,13 +615,13 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             acknowledgement.evidence(),
             acknowledgement.reference(),
         ] {
-            self.check_request_reference(reference)?;
+            Self::check_request_reference(reference)?;
         }
         Ok(())
     }
 
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(input.request)?;
+        Self::check_request_reference(input.request)?;
         self.check_policy_trust(input.policy, input.trust)?;
         if !matches!(
             input.lifecycle,
@@ -621,7 +636,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             input.provenance,
             input.signature,
         ] {
-            self.check_request_reference(reference)?;
+            Self::check_request_reference(reference)?;
         }
         Ok(())
     }
@@ -639,7 +654,7 @@ fn has_duplicate<T: PartialEq>(values: &[T]) -> bool {
     values.windows(2).any(|pair| pair[0] == pair[1])
 }
 
-fn category_owner(
+const fn category_owner(
     owners: [ErasureReferenceV1; 4],
     category: ErasureInventoryCategoryV1,
 ) -> ErasureReferenceV1 {
