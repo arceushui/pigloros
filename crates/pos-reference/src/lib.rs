@@ -24,6 +24,8 @@ pub mod evaluator_protocol;
 pub mod profile;
 #[cfg(unix)]
 pub(crate) mod provider_transport;
+#[cfg(unix)]
+mod root_selector;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
@@ -32,6 +34,20 @@ pub mod selector;
 #[doc(hidden)]
 pub mod selector_protocol;
 pub mod signed_bundle;
+
+/// Run ADR-069's fixed root-owned selector executable.
+///
+/// This is the sole public binary entry point. It accepts no configuration,
+/// authority, endpoint, artifact path, or compatibility input; all authority
+/// is opened by the crate-private composition from fixed root-owned locations.
+///
+/// # Errors
+/// Returns a closed failure when normal selector composition cannot establish
+/// the required immutable installation, listener, provider, or peer boundary.
+#[cfg(unix)]
+pub fn run_fixed_root_selector() -> Result<(), selector::SelectorBoundaryError> {
+    root_selector::run_fixed()
+}
 
 /// Divergence classes emitted by the independent JSON evaluator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

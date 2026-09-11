@@ -2,12 +2,12 @@ use ciborium::value::Value;
 
 use super::codec::{
     array, bounded_array, byte_string, bytes_value, decode_digest_list, decode_document,
-    decode_identifiers, decode_u8_list, digest32, digest_list_value, id16, identifier,
+    decode_identifiers, decode_u8_list, digest32, digest_list_value, encode, id16, identifier,
     invalid_digest_list, key_id, nonzero_optional, optional_bytes_value, optional_digest,
-    optional_digest_value, optional_id16, optional_text, optional_u8, require_signature,
-    self_digested, signed, text_value, uint, uint_value, valid_key_id, validate_identifier_order,
-    validate_magic, verify_digest, verify_digest_with_domain, verify_signature,
-    MAX_INPUT_BYTES_U64, MAX_LIST_ENTRIES, MAX_SAFE_DETAIL_BYTES,
+    optional_digest_value, optional_id16, optional_text, optional_u8, record_digest,
+    require_signature, self_digested, signed, text_value, uint, uint_value, valid_key_id,
+    validate_identifier_order, validate_magic, verify_digest, verify_digest_with_domain,
+    verify_signature, MAX_INPUT_BYTES_U64, MAX_LIST_ENTRIES, MAX_SAFE_DETAIL_BYTES,
 };
 use super::operations::{decode_request_authority, validate_request_authority, RequestAuthority};
 use super::SandboxProviderProtocolError;
@@ -274,6 +274,42 @@ pub struct SandboxExecuteRequest {
 }
 
 impl SandboxExecuteRequest {
+    /// Construct the exact selector-owned SPX1 request from authenticated inputs.
+    ///
+    /// This remains crate-private so only root-selector composition can create
+    /// provider work. No evaluator or provider caller can mint an SPX1 request.
+    pub(crate) fn for_selector(
+        request: RequestAuthority,
+        attempt_id: [u8; 16],
+        authority: ExecuteAuthority,
+        capability_ids: Vec<String>,
+        adapter_input: PayloadDescriptor,
+        network_plans: Vec<NetworkExchangePlan>,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        let mut execute = Self {
+            request,
+            attempt_id,
+            authority,
+            capability_ids,
+            adapter_input,
+            network_plans,
+            request_digest: [0; 32],
+        };
+        let unsigned = execute.unsigned_value();
+        execute.request_digest = record_digest("SPX1", &Value::Array(unsigned.to_vec()))?;
+        execute.validate(&unsigned).map(|()| execute)
+    }
+
+    /// Encode exact canonical SPX1 bytes after revalidating every binding.
+    pub(crate) fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        let unsigned = self.unsigned_value();
+        self.validate(&unsigned)?;
+        encode(&Value::Array(vec![
+            Value::Array(unsigned.to_vec()),
+            bytes_value(&self.request_digest),
+        ]))
+    }
+
     /// Decode and fully validate exact canonical SPX1 bytes.
     ///
     /// # Errors
@@ -308,6 +344,55 @@ impl SandboxExecuteRequest {
         validate_network_plans(&self.network_plans)?;
         verify_digest("SPX1", unsigned, self.request_digest)
     }
+
+    fn unsigned_value(&self) -> [Value; 22] {
+        [
+            text_value("SPX1"),
+            uint_value(1),
+            selector_request_authority_value(&self.request),
+            bytes_value(&self.attempt_id),
+            bytes_value(&self.authority.evr1_digest),
+            bytes_value(&self.authority.cpf1_digest),
+            bytes_value(&self.authority.cfb1_digest),
+            bytes_value(&self.authority.fixture_contract_digest),
+            bytes_value(&self.authority.fixture_digest),
+            bytes_value(&self.authority.execution_profile_digest),
+            bytes_value(&self.authority.lps1_digest),
+            bytes_value(&self.authority.sim1_digest),
+            bytes_value(&self.authority.apt1_digest),
+            bytes_value(&self.authority.trs1_digest),
+            bytes_value(&self.authority.rvs1_digest),
+            bytes_value(&self.authority.spm1_digest),
+            bytes_value(&self.authority.pcf1_digest),
+            bytes_value(&self.authority.pcr1_digest),
+            bytes_value(&self.authority.hcp1_digest),
+            Value::Array(
+                self.capability_ids
+                    .iter()
+                    .map(|capability| text_value(capability))
+                    .collect(),
+            ),
+            Value::Array(vec![
+                uint_value(self.adapter_input.byte_length),
+                bytes_value(&self.adapter_input.digest),
+            ]),
+            Value::Array(
+                self.network_plans
+                    .iter()
+                    .map(|plan| Value::Array(network_plan_value(plan).to_vec()))
+                    .collect(),
+            ),
+        ]
+    }
+}
+
+fn selector_request_authority_value(value: &RequestAuthority) -> Value {
+    Value::Array(vec![
+        bytes_value(&value.request_id),
+        bytes_value(&value.apt1_digest),
+        uint_value(value.policy_epoch),
+        bytes_value(&value.nonce),
+    ])
 }
 
 /// Named thirteen-digest authority block carried by AGR1.
@@ -1219,4 +1304,67 @@ fn output_value(value: &PayloadDescriptor) -> Value {
         uint_value(value.byte_length),
         bytes_value(&value.digest),
     ])
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn selector_authority() -> ExecuteAuthority {
+        ExecuteAuthority {
+            evr1_digest: [1; 32],
+            cpf1_digest: [2; 32],
+            cfb1_digest: [3; 32],
+            fixture_contract_digest: [4; 32],
+            fixture_digest: [5; 32],
+            execution_profile_digest: [6; 32],
+            lps1_digest: [7; 32],
+            sim1_digest: [8; 32],
+            apt1_digest: [9; 32],
+            trs1_digest: [10; 32],
+            rvs1_digest: [11; 32],
+            spm1_digest: [12; 32],
+            pcf1_digest: [13; 32],
+            pcr1_digest: [14; 32],
+            hcp1_digest: [15; 32],
+        }
+    }
+
+    fn selector_request(
+        authority: ExecuteAuthority,
+    ) -> Result<SandboxExecuteRequest, SandboxProviderProtocolError> {
+        SandboxExecuteRequest::for_selector(
+            RequestAuthority {
+                request_id: [16; 16],
+                apt1_digest: authority.apt1_digest,
+                policy_epoch: 1,
+                nonce: [17; 16],
+            },
+            [18; 16],
+            authority,
+            vec!["capability".to_owned()],
+            PayloadDescriptor {
+                byte_length: 1,
+                digest: [19; 32],
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn selector_constructor_emits_round_trippable_canonical_spx1(
+    ) -> Result<(), SandboxProviderProtocolError> {
+        let request = selector_request(selector_authority())?;
+        let bytes = request.to_canonical_cbor()?;
+        assert_eq!(SandboxExecuteRequest::from_canonical_cbor(&bytes)?, request);
+        Ok(())
+    }
+
+    #[test]
+    fn selector_constructor_rejects_zero_bound_authority() {
+        let mut authority = selector_authority();
+        authority.fixture_digest = [0; 32];
+        assert!(selector_request(authority).is_err());
+    }
 }
