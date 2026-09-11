@@ -365,12 +365,28 @@ fn evaluate_case(
     fixture: &Fixture,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
-    let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
-    let execution = execute_case(adapter, &attempt)?;
-    enforce_observed_coordinate_limit(
-        &execution.observation,
-        profile.evaluator_hard_caps.max_coordinate_bytes,
-    )?;
+    case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps).and_then(|attempt| {
+        evaluate_attempt(
+            request,
+            fixture,
+            bundle.mode,
+            profile.evaluator_hard_caps.max_coordinate_bytes,
+            adapter,
+            &attempt,
+        )
+    })
+}
+
+fn evaluate_attempt(
+    request: &EvaluationRequest,
+    fixture: &Fixture,
+    mode: u8,
+    maximum_coordinate_bytes: u64,
+    adapter: &mut impl SubjectAdapter,
+    attempt: &CaseAttempt,
+) -> Result<CaseOutcome, EvaluatorError> {
+    let execution = execute_case(adapter, attempt)?;
+    enforce_observed_coordinate_limit(&execution.observation, maximum_coordinate_bytes)?;
     let provenance_digest = case_provenance(
         request,
         fixture,
@@ -379,7 +395,7 @@ fn evaluate_case(
     )?;
     Ok(case_outcome(
         fixture,
-        bundle.mode,
+        mode,
         execution.observation,
         provenance_digest,
     ))
