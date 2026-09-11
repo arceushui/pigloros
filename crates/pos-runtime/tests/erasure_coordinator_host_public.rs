@@ -411,27 +411,32 @@ fn submit_authorize_freeze(
     Ok(request_reference)
 }
 
-fn add_lifecycle_fork_scope(
+fn create_lifecycle_fork_parent(
     host: &mut ErasureExecutionHostV1,
     authority: &TestAuthority,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = {
-        let mut commands = test_stage("open topology sender", host.command_sender())?;
-        test_stage(
-            "create lifecycle fork parent",
-            commands.create_timeline("lifecycle-fork-parent"),
-        )?
-    };
+) -> Result<TimelineId, Box<dyn std::error::Error>> {
+    let mut commands = test_stage("open topology sender", host.command_sender())?;
+    let parent = test_stage(
+        "create lifecycle fork parent",
+        commands.create_timeline("lifecycle-fork-parent"),
+    )?;
     test_stage(
         "publish lifecycle fork topology",
         authority.set_timeline(parent.id()),
     )?;
+    Ok(parent.id())
+}
+
+fn add_lifecycle_fork_scope(
+    host: &mut ErasureExecutionHostV1,
+    parent: TimelineId,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut commands = test_stage("open fork scope sender", host.command_sender())?;
     test_stage(
         "fork lifecycle scope",
         commands.fork_timeline_identified(
             reference(45),
-            parent.id(),
+            parent,
             pos_core::Seq::ZERO,
             "lifecycle-fork-child",
         ),
@@ -589,10 +594,11 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
+    let parent = create_lifecycle_fork_parent(&mut host, &authority)?;
     let request = test_stage("construct lifecycle request", persistence_request())?;
     let request_reference = submit_authorize_freeze(&mut host, request)?;
     authority.allow_post_freeze();
-    add_lifecycle_fork_scope(&mut host, &authority)?;
+    add_lifecycle_fork_scope(&mut host, parent)?;
 
     let target = persistence_target();
     let obligation = test_stage(
