@@ -15,6 +15,7 @@ use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
 use crate::selector_protocol::{decode_reply, encode_request, EncodedSelectorRequest};
 
 pub mod installation;
+pub(crate) mod recovery;
 
 /// Fixed root-owned selector endpoint. It is not configurable by an evaluator.
 pub const SANDBOX_SELECTOR_SOCKET: &str = "/run/pigloros/sandbox-provider.sock";
