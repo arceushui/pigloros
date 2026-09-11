@@ -283,22 +283,15 @@ impl HeldInstallationArtifact {
         if self.object.byte_length > maximum {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        let capacity = usize::try_from(self.object.byte_length)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let mut file = self
-            .file
-            .try_clone()
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        let mut bytes = Vec::with_capacity(capacity);
-        file.take(self.object.byte_length + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        if bytes.len() != capacity {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        Ok(bytes)
+        usize::try_from(self.object.byte_length)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+            .and_then(|capacity| {
+                self.file
+                    .try_clone()
+                    .map_err(|_| SelectorBoundaryError::Io)
+                    .and_then(rewind)
+                    .and_then(|file| read_exact_file(file, self.object.byte_length + 1, capacity))
+            })
     }
 }
 
@@ -318,15 +311,15 @@ impl InstalledSelectorState {
     /// Returns an error for unsafe ancestry, links, ownership, permissions,
     /// canonical SIC1 failures, missing indexed objects, or content mismatch.
     pub fn open() -> Result<Self, SelectorBoundaryError> {
-        let filesystem_root = File::open("/").map_err(|_| SelectorBoundaryError::Io)?;
-        let artifact_root = open_directory_chain(
-            filesystem_root,
-            Path::new(SANDBOX_ARTIFACT_ROOT)
-                .strip_prefix("/")
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
-            0,
-        )?;
-        Self::open_at(&artifact_root)
+        File::open("/")
+            .map_err(|_| SelectorBoundaryError::Io)
+            .and_then(|filesystem_root| {
+                Path::new(SANDBOX_ARTIFACT_ROOT)
+                    .strip_prefix("/")
+                    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                    .and_then(|relative| open_directory_chain(filesystem_root, relative, 0))
+            })
+            .and_then(|artifact_root| Self::open_at(&artifact_root))
     }
 
     fn open_at(root: &File) -> Result<Self, SelectorBoundaryError> {
@@ -334,53 +327,34 @@ impl InstalledSelectorState {
     }
 
     fn open_at_for_owner(root: &File, expected_owner: u32) -> Result<Self, SelectorBoundaryError> {
-        validate_directory(root, expected_owner)?;
-        ensure_no_pending_recovery(root)?;
-        let manifest_file =
-            open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT, expected_owner)?;
-        let manifest_bytes = read_complete_file(&manifest_file, MANIFEST_LIMIT)?;
-        let manifest = InstallationManifest::from_canonical_cbor(&manifest_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let mut artifacts = BTreeMap::new();
-        for object in manifest.objects() {
-            let directory = open_directory_chain(
-                root.try_clone().map_err(|_| SelectorBoundaryError::Io)?,
-                Path::new(object.kind.directory()),
-                expected_owner,
-            )?;
-            let file = open_immutable_file(
-                &directory,
-                &hex_name(object.content_digest),
-                object.kind.required_mode(),
-                object.byte_length,
-                expected_owner,
-            )?;
-            if digest_complete_file(&file, object.byte_length)? != object.content_digest {
-                return Err(SelectorBoundaryError::ArtifactInvalid);
-            }
-            artifacts.insert(
-                (object.kind, object.identity),
-                HeldInstallationArtifact {
-                    file,
-                    object: object.clone(),
-                },
-            );
-        }
-        Ok(Self {
-            manifest_file,
-            manifest_bytes,
-            manifest,
-            artifacts,
-        })
+        validate_directory(root, expected_owner)
+            .and_then(|()| ensure_no_pending_recovery(root))
+            .and_then(|()| {
+                open_immutable_file(root, MANIFEST_NAME, 0o400, MANIFEST_LIMIT, expected_owner)
+            })
+            .and_then(|manifest_file| {
+                read_complete_file(&manifest_file, MANIFEST_LIMIT).and_then(|manifest_bytes| {
+                    InstallationManifest::from_canonical_cbor(&manifest_bytes)
+                        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+                        .and_then(|manifest| {
+                            open_indexed_artifacts(root, &manifest, expected_owner).map(
+                                |artifacts| Self {
+                                    manifest_file,
+                                    manifest_bytes,
+                                    manifest,
+                                    artifacts,
+                                },
+                            )
+                        })
+                })
+            })
     }
 
     #[cfg(test)]
     fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
-        let owner = root
-            .metadata()
-            .map_err(|_| SelectorBoundaryError::Io)?
-            .uid();
-        Self::open_at_for_owner(root, owner)
+        root.metadata()
+            .map_err(|_| SelectorBoundaryError::Io)
+            .and_then(|metadata| Self::open_at_for_owner(root, metadata.uid()))
     }
 
     /// Returns the retained manifest descriptor.
@@ -414,6 +388,55 @@ impl InstalledSelectorState {
             .get(&(kind, identity))
             .ok_or(SelectorBoundaryError::ArtifactInvalid)
     }
+}
+
+fn open_indexed_artifacts(
+    root: &File,
+    manifest: &InstallationManifest,
+    expected_owner: u32,
+) -> Result<
+    BTreeMap<(InstallationObjectKind, [u8; 32]), HeldInstallationArtifact>,
+    SelectorBoundaryError,
+> {
+    manifest
+        .objects()
+        .iter()
+        .try_fold(BTreeMap::new(), |mut artifacts, object| {
+            root.try_clone()
+                .map_err(|_| SelectorBoundaryError::Io)
+                .and_then(|directory_root| {
+                    open_directory_chain(
+                        directory_root,
+                        Path::new(object.kind.directory()),
+                        expected_owner,
+                    )
+                })
+                .and_then(|directory| {
+                    open_immutable_file(
+                        &directory,
+                        &hex_name(object.content_digest),
+                        object.kind.required_mode(),
+                        object.byte_length,
+                        expected_owner,
+                    )
+                })
+                .and_then(|file| {
+                    digest_complete_file(&file, object.byte_length).and_then(|digest| {
+                        if digest == object.content_digest {
+                            artifacts.insert(
+                                (object.kind, object.identity),
+                                HeldInstallationArtifact {
+                                    file,
+                                    object: object.clone(),
+                                },
+                            );
+                            Ok(artifacts)
+                        } else {
+                            Err(SelectorBoundaryError::ArtifactInvalid)
+                        }
+                    })
+                })
+        })
 }
 
 fn ensure_no_pending_recovery(root: &File) -> Result<(), SelectorBoundaryError> {
@@ -524,13 +547,19 @@ fn open_directory_chain(
 }
 
 fn validate_directory(directory: &File, expected_owner: u32) -> Result<(), SelectorBoundaryError> {
-    let metadata = directory
+    directory
         .metadata()
-        .map_err(|_| SelectorBoundaryError::Io)?;
-    if !metadata.is_dir() || metadata.uid() != expected_owner || metadata.mode() & 0o022 != 0 {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(())
+        .map_err(|_| SelectorBoundaryError::Io)
+        .and_then(|metadata| {
+            if !metadata.is_dir()
+                || metadata.uid() != expected_owner
+                || metadata.mode() & 0o022 != 0
+            {
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            } else {
+                Ok(())
+            }
+        })
 }
 
 fn open_immutable_file(
@@ -540,7 +569,7 @@ fn open_immutable_file(
     maximum: u64,
     expected_owner: u32,
 ) -> Result<File, SelectorBoundaryError> {
-    let file = openat2(
+    openat2(
         directory,
         name,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
@@ -550,73 +579,98 @@ fn open_immutable_file(
             .union(ResolveFlags::NO_MAGICLINKS),
     )
     .map(File::from)
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
-    if !metadata.is_file()
-        || metadata.uid() != expected_owner
-        || metadata.nlink() != 1
-        || metadata.mode() & 0o7777 != required_mode
-        || metadata.len() == 0
-        || metadata.len() > maximum
-    {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(file)
+    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    .and_then(|file| {
+        file.metadata()
+            .map_err(|_| SelectorBoundaryError::Io)
+            .and_then(|metadata| {
+                if !metadata.is_file()
+                    || metadata.uid() != expected_owner
+                    || metadata.nlink() != 1
+                    || metadata.mode() & 0o7777 != required_mode
+                    || metadata.len() == 0
+                    || metadata.len() > maximum
+                {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                } else {
+                    Ok(file)
+                }
+            })
+    })
 }
 
 fn read_complete_file(file: &File, maximum: u64) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let metadata = file.metadata().map_err(|_| SelectorBoundaryError::Io)?;
-    let capacity =
-        usize::try_from(metadata.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let mut reader = file.try_clone().map_err(|_| SelectorBoundaryError::Io)?;
-    reader
-        .seek(SeekFrom::Start(0))
-        .map_err(|_| SelectorBoundaryError::Io)?;
+    file.metadata()
+        .map_err(|_| SelectorBoundaryError::Io)
+        .and_then(|metadata| {
+            usize::try_from(metadata.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        })
+        .and_then(|capacity| {
+            file.try_clone()
+                .map_err(|_| SelectorBoundaryError::Io)
+                .and_then(rewind)
+                .and_then(|file| read_exact_file(file, maximum + 1, capacity))
+        })
+}
+
+fn rewind(mut file: File) -> Result<File, SelectorBoundaryError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| SelectorBoundaryError::Io)
+        .map(|_| file)
+}
+
+fn read_exact_file(
+    file: File,
+    maximum: u64,
+    capacity: usize,
+) -> Result<Vec<u8>, SelectorBoundaryError> {
     let mut bytes = Vec::with_capacity(capacity);
-    reader
-        .take(maximum + 1)
+    file.take(maximum)
         .read_to_end(&mut bytes)
-        .map_err(|_| SelectorBoundaryError::Io)?;
-    if bytes.len() != capacity {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(bytes)
+        .map_err(|_| SelectorBoundaryError::Io)
+        .and({
+            if bytes.len() == capacity {
+                Ok(bytes)
+            } else {
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            }
+        })
 }
 
 fn digest_complete_file(
     file: &File,
     expected_length: u64,
 ) -> Result<[u8; 32], SelectorBoundaryError> {
-    let mut reader = file.try_clone().map_err(|_| SelectorBoundaryError::Io)?;
-    reader
-        .seek(SeekFrom::Start(0))
-        .map_err(|_| SelectorBoundaryError::Io)?;
+    file.try_clone()
+        .map_err(|_| SelectorBoundaryError::Io)
+        .and_then(rewind)
+        .and_then(|file| digest_reader(file, expected_length))
+}
+
+fn digest_reader(
+    mut reader: File,
+    expected_length: u64,
+) -> Result<[u8; 32], SelectorBoundaryError> {
     let mut remaining = expected_length;
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut hasher = blake3::Hasher::new();
     while remaining != 0 {
-        let maximum = usize::try_from(remaining.min(buffer.len() as u64))
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let read = reader
-            .read(&mut buffer[..maximum])
-            .map_err(|_| SelectorBoundaryError::Io)?;
+        let maximum = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let Ok(read) = reader.read(&mut buffer[..maximum]) else {
+            return Err(SelectorBoundaryError::Io);
+        };
         if read == 0 {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         hasher.update(&buffer[..read]);
-        remaining = remaining
-            .checked_sub(read as u64)
-            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        remaining -= read as u64;
     }
     let mut extra = [0_u8; 1];
-    if reader
-        .read(&mut extra)
-        .map_err(|_| SelectorBoundaryError::Io)?
-        != 0
-    {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
+    match reader.read(&mut extra) {
+        Ok(0) => Ok(*hasher.finalize().as_bytes()),
+        Ok(_) => Err(SelectorBoundaryError::ArtifactInvalid),
+        Err(_) => Err(SelectorBoundaryError::Io),
     }
-    Ok(*hasher.finalize().as_bytes())
 }
 
 fn hex_name(digest: [u8; 32]) -> String {
@@ -1221,6 +1275,344 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn sic1_exposes_canonical_entries_and_rejects_unsafe_routes() -> TestResult {
+        let encoded = encode_manifest(unsigned(valid_objects()))?;
+        let manifest = InstallationManifest::from_canonical_cbor(&encoded)?;
+        let (root_key_id, root_public_key) = manifest.offline_root();
+        assert_eq!(root_key_id, "offline-root");
+        assert_eq!(
+            root_public_key,
+            SigningKey::from_bytes(&[7; 32]).verifying_key().to_bytes()
+        );
+        assert_eq!(manifest.authority_digests(), [[1; 32], [2; 32], [3; 32]]);
+        assert_eq!(
+            manifest.provider_sockets(),
+            (
+                Path::new("/run/pigloros/provider-execute.sock"),
+                Path::new("/run/pigloros/provider-control.sock"),
+            )
+        );
+        assert_eq!(manifest.required_features(), ["a", "b"]);
+        assert_eq!(manifest.objects().len(), 16);
+        assert_ne!(manifest.digest(), [0; 32]);
+        let provider_binary_identity = manifest.objects()[11].identity();
+        let provider_binary = manifest.object(
+            InstallationObjectKind::from_code(11)?,
+            provider_binary_identity,
+        )?;
+        assert_eq!(provider_binary.kind().code(), 11);
+        assert_eq!(provider_binary.identity(), provider_binary.content_digest());
+        assert_ne!(provider_binary.content_digest(), [0; 32]);
+        assert_eq!(provider_binary.byte_length(), 3);
+        assert!(manifest
+            .object(InstallationObjectKind::from_code(11)?, [0; 32])
+            .is_err());
+
+        for path in [
+            "relative-provider.sock",
+            "/run/pigloros/",
+            "/run/pigloros/../provider.sock",
+        ] {
+            let mut fields = unsigned(valid_objects());
+            fields[7] = Value::Text(path.to_owned());
+            assert!(InstallationManifest::from_canonical_cbor(&encode_manifest(fields)?).is_err());
+        }
+
+        let mut equal_sockets = unsigned(valid_objects());
+        equal_sockets[8] = equal_sockets[7].clone();
+        assert!(
+            InstallationManifest::from_canonical_cbor(&encode_manifest(equal_sockets)?).is_err()
+        );
+
+        let empty_objects = unsigned(Vec::new());
+        assert!(
+            InstallationManifest::from_canonical_cbor(&encode_manifest(empty_objects)?).is_err()
+        );
+
+        let mut zero_length_objects = valid_objects();
+        zero_length_objects[0] = object(0, *blake3::hash(&[1; 3]).as_bytes(), 0);
+        assert!(
+            InstallationManifest::from_canonical_cbor(&encode_manifest(unsigned(
+                zero_length_objects,
+            ))?)
+            .is_err()
+        );
+
+        let mut mismatched_identity_objects = valid_objects();
+        let Value::Array(fields) = &mut mismatched_identity_objects[10] else {
+            return Err("installation object is not an array".into());
+        };
+        fields[1] = digest([42; 32]);
+        assert!(
+            InstallationManifest::from_canonical_cbor(&encode_manifest(unsigned(
+                mismatched_identity_objects,
+            ))?)
+            .is_err()
+        );
+        Ok(())
+    }
+
+    fn replace_object_field(
+        objects: &mut [Value],
+        object_index: usize,
+        field_index: usize,
+        value: Value,
+    ) -> TestResult {
+        let Value::Array(fields) = &mut objects[object_index] else {
+            return Err("installation object is not an array".into());
+        };
+        fields[field_index] = value;
+        Ok(())
+    }
+
+    fn assert_manifest_rejected(fields: Vec<Value>) -> TestResult {
+        assert!(InstallationManifest::from_canonical_cbor(&encode_manifest(fields)?).is_err());
+        Ok(())
+    }
+
+    fn assert_raw_manifest_rejected(value: &Value) -> TestResult {
+        assert!(InstallationManifest::from_canonical_cbor(&encode(value)?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn sic1_rejects_invalid_authority_and_object_encodings() -> TestResult {
+        let unsigned_manifest = Value::Array(unsigned(valid_objects()));
+        let mismatched_digest = encode(&Value::Array(vec![
+            unsigned_manifest,
+            Value::Bytes(vec![9; 32]),
+        ]))?;
+        assert!(InstallationManifest::from_canonical_cbor(&mismatched_digest).is_err());
+
+        let mut invalid_root_key = unsigned(valid_objects());
+        invalid_root_key[3] = Value::Bytes(vec![0; 31]);
+        assert_manifest_rejected(invalid_root_key)?;
+
+        for (field, value) in [
+            (0, Value::Integer(2.into())),
+            (1, Value::Text("one".to_owned())),
+            (2, Value::Null),
+        ] {
+            let mut fields = unsigned(valid_objects());
+            fields[field] = value;
+            assert_manifest_rejected(fields)?;
+        }
+
+        for (field, value) in [
+            (4, Value::Null),
+            (7, Value::Bytes(vec![7; 32])),
+            (9, Value::Null),
+            (10, Value::Null),
+        ] {
+            let mut fields = unsigned(valid_objects());
+            fields[field] = value;
+            assert_manifest_rejected(fields)?;
+        }
+
+        for authority_field in 4..=6 {
+            let mut fields = unsigned(valid_objects());
+            fields[authority_field] = digest([0; 32]);
+            assert_manifest_rejected(fields)?;
+        }
+
+        for features in [
+            Value::Array(vec![Value::Integer(1.into())]),
+            Value::Array(vec![
+                Value::Text("a".to_owned()),
+                Value::Text("a".to_owned()),
+            ]),
+        ] {
+            let mut fields = unsigned(valid_objects());
+            fields[9] = features;
+            assert_manifest_rejected(fields)?;
+        }
+
+        let mut invalid_shape = valid_objects();
+        invalid_shape[0] = Value::Array(vec![]);
+        assert_manifest_rejected(unsigned(invalid_shape))?;
+
+        let mut invalid_kind = valid_objects();
+        replace_object_field(&mut invalid_kind, 0, 0, integer(16))?;
+        assert_manifest_rejected(unsigned(invalid_kind))?;
+
+        let mut out_of_range_kind = valid_objects();
+        replace_object_field(&mut out_of_range_kind, 0, 0, integer(256))?;
+        assert_manifest_rejected(unsigned(out_of_range_kind))?;
+
+        let mut non_integer_kind = valid_objects();
+        replace_object_field(&mut non_integer_kind, 0, 0, Value::Null)?;
+        assert_manifest_rejected(unsigned(non_integer_kind))?;
+
+        let mut invalid_kind_encoding = valid_objects();
+        replace_object_field(
+            &mut invalid_kind_encoding,
+            0,
+            0,
+            Value::Text("authority".to_owned()),
+        )?;
+        assert_manifest_rejected(unsigned(invalid_kind_encoding))?;
+
+        let mut zero_identity = valid_objects();
+        replace_object_field(&mut zero_identity, 0, 1, digest([0; 32]))?;
+        assert_manifest_rejected(unsigned(zero_identity))?;
+
+        let mut zero_content = valid_objects();
+        replace_object_field(&mut zero_content, 0, 2, digest([0; 32]))?;
+        assert_manifest_rejected(unsigned(zero_content))?;
+
+        let mut invalid_length = valid_objects();
+        replace_object_field(&mut invalid_length, 0, 3, Value::Text("three".to_owned()))?;
+        assert_manifest_rejected(unsigned(invalid_length))?;
+
+        let mut missing_selected_authority = valid_objects();
+        missing_selected_authority.remove(0);
+        assert_manifest_rejected(unsigned(missing_selected_authority))?;
+        Ok(())
+    }
+
+    #[test]
+    fn sic1_rejects_invalid_outer_envelopes_and_root_identity() -> TestResult {
+        assert_raw_manifest_rejected(&Value::Null)?;
+        assert_raw_manifest_rejected(&Value::Array(vec![]))?;
+        assert_raw_manifest_rejected(&Value::Array(vec![Value::Null, Value::Bytes(vec![1; 32])]))?;
+        assert_raw_manifest_rejected(&Value::Array(vec![
+            Value::Array(unsigned(valid_objects())),
+            Value::Null,
+        ]))?;
+        assert_raw_manifest_rejected(&Value::Array(vec![
+            Value::Array(vec![Value::Text("SIC1".to_owned())]),
+            Value::Bytes(vec![1; 32]),
+        ]))?;
+
+        let mut oversized_root_id = unsigned(valid_objects());
+        oversized_root_id[2] = Value::Text("r".repeat(129));
+        assert_manifest_rejected(oversized_root_id)?;
+
+        let mut reserved_socket = unsigned(valid_objects());
+        reserved_socket[7] = Value::Text(SANDBOX_ADMIN_SOCKET.to_owned());
+        assert_manifest_rejected(reserved_socket)?;
+
+        let mut oversized_socket = unsigned(valid_objects());
+        oversized_socket[7] = Value::Text(format!("/run/pigloros/{}", "s".repeat(108)));
+        assert_manifest_rejected(oversized_socket)?;
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_root_open_fails_closed_without_a_root_owned_installation() {
+        assert!(InstalledSelectorState::open().is_err());
+    }
+
+    fn write_immutable_file(root: &Path, name: &str, bytes: &[u8]) -> TestResult {
+        let path = root.join(name);
+        fs::write(&path, bytes)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o400))?;
+        Ok(())
+    }
+
+    #[test]
+    fn installation_filesystem_boundaries_reject_unsafe_descriptors() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        let root = File::open(temporary.path())?;
+        let owner = root.metadata()?.uid();
+        assert!(validate_directory(&root, owner).is_ok());
+        assert!(validate_directory(&root, owner.saturating_add(1)).is_err());
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o777))?;
+        assert!(validate_directory(&root, owner).is_err());
+        assert!(open_directory_chain(root.try_clone()?, Path::new(""), owner).is_err());
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
+
+        assert!(open_directory_chain(root.try_clone()?, Path::new("missing"), owner).is_err());
+        assert!(open_directory_chain(root.try_clone()?, Path::new("../escape"), owner).is_err());
+
+        fs::create_dir(temporary.path().join("unsafe-directory"))?;
+        fs::set_permissions(
+            temporary.path().join("unsafe-directory"),
+            fs::Permissions::from_mode(0o777),
+        )?;
+        assert!(
+            open_directory_chain(root.try_clone()?, Path::new("unsafe-directory"), owner).is_err()
+        );
+
+        fs::create_dir(temporary.path().join("directory"))?;
+        assert!(open_immutable_file(&root, "directory", 0o400, 4, owner).is_err());
+
+        write_immutable_file(temporary.path(), "regular", b"read")?;
+        let regular = open_immutable_file(&root, "regular", 0o400, 4, owner)?;
+        assert_eq!(read_complete_file(&regular, 4)?, b"read");
+        assert!(read_complete_file(&regular, 2).is_err());
+        assert!(open_immutable_file(&root, "regular", 0o400, 4, owner.saturating_add(1)).is_err());
+
+        write_immutable_file(temporary.path(), "empty", b"")?;
+        assert!(open_immutable_file(&root, "empty", 0o400, 4, owner).is_err());
+
+        write_immutable_file(temporary.path(), "large", b"large")?;
+        assert!(open_immutable_file(&root, "large", 0o400, 4, owner).is_err());
+
+        write_immutable_file(temporary.path(), "wrong-mode", b"read")?;
+        fs::set_permissions(
+            temporary.path().join("wrong-mode"),
+            fs::Permissions::from_mode(0o600),
+        )?;
+        assert!(open_immutable_file(&root, "wrong-mode", 0o400, 4, owner).is_err());
+
+        write_immutable_file(temporary.path(), "linked", b"read")?;
+        fs::hard_link(
+            temporary.path().join("linked"),
+            temporary.path().join("linked-copy"),
+        )?;
+        assert!(open_immutable_file(&root, "linked", 0o400, 4, owner).is_err());
+
+        symlink("regular", temporary.path().join("symlink"))?;
+        assert!(open_immutable_file(&root, "symlink", 0o400, 4, owner).is_err());
+        assert!(open_immutable_file(&root, "missing", 0o400, 4, owner).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn installed_state_rejects_missing_and_mismatched_indexed_artifacts() -> TestResult {
+        let missing_manifest = tempfile::tempdir()?;
+        write_state(missing_manifest.path())?;
+        let root = File::open(missing_manifest.path())?;
+        fs::remove_file(missing_manifest.path().join(MANIFEST_NAME))?;
+        assert!(InstalledSelectorState::open_at_for_test(&root).is_err());
+
+        let malformed_manifest = tempfile::tempdir()?;
+        write_state(malformed_manifest.path())?;
+        let root = File::open(malformed_manifest.path())?;
+        fs::set_permissions(
+            malformed_manifest.path().join(MANIFEST_NAME),
+            fs::Permissions::from_mode(0o600),
+        )?;
+        fs::write(malformed_manifest.path().join(MANIFEST_NAME), [0xff])?;
+        fs::set_permissions(
+            malformed_manifest.path().join(MANIFEST_NAME),
+            fs::Permissions::from_mode(0o400),
+        )?;
+        assert!(InstalledSelectorState::open_at_for_test(&root).is_err());
+
+        let missing_artifact_directory = tempfile::tempdir()?;
+        write_state(missing_artifact_directory.path())?;
+        let root = File::open(missing_artifact_directory.path())?;
+        fs::rename(
+            missing_artifact_directory.path().join("authority"),
+            missing_artifact_directory.path().join("missing-authority"),
+        )?;
+        assert!(InstalledSelectorState::open_at_for_test(&root).is_err());
+
+        let mismatched_artifact = tempfile::tempdir()?;
+        write_state(mismatched_artifact.path())?;
+        let root = File::open(mismatched_artifact.path())?;
+        let digest = hex_name(*blake3::hash(&[1; 3]).as_bytes());
+        let artifact = mismatched_artifact.path().join("authority").join(digest);
+        fs::set_permissions(&artifact, fs::Permissions::from_mode(0o600))?;
+        fs::write(&artifact, b"bad")?;
+        fs::set_permissions(&artifact, fs::Permissions::from_mode(0o400))?;
+        assert!(InstalledSelectorState::open_at_for_test(&root).is_err());
+        Ok(())
+    }
+
     fn write_state(root: &Path) -> TestResult {
         for directory in ["authority", "providers", "images"] {
             let path = root.join(directory);
@@ -1258,9 +1650,15 @@ mod tests {
         let state = InstalledSelectorState::open_at_for_test(&root)?;
         assert!(!state.manifest_bytes().is_empty());
         assert!(state.manifest_file().metadata()?.is_file());
+        assert_eq!(state.manifest().objects().len(), 16);
         let authority = state.artifact(InstallationObjectKind::from_code(0)?, [1; 32])?;
+        assert!(authority.file().metadata()?.is_file());
         assert_eq!(authority.read_control(3)?, [1; 3]);
         assert!(authority.read_control(2).is_err());
+
+        let mut truncated = held_artifact(0, [9; 32], b"abc")?;
+        truncated.object.byte_length = 4;
+        assert!(truncated.read_control(4).is_err());
         assert!(state
             .artifact(InstallationObjectKind::from_code(0)?, [0; 32])
             .is_err());
@@ -1333,6 +1731,24 @@ mod tests {
             .artifacts
             .remove(&(InstallationObjectKind::from_code(4)?, [16; 32]));
         assert!(missing_selected.authenticate_bootstrap().is_err());
+
+        let mut digest_mismatch = authenticated_state()?;
+        let trust = digest_mismatch
+            .artifacts
+            .remove(&(
+                InstallationObjectKind::from_code(0)?,
+                digest_mismatch.manifest.trust_digest,
+            ))
+            .ok_or("authenticated state is missing the trust artifact")?;
+        let replacement_digest = [99; 32];
+        digest_mismatch.manifest.trust_digest = replacement_digest;
+        let HeldInstallationArtifact { file, mut object } = trust;
+        object.identity = replacement_digest;
+        digest_mismatch.artifacts.insert(
+            (InstallationObjectKind::from_code(0)?, replacement_digest),
+            HeldInstallationArtifact { file, object },
+        );
+        assert!(digest_mismatch.authenticate_bootstrap().is_err());
         Ok(())
     }
 
@@ -1348,6 +1764,7 @@ mod tests {
         let admitted = admitted_state()?
             .authenticate_bootstrap()?
             .admit_provider()?;
+        assert_eq!(admitted.bootstrap().policy().policy_epoch(), 4);
         assert_eq!(admitted.provider().manifest().provider_id, "provider");
         assert_eq!(admitted.provider().host_profile().kernel_release, "6.12.0");
         Ok(())
