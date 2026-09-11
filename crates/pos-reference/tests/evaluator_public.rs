@@ -146,6 +146,7 @@ struct MismatchedOracleAdapter {
 enum AdverseBehavior {
     WrongOutput,
     AdapterUnavailable,
+    AuthenticatedEvidenceFailure,
     ExcessiveUsage,
     SubjectUnavailable,
     WrongResultKind,
@@ -305,6 +306,9 @@ impl SubjectAdapter for AdverseAdapter {
     fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
         match self.behavior {
             AdverseBehavior::AdapterUnavailable => Err(AdapterError::Unavailable),
+            AdverseBehavior::AuthenticatedEvidenceFailure => {
+                Err(AdapterError::AuthenticatedEvidenceFailure)
+            }
             AdverseBehavior::WrongOutput => Ok(SubjectObservation {
                 result: SubjectResult::Output(b"wrong".to_vec()),
                 usage: ResourceUsage::default(),
@@ -487,6 +491,32 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
             &corpus.trust_policy,
             &evaluator_identity()?,
             &mut admitted,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
+    );
+    let mut unavailable = AdverseAdapter {
+        subject_digest: corpus.subject_digest,
+        behavior: AdverseBehavior::AdapterUnavailable,
+    };
+    assert!(evaluate(
+        &request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity()?,
+        &mut unavailable,
+    )
+    .is_ok());
+    let mut unauthenticated = AdverseAdapter {
+        subject_digest: corpus.subject_digest,
+        behavior: AdverseBehavior::AuthenticatedEvidenceFailure,
+    };
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut unauthenticated,
         ),
         Err(EvaluatorError::AdapterIdentity)
     );
