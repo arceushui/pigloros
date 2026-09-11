@@ -43,12 +43,12 @@ impl SandboxProviderOperationV1 {
         self as u64
     }
 
-    const fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
-        if code < Self::ALL.len() as u64 {
-            Ok(Self::ALL[code as usize])
-        } else {
-            Err(SandboxContractErrorV1::FieldOutOfBounds)
-        }
+    fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxContractErrorV1::FieldOutOfBounds)
     }
 }
 
@@ -213,12 +213,12 @@ impl SandboxLocalErrorCodeV1 {
         self as u64
     }
 
-    const fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
-        if code < Self::ALL.len() as u64 {
-            Ok(Self::ALL[code as usize])
-        } else {
-            Err(SandboxContractErrorV1::FieldOutOfBounds)
-        }
+    fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxContractErrorV1::FieldOutOfBounds)
     }
 }
 

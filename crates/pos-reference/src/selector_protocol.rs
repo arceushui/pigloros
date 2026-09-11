@@ -53,7 +53,7 @@ pub(crate) fn encode_request(
         Value::Bytes(provider_request_id.to_vec()),
         Value::Bytes(attempt_id.to_vec()),
         Value::Bytes(request_bytes.to_vec()),
-        descriptor(&attempt_stream, input_digest)?,
+        descriptor(&attempt_stream, input_digest),
     ]);
     let unsigned_bytes =
         encode_with_limit(&unsigned, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
@@ -127,8 +127,7 @@ fn decode_authenticated_reply(
     {
         return Err(AdapterError::ProtocolFailure);
     }
-    let unsigned =
-        encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
+    let unsigned = canonical_control(&wrapper[0]);
     if fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?
         != domain_digest(SLY1_DOMAIN, &unsigned)
     {
@@ -239,7 +238,7 @@ fn validate_evidence(
         let record = SandboxAuditRecord::from_canonical_cbor(bytes(value)?)
             .map_err(|_| AdapterError::ProtocolFailure)?;
         if record.attempt_id != result.attempt_id
-            || record.sequence != u64::try_from(index).map_err(|_| AdapterError::ProtocolFailure)?
+            || record.sequence != index as u64
             || record.previous_digest != previous
             || record.runtime_attestation_key_id != result.runtime_attestation_key_id
             || result.operational_events.get(index) != Some(&record.event_code)
@@ -258,9 +257,7 @@ fn validate_output_descriptor(value: &Value, trailing: &[u8]) -> Result<(), Adap
     let fields = array(value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
     let length = uint(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)?;
     let digest = fixed_bytes::<32>(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)?;
-    if length != u64::try_from(trailing.len()).map_err(|_| AdapterError::ProtocolFailure)?
-        || digest != domain_digest(OUTPUT_DOMAIN, trailing)
-    {
+    if length != trailing.len() as u64 || digest != domain_digest(OUTPUT_DOMAIN, trailing) {
         return Err(AdapterError::ProtocolFailure);
     }
     Ok(())
@@ -286,11 +283,16 @@ fn derived_id(mut namespace: [u8; 16], ordinal: u16) -> [u8; 16] {
     namespace
 }
 
-fn descriptor(payload: &[u8], digest: [u8; 32]) -> Result<Value, AdapterError> {
-    Ok(Value::Array(vec![
-        integer(u64::try_from(payload.len()).map_err(|_| AdapterError::ProtocolFailure)?),
+fn descriptor(payload: &[u8], digest: [u8; 32]) -> Value {
+    Value::Array(vec![
+        integer(payload.len() as u64),
         Value::Bytes(digest.to_vec()),
-    ]))
+    ])
+}
+
+fn canonical_control(value: &Value) -> Vec<u8> {
+    encode_with_limit(value, CONTROL_LIMIT)
+        .expect("re-encoding a bounded canonical control value cannot exceed its source bound")
 }
 
 fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {

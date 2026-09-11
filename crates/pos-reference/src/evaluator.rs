@@ -346,11 +346,16 @@ fn evaluate_selected_fixture(
     ordinal: usize,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<Option<CaseOutcome>, EvaluatorError> {
-    if !fixture.modes.contains(&bundle.mode) {
-        return Ok(None);
-    }
-    adapter.set_case_ordinal(u16::try_from(ordinal).map_err(|_| EvaluatorError::Profile)?);
-    evaluate_case(profile, bundle, request, fixture, adapter).map(Some)
+    fixture
+        .modes
+        .contains(&bundle.mode)
+        .then(|| {
+            u16::try_from(ordinal)
+                .map_err(|_| EvaluatorError::Profile)
+                .map(|ordinal| adapter.set_case_ordinal(ordinal))
+                .and_then(|()| evaluate_case(profile, bundle, request, fixture, adapter))
+        })
+        .transpose()
 }
 
 fn evaluate_case(
@@ -361,30 +366,43 @@ fn evaluate_case(
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
     let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
-    let (observation, provider_provenance) = execute_case(adapter, &attempt)?;
+    let execution = execute_case(adapter, &attempt)?;
     enforce_observed_coordinate_limit(
-        &observation,
+        &execution.observation,
         profile.evaluator_hard_caps.max_coordinate_bytes,
     )?;
-    let provenance_digest = case_provenance(request, fixture, &observation, provider_provenance)?;
+    let provenance_digest = case_provenance(
+        request,
+        fixture,
+        &execution.observation,
+        execution.provider_provenance,
+    )?;
     Ok(case_outcome(
         fixture,
         bundle.mode,
-        observation,
+        execution.observation,
         provenance_digest,
     ))
+}
+
+struct CaseExecution {
+    observation: Result<SubjectObservation, AdapterError>,
+    provider_provenance: Option<[u8; 32]>,
 }
 
 fn execute_case(
     adapter: &mut impl SubjectAdapter,
     attempt: &CaseAttempt,
-) -> Result<(Result<SubjectObservation, AdapterError>, Option<[u8; 32]>), EvaluatorError> {
+) -> Result<CaseExecution, EvaluatorError> {
     let observation = adapter.execute(attempt);
     let provider_provenance = adapter.take_execution_provenance_digest();
     if observation == Err(AdapterError::AuthenticatedEvidenceFailure) {
         return Err(EvaluatorError::AdapterIdentity);
     }
-    Ok((observation, provider_provenance))
+    Ok(CaseExecution {
+        observation,
+        provider_provenance,
+    })
 }
 
 fn case_provenance(
