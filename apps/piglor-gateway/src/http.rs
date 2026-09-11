@@ -158,11 +158,14 @@ async fn ledger_page(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let erasure_ready = matches!(
-        state.gateway.erasure_status().await,
-        Ok(ErasureHostStatusV1::Ready)
+    let ready = matches!(
+        (
+            state.gateway.is_ready(),
+            state.gateway.erasure_status().await,
+        ),
+        (true, Ok(ErasureHostStatusV1::Ready))
     );
-    if state.gateway.is_ready() && erasure_ready {
+    if ready {
         (StatusCode::OK, Json(json!({ "ok": true })))
     } else {
         (
