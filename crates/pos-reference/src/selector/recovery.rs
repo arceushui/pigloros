@@ -54,7 +54,7 @@ impl RecoveryPeerSlot {
     ///
     /// # Errors
     /// Returns a closed failure for zero or non-distinct SIR1 slot identities.
-    pub(crate) const fn from_authenticated_sir1(
+    pub(crate) fn from_authenticated_sir1(
         runtime_instance_id: [u8; 16],
         lifecycle_scope_id: [u8; 16],
         endpoint_id: [u8; 16],
@@ -404,7 +404,7 @@ impl AuthenticatedRecoveryAcknowledgement {
     ///
     /// # Errors
     /// Returns a closed failure for the absent sentinel digest.
-    pub(crate) const fn from_authenticated_rca1(
+    pub(crate) fn from_authenticated_rca1(
         acknowledgement_digest: [u8; 32],
     ) -> Result<Self, RecoveryDomainError> {
         if acknowledgement_digest == [0; 32] {
@@ -462,27 +462,27 @@ impl RecoveryPeerSession {
         ),
         RecoveryDomainError,
     > {
-        let request = RecoveryPeerRequest {
-            identity: &self.previous.identity,
+        let (exchange, acknowledgement) = {
+            let request = RecoveryPeerRequest {
+                identity: &self.previous.identity,
+            };
+            let exchange = peer.exchange_and_cleanup(&request)?;
+            let acknowledgement =
+                authenticator.authenticate(&request, &exchange.acknowledgement_bytes)?;
+            (exchange, acknowledgement)
         };
-        peer.exchange_and_cleanup(&request).and_then(|exchange| {
-            authenticator
-                .authenticate(&request, &exchange.acknowledgement_bytes)
-                .map(|acknowledgement| {
-                    let transaction_binding_digest = self.previous.identity.binding_digest();
-                    let previous = PreviousRuntimeTerminationProof {
-                        identity: self.previous.identity,
-                        state: PhantomData,
-                    };
-                    let recovery_peer = RecoveryPeerTerminationProof {
-                        transaction_binding_digest,
-                        acknowledgement_digest: acknowledgement.digest(),
-                        recovery_peer_pid: exchange.recovery_peer_pid,
-                        recovery_peer_start_time_ticks: exchange.recovery_peer_start_time_ticks,
-                    };
-                    (previous, recovery_peer)
-                })
-        })
+        let transaction_binding_digest = self.previous.identity.binding_digest();
+        let previous = PreviousRuntimeTerminationProof {
+            identity: self.previous.identity,
+            state: PhantomData,
+        };
+        let recovery_peer = RecoveryPeerTerminationProof {
+            transaction_binding_digest,
+            acknowledgement_digest: acknowledgement.digest(),
+            recovery_peer_pid: exchange.recovery_peer_pid,
+            recovery_peer_start_time_ticks: exchange.recovery_peer_start_time_ticks,
+        };
+        Ok((previous, recovery_peer))
     }
 }
 
@@ -593,11 +593,10 @@ mod tests {
             &mut self,
             request: &RecoveryPeerRequest<'_>,
         ) -> Result<RecoveryPeerExchange, RecoveryDomainError> {
-            self.observed_exchange_binding =
-                Some(request.transaction_identity().binding_digest());
-            self.exchange_result
-                .take()
-                .unwrap_or(Err(RecoveryDomainError::RecoveryPeerExchangeOrCleanupRejected))
+            self.observed_exchange_binding = Some(request.transaction_identity().binding_digest());
+            self.exchange_result.take().unwrap_or(Err(
+                RecoveryDomainError::RecoveryPeerExchangeOrCleanupRejected,
+            ))
         }
     }
 
@@ -661,7 +660,9 @@ mod tests {
         })
     }
 
-    fn complete(seed: u8) -> Result<
+    fn complete(
+        seed: u8,
+    ) -> Result<
         (
             PreviousRuntimeTerminationProof<Consumed>,
             RecoveryPeerTerminationProof,
@@ -786,7 +787,9 @@ mod tests {
         let previous = pending(3)?.terminate_previous_runtime(&mut lifecycle)?;
         let mut cleanup_failure = RecordingRecoveryPeerPort {
             start_result: Ok(()),
-            exchange_result: Some(Err(RecoveryDomainError::RecoveryPeerExchangeOrCleanupRejected)),
+            exchange_result: Some(Err(
+                RecoveryDomainError::RecoveryPeerExchangeOrCleanupRejected,
+            )),
             observed_start_binding: None,
             observed_exchange_binding: None,
         };
