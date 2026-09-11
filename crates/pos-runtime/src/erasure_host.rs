@@ -45,8 +45,6 @@ enum HostStateV1 {
     Poisoned,
 }
 
-const ERASURE_MAX_STATE_HISTORY: usize = 64;
-
 /// Payload-free recovery status for an erasure execution host.
 ///
 /// This status is safe to expose from health and minimized-status endpoints:
@@ -2152,15 +2150,10 @@ impl ErasureReadSenderV1<'_> {
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedStateV1>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let authority = self
-            .host
-            .authority
-            .clone()
-            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
-        let coordinator = self
-            .host
-            .coordinator
-            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let Some((authority, coordinator)) = self.host.authority.clone().zip(self.host.coordinator)
+        else {
+            return Err(ErasureHostErrorV1::AuthorizationDenied);
+        };
         let state = {
             let port =
                 HostedCoordinatorPortV1::new(self.host.store.host_store(), authority.as_ref());
@@ -2168,7 +2161,6 @@ impl ErasureReadSenderV1<'_> {
             ErasureVerifiedStateQueryV1::verified_state(&mut state_machine, request)
                 .map_err(map_erasure_error)?
         };
-        self.host.ensure_generation(self.generation)?;
         Ok(state)
     }
 
@@ -2193,9 +2185,6 @@ impl ErasureReadSenderV1<'_> {
         let mut history = vec![current.state().clone()];
         let mut successor = current.state().clone();
         while let Some(predecessor_digest) = successor.previous_state() {
-            if history.len() >= ERASURE_MAX_STATE_HISTORY {
-                return Err(ErasureHostErrorV1::RecoveryUnavailable);
-            }
             let predecessor = self
                 .host
                 .store
@@ -2209,7 +2198,6 @@ impl ErasureReadSenderV1<'_> {
             history.push(predecessor.clone());
             successor = predecessor;
         }
-        self.host.ensure_generation(self.generation)?;
         Ok(Some(history))
     }
 
