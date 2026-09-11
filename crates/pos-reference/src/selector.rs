@@ -712,26 +712,14 @@ mod tests {
     }
 
     #[test]
-    fn selector_transport_rejects_a_zero_watchdog_before_exchange(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let socket = temporary.path().join("selector.sock");
-        let listener = UnixListener::bind(&socket)?;
-        std::fs::set_permissions(
-            &socket,
-            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
-        )?;
-        let uid = std::fs::metadata(&socket)?.uid();
+    fn selector_request_rejects_a_zero_watchdog() {
         let request = selector_request();
         let mut attempt = selector_attempt();
         attempt.watchdog_ms = 0;
-        let encoded = encode_request(&request, b"evr1", &attempt, 0)?;
         assert_eq!(
-            SelectorAdapter::invoke_at(&socket, uid, &attempt, &encoded, [14; 32]),
-            Err(AdapterError::Unavailable)
+            encode_request(&request, b"evr1", &attempt, 0).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
         );
-        drop(listener);
-        Ok(())
     }
 
     #[test]
