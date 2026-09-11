@@ -111,17 +111,23 @@ pub struct SelectorAdapter {
 }
 
 impl SelectorAdapter {
-    /// Bind evaluation to the fixed root-owned selector endpoint.
-    #[must_use]
-    pub fn new(request: &EvaluationRequest, request_bytes: &[u8]) -> Self {
-        Self {
+    /// Bind one canonical EVR1 request to the fixed root-owned selector endpoint.
+    ///
+    /// # Errors
+    /// Returns a closed failure when the supplied request cannot produce a
+    /// self-consistent canonical EVR1 representation.
+    pub fn new(request: EvaluationRequest) -> Result<Self, AdapterError> {
+        let request_bytes = request
+            .to_canonical_cbor()
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        Ok(Self {
             kind: request.subject_adapter,
             subject_artifact_digest: request.subject_artifact_digest,
-            request: request.clone(),
-            request_bytes: request_bytes.to_vec(),
+            request,
+            request_bytes,
             next_case_ordinal: None,
             provenance: None,
-        }
+        })
     }
 
     fn invoke(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
@@ -807,9 +813,9 @@ mod tests {
     }
 
     #[test]
-    fn selector_adapter_requires_an_explicit_case_ordinal() {
+    fn selector_adapter_requires_an_explicit_case_ordinal() -> Result<(), AdapterError> {
         let request = selector_request();
-        let mut adapter = SelectorAdapter::new(&request, b"evr1");
+        let mut adapter = SelectorAdapter::new(request.clone())?;
         assert_eq!(adapter.kind(), request.subject_adapter);
         assert_eq!(
             adapter.subject_artifact_digest(),
@@ -827,6 +833,13 @@ mod tests {
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(adapter.take_execution_provenance_digest(), None);
+        let mut invalid_request = request;
+        invalid_request.request_id = [0; 16];
+        assert_eq!(
+            SelectorAdapter::new(invalid_request).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
     }
 
     #[test]
@@ -860,7 +873,7 @@ mod tests {
         });
         let request = selector_request();
         let attempt = selector_attempt();
-        let mut adapter = SelectorAdapter::new(&request, b"evr1");
+        let mut adapter = SelectorAdapter::new(request)?;
         adapter.set_case_ordinal(7);
         assert_eq!(
             adapter.invoke_with_selector(&attempt, &socket, uid),
