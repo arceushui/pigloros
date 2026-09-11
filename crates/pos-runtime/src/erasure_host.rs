@@ -45,6 +45,8 @@ enum HostStateV1 {
     Poisoned,
 }
 
+const ERASURE_MAX_STATE_HISTORY: usize = 64;
+
 /// Payload-free recovery status for an erasure execution host.
 ///
 /// This status is safe to expose from health and minimized-status endpoints:
@@ -2170,28 +2172,45 @@ impl ErasureReadSenderV1<'_> {
         Ok(state)
     }
 
-    /// Resolve one payload-free ERS1 state by its durable digest through the
-    /// generation-bound host store.
+    /// Recover one request's validated ERS1 history through the host-owned
+    /// coordinator and persistence boundary.
     ///
-    /// This is intentionally separate from [`Self::erasure_state`]: callers
-    /// use the request query for the independently verified current snapshot,
-    /// while this resolver is for checking an already-linked predecessor.
+    /// The current state is recovered through the configured authority first;
+    /// each predecessor is then resolved only through the same host store and
+    /// validated against its successor before it is returned. Callers cannot
+    /// ask for an arbitrary digest or bypass the request binding.
     ///
     /// # Errors
-    /// Returns a payload-free adapter, recovery, or stale generation error.
-    pub fn erasure_state_by_digest(
+    /// Returns a payload-free recovery, provenance, adapter, or stale
+    /// generation error when the chain cannot be verified.
+    pub fn erasure_state_history(
         &mut self,
-        digest: ErasureReferenceV1,
-    ) -> Result<Option<ErasureStateV1>, ErasureHostErrorV1> {
+        request: ErasureReferenceV1,
+    ) -> Result<Option<Vec<ErasureStateV1>>, ErasureHostErrorV1> {
+        let Some(current) = self.erasure_state(request)? else {
+            return Ok(None);
+        };
+        let mut history = vec![current.state().clone()];
+        let mut successor = current.state().clone();
+        while let Some(predecessor_digest) = successor.previous_state() {
+            if history.len() >= ERASURE_MAX_STATE_HISTORY {
+                return Err(ErasureHostErrorV1::RecoveryUnavailable);
+            }
+            let predecessor = self
+                .host
+                .store
+                .host_store()
+                .resolve_state(predecessor_digest)
+                .map_err(map_erasure_error)?
+                .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+            successor
+                .validate_predecessor(&predecessor)
+                .map_err(map_erasure_error)?;
+            history.push(predecessor.clone());
+            successor = predecessor;
+        }
         self.host.ensure_generation(self.generation)?;
-        let state = self
-            .host
-            .store
-            .host_store()
-            .resolve_state(digest)
-            .map_err(map_erasure_error)?;
-        self.host.ensure_generation(self.generation)?;
-        Ok(state)
+        Ok(Some(history))
     }
 
     /// Run one read-only protected effect while retaining the host's current

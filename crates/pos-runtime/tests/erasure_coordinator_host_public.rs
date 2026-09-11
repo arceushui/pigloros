@@ -412,33 +412,39 @@ fn assert_terminal_readback(
     reads: &mut pos_runtime::ErasureReadSenderV1<'_>,
     receipt: &ErasureReceiptV1,
     request: ErasureReferenceV1,
-    dispatched_predecessor: ErasureReferenceV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let verified = test_stage(
-        "read terminal lifecycle state",
-        reads.erasure_state(request),
+    let history = test_stage(
+        "read lifecycle history",
+        reads.erasure_state_history(request),
     )?
     .ok_or("terminal lifecycle state missing")?;
-    let predecessor = test_stage(
-        "read dispatched lifecycle state",
-        reads.erasure_state_by_digest(dispatched_predecessor),
-    )?
-    .ok_or("dispatched lifecycle state missing")?;
+    if history.len() < 3 {
+        return Err("lifecycle history omitted a destruction predecessor".into());
+    }
+    let [terminal, awaiting, dispatched, ..] = history.as_slice() else {
+        unreachable!("history length checked above");
+    };
     assert_eq!(receipt.request(), request);
-    assert_eq!(receipt.terminal_state(), verified.state().state_digest());
-    assert_eq!(receipt.coordinator(), verified.state().coordinator());
-    assert_eq!(receipt.lifecycle(), verified.lifecycle());
+    assert_eq!(receipt.terminal_state(), terminal.state_digest());
+    assert_eq!(receipt.coordinator(), terminal.coordinator());
+    assert_eq!(receipt.lifecycle(), terminal.lifecycle());
     assert_eq!(
-        predecessor.lifecycle(),
+        awaiting.lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
+    assert_eq!(
+        dispatched.lifecycle(),
         ErasureLifecycleV1::DestructionDispatched
     );
-    assert_eq!(
-        verified.state().previous_state(),
-        Some(dispatched_predecessor)
-    );
+    assert_eq!(terminal.previous_state(), Some(awaiting.state_digest()));
+    assert_eq!(awaiting.previous_state(), Some(dispatched.state_digest()));
+    test_stage(
+        "validate terminal lifecycle predecessor",
+        terminal.validate_predecessor(awaiting),
+    )?;
     test_stage(
         "validate dispatched lifecycle predecessor",
-        verified.state().validate_predecessor(&predecessor),
+        awaiting.validate_predecessor(dispatched),
     )?;
     Ok(())
 }
@@ -575,7 +581,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
             authorization_provenance: reference(32),
         }),
     )?;
-    let (receipt, dispatched_predecessor) = {
+    let receipt = {
         let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
         let dispatched = test_stage(
             "dispatch lifecycle destruction",
@@ -585,9 +591,6 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
             dispatched.lifecycle(),
             ErasureLifecycleV1::AwaitingAcknowledgements
         );
-        let predecessor = dispatched
-            .previous_state()
-            .ok_or("dispatched state has no predecessor")?;
         test_stage(
             "acknowledge lifecycle destruction",
             commands.acknowledge_erasure(
@@ -601,7 +604,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
                 },
             ),
         )?;
-        let receipt = test_stage(
+        test_stage(
             "finalize lifecycle request",
             commands.finalize_erasure_request(
                 request_reference,
@@ -611,20 +614,14 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
                     ErasureReplayClaimV1::Exact,
                 ),
             ),
-        )?;
-        Ok::<_, Box<dyn std::error::Error>>((receipt, predecessor))
-    }?;
+        )?
+    };
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_ne!(receipt.terminal_state(), reference(0));
     assert_ne!(receipt.coordinator(), reference(0));
     assert_ne!(receipt.provenance(), reference(0));
     let mut reads = test_stage("open lifecycle reader", host.read_sender())?;
-    assert_terminal_readback(
-        &mut reads,
-        &receipt,
-        request_reference,
-        dispatched_predecessor,
-    )?;
+    assert_terminal_readback(&mut reads, &receipt, request_reference)?;
     Ok(())
 }
 
@@ -826,7 +823,10 @@ fn public_read_sender_reports_missing_request_and_missing_authority(
     )?;
     let mut reads = test_stage("open read-contract sender", host.read_sender())?;
     assert_eq!(
-        test_stage("read missing request", reads.erasure_state(reference(250)),)?,
+        test_stage(
+            "read missing request history",
+            reads.erasure_state_history(reference(250)),
+        )?,
         None
     );
 
@@ -839,7 +839,7 @@ fn public_read_sender_reports_missing_request_and_missing_authority(
     )?;
     let mut empty_reads = test_stage("open authority-free reader", empty_host.read_sender())?;
     assert_eq!(
-        empty_reads.erasure_state(reference(250)),
+        empty_reads.erasure_state_history(reference(250)),
         Err(ErasureHostErrorV1::AuthorizationDenied)
     );
     Ok(())
@@ -968,7 +968,7 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
         }),
     )?;
     authority.allow_post_freeze();
-    let (receipt, dispatched_predecessor) = {
+    let receipt = {
         let mut commands = test_stage("open partial-failure sender", host.command_sender())?;
         let dispatched = test_stage(
             "dispatch partial-failure destruction",
@@ -978,10 +978,7 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
             dispatched.lifecycle(),
             ErasureLifecycleV1::AwaitingAcknowledgements
         );
-        let predecessor = dispatched
-            .previous_state()
-            .ok_or("dispatched state has no predecessor")?;
-        let receipt = test_stage(
+        test_stage(
             "finalize partial-failure request",
             commands.finalize_erasure_request(
                 request_reference,
@@ -991,20 +988,14 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
                     ErasureReplayClaimV1::StructuralOnly,
                 ),
             ),
-        )?;
-        Ok::<_, Box<dyn std::error::Error>>((receipt, predecessor))
-    }?;
+        )?
+    };
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     assert_ne!(receipt.terminal_state(), reference(0));
     assert_ne!(receipt.coordinator(), reference(0));
     assert_ne!(receipt.provenance(), reference(0));
     let mut reads = test_stage("open partial-failure reader", host.read_sender())?;
-    assert_terminal_readback(
-        &mut reads,
-        &receipt,
-        request_reference,
-        dispatched_predecessor,
-    )?;
+    assert_terminal_readback(&mut reads, &receipt, request_reference)?;
     Ok(())
 }
 
