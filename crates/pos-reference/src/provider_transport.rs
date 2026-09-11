@@ -20,8 +20,8 @@ use rustix::net::sockopt::{socket_error, socket_peercred};
 use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
 use crate::sandbox_provider_protocol::{
-    PayloadDescriptor, PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest,
-    SandboxPayloadChunk, SelectorGrantCommitment,
+    AuthenticatedSandboxProviderResult, PayloadDescriptor, PayloadDirection,
+    PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk, SelectorGrantCommitment,
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::open_directory_chain;
