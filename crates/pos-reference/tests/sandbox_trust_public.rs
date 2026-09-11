@@ -3,9 +3,10 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    SandboxAdministratorPolicy, SandboxProviderProtocolError as ProtocolError,
-    SandboxRevocationSnapshot, SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole,
-    SandboxTrustSnapshot, SelectorRevocationState,
+    RevocationUpdateRequest, SandboxAdministratorPolicy,
+    SandboxProviderProtocolError as ProtocolError, SandboxRevocationSnapshot,
+    SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    SelectorRevocationState,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -969,6 +970,16 @@ fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
         &fixture.signer,
         test_nonce(),
     )?;
+    assert!(
+        RevocationUpdateRequest::authenticate(b"not-cbor", &fixture.trust, &fixture.current)
+            .is_err()
+    );
+    assert!(RevocationUpdateRequest::authenticate(
+        &encode(&Value::Null)?,
+        &fixture.trust,
+        &fixture.current
+    )
+    .is_err());
     for field in 2..=7 {
         let changed = resign_unsigned_field(&update, "RCU1", field, Value::Null, &fixture.signer)?;
         let mut state = SelectorRevocationState::new(fixture.current.clone());
@@ -989,6 +1000,39 @@ fn selector_revocation_state_rejects_malformed_update_fields() -> TestResult {
             ProtocolError::DigestMismatch
         ))
     ));
+    let malformed_next = resign_unsigned_field(
+        &update,
+        "RCU1",
+        4,
+        Value::Bytes(b"not-cbor".to_vec()),
+        &fixture.signer,
+    )?;
+    assert!(RevocationUpdateRequest::authenticate(
+        &malformed_next,
+        &fixture.trust,
+        &fixture.current
+    )
+    .is_err());
+
+    let skipped_bytes = sign_record(
+        "RVS1",
+        revocation(&fixture.trust, 7, vec![]),
+        &fixture.signer,
+    )?;
+    let skipped = SandboxRevocationSnapshot::authenticate(&skipped_bytes, &fixture.trust)?;
+    let skipped_update = revocation_update(
+        &fixture.current,
+        &skipped_bytes,
+        &skipped,
+        &fixture.signer,
+        test_nonce(),
+    )?;
+    assert!(RevocationUpdateRequest::authenticate(
+        &skipped_update,
+        &fixture.trust,
+        &fixture.current
+    )
+    .is_err());
     Ok(())
 }
 
