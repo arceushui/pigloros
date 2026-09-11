@@ -785,11 +785,7 @@ impl AdmittedSandboxProvider {
             || request_authority.fixture_digest != commitment.fixture_digest
             || request.capability_ids != commitment.capability_ids
             || expected_plans != commitment.network_plan_digests
-            || !request
-                .capability_ids
-                .contains(&commitment.required_provider_capability.capability_id)
             || !self.supports_capabilities(&request.capability_ids)
-            || !self.supports_required_capability(&commitment.required_provider_capability)
         {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
@@ -1087,7 +1083,6 @@ impl SelectorGrantCommitment {
             || requirement.policy_epoch != provider.policy.policy_epoch()
             || u64::from(attempt.mode) != launch.execution_mode.code()
             || attempt.fixture_digest == [0; 32]
-            || evaluation.execution_profile_digest == [0; 32]
             || !attempt
                 .capability_ids
                 .contains(&requirement.required_provider_capability.capability_id)
