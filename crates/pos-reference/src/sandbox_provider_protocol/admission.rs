@@ -4,23 +4,31 @@ use std::ops::Deref;
 
 use ciborium::value::Value;
 
-use crate::evaluator_protocol::RequiredProviderCapability;
+use crate::evaluator::CaseAttempt;
+use crate::evaluator_protocol::{EvaluationRequest, RequiredProviderCapability};
 
 use super::codec::{
-    array, bounded_array, bytes_value, decode_document, encode, identifier, key_id,
+    array, bounded_array, bytes_value, decode_document, encode, identifier, key_id, record_digest,
     require_canonical_order, require_signature, signed, text, text_value, uint, uint_value,
     valid_identifier, valid_key_id, verify_digest, verify_signature,
 };
 use super::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, LaunchPolicy, ProviderCapability,
     ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxExecuteRequest,
-    SandboxProviderManifest, SandboxProviderProtocolError, SandboxProviderReceipt,
-    SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome,
-    SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
+    SandboxExecutionMode, SandboxLimit, SandboxProviderManifest, SandboxProviderProtocolError,
+    SandboxProviderReceipt, SandboxProviderResult, SandboxRevocationSnapshot,
+    SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError, SandboxTrustRole,
+    SandboxTrustSnapshot, SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
 const REQUIRED_FEATURE_SET_DOMAIN: &[u8] = b"PiglorOS.RequiredHostFeatureSet.v1\0";
+const READBACK_SET_DOMAIN: &[u8] = b"PiglorOS.SandboxReadbackSet.v1\0";
+const MAX_BROKER_HARD_CAP_BYTES: usize = 1024;
+const LIMIT_COUNT: usize = 17;
+const MAX_NETWORK_PLANS: usize = 256;
+const CONCURRENT_ATTEMPTS_LIMIT_ID: usize = 13;
+const MAX_CONCURRENT_ATTEMPTS: u64 = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProviderSelectionBinding {
@@ -50,6 +58,39 @@ struct GrantBinding {
     input: [u8; 32],
     exchange_plans: Vec<[u8; 32]>,
     launch_policy: [u8; 32],
+    effective_limits: [u8; 32],
+    readback_set: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SelectorCommitmentAuthority {
+    provider_manifest: [u8; 32],
+    provider_binary: [u8; 32],
+    host_profile: [u8; 32],
+    syscall_set: [u8; 32],
+    administrator_policy: [u8; 32],
+    launch_policy: [u8; 32],
+    image: [u8; 32],
+}
+
+/// Selector-derived authority that an AGR1 must reproduce exactly.
+///
+/// Its fields are deliberately private: callers provide authenticated EVR1,
+/// EAI1, and NXP1 sources, while this module derives ELM1 and RBS1 itself.
+/// A commitment cannot be assembled from provider-supplied expectation digests.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectorGrantCommitment {
+    authority: SelectorCommitmentAuthority,
+    required_provider_capability: RequiredProviderCapability,
+    evr1_digest: [u8; 32],
+    execution_profile_digest: [u8; 32],
+    fixture_digest: [u8; 32],
+    capability_ids: Vec<String>,
+    network_plan_digests: Vec<[u8; 32]>,
+    effective_limits: Vec<SandboxLimit>,
+    effective_limits_digest: [u8; 32],
+    readback_set: Vec<u8>,
+    expected_readback_set_digest: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -411,6 +452,9 @@ pub struct AdmittedSandboxProvider {
     trust: SandboxTrustSnapshot,
     revocation: SandboxRevocationSnapshot,
     runtime_key: ed25519_dalek::VerifyingKey,
+    broker_hard_caps: Vec<SandboxLimit>,
+    broker_hard_caps_digest: [u8; 32],
+    required_features: Vec<String>,
 }
 
 /// SIM1 and exact image bytes released by selector-owned admission.
@@ -457,6 +501,8 @@ impl AdmittedSandboxProvider {
             inputs.broker_hard_caps,
             &decoded,
         )?;
+        let broker_hard_caps = decode_broker_hard_caps(inputs.broker_hard_caps)?;
+        let broker_hard_caps_digest = digest_bytes(inputs.broker_hard_caps);
         let runtime_key = Self::authenticate_provider_signers(trust, revocation, &decoded)?;
         Self::validate_conformance(inputs.required_features, &decoded)?;
         Ok(Self {
@@ -468,6 +514,9 @@ impl AdmittedSandboxProvider {
             trust: trust.clone(),
             revocation: revocation.clone(),
             runtime_key,
+            broker_hard_caps,
+            broker_hard_caps_digest,
+            required_features: inputs.required_features.to_vec(),
         })
     }
 
@@ -680,6 +729,28 @@ impl AdmittedSandboxProvider {
         Ok(launch)
     }
 
+    /// Derive the only ELM1 and RBS1 commitments that an AGR1 may carry.
+    ///
+    /// The selector supplies the authenticated EVR1 request, its selected EAI1
+    /// attempt, and the ordered NXP1 plans. This method derives the expected
+    /// digests from those sources and from the already admitted provider,
+    /// image, launch policy, and BHC1 bytes; no caller can provide an expected
+    /// ELM1 or RBS1 digest.
+    ///
+    /// # Errors
+    /// Rejects incomplete, substituted, noncanonical, or unsupported selector
+    /// authority before returning a commitment.
+    pub fn derive_selector_grant_commitment(
+        &self,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+        evaluation: &EvaluationRequest,
+        attempt: &CaseAttempt,
+        network_plans: &[super::NetworkExchangePlan],
+    ) -> Result<SelectorGrantCommitment, SandboxAdmissionError> {
+        SelectorGrantCommitment::derive(self, image, launch, evaluation, attempt, network_plans)
+    }
+
     /// Authenticate AGR1 and bind it to the exact selected SPX1 authority.
     ///
     /// # Errors
@@ -691,7 +762,11 @@ impl AdmittedSandboxProvider {
         request: &SandboxExecuteRequest,
         image: &AdmittedSandboxImage,
         launch: &LaunchPolicy,
+        commitment: &SelectorGrantCommitment,
     ) -> Result<AuthenticatedAdmissionGrant, SandboxAdmissionError> {
+        if !commitment.matches(self, image, launch) {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
         self.validate_execute_authority(request, image, launch)?;
         let grant = AdmissionGrant::from_canonical_cbor(bytes)?;
         if grant.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
@@ -717,6 +792,8 @@ impl AdmittedSandboxProvider {
             input: grant.input_digest,
             exchange_plans: grant.exchange_plan_digests.clone(),
             launch_policy: grant.expected_launch_policy_digest,
+            effective_limits: grant.elm1_digest,
+            readback_set: grant.expected_readback_set_digest,
         };
         let expected = GrantBinding {
             request_id: request.request.request_id,
@@ -744,8 +821,21 @@ impl AdmittedSandboxProvider {
             input: request.adapter_input.digest,
             exchange_plans: expected_plans,
             launch_policy: launch.policy_digest,
+            effective_limits: commitment.effective_limits_digest,
+            readback_set: commitment.expected_readback_set_digest,
         };
-        if actual != expected || !self.supports_capabilities(&request.capability_ids) {
+        if actual != expected
+            || request_authority.evr1_digest != commitment.evr1_digest
+            || request_authority.execution_profile_digest != commitment.execution_profile_digest
+            || request_authority.fixture_digest != commitment.fixture_digest
+            || request.capability_ids != commitment.capability_ids
+            || expected_plans != commitment.network_plan_digests
+            || !request
+                .capability_ids
+                .contains(&commitment.required_provider_capability.capability_id)
+            || !self.supports_capabilities(&request.capability_ids)
+            || !self.supports_required_capability(&commitment.required_provider_capability)
+        {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
         Ok(AuthenticatedAdmissionGrant(grant))
@@ -971,6 +1061,325 @@ fn feature_proof_value(proof: &HostFeatureProof) -> Value {
         uint_value(u64::from(proof.passed)),
         bytes_value(&proof.evidence_digest),
     ])
+}
+
+impl SelectorGrantCommitment {
+    fn derive(
+        provider: &AdmittedSandboxProvider,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+        evaluation: &EvaluationRequest,
+        attempt: &CaseAttempt,
+        network_plans: &[super::NetworkExchangePlan],
+    ) -> Result<Self, SandboxAdmissionError> {
+        evaluation
+            .to_canonical_cbor()
+            .map_err(|_| SandboxAdmissionError::ConformanceMismatch)?;
+        let requirement = evaluation
+            .sandbox_requirement
+            .as_ref()
+            .ok_or(SandboxAdmissionError::ConformanceMismatch)?;
+        if requirement.lps1_digest != launch.policy_digest
+            || requirement.sim1_digest != image.manifest.manifest_digest
+            || requirement.apt1_digest != provider.policy.policy_digest()
+            || requirement.policy_epoch != provider.policy.policy_epoch()
+            || u64::from(attempt.mode) != launch.execution_mode.code()
+            || attempt.fixture_digest == [0; 32]
+            || evaluation.execution_profile_digest == [0; 32]
+            || !attempt
+                .capability_ids
+                .contains(&requirement.required_provider_capability.capability_id)
+            || !provider.supports_required_capability(&requirement.required_provider_capability)
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        if network_plans.len() > MAX_NETWORK_PLANS {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds.into());
+        }
+        super::execution::validate_network_plans(network_plans)?;
+        let effective_limits =
+            derive_effective_limits(&provider.broker_hard_caps, launch, attempt)?;
+        let effective_limits_digest = effective_limits_digest(
+            &effective_limits,
+            provider.broker_hard_caps_digest,
+            provider.policy.policy_digest(),
+            launch.policy_digest,
+            evaluation.execution_profile_digest,
+            attempt.fixture_digest,
+            &provider.manifest.runtime_attestation_key_id,
+        )?;
+        let expected_fdl1_digest = expected_fdl1_digest(launch.execution_mode)?;
+        let network_plan_digests = network_plans
+            .iter()
+            .map(|plan| plan.plan_digest)
+            .collect::<Vec<_>>();
+        let (readback_set, expected_readback_set_digest) = readback_set(
+            provider,
+            image,
+            launch,
+            &requirement.required_provider_capability,
+            effective_limits_digest,
+            expected_fdl1_digest,
+            &network_plan_digests,
+        )?;
+        Ok(Self {
+            authority: selector_commitment_authority(provider, image, launch),
+            required_provider_capability: requirement.required_provider_capability.clone(),
+            evr1_digest: evaluation.request_digest,
+            execution_profile_digest: evaluation.execution_profile_digest,
+            fixture_digest: attempt.fixture_digest,
+            capability_ids: attempt.capability_ids.clone(),
+            network_plan_digests,
+            effective_limits,
+            effective_limits_digest,
+            readback_set,
+            expected_readback_set_digest,
+        })
+    }
+
+    fn matches(
+        &self,
+        provider: &AdmittedSandboxProvider,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+    ) -> bool {
+        self.authority == selector_commitment_authority(provider, image, launch)
+    }
+
+    /// Selector-derived ELM1 limits retained for provider-independent audit.
+    #[must_use]
+    pub fn effective_limits(&self) -> &[SandboxLimit] {
+        &self.effective_limits
+    }
+
+    /// Selector-derived ELM1 digest that AGR1 must reproduce.
+    #[must_use]
+    pub const fn effective_limits_digest(&self) -> [u8; 32] {
+        self.effective_limits_digest
+    }
+
+    /// Exact selector-derived RBS1 bytes retained for audit and golden vectors.
+    #[must_use]
+    pub fn expected_readback_set(&self) -> &[u8] {
+        &self.readback_set
+    }
+
+    /// Selector-derived RBS1 digest that AGR1 must reproduce.
+    #[must_use]
+    pub const fn expected_readback_set_digest(&self) -> [u8; 32] {
+        self.expected_readback_set_digest
+    }
+}
+
+fn selector_commitment_authority(
+    provider: &AdmittedSandboxProvider,
+    image: &AdmittedSandboxImage,
+    launch: &LaunchPolicy,
+) -> SelectorCommitmentAuthority {
+    SelectorCommitmentAuthority {
+        provider_manifest: provider.manifest.manifest_digest,
+        provider_binary: provider.manifest.binary_digest,
+        host_profile: provider.host_profile.profile_digest,
+        syscall_set: provider.syscall_set.syscall_set_digest,
+        administrator_policy: provider.policy.policy_digest(),
+        launch_policy: launch.policy_digest,
+        image: image.manifest.manifest_digest,
+    }
+}
+
+fn decode_broker_hard_caps(
+    bytes: &[u8],
+) -> Result<Vec<SandboxLimit>, SandboxProviderProtocolError> {
+    if bytes.is_empty() || bytes.len() > MAX_BROKER_HARD_CAP_BYTES {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    let document = decode_document(bytes)?;
+    let fields = array::<3>(&document)?;
+    if text(&fields[0])? != "BHC1" || uint(&fields[1])? != 1 {
+        return Err(SandboxProviderProtocolError::UnsupportedVersion);
+    }
+    decode_exact_limits(&fields[2])
+}
+
+fn decode_exact_limits(value: &Value) -> Result<Vec<SandboxLimit>, SandboxProviderProtocolError> {
+    let Value::Array(values) = value else {
+        return Err(SandboxProviderProtocolError::InvalidEncoding);
+    };
+    if values.len() != LIMIT_COUNT {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(expected_id, value)| {
+            let fields = array::<2>(value)?;
+            let limit_id = u8::try_from(uint(&fields[0])?)
+                .map_err(|_| SandboxProviderProtocolError::FieldOutOfBounds)?;
+            if usize::from(limit_id) != expected_id {
+                return Err(SandboxProviderProtocolError::NonCanonicalOrder);
+            }
+            Ok(SandboxLimit {
+                limit_id,
+                value: uint(&fields[1])?,
+            })
+        })
+        .collect()
+}
+
+fn derive_effective_limits(
+    broker: &[SandboxLimit],
+    launch: &LaunchPolicy,
+    attempt: &CaseAttempt,
+) -> Result<Vec<SandboxLimit>, SandboxProviderProtocolError> {
+    if broker.len() != LIMIT_COUNT
+        || launch.effective_limits.len() != LIMIT_COUNT
+        || !broker
+            .iter()
+            .zip(&launch.effective_limits)
+            .enumerate()
+            .all(|(limit_id, (broker, launch))| {
+                usize::from(broker.limit_id) == limit_id && broker.limit_id == launch.limit_id
+            })
+    {
+        return Err(SandboxProviderProtocolError::InconsistentFields);
+    }
+    let limits = broker
+        .iter()
+        .zip(&launch.effective_limits)
+        .map(|(broker, policy)| SandboxLimit {
+            limit_id: broker.limit_id,
+            value: broker.value.min(policy.value).min(attempt_limit(broker.limit_id, attempt)),
+        })
+        .collect::<Vec<_>>();
+    if limits[4].value == 0
+        || limits[CONCURRENT_ATTEMPTS_LIMIT_ID].value > MAX_CONCURRENT_ATTEMPTS
+    {
+        return Err(SandboxProviderProtocolError::InconsistentFields);
+    }
+    Ok(limits)
+}
+
+fn attempt_limit(limit_id: u8, attempt: &CaseAttempt) -> u64 {
+    match limit_id {
+        0 => attempt.budget.memory_bytes,
+        4 => attempt.watchdog_ms,
+        8 => attempt.budget.output_bytes,
+        9 => attempt.budget.storage_bytes,
+        _ => u64::MAX,
+    }
+}
+
+fn effective_limits_digest(
+    limits: &[SandboxLimit],
+    broker_caps_digest: [u8; 32],
+    apt1_digest: [u8; 32],
+    lps1_digest: [u8; 32],
+    execution_profile_digest: [u8; 32],
+    fixture_digest: [u8; 32],
+    runtime_attestation_key_id: &str,
+) -> Result<[u8; 32], SandboxProviderProtocolError> {
+    record_digest(
+        "ELM1",
+        &Value::Array(vec![
+            text_value("ELM1"),
+            uint_value(1),
+            limit_values(limits),
+            bytes_value(&broker_caps_digest),
+            bytes_value(&apt1_digest),
+            bytes_value(&lps1_digest),
+            bytes_value(&execution_profile_digest),
+            bytes_value(&fixture_digest),
+            text_value(runtime_attestation_key_id),
+        ]),
+    )
+}
+
+fn expected_fdl1_digest(
+    mode: SandboxExecutionMode,
+) -> Result<[u8; 32], SandboxProviderProtocolError> {
+    let entries = match mode {
+        SandboxExecutionMode::Local => vec![fd_layout_entry(3, 0), fd_layout_entry(4, 1)],
+        SandboxExecutionMode::AirGapped
+        | SandboxExecutionMode::Replay
+        | SandboxExecutionMode::Fork => vec![fd_layout_entry(3, 1)],
+    };
+    record_digest(
+        "FDL1",
+        &Value::Array(vec![
+            text_value("FDL1"),
+            uint_value(1),
+            uint_value(mode.code()),
+            Value::Array(entries),
+        ]),
+    )
+}
+
+fn readback_set(
+    provider: &AdmittedSandboxProvider,
+    image: &AdmittedSandboxImage,
+    launch: &LaunchPolicy,
+    required_capability: &RequiredProviderCapability,
+    effective_limits_digest: [u8; 32],
+    expected_fdl1_digest: [u8; 32],
+    network_plan_digests: &[[u8; 32]],
+) -> Result<(Vec<u8>, [u8; 32]), SandboxProviderProtocolError> {
+    let unsigned = Value::Array(vec![
+        text_value("RBS1"),
+        uint_value(1),
+        uint_value(0),
+        text_value(&provider.manifest.provider_id),
+        bytes_value(&provider.manifest.manifest_digest),
+        bytes_value(&provider.manifest.binary_digest),
+        bytes_value(&provider.manifest.public_contract_digest),
+        bytes_value(&provider.host_profile.profile_digest),
+        uint_value(provider.syscall_set.architecture.code()),
+        text_value(&provider.manifest.runtime_attestation_key_id),
+        Value::Array(vec![
+            text_value(&required_capability.capability_id),
+            uint_value(required_capability.capability_version),
+            uint_value(required_capability.minimum_strength),
+        ]),
+        uint_value(launch.execution_mode.code()),
+        bytes_value(&launch.policy_digest),
+        bytes_value(&image.manifest.manifest_digest),
+        bytes_value(&provider.syscall_set.syscall_set_digest),
+        bytes_value(&effective_limits_digest),
+        bytes_value(&expected_fdl1_digest),
+        Value::Array(
+            provider
+                .required_features
+                .iter()
+                .map(|feature| text_value(feature))
+                .collect(),
+        ),
+        Value::Array(
+            network_plan_digests
+                .iter()
+                .map(|digest| bytes_value(digest))
+                .collect(),
+        ),
+    ]);
+    let digest = digest_value(READBACK_SET_DOMAIN, &unsigned)?;
+    let bytes = encode(&Value::Array(vec![unsigned, bytes_value(&digest)]))?;
+    Ok((bytes, digest))
+}
+
+fn limit_values(limits: &[SandboxLimit]) -> Value {
+    Value::Array(
+        limits
+            .iter()
+            .map(|limit| {
+                Value::Array(vec![
+                    uint_value(u64::from(limit.limit_id)),
+                    uint_value(limit.value),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn fd_layout_entry(fd: u64, role: u64) -> Value {
+    Value::Array(vec![uint_value(fd), uint_value(role)])
 }
 
 fn capability_set_digest(

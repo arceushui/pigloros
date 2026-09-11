@@ -1133,8 +1133,16 @@ mod tests {
         let features_digest = feature_digest(&features)?;
         let provider_binary = b"exact provider binary";
         let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
-        let hard_caps = b"broker hard caps";
-        let hard_caps_digest = *blake3::hash(hard_caps).as_bytes();
+        let hard_caps = encode(&Value::Array(vec![
+            Value::Text("BHC1".to_owned()),
+            integer(1),
+            Value::Array(
+                (0..17)
+                    .map(|limit_id| Value::Array(vec![integer(limit_id), integer(2_000)]))
+                    .collect(),
+            ),
+        ]))?;
+        let hard_caps_digest = *blake3::hash(&hard_caps).as_bytes();
         let manifest = provider_manifest(&authority, provider_binary_digest, features_digest)?;
         let manifest_digest = signed_record_digest(&manifest)?;
         let syscall = syscall_record()?;
