@@ -1248,18 +1248,53 @@ fn closed_composition_proves_empty_but_rejects_non_empty_authority(
 
     let authority = ClosedErasureCoordinatorAuthorityV1;
     assert_eq!(
-        authority
-            .verified_topology_observation(reference(1), reference(2))
-            .expect_err("closed authority must reject topology evidence"),
-        ErasureErrorV1::ProvenanceMissing
+        authority.verified_topology_observation(reference(1), reference(2)),
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
 
 #[test]
-fn closed_authority_rejects_every_authority_operation() -> Result<(), Box<dyn std::error::Error>> {
+fn closed_authority_rejects_request_operations() -> Result<(), Box<dyn std::error::Error>> {
     let authority = ClosedErasureCoordinatorAuthorityV1;
     let request = test_stage("construct closed-authority request", persistence_request())?;
+    let request_reference = request.reference();
+    assert_eq!(
+        authority.authenticate(&request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_authorization(
+            request_reference,
+            reference(230),
+            ErasureAuthorizationDecisionV1::Authorized,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let correction = test_stage(
+        "construct closed-authority correction",
+        pos_core::ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request_reference,
+            rejected_terminal_state: reference(231),
+            correction_reason: reference(232),
+            authorization_provenance: reference(233),
+        }),
+    )?;
+    assert_eq!(
+        authority.admit_corrected_submission(&request, &correction),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn closed_authority_rejects_freeze_and_scope_operations() -> Result<(), Box<dyn std::error::Error>>
+{
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    let request = test_stage(
+        "construct closed-authority freeze request",
+        persistence_request(),
+    )?;
     let request_reference = request.reference();
     let target = persistence_target();
     let obligation = test_stage(
@@ -1296,7 +1331,6 @@ fn closed_authority_rejects_every_authority_operation() -> Result<(), Box<dyn st
         authority.validate_freeze_authorization(&freeze_admission, &freeze_authorization),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-
     let extension = test_stage(
         "construct closed-authority scope extension",
         ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
@@ -1308,22 +1342,59 @@ fn closed_authority_rejects_every_authority_operation() -> Result<(), Box<dyn st
             admission_provenance: reference(207),
         }),
     )?;
-    let resolution = test_stage(
-        "construct closed-authority resolution",
-        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
-            request: request_reference,
-            affected_digests: vec![reference(208)],
-            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
-            scope_commitment: reference(209),
-            policy: reference(210),
-            trust: reference(211),
-            principal: reference(212),
-            authorization_provenance: reference(213),
-            reason: reference(214),
-            issue_position: 1,
-            predecessor_resolution: None,
-        }),
+    let transition = ErasureStateTransitionV1 {
+        lifecycle: ErasureLifecycleV1::AccessFrozen,
+        freeze_position: Some(1),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        acknowledged_targets: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        provenance: reference(226),
+    };
+    let fork_input = ErasureForkAdmissionInputV1 {
+        operation: reference(227),
+        expected_inventory_generation: reference(228),
+        child_scope: reference(229),
+        child: pos_core::TimelineMeta::root("closed-authority-child"),
+    };
+    assert_eq!(
+        authority.admit_atomic_freeze(request_reference, &transition),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_scope_extension(&extension),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_fork_scope_extension(&extension, &fork_input),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.resolve_fork_child_scope(fork_input.child.id, &fork_input.child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.validate_scope_extension(&extension),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn closed_authority_rejects_retry_and_acknowledgement_operations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    let request = test_stage(
+        "construct closed-authority retry request",
+        persistence_request(),
     )?;
+    let request_reference = request.reference();
+    let target = persistence_target();
+    let obligation = test_stage(
+        "construct closed-authority retry obligation",
+        obligation(request_reference, target),
+    )?;
+    let obligations = vec![obligation];
     let retry = test_stage(
         "construct closed-authority retry admission",
         retry_admission(RetryAdmissionFixture {
@@ -1353,6 +1424,42 @@ fn closed_authority_rejects_every_authority_operation() -> Result<(), Box<dyn st
             trust: reference(216),
         }),
     )?;
+    assert_eq!(
+        authority.admit_attempt(&retry),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_acknowledgement(&acknowledgement),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn closed_authority_rejects_receipt_and_administrative_operations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    let request = test_stage(
+        "construct closed-authority receipt request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    let resolution = test_stage(
+        "construct closed-authority resolution",
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: request_reference,
+            affected_digests: vec![reference(208)],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: reference(209),
+            policy: reference(210),
+            trust: reference(211),
+            principal: reference(212),
+            authorization_provenance: reference(213),
+            reason: reference(214),
+            issue_position: 1,
+            predecessor_resolution: None,
+        }),
+    )?;
     let receipt = ErasureReceiptInputV1 {
         request: request_reference,
         terminal_state: reference(222),
@@ -1377,61 +1484,8 @@ fn closed_authority_rejects_every_authority_operation() -> Result<(), Box<dyn st
         signature: reference(225),
         receipt_digest: reference(0),
     };
-    let transition = ErasureStateTransitionV1 {
-        lifecycle: ErasureLifecycleV1::AccessFrozen,
-        freeze_position: Some(1),
-        pending_owners: Vec::new(),
-        failed_owners: Vec::new(),
-        acknowledged_targets: Vec::new(),
-        replay_claim: ErasureReplayClaimV1::Exact,
-        provenance: reference(226),
-    };
-    let fork_input = ErasureForkAdmissionInputV1 {
-        operation: reference(227),
-        expected_inventory_generation: reference(228),
-        child_scope: reference(229),
-        child: pos_core::TimelineMeta::root("closed-authority-child"),
-    };
-
     assert_eq!(
-        authority.authenticate(&request),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.admit_authorization(
-            request_reference,
-            reference(230),
-            ErasureAuthorizationDecisionV1::Authorized,
-        ),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    let correction = test_stage(
-        "construct closed-authority correction",
-        pos_core::ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-            rejected_request: request_reference,
-            rejected_terminal_state: reference(231),
-            correction_reason: reference(232),
-            authorization_provenance: reference(233),
-        }),
-    )?;
-    assert_eq!(
-        authority.admit_corrected_submission(&request, &correction),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.admit_atomic_freeze(request_reference, &transition),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.admit_scope_extension(&extension),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.admit_fork_scope_extension(&extension, &fork_input),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.resolve_fork_child_scope(fork_input.child.id, &fork_input.child),
+        authority.admit_receipt(&receipt),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
@@ -1439,27 +1493,11 @@ fn closed_authority_rejects_every_authority_operation() -> Result<(), Box<dyn st
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.dispatch_destruction(request_reference, &[]),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.admit_attempt(&retry),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.admit_acknowledgement(&acknowledgement),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.admit_receipt(&receipt),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        authority.validate_scope_extension(&extension),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
         authority.validate_administrative_resolution(&resolution),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.dispatch_destruction(request_reference, &[]),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1487,6 +1525,16 @@ fn compatibility_recovery_without_composition_remains_empty_only(
         ),
     )?;
     assert_eq!(gateway_host.status(), ErasureHostStatusV1::Ready);
+    let composition = ErasureCoordinatorCompositionV1::closed();
+    let composed_gateway_host = test_stage(
+        "open composed compatibility gateway host",
+        ErasureExecutionHostV1::open_gateway_with_recovery(
+            StoreConfig::Memory,
+            Some(&composition),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(composed_gateway_host.status(), ErasureHostStatusV1::Ready);
 
     let path = std::env::temp_dir().join(format!(
         "pigloros-runtime-recovery-{}.db",
@@ -1512,6 +1560,15 @@ fn compatibility_recovery_without_composition_remains_empty_only(
         ),
     )?;
     assert_eq!(read_only_host.status(), ErasureHostStatusV1::Ready);
+    let composed_read_only_host = test_stage(
+        "open composed compatibility read-only host",
+        ErasureExecutionHostV1::open_read_only_with_recovery(
+            &path_text,
+            Some(&composition),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(composed_read_only_host.status(), ErasureHostStatusV1::Ready);
     std::fs::remove_file(path)?;
     Ok(())
 }
