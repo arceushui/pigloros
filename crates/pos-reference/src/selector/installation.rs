@@ -691,6 +691,17 @@ mod tests {
         ]))?)
     }
 
+    fn signed_record_digest(bytes: &[u8]) -> TestResult<[u8; 32]> {
+        let value: Value = ciborium::from_reader(bytes)?;
+        let Value::Array(wrapper) = value else {
+            return Err("signed record wrapper is not an array".into());
+        };
+        let Value::Bytes(digest) = wrapper.get(1).ok_or("signed record digest missing")? else {
+            return Err("signed record digest is not bytes".into());
+        };
+        Ok(digest.as_slice().try_into()?)
+    }
+
     fn held_artifact(
         kind: u8,
         identity: [u8; 32],
@@ -729,16 +740,7 @@ mod tests {
             ]),
             &root,
         )?;
-        let trust_digest: [u8; 32] = {
-            let value: Value = ciborium::from_reader(trust_bytes.as_slice())?;
-            let Value::Array(wrapper) = value else {
-                return Err("TRS1 wrapper is not an array".into());
-            };
-            let Value::Bytes(digest) = wrapper.get(1).ok_or("TRS1 digest missing")? else {
-                return Err("TRS1 digest is not bytes".into());
-            };
-            digest.as_slice().try_into()?
-        };
+        let trust_digest = signed_record_digest(&trust_bytes)?;
         let revocation_bytes = sign_record(
             "RVS1",
             Value::Array(vec![
@@ -753,16 +755,7 @@ mod tests {
             ]),
             &policy_signer,
         )?;
-        let revocation_digest: [u8; 32] = {
-            let value: Value = ciborium::from_reader(revocation_bytes.as_slice())?;
-            let Value::Array(wrapper) = value else {
-                return Err("RVS1 wrapper is not an array".into());
-            };
-            let Value::Bytes(digest) = wrapper.get(1).ok_or("RVS1 digest missing")? else {
-                return Err("RVS1 digest is not bytes".into());
-            };
-            digest.as_slice().try_into()?
-        };
+        let revocation_digest = signed_record_digest(&revocation_bytes)?;
         let provider_binary = *blake3::hash(b"provider-binary").as_bytes();
         let hard_caps = *blake3::hash(b"hard-caps").as_bytes();
         let policy_bytes = sign_record(
@@ -787,16 +780,7 @@ mod tests {
             ]),
             &policy_signer,
         )?;
-        let policy_digest: [u8; 32] = {
-            let value: Value = ciborium::from_reader(policy_bytes.as_slice())?;
-            let Value::Array(wrapper) = value else {
-                return Err("APT1 wrapper is not an array".into());
-            };
-            let Value::Bytes(digest) = wrapper.get(1).ok_or("APT1 digest missing")? else {
-                return Err("APT1 digest is not bytes".into());
-            };
-            digest.as_slice().try_into()?
-        };
+        let policy_digest = signed_record_digest(&policy_bytes)?;
         let artifacts = [
             (0, trust_digest, trust_bytes.as_slice()),
             (1, revocation_digest, revocation_bytes.as_slice()),
