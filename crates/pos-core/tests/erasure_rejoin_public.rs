@@ -160,7 +160,7 @@ fn proof_for(
     ErasureRejoinProofV1::new(proof_input(receipt, entries))
 }
 
-fn proof_input(
+const fn proof_input(
     receipt: &ErasureReceiptV1,
     entries: Vec<ErasureRejoinInventoryV1>,
 ) -> ErasureRejoinProofInputV1 {
