@@ -2428,7 +2428,7 @@ mod tests {
     };
 
     use pos_store::memory::MemoryStore;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const fn reference(seed: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([seed; 32])
@@ -2461,9 +2461,8 @@ mod tests {
     }
 
     struct ResolveStateControlV1 {
-        calls: AtomicUsize,
-        fail_at: AtomicUsize,
-        missing_at: AtomicUsize,
+        fail_for: std::sync::Mutex<Option<(ErasureReferenceV1, usize)>>,
+        missing_for: std::sync::Mutex<Option<(ErasureReferenceV1, usize)>>,
         wrong_seen: AtomicBool,
         wrong_for: std::sync::Mutex<Option<ErasureReferenceV1>>,
         wrong_digest: std::sync::Mutex<Option<ErasureReferenceV1>>,
@@ -2472,13 +2471,34 @@ mod tests {
     impl ResolveStateControlV1 {
         fn new() -> Arc<Self> {
             Arc::new(Self {
-                calls: AtomicUsize::new(0),
-                fail_at: AtomicUsize::new(usize::MAX),
-                missing_at: AtomicUsize::new(usize::MAX),
+                fail_for: std::sync::Mutex::new(None),
+                missing_for: std::sync::Mutex::new(None),
                 wrong_seen: AtomicBool::new(false),
                 wrong_for: std::sync::Mutex::new(None),
                 wrong_digest: std::sync::Mutex::new(None),
             })
+        }
+
+        fn take_fault(
+            fault: &std::sync::Mutex<Option<(ErasureReferenceV1, usize)>>,
+            digest: ErasureReferenceV1,
+        ) -> bool {
+            let Ok(mut configured) = fault.lock() else {
+                return false;
+            };
+            let Some((requested, remaining)) = *configured else {
+                return false;
+            };
+            if requested != digest {
+                return false;
+            }
+            if remaining <= 1 {
+                *configured = None;
+                true
+            } else {
+                *configured = Some((requested, remaining - 1));
+                false
+            }
         }
     }
 
@@ -2635,11 +2655,10 @@ mod tests {
             &self,
             digest: ErasureReferenceV1,
         ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
-            let call = self.resolve_control.calls.fetch_add(1, Ordering::AcqRel) + 1;
-            if self.resolve_control.fail_at.load(Ordering::Acquire) == call {
+            if ResolveStateControlV1::take_fault(&self.resolve_control.fail_for, digest) {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            if self.resolve_control.missing_at.load(Ordering::Acquire) == call {
+            if ResolveStateControlV1::take_fault(&self.resolve_control.missing_for, digest) {
                 return Ok(None);
             }
             let wrong_for = self
@@ -3368,8 +3387,12 @@ mod tests {
     }
 
     fn set_resolve_fault(control: &ResolveStateControlV1, kind: &ResolveStateFaultV1) {
-        control.fail_at.store(usize::MAX, Ordering::Release);
-        control.missing_at.store(usize::MAX, Ordering::Release);
+        if let Ok(mut fail_for) = control.fail_for.lock() {
+            *fail_for = None;
+        }
+        if let Ok(mut missing_for) = control.missing_for.lock() {
+            *missing_for = None;
+        }
         control.wrong_seen.store(false, Ordering::Release);
         if let Ok(mut wrong_for) = control.wrong_for.lock() {
             *wrong_for = None;
@@ -3378,12 +3401,22 @@ mod tests {
             *wrong_digest = None;
         }
         match kind {
-            ResolveStateFaultV1::Adapter => control
-                .fail_at
-                .store(control.calls.load(Ordering::Acquire) + 3, Ordering::Release),
-            ResolveStateFaultV1::Missing => control
-                .missing_at
-                .store(control.calls.load(Ordering::Acquire) + 3, Ordering::Release),
+            ResolveStateFaultV1::Adapter {
+                requested,
+                occurrence,
+            } => {
+                if let Ok(mut fail_for) = control.fail_for.lock() {
+                    *fail_for = Some((*requested, *occurrence));
+                }
+            }
+            ResolveStateFaultV1::Missing {
+                requested,
+                occurrence,
+            } => {
+                if let Ok(mut missing_for) = control.missing_for.lock() {
+                    *missing_for = Some((*requested, *occurrence));
+                }
+            }
             ResolveStateFaultV1::Wrong {
                 requested,
                 replacement,
@@ -3399,8 +3432,14 @@ mod tests {
     }
 
     enum ResolveStateFaultV1 {
-        Adapter,
-        Missing,
+        Adapter {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+        Missing {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
         Wrong {
             requested: ErasureReferenceV1,
             replacement: ErasureReferenceV1,
@@ -3412,21 +3451,37 @@ mod tests {
     ) -> Result<(), ErasureHostErrorV1> {
         let (mut host, control, request, wrong_digest, predecessor_digest) =
             rejected_host_with_resolve_control()?;
-        control
-            .fail_at
-            .store(control.calls.load(Ordering::Acquire) + 1, Ordering::Release);
+        set_resolve_fault(
+            &control,
+            &ResolveStateFaultV1::Adapter {
+                requested: predecessor_digest,
+                occurrence: 1,
+            },
+        );
         assert_eq!(
             host.read_sender()?.erasure_state(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(&control, &ResolveStateFaultV1::Missing);
+        set_resolve_fault(
+            &control,
+            &ResolveStateFaultV1::Missing {
+                requested: predecessor_digest,
+                occurrence: 2,
+            },
+        );
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(&control, &ResolveStateFaultV1::Adapter);
+        set_resolve_fault(
+            &control,
+            &ResolveStateFaultV1::Adapter {
+                requested: predecessor_digest,
+                occurrence: 2,
+            },
+        );
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
