@@ -386,8 +386,8 @@ pub enum SandboxAdmissionError {
 pub struct SandboxProviderAdmissionInputs<'a> {
     /// Canonical signed SPM1 bytes.
     pub provider_manifest: &'a [u8],
-    /// Exact installed provider executable bytes.
-    pub provider_binary: &'a [u8],
+    /// Stream-verified content digest of the retained provider executable.
+    pub provider_binary_digest: [u8; 32],
     /// Exact independently installed broker hard-cap bytes selected by APT1.
     pub broker_hard_caps: &'a [u8],
     /// Canonical independently signed PCR1 bytes.
@@ -453,7 +453,7 @@ impl AdmittedSandboxProvider {
         Self::validate_selected_provider(
             policy,
             revocation,
-            inputs.provider_binary,
+            inputs.provider_binary_digest,
             inputs.broker_hard_caps,
             &decoded,
         )?;
@@ -474,7 +474,7 @@ impl AdmittedSandboxProvider {
     fn validate_selected_provider(
         policy: &SandboxAdministratorPolicy,
         revocation: &SandboxRevocationSnapshot,
-        provider_binary: &[u8],
+        provider_binary_digest: [u8; 32],
         broker_hard_caps: &[u8],
         decoded: &DecodedProviderAdmission,
     ) -> Result<(), SandboxAdmissionError> {
@@ -510,7 +510,7 @@ impl AdmittedSandboxProvider {
         {
             return Err(SandboxAdmissionError::Revoked);
         }
-        if digest_bytes(provider_binary) != manifest.binary_digest {
+        if provider_binary_digest != manifest.binary_digest {
             return Err(SandboxAdmissionError::ArtifactMismatch);
         }
         Ok(())
