@@ -2446,8 +2446,6 @@ mod tests {
     };
 
     use pos_store::memory::MemoryStore;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     const fn reference(seed: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([seed; 32])
     }
@@ -2491,6 +2489,7 @@ mod tests {
         Wrong {
             requested: ErasureReferenceV1,
             replacement: ErasureReferenceV1,
+            seen: bool,
         },
     }
 
@@ -2503,21 +2502,77 @@ mod tests {
 
     struct ResolveStateControlV1 {
         fault: std::sync::Mutex<Option<ResolveStateFaultV1>>,
-        wrong_seen: AtomicBool,
     }
 
     impl ResolveStateControlV1 {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 fault: std::sync::Mutex::new(None),
-                wrong_seen: AtomicBool::new(false),
             })
         }
 
         fn set_fault(&self, fault: ResolveStateFaultV1) {
-            self.wrong_seen.store(false, Ordering::Release);
             if let Ok(mut configured) = self.fault.lock() {
-                *configured = Some(fault);
+                *configured = Some(fault.reset());
+            }
+        }
+
+        fn next_occurrence(self, digest: ErasureReferenceV1) -> Option<usize> {
+            match self {
+                ResolveStateFaultV1::Adapter {
+                    requested,
+                    occurrence,
+                }
+                | ResolveStateFaultV1::Missing {
+                    requested,
+                    occurrence,
+                } => (requested == digest).then_some(occurrence.saturating_sub(1)),
+                ResolveStateFaultV1::Wrong { .. } => None,
+            }
+        }
+
+        const fn with_occurrence(self, occurrence: usize) -> Self {
+            match self {
+                Self::Adapter { requested, .. } => Self::Adapter {
+                    requested,
+                    occurrence,
+                },
+                Self::Missing { requested, .. } => Self::Missing {
+                    requested,
+                    occurrence,
+                },
+                Self::Wrong {
+                    requested,
+                    replacement,
+                    seen,
+                } => Self::Wrong {
+                    requested,
+                    replacement,
+                    seen,
+                },
+            }
+        }
+
+        const fn fault_outcome(self) -> ResolveStateFaultOutcomeV1 {
+            match self {
+                Self::Adapter { .. } => ResolveStateFaultOutcomeV1::Adapter,
+                Self::Missing { .. } => ResolveStateFaultOutcomeV1::Missing,
+                Self::Wrong { replacement, .. } => ResolveStateFaultOutcomeV1::Wrong(replacement),
+            }
+        }
+
+        const fn reset(self) -> Self {
+            match self {
+                Self::Wrong {
+                    requested,
+                    replacement,
+                    ..
+                } => Self::Wrong {
+                    requested,
+                    replacement,
+                    seen: false,
+                },
+                other => other,
             }
         }
 
@@ -2528,45 +2583,33 @@ mod tests {
             let Some(fault) = *configured else {
                 return None;
             };
-            match fault {
-                ResolveStateFaultV1::Adapter {
-                    requested,
-                    occurrence,
-                } if requested == digest => {
-                    if occurrence <= 1 {
-                        *configured = None;
-                        Some(ResolveStateFaultOutcomeV1::Adapter)
-                    } else {
-                        *configured = Some(ResolveStateFaultV1::Adapter {
-                            requested,
-                            occurrence: occurrence - 1,
-                        });
-                        None
-                    }
+            if let Some(remaining) = fault.next_occurrence(digest) {
+                if remaining == 0 {
+                    *configured = None;
+                    return Some(fault.fault_outcome());
                 }
-                ResolveStateFaultV1::Missing {
-                    requested,
-                    occurrence,
-                } if requested == digest => {
-                    if occurrence <= 1 {
-                        *configured = None;
-                        Some(ResolveStateFaultOutcomeV1::Missing)
-                    } else {
-                        *configured = Some(ResolveStateFaultV1::Missing {
-                            requested,
-                            occurrence: occurrence - 1,
-                        });
-                        None
-                    }
+                *configured = Some(fault.with_occurrence(remaining));
+                return None;
+            }
+            if let ResolveStateFaultV1::Wrong {
+                requested,
+                replacement,
+                seen,
+            } = fault
+            {
+                if requested != digest {
+                    return None;
                 }
-                ResolveStateFaultV1::Wrong {
+                if seen {
+                    return Some(ResolveStateFaultOutcomeV1::Wrong(replacement));
+                }
+                *configured = Some(ResolveStateFaultV1::Wrong {
                     requested,
                     replacement,
-                } if requested == digest && self.wrong_seen.swap(true, Ordering::AcqRel) => {
-                    Some(ResolveStateFaultOutcomeV1::Wrong(replacement))
-                }
-                _ => None,
+                    seen: true,
+                });
             }
+            None
         }
     }
 
@@ -3438,10 +3481,6 @@ mod tests {
         })
     }
 
-    fn set_resolve_fault(control: &ResolveStateControlV1, kind: &ResolveStateFaultV1) {
-        control.set_fault(*kind);
-    }
-
     #[test]
     fn read_sender_fails_closed_for_recovery_and_history_adapter_faults(
     ) -> Result<(), ErasureHostErrorV1> {
@@ -3452,49 +3491,38 @@ mod tests {
             rejected_digest,
             predecessor_digest,
         } = rejected_host_with_resolve_control()?;
-        set_resolve_fault(
-            &control,
-            &ResolveStateFaultV1::Adapter {
-                requested: predecessor_digest,
-                occurrence: 1,
-            },
-        );
+        control.set_fault(ResolveStateFaultV1::Adapter {
+            requested: predecessor_digest,
+            occurrence: 1,
+        });
         assert_eq!(
             host.read_sender()?.erasure_state(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(
-            &control,
-            &ResolveStateFaultV1::Missing {
-                requested: predecessor_digest,
-                occurrence: 2,
-            },
-        );
+        control.set_fault(ResolveStateFaultV1::Missing {
+            requested: predecessor_digest,
+            occurrence: 2,
+        });
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(
-            &control,
-            &ResolveStateFaultV1::Adapter {
-                requested: predecessor_digest,
-                occurrence: 2,
-            },
-        );
+        control.set_fault(ResolveStateFaultV1::Adapter {
+            requested: predecessor_digest,
+            occurrence: 2,
+        });
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(
-            &control,
-            &ResolveStateFaultV1::Wrong {
-                requested: predecessor_digest,
-                replacement: rejected_digest,
-            },
-        );
+        control.set_fault(ResolveStateFaultV1::Wrong {
+            requested: predecessor_digest,
+            replacement: rejected_digest,
+            seen: false,
+        });
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
