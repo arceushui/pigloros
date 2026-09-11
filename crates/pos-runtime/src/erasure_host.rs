@@ -2478,44 +2478,94 @@ mod tests {
         resolve_control: Arc<ResolveStateControlV1>,
     }
 
+    #[derive(Clone, Copy)]
+    enum ResolveStateFaultV1 {
+        Adapter {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+        Missing {
+            requested: ErasureReferenceV1,
+            occurrence: usize,
+        },
+        Wrong {
+            requested: ErasureReferenceV1,
+            replacement: ErasureReferenceV1,
+        },
+    }
+
+    #[derive(Clone, Copy)]
+    enum ResolveStateFaultOutcomeV1 {
+        Adapter,
+        Missing,
+        Wrong(ErasureReferenceV1),
+    }
+
     struct ResolveStateControlV1 {
-        fail_for: std::sync::Mutex<Option<(ErasureReferenceV1, usize)>>,
-        missing_for: std::sync::Mutex<Option<(ErasureReferenceV1, usize)>>,
+        fault: std::sync::Mutex<Option<ResolveStateFaultV1>>,
         wrong_seen: AtomicBool,
-        wrong_for: std::sync::Mutex<Option<ErasureReferenceV1>>,
-        wrong_digest: std::sync::Mutex<Option<ErasureReferenceV1>>,
     }
 
     impl ResolveStateControlV1 {
         fn new() -> Arc<Self> {
             Arc::new(Self {
-                fail_for: std::sync::Mutex::new(None),
-                missing_for: std::sync::Mutex::new(None),
+                fault: std::sync::Mutex::new(None),
                 wrong_seen: AtomicBool::new(false),
-                wrong_for: std::sync::Mutex::new(None),
-                wrong_digest: std::sync::Mutex::new(None),
             })
         }
 
-        fn take_fault(
-            fault: &std::sync::Mutex<Option<(ErasureReferenceV1, usize)>>,
-            digest: ErasureReferenceV1,
-        ) -> bool {
-            let Ok(mut configured) = fault.lock() else {
-                return false;
-            };
-            let Some((requested, remaining)) = *configured else {
-                return false;
-            };
-            if requested != digest {
-                return false;
+        fn set_fault(&self, fault: ResolveStateFaultV1) {
+            self.wrong_seen.store(false, Ordering::Release);
+            if let Ok(mut configured) = self.fault.lock() {
+                *configured = Some(fault);
             }
-            if remaining <= 1 {
-                *configured = None;
-                true
-            } else {
-                *configured = Some((requested, remaining - 1));
-                false
+        }
+
+        fn outcome(&self, digest: ErasureReferenceV1) -> Option<ResolveStateFaultOutcomeV1> {
+            let Ok(mut configured) = self.fault.lock() else {
+                return None;
+            };
+            let Some(fault) = *configured else {
+                return None;
+            };
+            match fault {
+                ResolveStateFaultV1::Adapter {
+                    requested,
+                    occurrence,
+                } if requested == digest => {
+                    if occurrence <= 1 {
+                        *configured = None;
+                        Some(ResolveStateFaultOutcomeV1::Adapter)
+                    } else {
+                        *configured = Some(ResolveStateFaultV1::Adapter {
+                            requested,
+                            occurrence: occurrence - 1,
+                        });
+                        None
+                    }
+                }
+                ResolveStateFaultV1::Missing {
+                    requested,
+                    occurrence,
+                } if requested == digest => {
+                    if occurrence <= 1 {
+                        *configured = None;
+                        Some(ResolveStateFaultOutcomeV1::Missing)
+                    } else {
+                        *configured = Some(ResolveStateFaultV1::Missing {
+                            requested,
+                            occurrence: occurrence - 1,
+                        });
+                        None
+                    }
+                }
+                ResolveStateFaultV1::Wrong {
+                    requested,
+                    replacement,
+                } if requested == digest && self.wrong_seen.swap(true, Ordering::AcqRel) => {
+                    Some(ResolveStateFaultOutcomeV1::Wrong(replacement))
+                }
+                _ => None,
             }
         }
     }
@@ -2673,30 +2723,15 @@ mod tests {
             &self,
             digest: ErasureReferenceV1,
         ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
-            if ResolveStateControlV1::take_fault(&self.resolve_control.fail_for, digest) {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            if ResolveStateControlV1::take_fault(&self.resolve_control.missing_for, digest) {
-                return Ok(None);
-            }
-            let wrong_for = self
-                .resolve_control
-                .wrong_for
-                .lock()
-                .ok()
-                .and_then(|digest| *digest);
-            if wrong_for == Some(digest)
-                && self.resolve_control.wrong_seen.swap(true, Ordering::AcqRel)
-            {
-                if let Some(wrong_digest) = self
-                    .resolve_control
-                    .wrong_digest
-                    .lock()
-                    .ok()
-                    .and_then(|digest| *digest)
-                {
-                    return self.inner.resolve_state(wrong_digest);
+            match self.resolve_control.outcome(digest) {
+                Some(ResolveStateFaultOutcomeV1::Adapter) => {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
                 }
+                Some(ResolveStateFaultOutcomeV1::Missing) => return Ok(None),
+                Some(ResolveStateFaultOutcomeV1::Wrong(replacement)) => {
+                    return self.inner.resolve_state(replacement);
+                }
+                None => {}
             }
             self.inner.resolve_state(digest)
         }
@@ -3404,63 +3439,7 @@ mod tests {
     }
 
     fn set_resolve_fault(control: &ResolveStateControlV1, kind: &ResolveStateFaultV1) {
-        if let Ok(mut fail_for) = control.fail_for.lock() {
-            *fail_for = None;
-        }
-        if let Ok(mut missing_for) = control.missing_for.lock() {
-            *missing_for = None;
-        }
-        control.wrong_seen.store(false, Ordering::Release);
-        if let Ok(mut wrong_for) = control.wrong_for.lock() {
-            *wrong_for = None;
-        }
-        if let Ok(mut wrong_digest) = control.wrong_digest.lock() {
-            *wrong_digest = None;
-        }
-        match kind {
-            ResolveStateFaultV1::Adapter {
-                requested,
-                occurrence,
-            } => {
-                if let Ok(mut fail_for) = control.fail_for.lock() {
-                    *fail_for = Some((*requested, *occurrence));
-                }
-            }
-            ResolveStateFaultV1::Missing {
-                requested,
-                occurrence,
-            } => {
-                if let Ok(mut missing_for) = control.missing_for.lock() {
-                    *missing_for = Some((*requested, *occurrence));
-                }
-            }
-            ResolveStateFaultV1::Wrong {
-                requested,
-                replacement,
-            } => {
-                if let Ok(mut wrong_for) = control.wrong_for.lock() {
-                    *wrong_for = Some(*requested);
-                }
-                if let Ok(mut wrong_digest) = control.wrong_digest.lock() {
-                    *wrong_digest = Some(*replacement);
-                }
-            }
-        }
-    }
-
-    enum ResolveStateFaultV1 {
-        Adapter {
-            requested: ErasureReferenceV1,
-            occurrence: usize,
-        },
-        Missing {
-            requested: ErasureReferenceV1,
-            occurrence: usize,
-        },
-        Wrong {
-            requested: ErasureReferenceV1,
-            replacement: ErasureReferenceV1,
-        },
+        control.set_fault(*kind);
     }
 
     #[test]
