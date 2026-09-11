@@ -705,7 +705,7 @@ mod tests {
         for end in 0..encoded.len() {
             assert!(InstallationManifest::from_canonical_cbor(&encoded[..end]).is_err());
         }
-        let mut trailing = encoded.clone();
+        let mut trailing = encoded;
         trailing.push(0);
         assert!(InstallationManifest::from_canonical_cbor(&trailing).is_err());
         for (field, value) in [
