@@ -421,9 +421,9 @@ fn assert_terminal_readback(
     if history.len() < 3 {
         return Err("lifecycle history omitted a destruction predecessor".into());
     }
-    let [terminal, awaiting, dispatched, ..] = history.as_slice() else {
-        unreachable!("history length checked above");
-    };
+    let terminal = &history[0];
+    let awaiting = &history[1];
+    let dispatched = &history[2];
     assert_eq!(receipt.request(), request);
     assert_eq!(receipt.terminal_state(), terminal.state_digest());
     assert_eq!(receipt.coordinator(), terminal.coordinator());
