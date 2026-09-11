@@ -782,7 +782,7 @@ impl Fixture {
     fn inputs(&self) -> SandboxProviderAdmissionInputs<'_> {
         SandboxProviderAdmissionInputs {
             provider_manifest: &self.spm1,
-            provider_binary: &self.provider_binary,
+            provider_binary_digest: *blake3::hash(&self.provider_binary).as_bytes(),
             broker_hard_caps: &self.broker_hard_caps,
             conformance_report: &self.pcr1,
             host_profile: &self.hcp1,
@@ -886,7 +886,7 @@ fn complete_provider_and_image_admission_binds_all_authority() -> TestResult {
 fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResult {
     let fixture = Fixture::new()?;
     let wrong_binary = SandboxProviderAdmissionInputs {
-        provider_binary: b"changed",
+        provider_binary_digest: *blake3::hash(b"changed").as_bytes(),
         ..fixture.inputs()
     };
     assert_eq!(
