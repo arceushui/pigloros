@@ -3347,13 +3347,13 @@ mod tests {
         Ok((host, resolve_control, request_reference, rejected_digest))
     }
 
-    fn set_resolve_fault(control: &ResolveStateControlV1, kind: ResolveStateFaultV1) {
+    fn set_resolve_fault(control: &ResolveStateControlV1, kind: &ResolveStateFaultV1) {
         control.fail_at.store(usize::MAX, Ordering::Release);
         control.missing_at.store(usize::MAX, Ordering::Release);
         control.wrong_at.store(usize::MAX, Ordering::Release);
         if let ResolveStateFaultV1::Wrong(digest) = kind {
             if let Ok(mut wrong_digest) = control.wrong_digest.lock() {
-                *wrong_digest = Some(digest);
+                *wrong_digest = Some(*digest);
             }
         }
         let target = control.calls.load(Ordering::Acquire) + 3;
@@ -3382,19 +3382,19 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(&control, ResolveStateFaultV1::Missing);
+        set_resolve_fault(&control, &ResolveStateFaultV1::Missing);
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(&control, ResolveStateFaultV1::Adapter);
+        set_resolve_fault(&control, &ResolveStateFaultV1::Adapter);
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        set_resolve_fault(&control, ResolveStateFaultV1::Wrong(wrong_digest));
+        set_resolve_fault(&control, &ResolveStateFaultV1::Wrong(wrong_digest));
         assert_eq!(
             host.read_sender()?.erasure_state_history(request),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
