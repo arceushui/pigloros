@@ -6259,7 +6259,7 @@ mod tests {
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
-        let mut failed_read = new_store();
+        let failed_read = new_store();
         failed_read
             .conn
             .execute_batch("DROP TABLE erasure_evidence;")
