@@ -337,6 +337,7 @@ fn connect_at(path: &Path, expected_uid: u32) -> Result<UnixStream, SelectorBoun
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
@@ -431,7 +432,8 @@ mod tests {
         Ok(bytes)
     }
 
-    fn invoke_with_reply(
+    fn invoke_with_framed_reply(
+        declared_length: u32,
         control: Vec<u8>,
         trailing: Vec<u8>,
     ) -> Result<crate::selector_protocol::DecodedSelectorReply, AdapterError> {
@@ -450,9 +452,7 @@ mod tests {
             let (mut stream, _) = listener.accept()?;
             let mut request = Vec::new();
             stream.read_to_end(&mut request)?;
-            let length = u32::try_from(control.len())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            stream.write_all(&length.to_be_bytes())?;
+            stream.write_all(&declared_length.to_be_bytes())?;
             stream.write_all(&control)?;
             stream.write_all(&trailing)
         });
@@ -465,6 +465,15 @@ mod tests {
             .map_err(|_| AdapterError::ProtocolFailure)?
             .map_err(|_| AdapterError::ProtocolFailure)?;
         result
+    }
+
+    fn invoke_with_reply(
+        control: Vec<u8>,
+        trailing: Vec<u8>,
+    ) -> Result<crate::selector_protocol::DecodedSelectorReply, AdapterError> {
+        let declared_length =
+            u32::try_from(control.len()).map_err(|_| AdapterError::ProtocolFailure)?;
+        invoke_with_framed_reply(declared_length, control, trailing)
     }
 
     #[test]
@@ -581,6 +590,14 @@ mod tests {
     }
 
     #[test]
+    fn fixed_artifact_root_rejects_an_uninstalled_digest() {
+        assert_eq!(
+            ImmutableSandboxArtifact::open(SandboxArtifactKind::Provider, [0; 32]).map(|_| ()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+    }
+
+    #[test]
     fn selector_transport_rejects_missing_wrong_type_mode_and_owner(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
@@ -651,6 +668,14 @@ mod tests {
         );
         assert_eq!(
             invoke_with_reply(local_unavailable()?, vec![1]),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            invoke_with_framed_reply(1, Vec::new(), Vec::new()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            invoke_with_framed_reply(16 * 1024 * 1024 + 1, Vec::new(), Vec::new()),
             Err(AdapterError::ProtocolFailure)
         );
         Ok(())
