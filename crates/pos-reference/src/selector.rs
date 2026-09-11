@@ -16,7 +16,6 @@ use crate::selector_protocol::{decode_reply, encode_request, EncodedSelectorRequ
 /// Fixed root-owned selector endpoint. It is not configurable by an evaluator.
 pub const SANDBOX_SELECTOR_SOCKET: &str = "/run/pigloros/sandbox-provider.sock";
 
-const FORBIDDEN_WRITE_MODE: u32 = 0o222;
 const SELECTOR_SOCKET_MODE: u32 = 0o600;
 const MAX_SELECTOR_TRAILING_BYTES: u64 = 129 * 1024 * 1024;
 
