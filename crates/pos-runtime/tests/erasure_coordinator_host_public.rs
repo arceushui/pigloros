@@ -41,6 +41,7 @@ struct TestAuthority {
     frozen: AtomicBool,
     deny_authentication: AtomicBool,
     deny_topology: AtomicBool,
+    deny_scope_extension: AtomicBool,
     allow_rejection: AtomicBool,
     allow_corrected: AtomicBool,
     allow_administrative_resolution: AtomicBool,
@@ -114,7 +115,9 @@ impl ErasureRecoveryAuthorizationVerifierV1 for TestAuthority {
         &self,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        (!self.deny_scope_extension.load(Ordering::Acquire))
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn validate_administrative_resolution(
@@ -562,6 +565,18 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
     let request_reference = submit_authorize_freeze(&mut host, request)?;
     authority.allow_post_freeze();
 
+    let parent = {
+        let mut commands = test_stage("open topology sender", host.command_sender())?;
+        test_stage(
+            "create lifecycle fork parent",
+            commands.create_timeline("lifecycle-fork-parent"),
+        )?
+    };
+    test_stage(
+        "publish lifecycle fork topology",
+        authority.set_timeline(parent.id()),
+    )?;
+
     let target = persistence_target();
     let obligation = test_stage(
         "construct lifecycle obligation",
@@ -583,6 +598,15 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
     )?;
     let receipt = {
         let mut commands = test_stage("open lifecycle sender", host.command_sender())?;
+        test_stage(
+            "fork lifecycle scope",
+            commands.fork_timeline_identified(
+                reference(45),
+                parent.id(),
+                pos_core::Seq::ZERO,
+                "lifecycle-fork-child",
+            ),
+        )?;
         let dispatched = test_stage(
             "dispatch lifecycle destruction",
             commands.dispatch_erasure_destruction(request_reference, &admission),
@@ -622,6 +646,13 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
     assert_ne!(receipt.provenance(), reference(0));
     let mut reads = test_stage("open lifecycle reader", host.read_sender())?;
     assert_terminal_readback(&mut reads, &receipt, request_reference)?;
+    authority
+        .deny_scope_extension
+        .store(true, Ordering::Release);
+    assert_eq!(
+        reads.erasure_state(request_reference),
+        Err(pos_runtime::ErasureHostErrorV1::RecoveryUnavailable)
+    );
     Ok(())
 }
 

@@ -4028,6 +4028,13 @@ mod tests {
             sender.freeze_access(ErasureReferenceV1::from_digest([39; 32]), &transition),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
+        assert_eq!(
+            sender.finalize_erasure_request(
+                ErasureReferenceV1::from_digest([40; 32]),
+                &lifecycle_receipt(ErasureReferenceV1::from_digest([40; 32]), 41),
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
     }
 
     #[test]
