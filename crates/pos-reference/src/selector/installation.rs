@@ -146,7 +146,10 @@ impl InstallationManifest {
     /// Returns an error for a malformed, noncanonical, inconsistent, or
     /// ambiguous bootstrap document.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        if bytes.is_empty() || bytes.len() > MANIFEST_LIMIT as usize {
+        if bytes.is_empty()
+            || u64::try_from(bytes.len()).map_err(|_| ProtocolError::FieldOutOfBounds)?
+                > MANIFEST_LIMIT
+        {
             return Err(ProtocolError::FieldOutOfBounds);
         }
         let document = decode_canonical(bytes)?;
@@ -560,7 +563,7 @@ fn digest_complete_file(
         .seek(SeekFrom::Start(0))
         .map_err(|_| SelectorBoundaryError::Io)?;
     let mut remaining = expected_length;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     let mut hasher = blake3::Hasher::new();
     while remaining != 0 {
         let maximum = usize::try_from(remaining.min(buffer.len() as u64))
