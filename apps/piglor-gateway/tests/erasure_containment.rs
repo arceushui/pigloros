@@ -6,32 +6,147 @@ use axum::{
 use piglor_gateway::{router, AppState, Gateway, GatewayError, LedgerWriteMode, OwnTracksOwnerKey};
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    CoreError, ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
+    destruction_command_reference, CoreError, ErasureAcknowledgementProvenanceV1,
+    ErasureAdministrativeResolutionV1, ErasureApplicabilityDecisionV1, ErasureArtifactClassV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAuthorizationDecisionV1, ErasureCorrectionProvenanceV1,
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
-    ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1,
-    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1,
-    TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceInputV1,
+    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeApplicabilityRowV1,
+    ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1,
+    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
+    ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{
     ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1, ErasureExecutionHostV1,
 };
 use pos_store::StoreConfig;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-#[path = "../../../crates/pos-core/tests/support/erasure.rs"]
-mod erasure_support;
+const fn reference(value: u8) -> ErasureReferenceV1 {
+    ErasureReferenceV1::from_digest([value; 32])
+}
 
-use erasure_support::{
-    freeze_evidence_fixture, obligation, persistence_request, persistence_target, reference,
-    FreezeEvidenceFixtureInput,
-};
+fn persistence_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+    ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(1),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(3)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 9,
+        horizon_position: 20,
+        provenance: reference(7),
+    })
+}
+
+const fn persistence_target() -> ErasureRequiredTargetV1 {
+    ErasureRequiredTargetV1 {
+        artifact_class: ErasureArtifactClassV1::TimelineReplay,
+        artifact_digest: reference(10),
+        key_role: ErasureKeyRoleV1::DataEncryption,
+        key_digest: reference(11),
+        replica_set: reference(12),
+        replica_id: reference(13),
+    }
+}
+
+fn obligation(
+    request: ErasureReferenceV1,
+    target: ErasureRequiredTargetV1,
+) -> Result<ErasureObligationV1, ErasureErrorV1> {
+    ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: target.replica_id,
+        command_identity: destruction_command_reference(request, target),
+    })
+}
+
+struct FreezeEvidenceFixtureInput<'a> {
+    request: ErasureReferenceV1,
+    scope_commitment: ErasureReferenceV1,
+    obligation_set: &'a ErasureObligationSetV1,
+    targets: &'a [ErasureRequiredTargetV1],
+    obligations: &'a [ErasureObligationV1],
+    freeze_position: u64,
+    evidence: &'a [u8],
+}
+
+fn freeze_evidence_fixture(
+    input: FreezeEvidenceFixtureInput<'_>,
+) -> Result<
+    (
+        ErasureFreezeAdmissionEvidenceV1,
+        ErasureFreezeAuthorizationEvidenceV1,
+    ),
+    ErasureErrorV1,
+> {
+    let owners_by_obligation = input
+        .obligations
+        .iter()
+        .map(|obligation| {
+            (
+                (obligation.category(), obligation.target()),
+                obligation.owner(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut applicability_matrix = Vec::with_capacity(
+        input
+            .targets
+            .len()
+            .saturating_mul(ErasureInventoryCategoryV1::CANONICAL.len()),
+    );
+    for category in ErasureInventoryCategoryV1::CANONICAL {
+        for (target_index, target) in input.targets.iter().enumerate() {
+            let owner = owners_by_obligation.get(&(category, *target)).copied();
+            applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
+                category,
+                target_index as u64,
+                if owner.is_some() {
+                    ErasureApplicabilityDecisionV1::Applicable
+                } else {
+                    ErasureApplicabilityDecisionV1::Inapplicable
+                },
+                owner,
+            )?);
+        }
+    }
+    let admission_input = ErasureFreezeAdmissionEvidenceInputV1 {
+        request: input.request,
+        scope_commitment: input.scope_commitment,
+        obligation_set: input.obligation_set.reference(),
+        applicability_matrix,
+        freeze_position: input.freeze_position,
+        policy: input.obligation_set.policy(),
+        trust: input.obligation_set.trust(),
+        authorization_provenance: reference(0),
+    };
+    let provisional = ErasureFreezeAdmissionEvidenceV1::new(admission_input.clone())?;
+    let authorization =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: provisional.authorization_body_digest()?,
+            policy: input.obligation_set.policy(),
+            trust: input.obligation_set.trust(),
+            evidence: input.evidence.to_vec(),
+        })?;
+    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+        authorization_provenance: authorization.reference(),
+        ..admission_input
+    })?;
+    Ok((admission, authorization))
+}
 
 #[derive(Default)]
 struct HealthAuthority;
