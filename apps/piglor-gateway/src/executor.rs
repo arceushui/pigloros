@@ -103,7 +103,7 @@ mod lifecycle_coverage_tests {
         let generic = ExecutorStore::Generic(Box::new(MemoryStore::new()));
         assert_eq!(
             generic.erasure_status(),
-            pos_runtime::ErasureHostStatusV1::Ready
+            pos_runtime::ErasureHostStatusV1::Closed
         );
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
@@ -635,7 +635,11 @@ impl ExecutorStore {
         match self {
             Self::Host(host) => host.status(),
             #[cfg(test)]
-            Self::Generic(_) | Self::Gateway(_) => ErasureHostStatusV1::Ready,
+            // Test-only compatibility stores do not own an
+            // `ErasureExecutionHostV1`, so they must not claim recovered
+            // readiness.  Their event-store gate is intentionally permissive
+            // for unrelated Gateway tests, but that is not recovery evidence.
+            Self::Generic(_) | Self::Gateway(_) => ErasureHostStatusV1::Closed,
         }
     }
 }

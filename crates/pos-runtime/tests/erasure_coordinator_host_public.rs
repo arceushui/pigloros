@@ -8,19 +8,21 @@ use std::sync::{
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
-    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1,
-    ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
-    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionV1,
+    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
+    ErasureAuthorizationDecisionV1, ErasureCorrectionProvenanceInputV1,
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
     ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureHostErrorV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1,
-    TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
+    ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1, ErasureHostStatusV1};
 use pos_store::StoreConfig;
@@ -40,6 +42,9 @@ struct TestAuthority {
     deny_authentication: AtomicBool,
     deny_topology: AtomicBool,
     allow_rejection: AtomicBool,
+    allow_corrected: AtomicBool,
+    allow_scope_extension: AtomicBool,
+    allow_administrative_resolution: AtomicBool,
     allow_attempt: AtomicBool,
     allow_dispatch: AtomicBool,
     allow_ack: AtomicBool,
@@ -154,7 +159,10 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         _request: &ErasureRequestV1,
         _correction: &pos_core::ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::Unauthorized)
+        self.allow_corrected
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn admit_atomic_freeze(
@@ -212,7 +220,10 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         &self,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::Unauthorized)
+        self.allow_scope_extension
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn admit_fork_scope_extension(
@@ -257,7 +268,10 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         &self,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::Unauthorized)
+        self.allow_administrative_resolution
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn dispatch_destruction(
@@ -312,6 +326,19 @@ const fn freeze_transition() -> ErasureStateTransitionV1 {
         replay_claim: ErasureReplayClaimV1::Exact,
         provenance: reference(11),
     }
+}
+
+fn frozen_scope_reference(
+    request: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    let target = persistence_target();
+    ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request,
+        scope_members: vec![reference(9)],
+        target_closure: target_closure_digest(&[target]),
+        lineage_rule: Some(reference(100)),
+    })
+    .map(|scope| scope.reference())
 }
 
 const fn completed_inventory(
@@ -530,6 +557,9 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
         ),
     )?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_ne!(receipt.terminal_state(), reference(0));
+    assert_ne!(receipt.coordinator(), reference(0));
+    assert_ne!(receipt.provenance(), reference(0));
     Ok(())
 }
 
@@ -651,6 +681,158 @@ fn public_sender_reaches_rejected_lifecycle_before_containment(
 }
 
 #[test]
+fn public_sender_reaches_corrected_submission_after_rejection(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open corrected-submission host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let original = test_stage(
+        "construct corrected-submission predecessor",
+        persistence_request(),
+    )?;
+    let original_reference = original.reference();
+    let original_provenance = original.provenance();
+    authority.allow_rejection.store(true, Ordering::Release);
+    let mut commands = test_stage("open corrected-submission sender", host.command_sender())?;
+    test_stage(
+        "submit corrected-submission predecessor",
+        commands.submit_erasure_request(original, original_provenance),
+    )?;
+    let rejected = test_stage(
+        "reject corrected-submission predecessor",
+        commands.reject_erasure_request(original_reference, reference(32)),
+    )?;
+    let correction = test_stage(
+        "construct corrected-submission provenance",
+        pos_core::ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: original_reference,
+            rejected_terminal_state: rejected.state_digest(),
+            correction_reason: reference(72),
+            authorization_provenance: reference(73),
+        }),
+    )?;
+    let corrected = test_stage(
+        "construct corrected request",
+        ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: reference(74),
+            subject: reference(2),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(3)],
+            requester: reference(4),
+            authorization: reference(5),
+            policy: reference(6),
+            request_position: 9,
+            horizon_position: 20,
+            provenance: correction.reference(),
+        }),
+    )?;
+    authority.allow_corrected.store(true, Ordering::Release);
+    assert_eq!(
+        test_stage(
+            "submit corrected request",
+            commands.submit_corrected_erasure_request(corrected, correction),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::Submitted
+    );
+    Ok(())
+}
+
+#[test]
+fn public_sender_reaches_scope_extension_and_administrative_resolution(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open resolution host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let request = test_stage("construct resolution request", persistence_request())?;
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    let mut commands = test_stage("open resolution sender", host.command_sender())?;
+    test_stage(
+        "submit resolution request",
+        commands.submit_erasure_request(request, request_provenance),
+    )?;
+    test_stage(
+        "authorize resolution request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze resolution request",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+    let scope_commitment = test_stage(
+        "derive frozen scope commitment",
+        frozen_scope_reference(request_reference),
+    )?;
+    authority
+        .allow_scope_extension
+        .store(true, Ordering::Release);
+    let extension = test_stage(
+        "construct scope extension",
+        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: request_reference,
+            scope_commitment,
+            fork: reference(101),
+            lineage_rule: reference(100),
+            predecessor_extension: None,
+            admission_provenance: reference(102),
+        }),
+    )?;
+    assert_eq!(
+        test_stage(
+            "append scope extension",
+            commands.append_erasure_scope_extension(request_reference, extension),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    authority
+        .allow_administrative_resolution
+        .store(true, Ordering::Release);
+    let resolution = test_stage(
+        "construct administrative resolution",
+        ErasureAdministrativeResolutionV1::new(pos_core::ErasureAdministrativeResolutionInputV1 {
+            request: request_reference,
+            affected_digests: vec![reference(110)],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment,
+            policy: reference(6),
+            trust: reference(8),
+            principal: reference(111),
+            authorization_provenance: reference(112),
+            reason: reference(113),
+            issue_position: 12,
+            predecessor_resolution: None,
+        }),
+    )?;
+    assert_eq!(
+        test_stage(
+            "resolve administratively",
+            commands.resolve_erasure_administratively(request_reference, &resolution),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    Ok(())
+}
+
+#[test]
 fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
@@ -739,6 +921,9 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
         ),
     )?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    assert_ne!(receipt.terminal_state(), reference(0));
+    assert_ne!(receipt.coordinator(), reference(0));
+    assert_ne!(receipt.provenance(), reference(0));
     Ok(())
 }
 
