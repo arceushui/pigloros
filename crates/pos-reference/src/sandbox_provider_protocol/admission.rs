@@ -16,9 +16,9 @@ use super::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, LaunchPolicy, ProviderCapability,
     ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxExecuteRequest,
     SandboxExecutionMode, SandboxLimit, SandboxProviderManifest, SandboxProviderProtocolError,
-    SandboxProviderReceipt, SandboxProviderResult, SandboxRevocationSnapshot,
-    SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError, SandboxTrustRole,
-    SandboxTrustSnapshot, SignedImageManifest,
+    SandboxProviderReceipt, SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet,
+    SandboxTerminalOutcome, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
@@ -780,6 +780,19 @@ impl AdmittedSandboxProvider {
             .iter()
             .map(|plan| plan.plan_digest)
             .collect::<Vec<_>>();
+        if request_authority.evr1_digest != commitment.evr1_digest
+            || request_authority.execution_profile_digest != commitment.execution_profile_digest
+            || request_authority.fixture_digest != commitment.fixture_digest
+            || request.capability_ids != commitment.capability_ids
+            || expected_plans != commitment.network_plan_digests
+            || !request
+                .capability_ids
+                .contains(&commitment.required_provider_capability.capability_id)
+            || !self.supports_capabilities(&request.capability_ids)
+            || !self.supports_required_capability(&commitment.required_provider_capability)
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
         let actual = GrantBinding {
             request_id: grant.request_id,
             attempt_id: grant.attempt_id,
@@ -824,18 +837,7 @@ impl AdmittedSandboxProvider {
             effective_limits: commitment.effective_limits_digest,
             readback_set: commitment.expected_readback_set_digest,
         };
-        if actual != expected
-            || request_authority.evr1_digest != commitment.evr1_digest
-            || request_authority.execution_profile_digest != commitment.execution_profile_digest
-            || request_authority.fixture_digest != commitment.fixture_digest
-            || request.capability_ids != commitment.capability_ids
-            || expected_plans != commitment.network_plan_digests
-            || !request
-                .capability_ids
-                .contains(&commitment.required_provider_capability.capability_id)
-            || !self.supports_capabilities(&request.capability_ids)
-            || !self.supports_required_capability(&commitment.required_provider_capability)
-        {
+        if actual != expected {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
         Ok(AuthenticatedAdmissionGrant(grant))
@@ -1233,13 +1235,11 @@ fn derive_effective_limits(
 ) -> Result<Vec<SandboxLimit>, SandboxProviderProtocolError> {
     if broker.len() != LIMIT_COUNT
         || launch.effective_limits.len() != LIMIT_COUNT
-        || !broker
-            .iter()
-            .zip(&launch.effective_limits)
-            .enumerate()
-            .all(|(limit_id, (broker, launch))| {
+        || !broker.iter().zip(&launch.effective_limits).enumerate().all(
+            |(limit_id, (broker, launch))| {
                 usize::from(broker.limit_id) == limit_id && broker.limit_id == launch.limit_id
-            })
+            },
+        )
     {
         return Err(SandboxProviderProtocolError::InconsistentFields);
     }
@@ -1248,11 +1248,13 @@ fn derive_effective_limits(
         .zip(&launch.effective_limits)
         .map(|(broker, policy)| SandboxLimit {
             limit_id: broker.limit_id,
-            value: broker.value.min(policy.value).min(attempt_limit(broker.limit_id, attempt)),
+            value: broker
+                .value
+                .min(policy.value)
+                .min(attempt_limit(broker.limit_id, attempt)),
         })
         .collect::<Vec<_>>();
-    if limits[4].value == 0
-        || limits[CONCURRENT_ATTEMPTS_LIMIT_ID].value > MAX_CONCURRENT_ATTEMPTS
+    if limits[4].value == 0 || limits[CONCURRENT_ATTEMPTS_LIMIT_ID].value > MAX_CONCURRENT_ATTEMPTS
     {
         return Err(SandboxProviderProtocolError::InconsistentFields);
     }
