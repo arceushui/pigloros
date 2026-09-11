@@ -1023,4 +1023,11 @@ mod tests {
         assert!(missing_selected.authenticate_bootstrap().is_err());
         Ok(())
     }
+
+    #[test]
+    fn provider_admission_rejects_untrusted_installed_provider_records() -> TestResult {
+        let bootstrap = authenticated_state()?.authenticate_bootstrap()?;
+        assert!(bootstrap.admit_provider().is_err());
+        Ok(())
+    }
 }
