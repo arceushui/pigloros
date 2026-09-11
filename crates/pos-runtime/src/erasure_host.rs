@@ -243,6 +243,38 @@ pub trait ErasureCoordinatorAuthorityV1:
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1>;
 }
 
+/// The authority and coordinator identity selected by one production
+/// composition root.
+///
+/// Recovery is deliberately configured as one value so a Gateway, CLI,
+/// experiment, or ledger cannot accidentally pair an authority Plugin with a
+/// different coordinator identity.  A composition root that has no authority
+/// must pass `None` to the recovery constructors; that path is allowed to
+/// succeed only for a positively verified empty inventory.
+#[derive(Clone)]
+pub struct ErasureCoordinatorCompositionV1 {
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+}
+
+impl ErasureCoordinatorCompositionV1 {
+    /// Bind one host-trusted authority Plugin to its coordinator identity.
+    #[must_use]
+    pub fn new(
+        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+        coordinator: ErasureReferenceV1,
+    ) -> Self {
+        Self {
+            authority,
+            coordinator,
+        }
+    }
+
+    const fn coordinator(&self) -> ErasureReferenceV1 {
+        self.coordinator
+    }
+}
+
 struct HostedCoordinatorPortV1<'host> {
     store: RefCell<&'host mut dyn ErasureHostStore>,
     authority: &'host dyn ErasureCoordinatorAuthorityV1,
@@ -872,10 +904,31 @@ impl ErasureExecutionHostV1 {
         coordinator: ErasureReferenceV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator);
+        Self::open_with_recovery(config, Some(&composition), maximum_requests)
+    }
+
+    /// Open one store through the production recovery boundary.
+    ///
+    /// `Some` installs the complete coordinator-backed inventory. `None` is
+    /// intentionally narrower than a compatibility fallback: it may recover
+    /// only a positively proven empty inventory. A non-empty store therefore
+    /// remains closed until the composition root injects its authority Plugin.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_with_recovery(
+        config: StoreConfig,
+        composition: Option<&ErasureCoordinatorCompositionV1>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        let Some(composition) = composition else {
+            return Self::recover_verified_empty(store, maximum_requests);
+        };
         let mut host = Self::new_closed(store)?;
-        host.authority = Some(authority);
-        host.coordinator = Some(coordinator);
+        host.authority = Some(Arc::clone(&composition.authority));
+        host.coordinator = Some(composition.coordinator());
         host.install_inventory_from_coordinator(maximum_requests)?;
         Ok(host)
     }
@@ -892,12 +945,30 @@ impl ErasureExecutionHostV1 {
         coordinator: ErasureReferenceV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator);
+        Self::open_read_only_with_recovery(path, Some(&composition), maximum_requests)
+    }
+
+    /// Open one read-only SQLite store through the production recovery
+    /// boundary. See [`Self::open_with_recovery`] for the empty-only behavior
+    /// when no authority composition is supplied.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_read_only_with_recovery(
+        path: &str,
+        composition: Option<&ErasureCoordinatorCompositionV1>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let store = pos_store::sqlite::SqliteStore::open_read_only(path)
             .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        let Some(composition) = composition else {
+            return Self::recover_verified_empty(store, maximum_requests);
+        };
         let mut host = Self::new_closed(store)?;
-        host.authority = Some(authority);
-        host.coordinator = Some(coordinator);
+        host.authority = Some(Arc::clone(&composition.authority));
+        host.coordinator = Some(composition.coordinator());
         host.install_inventory_from_coordinator(maximum_requests)?;
         Ok(host)
     }
@@ -928,11 +999,29 @@ impl ErasureExecutionHostV1 {
         coordinator: ErasureReferenceV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator);
+        Self::open_gateway_with_recovery(config, Some(&composition), maximum_requests)
+    }
+
+    /// Open one Gateway-capable store through the production recovery
+    /// boundary. See [`Self::open_with_recovery`] for the empty-only behavior
+    /// when no authority composition is supplied.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_gateway_with_recovery(
+        config: StoreConfig,
+        composition: Option<&ErasureCoordinatorCompositionV1>,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let store =
             open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        let Some(composition) = composition else {
+            return Self::recover_verified_empty_gateway(store, maximum_requests);
+        };
         let mut host = Self::new_gateway_closed(store)?;
-        host.authority = Some(authority);
-        host.coordinator = Some(coordinator);
+        host.authority = Some(Arc::clone(&composition.authority));
+        host.coordinator = Some(composition.coordinator());
         host.install_inventory_from_coordinator(maximum_requests)?;
         Ok(host)
     }
