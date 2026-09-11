@@ -414,11 +414,6 @@ impl ErasureCoordinatorCompositionV1 {
     /// Build a composition from independently authenticated host authority
     /// material. This is the production injection seam; no persistence data
     /// is read while constructing the authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed provenance or scope error when the supplied host
-    /// configuration is incomplete or invalid.
     pub fn from_host_configuration(
         configuration: super::erasure_authority::ErasureAuthorityConfigurationV1,
         coordinator: ErasureReferenceV1,
