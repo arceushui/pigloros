@@ -99,8 +99,10 @@ pub struct ErasureRejoinProofV1 {
 }
 
 /// A structural admission token returned after a proof is bound to a complete
-/// terminal receipt.  A host must still authenticate the proof's attestation
-/// before allowing the replica to rejoin a live topology.
+/// terminal receipt.
+///
+/// A host must still authenticate the proof's attestation before allowing the
+/// replica to rejoin a live topology.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureRejoinAdmissionV1 {
     request: ErasureReferenceV1,
@@ -237,9 +239,9 @@ impl ErasureRejoinProofV1 {
         &self,
         receipt: &ErasureReceiptV1,
     ) -> Result<ErasureRejoinAdmissionV1, ErasureErrorV1> {
-        if self.request() != receipt.request()
-            || self.terminal_receipt() != receipt.receipt_digest()
-        {
+        let request_matches = self.request() == receipt.request();
+        let receipt_matches = self.terminal_receipt() == receipt.receipt_digest();
+        if !(request_matches && receipt_matches) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         if receipt.lifecycle() != super::ErasureLifecycleV1::Complete {
