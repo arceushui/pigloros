@@ -612,7 +612,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
                 ),
             ),
         )?;
-        Ok((receipt, predecessor))
+        Ok::<_, Box<dyn std::error::Error>>((receipt, predecessor))
     }?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_ne!(receipt.terminal_state(), reference(0));
@@ -992,7 +992,7 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
                 ),
             ),
         )?;
-        Ok((receipt, predecessor))
+        Ok::<_, Box<dyn std::error::Error>>((receipt, predecessor))
     }?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     assert_ne!(receipt.terminal_state(), reference(0));
