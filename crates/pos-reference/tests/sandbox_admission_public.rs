@@ -458,25 +458,26 @@ fn launch_policy(sim1_digest: [u8; 32]) -> TestResult<Vec<u8>> {
             Value::Text("air-gapped".to_owned()),
             integer(1),
             bytes(sim1_digest),
-            Value::Array(
-                (0..17)
-                    .map(|limit_id| Value::Array(vec![integer(limit_id), integer(2_000)]))
-                    .collect(),
-            ),
+            Value::Array(commitment_limit_values()),
             Value::Array(vec![]),
         ]),
     )
+}
+
+fn commitment_limit_values() -> Vec<Value> {
+    (0..17)
+        .map(|limit_id| {
+            let value = if limit_id == 13 { 256 } else { 2_000 };
+            Value::Array(vec![integer(limit_id), integer(value)])
+        })
+        .collect()
 }
 
 fn broker_hard_caps() -> TestResult<Vec<u8>> {
     encode(&Value::Array(vec![
         Value::Text("BHC1".to_owned()),
         integer(1),
-        Value::Array(
-            (0..17)
-                .map(|limit_id| Value::Array(vec![integer(limit_id), integer(2_000)]))
-                .collect(),
-        ),
+        Value::Array(commitment_limit_values()),
     ]))
 }
 
@@ -1923,6 +1924,7 @@ fn selector_derives_elm1_and_rbs1_from_selected_authority() -> TestResult {
     assert_eq!(commitment.effective_limits()[4].value, 1);
     assert_eq!(commitment.effective_limits()[8].value, 1);
     assert_eq!(commitment.effective_limits()[9].value, 1);
+    assert_eq!(commitment.effective_limits()[13].value, 256);
     assert!(commitment
         .effective_limits()
         .iter()
