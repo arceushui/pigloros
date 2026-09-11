@@ -1318,18 +1318,11 @@ impl ErasureExecutionHostV1 {
         };
         match publication {
             Ok(publication) => Ok(publication),
-            Err(error) => {
-                let mapped = transition_error.map_or_else(|| error.into(), map_erasure_error);
-                if transition_error.is_some_and(is_non_poisoning_transition_error)
-                    && self
-                        .install_inventory_from_coordinator(input.maximum_requests)
-                        .is_ok()
-                {
-                    return Err(mapped);
-                }
-                self.poison();
-                Err(mapped)
-            }
+            Err(error) => Err(self.handle_transition_failure(
+                transition_error,
+                error.into(),
+                input.maximum_requests,
+            )),
         }
     }
 
@@ -1371,16 +1364,11 @@ impl ErasureExecutionHostV1 {
         let (inventory, result) = match publication {
             Ok(publication) => publication,
             Err(error) => {
-                let mapped = transition_error.map_or_else(|| error.into(), map_erasure_error);
-                if transition_error.is_some_and(is_non_poisoning_transition_error)
-                    && self
-                        .install_inventory_from_coordinator(maximum_requests)
-                        .is_ok()
-                {
-                    return Err(mapped);
-                }
-                self.poison();
-                return Err(mapped);
+                return Err(self.handle_transition_failure(
+                    transition_error,
+                    error.into(),
+                    maximum_requests,
+                ));
             }
         };
         let generation = inventory.generation();
@@ -1392,6 +1380,24 @@ impl ErasureExecutionHostV1 {
             request_count,
         };
         Ok((result, generation))
+    }
+
+    fn handle_transition_failure(
+        &mut self,
+        transition_error: Option<ErasureErrorV1>,
+        publication_error: ErasureHostErrorV1,
+        maximum_requests: usize,
+    ) -> ErasureHostErrorV1 {
+        let mapped = transition_error.map_or(publication_error, map_erasure_error);
+        if transition_error.is_some_and(is_non_poisoning_transition_error)
+            && self
+                .install_inventory_from_coordinator(maximum_requests)
+                .is_ok()
+        {
+            return mapped;
+        }
+        self.poison();
+        mapped
     }
 
     fn apply_coordinator_command(
@@ -2376,17 +2382,32 @@ impl<T> MapStoreErrorV1<T> for Result<T, CoreError> {
     }
 }
 
-const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
+#[derive(Clone, Copy)]
+struct ErasureErrorDispositionV1 {
+    host_error: ErasureHostErrorV1,
+    preserves_ready_host: bool,
+}
+
+const fn erasure_error_disposition(error: ErasureErrorV1) -> ErasureErrorDispositionV1 {
     match error {
-        ErasureErrorV1::Unauthorized => ErasureHostErrorV1::AuthorizationDenied,
+        ErasureErrorV1::Unauthorized => ErasureErrorDispositionV1 {
+            host_error: ErasureHostErrorV1::AuthorizationDenied,
+            preserves_ready_host: true,
+        },
         ErasureErrorV1::ScopeInvalid | ErasureErrorV1::PolicyConflict => {
-            ErasureHostErrorV1::Conflict
+            ErasureErrorDispositionV1 {
+                host_error: ErasureHostErrorV1::Conflict,
+                preserves_ready_host: true,
+            }
         }
         ErasureErrorV1::InvalidEncoding
         | ErasureErrorV1::UnsupportedVersion
         | ErasureErrorV1::AccessFreezeFailed
         | ErasureErrorV1::TrustSnapshotInvalid
-        | ErasureErrorV1::ProvenanceMissing => ErasureHostErrorV1::RecoveryUnavailable,
+        | ErasureErrorV1::ProvenanceMissing => ErasureErrorDispositionV1 {
+            host_error: ErasureHostErrorV1::RecoveryUnavailable,
+            preserves_ready_host: true,
+        },
         ErasureErrorV1::KeyRegistryUnavailable
         | ErasureErrorV1::KeyDestructionFailed
         | ErasureErrorV1::ArtifactDeletionFailed
@@ -2394,22 +2415,19 @@ const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
         | ErasureErrorV1::ReplicaNegativeAcknowledgement
         | ErasureErrorV1::BackupInventoryIncomplete
         | ErasureErrorV1::BackupDeletionPending
-        | ErasureErrorV1::ReceiptCommitFailed => ErasureHostErrorV1::AdapterFailure,
+        | ErasureErrorV1::ReceiptCommitFailed => ErasureErrorDispositionV1 {
+            host_error: ErasureHostErrorV1::AdapterFailure,
+            preserves_ready_host: false,
+        },
     }
 }
 
+const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
+    erasure_error_disposition(error).host_error
+}
+
 const fn is_non_poisoning_transition_error(error: ErasureErrorV1) -> bool {
-    matches!(
-        error,
-        ErasureErrorV1::InvalidEncoding
-            | ErasureErrorV1::UnsupportedVersion
-            | ErasureErrorV1::Unauthorized
-            | ErasureErrorV1::ScopeInvalid
-            | ErasureErrorV1::PolicyConflict
-            | ErasureErrorV1::AccessFreezeFailed
-            | ErasureErrorV1::TrustSnapshotInvalid
-            | ErasureErrorV1::ProvenanceMissing
-    )
+    erasure_error_disposition(error).preserves_ready_host
 }
 
 #[cfg(test)]
@@ -3342,16 +3360,15 @@ mod tests {
         }
     }
 
-    fn rejected_host_with_resolve_control() -> Result<
-        (
-            ErasureExecutionHostV1,
-            Arc<ResolveStateControlV1>,
-            ErasureReferenceV1,
-            ErasureReferenceV1,
-            ErasureReferenceV1,
-        ),
-        ErasureHostErrorV1,
-    > {
+    struct RejectedHostFixtureV1 {
+        host: ErasureExecutionHostV1,
+        resolve_control: Arc<ResolveStateControlV1>,
+        request: ErasureReferenceV1,
+        rejected_digest: ErasureReferenceV1,
+        predecessor_digest: ErasureReferenceV1,
+    }
+
+    fn rejected_host_with_resolve_control() -> Result<RejectedHostFixtureV1, ErasureHostErrorV1> {
         let (mut store, resolve_control) = fault_store_with_control(FaultModeV1::Recovery);
         let authority = RejectedCoordinatorAuthorityV1;
         let request = coordinator_request().map_err(map_erasure_error)?;
@@ -3377,13 +3394,13 @@ mod tests {
         host.authority = Some(Arc::new(RejectedCoordinatorAuthorityV1));
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)?;
-        Ok((
+        Ok(RejectedHostFixtureV1 {
             host,
             resolve_control,
-            request_reference,
+            request: request_reference,
             rejected_digest,
             predecessor_digest,
-        ))
+        })
     }
 
     fn set_resolve_fault(control: &ResolveStateControlV1, kind: &ResolveStateFaultV1) {
@@ -3449,8 +3466,13 @@ mod tests {
     #[test]
     fn read_sender_fails_closed_for_recovery_and_history_adapter_faults(
     ) -> Result<(), ErasureHostErrorV1> {
-        let (mut host, control, request, wrong_digest, predecessor_digest) =
-            rejected_host_with_resolve_control()?;
+        let RejectedHostFixtureV1 {
+            mut host,
+            resolve_control: control,
+            request,
+            rejected_digest,
+            predecessor_digest,
+        } = rejected_host_with_resolve_control()?;
         set_resolve_fault(
             &control,
             &ResolveStateFaultV1::Adapter {
@@ -3491,7 +3513,7 @@ mod tests {
             &control,
             &ResolveStateFaultV1::Wrong {
                 requested: predecessor_digest,
-                replacement: wrong_digest,
+                replacement: rejected_digest,
             },
         );
         assert_eq!(

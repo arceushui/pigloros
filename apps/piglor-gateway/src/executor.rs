@@ -1948,6 +1948,9 @@ fn select_pending_index(pending: &[CommandEnvelope], reads_since_write: u8) -> u
     )
 }
 
+// Keep the exhaustive timeout dispatch below the worker's complexity budget;
+// the named seam also lets the timeout path be tested without running the
+// worker loop.
 fn expire_command(command: Command) {
     expire_command_impl(command);
 }
@@ -2107,6 +2110,8 @@ enum CommandExecution {
     Completed,
 }
 
+// Keep the exhaustive command dispatch below the worker's complexity budget;
+// the worker remains responsible only for sequencing and panic containment.
 fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
     execute_command_impl(state, command)
 }
