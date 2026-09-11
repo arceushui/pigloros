@@ -13,7 +13,7 @@ use super::evidence::{
 use super::{
     reference_zero, ErasureErrorV1, ErasureInventoryCategoryV1, ErasureReceiptV1,
     ErasureReferenceV1, ErasureRequiredTargetV1, ERASURE_MAX_INVENTORY_RESULTS,
-    ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    ERASURE_PORTABLE_RECORD_MAX_BYTES, VERSION,
 };
 use ciborium::value::Value;
 
@@ -309,7 +309,7 @@ impl ErasureRejoinProofV1 {
 fn entry_value(entry: ErasureRejoinInventoryV1) -> Value {
     Value::Array(vec![
         text(ERASURE_REJOIN_ENTRY_TAG_V1),
-        uint(1),
+        uint(VERSION),
         uint(entry.category.code()),
         target_value(entry.target),
         digest(entry.owner),
@@ -352,7 +352,7 @@ fn entries_from_value(value: &Value) -> Result<Vec<ErasureRejoinInventoryV1>, Er
 fn proof_fields(proof: &ErasureRejoinProofV1) -> Vec<Value> {
     vec![
         text(ERASURE_REJOIN_PROOF_TAG_V1),
-        uint(1),
+        uint(VERSION),
         digest(proof.request()),
         digest(proof.terminal_receipt()),
         digest(proof.replica_set()),

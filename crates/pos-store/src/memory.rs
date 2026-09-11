@@ -1368,6 +1368,35 @@ impl ErasureStateResolverV1 for MemoryStore {
     }
 }
 
+impl crate::ErasureRejoinPersistencePortV1 for MemoryStore {
+    fn store_rejoin_proof(
+        &mut self,
+        proof: &pos_core::ErasureRejoinProofV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        let bytes = proof.to_canonical_cbor()?;
+        match self.erasure_evidence.entry(proof.reference()) {
+            Entry::Vacant(entry) => {
+                entry.insert(bytes);
+                Ok(ErasureCasOutcomeV1::Applied)
+            }
+            Entry::Occupied(entry) if entry.get().as_slice() == bytes.as_slice() => {
+                Ok(ErasureCasOutcomeV1::ExactRetry)
+            }
+            Entry::Occupied(_) => Err(ErasureErrorV1::ProvenanceMissing),
+        }
+    }
+
+    fn load_rejoin_proof(
+        &self,
+        reference: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureRejoinProofV1>, ErasureErrorV1> {
+        self.erasure_evidence
+            .get(&reference)
+            .map(|bytes| pos_core::ErasureRejoinProofV1::from_canonical_cbor(bytes))
+            .transpose()
+    }
+}
+
 impl ErasureInventoryPersistencePortV1 for MemoryStore {
     fn complete_erasure_inventory_snapshot(
         &mut self,

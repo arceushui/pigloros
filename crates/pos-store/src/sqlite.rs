@@ -4745,6 +4745,57 @@ impl ErasureStateResolverV1 for SqliteStore {
     }
 }
 
+impl crate::ErasureRejoinPersistencePortV1 for SqliteStore {
+    fn store_rejoin_proof(
+        &mut self,
+        proof: &pos_core::ErasureRejoinProofV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        let bytes = proof.to_canonical_cbor()?;
+        let inserted = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO erasure_evidence(reference_digest, object_cbor)
+                 VALUES (?1, ?2)",
+                params![proof.reference().digest().as_slice(), bytes.as_slice()],
+            )
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let stored = self
+            .conn
+            .query_row(
+                "SELECT object_cbor FROM erasure_evidence WHERE reference_digest=?1",
+                params![proof.reference().digest().as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if stored.as_slice() != bytes.as_slice() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(if inserted == 1 {
+            ErasureCasOutcomeV1::Applied
+        } else {
+            ErasureCasOutcomeV1::ExactRetry
+        })
+    }
+
+    fn load_rejoin_proof(
+        &self,
+        reference: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureRejoinProofV1>, ErasureErrorV1> {
+        self.conn
+            .query_row(
+                "SELECT object_cbor FROM erasure_evidence WHERE reference_digest=?1",
+                params![reference.digest().as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+            .map(|bytes| pos_core::ErasureRejoinProofV1::from_canonical_cbor(&bytes))
+            .transpose()
+    }
+}
+
 impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn complete_erasure_inventory_snapshot(
         &mut self,

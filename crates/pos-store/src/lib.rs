@@ -54,11 +54,63 @@ pub use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,
-    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event, EventDraft, EventId,
-    GeographicAdmissionAdmin, GeographicAdmissionOutcome, GeographicAdmissionStore,
-    GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind, OwnTracksEnrollmentStore,
-    PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1, WallTime,
+    ErasureCasOutcomeV1, ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event,
+    EventDraft, EventId, GeographicAdmissionAdmin, GeographicAdmissionOutcome,
+    GeographicAdmissionStore, GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind,
+    OwnTracksEnrollmentStore, PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1,
+    WallTime,
 };
+
+/// Local persistence and admission seam for ADR-060 `ERRJ1` rejoin proofs.
+///
+/// The adapter stores the proof's exact canonical bytes under its content
+/// address. It does not authenticate host-owned attestations or decide
+/// topology policy; [`pos_core::ErasureRejoinProofV1::admit`] performs the
+/// structural gate and invokes the caller-supplied verifier. Backends may use
+/// any durable local object table, but must preserve exact bytes and make
+/// retries idempotent.
+pub trait ErasureRejoinPersistencePortV1 {
+    /// Persist one content-addressed proof, returning `ExactRetry` when the
+    /// same bytes were already present.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed erasure error when canonical encoding or storage
+    /// fails, or when an existing address contains different bytes.
+    fn store_rejoin_proof(
+        &mut self,
+        proof: &pos_core::ErasureRejoinProofV1,
+    ) -> Result<pos_core::ErasureCasOutcomeV1, pos_core::ErasureErrorV1>;
+
+    /// Load and validate one exact proof by content address.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed erasure error when stored bytes are malformed or no
+    /// longer authenticate their requested address.
+    fn load_rejoin_proof(
+        &self,
+        reference: pos_core::ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureRejoinProofV1>, pos_core::ErasureErrorV1>;
+
+    /// Admit a stored proof against one terminal receipt using a host-owned
+    /// attestation verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed erasure error when the proof is absent, malformed,
+    /// incomplete, or rejected by the structural gate/verifier.
+    fn admit_rejoin(
+        &self,
+        reference: pos_core::ErasureReferenceV1,
+        receipt: &pos_core::ErasureReceiptV1,
+        verifier: &dyn pos_core::ErasureRejoinAttestationVerifierV1,
+    ) -> Result<pos_core::ErasureRejoinAdmissionV1, pos_core::ErasureErrorV1> {
+        self.load_rejoin_proof(reference)?
+            .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)?
+            .admit(receipt, verifier)
+    }
+}
 
 #[cfg(test)]
 const TEST_EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
