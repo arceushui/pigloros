@@ -7,13 +7,13 @@ use std::sync::{
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
-    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionV1,
-    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
-    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
-    ErasureAuthorizationDecisionV1, ErasureCorrectionProvenanceInputV1,
-    ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
-    ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
+    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1,
+    ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
+    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ErasureCorrectionProvenanceInputV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureHostErrorV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
@@ -53,6 +53,7 @@ struct TestAuthority {
     allow_ack: AtomicBool,
     allow_receipt: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
+    use_closed_scope_resolution: AtomicBool,
 }
 
 impl TestAuthority {
@@ -253,6 +254,10 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+        if self.use_closed_scope_resolution.load(Ordering::Acquire) {
+            return ClosedErasureCoordinatorAuthorityV1
+                .resolve_fork_scope_extension(requirement, input);
+        }
         if self.fail_fork_scope_extension.load(Ordering::Acquire) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -1086,7 +1091,7 @@ fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
         commands.freeze_access(request_reference, &freeze_transition()),
     )?;
     authority
-        .fail_fork_scope_extension
+        .use_closed_scope_resolution
         .store(true, Ordering::Release);
 
     assert_eq!(
@@ -1246,6 +1251,215 @@ fn closed_composition_proves_empty_but_rejects_non_empty_authority(
             .verified_topology_observation(reference(1), reference(2))
             .expect_err("closed authority must reject topology evidence"),
         ErasureErrorV1::ProvenanceMissing
+    );
+    Ok(())
+}
+
+#[test]
+fn closed_authority_rejects_every_authority_operation() -> Result<(), Box<dyn std::error::Error>> {
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    let request = test_stage("construct closed-authority request", persistence_request())?;
+    let request_reference = request.reference();
+    let target = persistence_target();
+    let obligation = test_stage(
+        "construct closed-authority obligation",
+        obligation(request_reference, target),
+    )?;
+    let obligations = vec![obligation];
+    let targets = vec![target];
+    let obligation_set = test_stage(
+        "construct closed-authority obligation set",
+        ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request: request_reference,
+            obligations: obligations
+                .iter()
+                .map(ErasureObligationV1::reference)
+                .collect(),
+            policy: reference(201),
+            trust: reference(202),
+        }),
+    )?;
+    let (freeze_admission, freeze_authorization) = test_stage(
+        "construct closed-authority freeze evidence",
+        freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+            request: request_reference,
+            scope_commitment: reference(203),
+            obligation_set: &obligation_set,
+            targets: &targets,
+            obligations: &obligations,
+            freeze_position: 1,
+            evidence: b"closed-authority",
+        }),
+    )?;
+    assert_eq!(
+        authority.validate_freeze_authorization(&freeze_admission, &freeze_authorization),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let extension = test_stage(
+        "construct closed-authority scope extension",
+        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: request_reference,
+            scope_commitment: reference(204),
+            fork: reference(205),
+            lineage_rule: reference(206),
+            predecessor_extension: None,
+            admission_provenance: reference(207),
+        }),
+    )?;
+    let resolution = test_stage(
+        "construct closed-authority resolution",
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: request_reference,
+            affected_digests: vec![reference(208)],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: reference(209),
+            policy: reference(210),
+            trust: reference(211),
+            principal: reference(212),
+            authorization_provenance: reference(213),
+            reason: reference(214),
+            issue_position: 1,
+            predecessor_resolution: None,
+        }),
+    )?;
+    let retry = test_stage(
+        "construct closed-authority retry admission",
+        retry_admission(RetryAdmissionFixture {
+            request: request_reference,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            obligations: &obligations,
+            policy: reference(215),
+            trust: reference(216),
+            admitted_position: 1,
+            deadline_position: 2,
+            authorization_provenance: reference(217),
+        }),
+    )?;
+    let acknowledgement = test_stage(
+        "construct closed-authority acknowledgement",
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request: request_reference,
+            command: reference(218),
+            attempt: retry.reference(),
+            obligation: obligation.reference(),
+            owner: reference(219),
+            scope: reference(220),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(221),
+            policy: reference(215),
+            trust: reference(216),
+        }),
+    )?;
+    let receipt = ErasureReceiptInputV1 {
+        request: request_reference,
+        terminal_state: reference(222),
+        coordinator: reference(223),
+        lifecycle: ErasureLifecycleV1::Complete,
+        freeze_position: 1,
+        acknowledgements: Vec::new(),
+        frozen_targets: Vec::new(),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            artifacts: Vec::new(),
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim: ErasureReplayClaimV1::Exact,
+        policy: reference(215),
+        trust: reference(216),
+        provenance: reference(224),
+        issue_position: 2,
+        signature: reference(225),
+        receipt_digest: reference(0),
+    };
+    let transition = ErasureStateTransitionV1 {
+        lifecycle: ErasureLifecycleV1::AccessFrozen,
+        freeze_position: Some(1),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        acknowledged_targets: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        provenance: reference(226),
+    };
+    let fork_input = ErasureForkAdmissionInputV1 {
+        operation: reference(227),
+        expected_inventory_generation: reference(228),
+        child_scope: reference(229),
+        child: pos_core::TimelineMeta::root("closed-authority-child"),
+    };
+
+    assert_eq!(
+        authority.authenticate(&request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_authorization(
+            request_reference,
+            reference(230),
+            ErasureAuthorizationDecisionV1::Authorized,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let correction = test_stage(
+        "construct closed-authority correction",
+        pos_core::ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request_reference,
+            rejected_terminal_state: reference(231),
+            correction_reason: reference(232),
+            authorization_provenance: reference(233),
+        }),
+    )?;
+    assert_eq!(
+        authority.admit_corrected_submission(&request, &correction),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_atomic_freeze(request_reference, &transition),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_scope_extension(&extension),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_fork_scope_extension(&extension, &fork_input),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.resolve_fork_child_scope(fork_input.child.id, &fork_input.child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_administrative_resolution(&resolution),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.dispatch_destruction(request_reference, &[]),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_attempt(&retry),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_acknowledgement(&acknowledgement),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_receipt(&receipt),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.validate_scope_extension(&extension),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.validate_administrative_resolution(&resolution),
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
