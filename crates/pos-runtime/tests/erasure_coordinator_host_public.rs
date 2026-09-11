@@ -24,7 +24,10 @@ use pos_core::{
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
     ErasureVerifiedTopologyObservationV1, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
-use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1, ErasureHostStatusV1};
+use pos_runtime::{
+    ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorAuthorityV1,
+    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
+};
 use pos_store::StoreConfig;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
@@ -1220,6 +1223,81 @@ fn gateway_host_uses_the_same_coordinator_authority_boundary(
         "create gateway timeline",
         commands.create_timeline("gateway-coordinator-authority"),
     )?;
+    Ok(())
+}
+
+#[test]
+fn closed_composition_proves_empty_but_rejects_non_empty_authority(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let composition = ErasureCoordinatorCompositionV1::closed();
+    let host = test_stage(
+        "open explicitly closed composition",
+        ErasureExecutionHostV1::open_with_recovery(
+            StoreConfig::Memory,
+            Some(&composition),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    assert_eq!(
+        authority
+            .verified_topology_observation(reference(1), reference(2))
+            .expect_err("closed authority must reject topology evidence"),
+        ErasureErrorV1::ProvenanceMissing
+    );
+    Ok(())
+}
+
+#[test]
+fn compatibility_recovery_without_composition_remains_empty_only(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let host = test_stage(
+        "open compatibility host",
+        ErasureExecutionHostV1::open_with_recovery(
+            StoreConfig::Memory,
+            None,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+
+    let gateway_host = test_stage(
+        "open compatibility gateway host",
+        ErasureExecutionHostV1::open_gateway_with_recovery(
+            StoreConfig::Memory,
+            None,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(gateway_host.status(), ErasureHostStatusV1::Ready);
+
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-runtime-recovery-{}.db",
+        std::process::id()
+    ));
+    drop(std::fs::remove_file(&path));
+    let path_text = path.to_string_lossy().into_owned();
+    drop(test_stage(
+        "create compatibility read-only database",
+        ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?);
+    let read_only_host = test_stage(
+        "open compatibility read-only host",
+        ErasureExecutionHostV1::open_read_only_with_recovery(
+            &path_text,
+            None,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(read_only_host.status(), ErasureHostStatusV1::Ready);
+    std::fs::remove_file(path)?;
     Ok(())
 }
 
