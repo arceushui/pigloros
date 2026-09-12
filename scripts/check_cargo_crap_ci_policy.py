@@ -96,8 +96,16 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline resolver must require a main-branch artifact",
         ),
         (
-            'select(.workflow_run.head_sha == \\"${BASE_SHA}\\")',
-            "baseline resolver must require the exact base commit",
+            'TRUSTED_BASE_SHA="$(git merge-base "${BASE_SHA}" origin/main)"',
+            "baseline resolver must derive the trusted main merge-base",
+        ),
+        (
+            'BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${TRUSTED_BASE_SHA}"',
+            "baseline resolver must name the trusted main artifact",
+        ),
+        (
+            'select(.workflow_run.head_sha == \\"${TRUSTED_BASE_SHA}\\")',
+            "baseline resolver must require the exact trusted main commit",
         ),
         (
             "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
@@ -110,6 +118,10 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
         (
             'git diff --quiet "${BASE_SHA}...HEAD"',
             "baseline bootstrap must reject Rust-affecting changes",
+        ),
+        (
+            'echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"',
+            "baseline resolver must publish the trusted artifact commit",
         ),
     )
     for fragment, message in required_fragments:
@@ -253,7 +265,7 @@ def check_workflow(
             "if": "${{ steps.baseline.outputs.run-id != '' }}",
             "uses": DOWNLOAD_ACTION,
             "with": {
-                "name": "cargo-crap-baseline-${{ github.event.pull_request.base.sha }}",
+                "name": "cargo-crap-baseline-${{ steps.baseline.outputs.baseline-sha }}",
                 "path": "${{ runner.temp }}",
                 "github-token": "${{ github.token }}",
                 "repository": "${{ github.repository }}",
