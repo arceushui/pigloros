@@ -49,6 +49,7 @@ pub use erasure_authority::{
     ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
     ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
     ErasureAuthorityTopologyBindingV1, HostConfiguredErasureCoordinatorAuthorityV1,
+    MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES,
 };
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
