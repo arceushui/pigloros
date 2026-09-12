@@ -62,6 +62,7 @@ struct TestAuthority {
     allow_receipt: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
     use_closed_scope_resolution: AtomicBool,
+    substitute_configured_child_scope: AtomicBool,
     configured_fork_authority: OnceLock<HostConfiguredErasureCoordinatorAuthorityV1>,
 }
 
@@ -161,6 +162,49 @@ fn configured_fork_authority(
             )
         },
     )
+}
+
+fn configured_fork_fixture(
+    authority: &Arc<TestAuthority>,
+) -> Result<
+    (
+        ErasureExecutionHostV1,
+        TimelineId,
+        ErasureRequestV1,
+        ErasureReferenceV1,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open configured fork fixture host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let parent = create_lifecycle_fork_parent(&mut host, authority)?;
+    let request = test_stage(
+        "construct configured fork fixture request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    test_stage(
+        "submit authorize and freeze configured fork fixture request",
+        submit_authorize_freeze(&mut host, request.clone()),
+    )?;
+    let manifest = {
+        let mut reads = test_stage("open configured fork fixture reader", host.read_sender())?;
+        test_stage(
+            "read configured fork fixture state",
+            reads.erasure_state(request_reference),
+        )?
+        .ok_or("configured fork fixture state missing")?
+        .manifest_digest()
+    };
+    Ok((host, parent, request, manifest))
 }
 
 impl ErasureFreezeAuthorizationVerifierV1 for TestAuthority {
@@ -302,7 +346,15 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         child: &pos_core::TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         if let Some(authority) = self.configured_fork_authority() {
-            return authority.resolve_fork_child_scope(parent, child);
+            let child_scope = authority.resolve_fork_child_scope(parent, child)?;
+            return Ok(if self
+                .substitute_configured_child_scope
+                .load(Ordering::Acquire)
+            {
+                reference(101)
+            } else {
+                child_scope
+            });
         }
         self.timelines
             .lock()
@@ -1166,6 +1218,108 @@ fn memory_host_resolves_configured_fork_scope_through_public_sender(
         )?
     };
     assert_ne!(child.id(), parent);
+    Ok(())
+}
+
+#[test]
+fn memory_host_rejects_configured_fork_with_zero_public_operation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let (mut host, parent, request, manifest) = configured_fork_fixture(&authority)?;
+    authority.install_configured_fork_authority(configured_fork_authority(
+        request,
+        manifest,
+        parent,
+        reference(100),
+    )?);
+    let mut commands = test_stage(
+        "open zero-operation configured fork sender",
+        host.command_sender(),
+    )?;
+    assert!(test_stage(
+        "reject zero-operation configured fork",
+        commands.fork_timeline_identified(
+            reference(0),
+            parent,
+            pos_core::Seq::ZERO,
+            "zero-operation-configured-fork-child",
+        ),
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
+fn memory_host_rejects_configured_fork_with_unbound_requirement_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let (mut host, parent, _request, _manifest) = configured_fork_fixture(&authority)?;
+    let alternate = test_stage(
+        "construct alternate configured fork request",
+        erasure_support::request(erasure_support::RequestFixtureInput {
+            request: reference(90),
+            subject: reference(91),
+            scope: pos_core::ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(92)],
+            requester: reference(93),
+            authorization: reference(94),
+            policy: reference(6),
+            request_position: 12,
+            horizon_position: 24,
+            provenance: reference(95),
+        }),
+    )?;
+    authority.install_configured_fork_authority(configured_fork_authority(
+        alternate,
+        reference(96),
+        parent,
+        reference(100),
+    )?);
+    let mut commands = test_stage(
+        "open unbound configured fork sender",
+        host.command_sender(),
+    )?;
+    assert!(test_stage(
+        "reject configured fork with unbound requirement request",
+        commands.fork_timeline_identified(
+            reference(45),
+            parent,
+            pos_core::Seq::ZERO,
+            "unbound-requirement-configured-fork-child",
+        ),
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
+fn memory_host_rejects_configured_fork_with_substituted_child_scope(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let (mut host, parent, request, manifest) = configured_fork_fixture(&authority)?;
+    authority.install_configured_fork_authority(configured_fork_authority(
+        request,
+        manifest,
+        parent,
+        reference(100),
+    )?);
+    authority
+        .substitute_configured_child_scope
+        .store(true, Ordering::Release);
+    let mut commands = test_stage(
+        "open substituted-scope configured fork sender",
+        host.command_sender(),
+    )?;
+    assert!(test_stage(
+        "reject configured fork with substituted child scope",
+        commands.fork_timeline_identified(
+            reference(45),
+            parent,
+            pos_core::Seq::ZERO,
+            "substituted-scope-configured-fork-child",
+        ),
+    )
+    .is_err());
     Ok(())
 }
 
