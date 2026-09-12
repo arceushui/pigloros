@@ -9,10 +9,11 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureAttemptQuotaReservationV1,
     ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1, ErasureForkAdmissionInputV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1, ErasureReceiptInputV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRetryAdmissionV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq,
-    TimelineId, TimelineMeta,
+    ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationVerifierV1,
+    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_runtime::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
@@ -128,6 +129,138 @@ fn authority_with(
     )?;
     let configuration =
         ErasureAuthorityConfigurationV1::new(reference(6), reference(8), vec![request_binding])?;
+    Ok(HostConfiguredErasureCoordinatorAuthorityV1::new(
+        configuration,
+        Arc::new(TestEvidenceVerifier),
+        Arc::new(TestExecution),
+    ))
+}
+
+fn simple_profile(
+    child_scope: u8,
+    lineage_rule: Option<u8>,
+) -> Result<ErasureAuthorityFreezeProfileV1, Box<dyn std::error::Error>> {
+    Ok(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(9)],
+        vec![persistence_target()],
+        [reference(21), reference(22), reference(23), reference(24)],
+        lineage_rule.map(reference),
+        reference(child_scope),
+    )?)
+}
+
+fn simple_binding(
+    request: pos_core::ErasureRequestV1,
+    child_scope: u8,
+) -> Result<ErasureAuthorityRequestBindingV1, Box<dyn std::error::Error>> {
+    Ok(ErasureAuthorityRequestBindingV1::new(
+        request,
+        Vec::new(),
+        simple_profile(child_scope, Some(25))?,
+        reference(40),
+        b"host-proof".to_vec(),
+        reference(7),
+        true,
+    )?)
+}
+
+fn frozen_admission(
+    authority: &HostConfiguredErasureCoordinatorAuthorityV1,
+    request: &pos_core::ErasureRequestV1,
+) -> Result<pos_core::ErasureAtomicFreezeAdmissionV1, Box<dyn std::error::Error>> {
+    let result = authority.admit_atomic_freeze(
+        request.reference(),
+        &ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            provenance: reference(7),
+        },
+    )?;
+    match result {
+        pos_core::ErasureAtomicFreezeResultV1::Admitted(admission) => Ok(*admission),
+        pos_core::ErasureAtomicFreezeResultV1::Rejected(_) => {
+            Err("configured authority unexpectedly rejected freeze".into())
+        }
+    }
+}
+
+fn receipt_input(
+    request: ErasureReferenceV1,
+    lifecycle: ErasureLifecycleV1,
+    terminal_state: ErasureReferenceV1,
+) -> ErasureReceiptInputV1 {
+    ErasureReceiptInputV1 {
+        request,
+        terminal_state,
+        coordinator: reference(55),
+        lifecycle,
+        freeze_position: 10,
+        acknowledgements: Vec::new(),
+        frozen_targets: Vec::new(),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: pos_core::ErasureReceiptInventoriesV1 {
+            artifacts: Vec::new(),
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim: ErasureReplayClaimV1::Exact,
+        policy: reference(6),
+        trust: reference(8),
+        provenance: reference(7),
+        issue_position: 11,
+        signature: reference(56),
+        receipt_digest: reference(57),
+    }
+}
+
+fn acknowledgement(
+    request: ErasureReferenceV1,
+    attempt: ErasureReferenceV1,
+    obligation: ErasureReferenceV1,
+    command: ErasureReferenceV1,
+) -> Result<ErasureAcknowledgementProvenanceV1, Box<dyn std::error::Error>> {
+    Ok(ErasureAcknowledgementProvenanceV1::new(
+        ErasureAcknowledgementProvenanceInputV1 {
+            request,
+            command,
+            attempt,
+            obligation,
+            owner: reference(21),
+            scope: reference(9),
+            outcome: pos_core::ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(53),
+            policy: reference(6),
+            trust: reference(8),
+        },
+    )?)
+}
+
+fn authority_with_multiple_child_scopes(
+) -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn std::error::Error>> {
+    let first = persistence_request()?;
+    let second = erasure_support::request(erasure_support::RequestFixtureInput {
+        request: reference(90),
+        subject: reference(91),
+        scope: pos_core::ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(92)],
+        requester: reference(93),
+        authorization: reference(94),
+        policy: reference(6),
+        request_position: 12,
+        horizon_position: 24,
+        provenance: reference(95),
+    })?;
+    let configuration = ErasureAuthorityConfigurationV1::new(
+        reference(6),
+        reference(8),
+        vec![simple_binding(first, 26)?, simple_binding(second, 27)?],
+    )?;
     Ok(HostConfiguredErasureCoordinatorAuthorityV1::new(
         configuration,
         Arc::new(TestEvidenceVerifier),
@@ -370,6 +503,10 @@ fn admit_resolution_and_fork(
             predecessor_resolution: None,
         })?;
     authority.admit_administrative_resolution(&resolution)?;
+    ErasureRecoveryAuthorizationVerifierV1::validate_administrative_resolution(
+        authority,
+        &resolution,
+    )?;
     let parent = TimelineId::new();
     let child = TimelineMeta::forked_from(parent, Seq::ZERO, "configured-child");
     let child_scope = authority.resolve_fork_child_scope(parent, &child)?;
@@ -530,5 +667,284 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
         Vec::new(),
     )
     .is_err());
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_profile_binding_and_configuration_duplicates(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target = persistence_target();
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(1), reference(1)],
+        vec![target],
+        [reference(2), reference(3), reference(4), reference(5)],
+        Some(reference(6)),
+        reference(7),
+    )
+    .is_err());
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(1)],
+        vec![target, target],
+        [reference(2), reference(3), reference(4), reference(5)],
+        Some(reference(6)),
+        reference(7),
+    )
+    .is_err());
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(1)],
+        vec![target],
+        [reference(2); 4],
+        Some(reference(6)),
+        reference(7),
+    )
+    .is_err());
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(1)],
+        vec![target],
+        [reference(2), reference(3), reference(4), reference(5)],
+        Some(ErasureReferenceV1::from_digest([0; 32])),
+        reference(7),
+    )
+    .is_err());
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(1)],
+        vec![target],
+        [reference(2), reference(3), reference(4), reference(5)],
+        Some(reference(6)),
+        ErasureReferenceV1::from_digest([0; 32]),
+    )
+    .is_err());
+
+    let request = persistence_request()?;
+    let profile = simple_profile(26, Some(25))?;
+    let topology_entry = ErasureAuthorityTopologyBindingV1::new(
+        request.reference(),
+        reference(50),
+        TimelineId::new(),
+        None,
+    );
+    assert!(ErasureAuthorityRequestBindingV1::new(
+        request.clone(),
+        vec![topology_entry; pos_core::ERASURE_MAX_REFERENCES + 1],
+        profile.clone(),
+        reference(40),
+        b"host-proof".to_vec(),
+        reference(7),
+        true,
+    )
+    .is_err());
+    assert!(ErasureAuthorityRequestBindingV1::new(
+        request.clone(),
+        Vec::new(),
+        profile.clone(),
+        reference(40),
+        vec![1; pos_runtime::MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES + 1],
+        reference(7),
+        true,
+    )
+    .is_err());
+    assert!(ErasureAuthorityRequestBindingV1::new(
+        request.clone(),
+        vec![topology_entry, topology_entry],
+        profile.clone(),
+        reference(40),
+        b"host-proof".to_vec(),
+        reference(7),
+        true,
+    )
+    .is_err());
+    let duplicate_binding = simple_binding(request, 26)?;
+    assert!(ErasureAuthorityConfigurationV1::new(
+        reference(6),
+        reference(8),
+        vec![duplicate_binding.clone(), duplicate_binding],
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_lifecycle_boundary_inputs() -> Result<(), Box<dyn std::error::Error>>
+{
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    let admission = frozen_admission(&authority, &request)?;
+    let wrong_authorization = pos_core::ErasureFreezeAuthorizationEvidenceV1::new(
+        ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: admission
+                .freeze_admission_evidence()
+                .authorization_body_digest()?,
+            policy: reference(6),
+            trust: reference(8),
+            evidence: b"different-proof".to_vec(),
+        },
+    )?;
+    assert!(authority
+        .validate_freeze_authorization(admission.freeze_admission_evidence(), &wrong_authorization,)
+        .is_err());
+
+    let malformed_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: request_reference,
+        scope_commitment: ErasureReferenceV1::from_digest([0; 32]),
+        fork: reference(26),
+        lineage_rule: reference(25),
+        predecessor_extension: None,
+        admission_provenance: reference(7),
+    })?;
+    assert!(
+        ErasureRecoveryAuthorizationVerifierV1::validate_scope_extension(
+            &authority,
+            &malformed_extension,
+        )
+        .is_err()
+    );
+
+    let rejecting_authority = authority_with(false)?;
+    assert!(rejecting_authority
+        .admit_authorization(
+            request_reference,
+            reference(7),
+            ErasureAuthorizationDecisionV1::Rejected,
+        )
+        .is_err());
+    let malformed_correction = pos_core::ErasureCorrectionProvenanceV1::new(
+        pos_core::ErasureCorrectionProvenanceInputV1 {
+            rejected_request: reference(99),
+            rejected_terminal_state: ErasureReferenceV1::from_digest([0; 32]),
+            correction_reason: reference(52),
+            authorization_provenance: reference(7),
+        },
+    )?;
+    assert!(authority
+        .admit_corrected_submission(&request, &malformed_correction)
+        .is_err());
+
+    let valid_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: request_reference,
+        scope_commitment: reference(59),
+        fork: reference(26),
+        lineage_rule: reference(25),
+        predecessor_extension: None,
+        admission_provenance: reference(7),
+    })?;
+    assert!(authority
+        .admit_fork_scope_extension(
+            &valid_extension,
+            &ErasureForkAdmissionInputV1 {
+                operation: ErasureReferenceV1::from_digest([0; 32]),
+                expected_inventory_generation: reference(62),
+                child_scope: reference(26),
+                child: TimelineMeta::forked_from(TimelineId::new(), Seq::ZERO, "invalid-input"),
+            },
+        )
+        .is_err());
+
+    let actual_parent = TimelineId::new();
+    let child = TimelineMeta::forked_from(actual_parent, Seq::ZERO, "wrong-parent");
+    assert!(authority
+        .resolve_fork_child_scope(TimelineId::new(), &child)
+        .is_err());
+    assert!(authority
+        .dispatch_destruction(request_reference, &[])
+        .is_err());
+    let mut malformed_command =
+        ErasureDestructionCommandV1::from_obligation(&admission.obligations()[0], reference(7));
+    malformed_command.command = ErasureReferenceV1::from_digest([0; 32]);
+    assert!(authority
+        .dispatch_destruction(request_reference, &[malformed_command])
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_attempt_receipt_and_scope_edges(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    let admission = frozen_admission(&authority, &request)?;
+    let first = admission.obligations()[0];
+
+    let unknown_retry = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: request_reference,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![reference(99)],
+        command_identities: vec![reference(98)],
+        policy: reference(6),
+        trust: reference(8),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    assert!(authority.admit_attempt(&unknown_retry).is_err());
+    let zero_retry = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: request_reference,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![ErasureReferenceV1::from_digest([0; 32])],
+        command_identities: vec![reference(98)],
+        policy: reference(6),
+        trust: reference(8),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    assert!(authority.admit_attempt(&zero_retry).is_err());
+
+    let missing_ack = acknowledgement(
+        request_reference,
+        reference(60),
+        first.reference(),
+        ErasureReferenceV1::from_digest([0; 32]),
+    )?;
+    assert!(authority.admit_acknowledgement(&missing_ack).is_err());
+    let unknown_ack = acknowledgement(
+        request_reference,
+        reference(60),
+        reference(99),
+        first.command_identity(),
+    )?;
+    assert!(authority.admit_acknowledgement(&unknown_ack).is_err());
+    assert!(authority
+        .admit_receipt(&receipt_input(
+            request_reference,
+            ErasureLifecycleV1::AccessFrozen,
+            reference(54),
+        ))
+        .is_err());
+    assert!(authority
+        .admit_receipt(&receipt_input(
+            request_reference,
+            ErasureLifecycleV1::Complete,
+            ErasureReferenceV1::from_digest([0; 32]),
+        ))
+        .is_err());
+
+    let malformed_resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: request_reference,
+            affected_digests: vec![reference(58)],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: ErasureReferenceV1::from_digest([0; 32]),
+            policy: reference(6),
+            trust: reference(8),
+            principal: reference(40),
+            authorization_provenance: reference(7),
+            reason: reference(60),
+            issue_position: 12,
+            predecessor_resolution: None,
+        })?;
+    assert!(authority
+        .admit_administrative_resolution(&malformed_resolution)
+        .is_err());
+
+    let multiple_scopes = authority_with_multiple_child_scopes()?;
+    let parent = TimelineId::new();
+    let child = TimelineMeta::forked_from(parent, Seq::ZERO, "multiple-scopes");
+    assert!(multiple_scopes
+        .resolve_fork_child_scope(parent, &child)
+        .is_err());
     Ok(())
 }
