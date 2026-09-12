@@ -128,13 +128,14 @@ fn configured_fork_authority(
     request: ErasureRequestV1,
     manifest: ErasureReferenceV1,
     parent: TimelineId,
+    lineage_rule: ErasureReferenceV1,
 ) -> Result<HostConfiguredErasureCoordinatorAuthorityV1, ErasureErrorV1> {
     let request_reference = request.reference();
     let profile = ErasureAuthorityFreezeProfileV1::new(
         vec![reference(9)],
         vec![persistence_target()],
         [reference(21), reference(22), reference(23), reference(24)],
-        Some(reference(100)),
+        Some(lineage_rule),
         reference(19),
     )?;
     let binding = ErasureAuthorityRequestBindingV1::new(
@@ -1147,7 +1148,12 @@ fn memory_host_resolves_configured_fork_scope_through_public_sender(
         .manifest_digest()
     };
     authority
-        .install_configured_fork_authority(configured_fork_authority(request, manifest, parent)?);
+        .install_configured_fork_authority(configured_fork_authority(
+            request,
+            manifest,
+            parent,
+            reference(100),
+        )?);
     let child = {
         let mut commands = test_stage("open configured fork sender", host.command_sender())?;
         test_stage(
@@ -1161,6 +1167,62 @@ fn memory_host_resolves_configured_fork_scope_through_public_sender(
         )?
     };
     assert_ne!(child.id(), parent);
+    Ok(())
+}
+
+#[test]
+fn memory_host_rejects_configured_fork_lineage_that_conflicts_with_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open conflicting configured fork host",
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let parent = create_lifecycle_fork_parent(&mut host, &authority)?;
+    let request = test_stage(
+        "construct conflicting configured fork request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    test_stage(
+        "submit authorize and freeze conflicting configured fork request",
+        submit_authorize_freeze(&mut host, request.clone()),
+    )?;
+    let manifest = {
+        let mut reads = test_stage("open conflicting configured fork reader", host.read_sender())?;
+        test_stage(
+            "read conflicting configured fork state",
+            reads.erasure_state(request_reference),
+        )?
+        .ok_or("conflicting configured fork state missing")?
+        .manifest_digest()
+    };
+    authority.install_configured_fork_authority(configured_fork_authority(
+        request,
+        manifest,
+        parent,
+        reference(99),
+    )?);
+    let mut commands = test_stage(
+        "open conflicting configured fork sender",
+        host.command_sender(),
+    )?;
+    assert!(test_stage(
+        "reject conflicting configured fork lineage",
+        commands.fork_timeline_identified(
+            reference(45),
+            parent,
+            pos_core::Seq::ZERO,
+            "conflicting-configured-fork-child",
+        ),
+    )
+    .is_err());
     Ok(())
 }
 

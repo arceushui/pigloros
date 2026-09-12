@@ -893,3 +893,97 @@ fn configured_authority_rejects_attempt_receipt_and_scope_edges(
         .is_err());
     Ok(())
 }
+
+#[test]
+fn configured_authority_rejects_reachable_execution_boundary_mismatches(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    let admission = frozen_admission(&authority, &request)?;
+    let obligation = admission.obligations()[0];
+
+    let wrong_provenance = ErasureDestructionCommandV1::from_obligation(&obligation, reference(99));
+    assert!(authority
+        .dispatch_destruction(request_reference, &[wrong_provenance])
+        .is_err());
+
+    let mut wrong_owner = ErasureDestructionCommandV1::from_obligation(&obligation, reference(7));
+    wrong_owner.owner = reference(99);
+    assert!(authority
+        .dispatch_destruction(request_reference, &[wrong_owner])
+        .is_err());
+
+    let mut wrong_target = ErasureDestructionCommandV1::from_obligation(&obligation, reference(7));
+    wrong_target.target = persistence_target();
+    wrong_target.target.replica_id = reference(99);
+    assert!(authority
+        .dispatch_destruction(request_reference, &[wrong_target])
+        .is_err());
+
+    let mut wrong_obligation = ErasureDestructionCommandV1::from_obligation(&obligation, reference(7));
+    wrong_obligation.obligation = reference(99);
+    assert!(authority
+        .dispatch_destruction(request_reference, &[wrong_obligation])
+        .is_err());
+
+    let mut wrong_command = ErasureDestructionCommandV1::from_obligation(&obligation, reference(7));
+    wrong_command.command = reference(99);
+    assert!(authority
+        .dispatch_destruction(request_reference, &[wrong_command])
+        .is_err());
+
+    let retry = retry_admission(erasure_support::RetryAdmissionFixture {
+        request: request_reference,
+        attempt_ordinal: 1,
+        source_receipt: Some(reference(70)),
+        obligations: admission.obligations(),
+        policy: reference(99),
+        trust: reference(8),
+        admitted_position: 12,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    assert!(authority.admit_attempt(&retry).is_err());
+
+    assert!(authority
+        .admit_acknowledgement(&ErasureAcknowledgementProvenanceV1::new(
+            ErasureAcknowledgementProvenanceInputV1 {
+                request: request_reference,
+                command: obligation.command_identity(),
+                attempt: reference(60),
+                obligation: obligation.reference(),
+                owner: reference(21),
+                scope: reference(9),
+                outcome: pos_core::ErasureAcknowledgementOutcomeV1::Acknowledged,
+                evidence: reference(53),
+                policy: reference(99),
+                trust: reference(8),
+            },
+        )?)
+        .is_err());
+
+    let mut receipt = receipt_input(request_reference, ErasureLifecycleV1::Complete, reference(54));
+    receipt.policy = reference(99);
+    assert!(authority.admit_receipt(&receipt).is_err());
+
+    for (principal, provenance) in [(reference(99), reference(7)), (reference(40), reference(99))] {
+        let resolution = ErasureAdministrativeResolutionV1::new(
+            ErasureAdministrativeResolutionInputV1 {
+                request: request_reference,
+                affected_digests: vec![reference(58)],
+                action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+                scope_commitment: reference(59),
+                policy: reference(6),
+                trust: reference(8),
+                principal,
+                authorization_provenance: provenance,
+                reason: reference(60),
+                issue_position: 12,
+                predecessor_resolution: None,
+            },
+        )?;
+        assert!(authority.admit_administrative_resolution(&resolution).is_err());
+    }
+    Ok(())
+}
