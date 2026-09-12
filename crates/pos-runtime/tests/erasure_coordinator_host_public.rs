@@ -1757,6 +1757,38 @@ fn compatibility_recovery_without_composition_remains_empty_only(
 }
 
 #[test]
+fn recovery_entrypoints_map_store_open_failures_to_adapter_failure() {
+    let missing_path = std::env::temp_dir()
+        .join(format!(
+            "pigloros-erasure-recovery-missing-parent-{}",
+            std::process::id()
+        ))
+        .join("store.db")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        ErasureExecutionHostV1::open_with_recovery(
+            StoreConfig::Sqlite {
+                path: missing_path.clone(),
+            },
+            None,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .map(|_| ()),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    );
+    assert_eq!(
+        ErasureExecutionHostV1::open_gateway_with_recovery(
+            StoreConfig::Sqlite { path: missing_path },
+            None,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .map(|_| ()),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    );
+}
+
+#[test]
 fn authentication_denial_preserves_a_recovered_host() -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();

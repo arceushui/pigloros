@@ -17,9 +17,8 @@ use pos_core::{
 use pos_runtime::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
     ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
-    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1,
-    ErasureAuthorityRequestBindingV1, ErasureAuthorityTopologyBindingV1,
-    ErasureCoordinatorAuthorityV1,
+    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
+    ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, HostConfiguredErasureCoordinatorAuthorityV1,
 };
 
@@ -871,6 +870,121 @@ fn configured_authority_rejects_lifecycle_boundary_inputs() -> Result<(), Box<dy
 }
 
 #[test]
+fn configured_authority_rejects_unbound_public_admission_requests(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let unknown = reference(99);
+    let transition = ErasureStateTransitionV1 {
+        lifecycle: ErasureLifecycleV1::AccessFrozen,
+        freeze_position: Some(10),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        acknowledged_targets: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        provenance: reference(7),
+    };
+    assert!(authority
+        .admit_authorization(unknown, reference(7), ErasureAuthorizationDecisionV1::Authorized)
+        .is_err());
+    assert!(authority.admit_atomic_freeze(unknown, &transition).is_err());
+    assert!(authority.dispatch_destruction(unknown, &[]).is_err());
+    let retry = retry_admission(erasure_support::RetryAdmissionFixture {
+        request: unknown,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        obligations: Vec::new(),
+        policy: reference(6),
+        trust: reference(8),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    assert!(authority.admit_attempt(&retry).is_err());
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: unknown,
+        scope_commitment: reference(59),
+        fork: reference(26),
+        lineage_rule: reference(25),
+        predecessor_extension: None,
+        admission_provenance: reference(7),
+    })?;
+    assert!(authority.admit_scope_extension(&extension).is_err());
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: unknown,
+            affected_digests: vec![reference(58)],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: reference(59),
+            policy: reference(6),
+            trust: reference(8),
+            principal: reference(40),
+            authorization_provenance: reference(7),
+            reason: reference(60),
+            issue_position: 12,
+            predecessor_resolution: None,
+        })?;
+    assert!(authority.admit_administrative_resolution(&resolution).is_err());
+    assert!(authority
+        .admit_receipt(&receipt_input(unknown, ErasureLifecycleV1::Complete, reference(54)))
+        .is_err());
+    assert!(authority.authenticate(&request).is_ok());
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_freeze_and_fork_input_mismatches(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    for requested in [
+        ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::Submitted,
+            freeze_position: Some(10),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            provenance: reference(7),
+        },
+        ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::AccessFrozen,
+            freeze_position: None,
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            provenance: reference(7),
+        },
+    ] {
+        assert!(authority
+            .admit_atomic_freeze(request_reference, &requested)
+            .is_err());
+    }
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: request_reference,
+        scope_commitment: reference(59),
+        fork: reference(26),
+        lineage_rule: reference(25),
+        predecessor_extension: None,
+        admission_provenance: reference(7),
+    })?;
+    assert!(authority
+        .admit_fork_scope_extension(
+            &extension,
+            &ErasureForkAdmissionInputV1 {
+                operation: reference(61),
+                expected_inventory_generation: reference(62),
+                child_scope: reference(99),
+                child: TimelineMeta::forked_from(TimelineId::new(), Seq::ZERO, "wrong-scope"),
+            },
+        )
+        .is_err());
+    Ok(())
+}
+
+#[test]
 fn configured_authority_rejects_attempt_receipt_and_scope_edges(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority = authority()?;
@@ -963,7 +1077,7 @@ fn configured_authority_rejects_attempt_receipt_and_scope_edges(
 }
 
 #[test]
-fn configured_authority_rejects_reachable_execution_boundary_mismatches(
+fn configured_authority_rejects_destruction_command_binding_mismatches(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority = authority()?;
     let request = persistence_request()?;
@@ -998,9 +1112,30 @@ fn configured_authority_rejects_reachable_execution_boundary_mismatches(
 
     let mut wrong_command = ErasureDestructionCommandV1::from_obligation(&obligation, reference(7));
     wrong_command.command = reference(99);
-    assert!(authority
-        .dispatch_destruction(request_reference, &[wrong_command])
-        .is_err());
+    wrong_command.obligation = pos_core::ErasureObligationV1::new(
+        pos_core::ErasureObligationInputV1 {
+            category: wrong_command.category,
+            target: wrong_command.target,
+            owner: wrong_command.owner,
+            command_identity: wrong_command.command,
+        },
+    )?
+    .reference();
+    assert!(matches!(
+        authority.dispatch_destruction(request_reference, &[wrong_command]),
+        Err(pos_core::ErasureErrorV1::ProvenanceMissing)
+    ));
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_retry_receipt_and_resolution_boundary_mismatches(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    let admission = frozen_admission(&authority, &request)?;
+    let obligation = admission.obligations()[0];
 
     let retry = retry_admission(erasure_support::RetryAdmissionFixture {
         request: request_reference,
