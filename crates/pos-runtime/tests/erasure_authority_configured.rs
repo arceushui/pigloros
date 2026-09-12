@@ -8,7 +8,7 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1,
     ErasureForkAdmissionInputV1, ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureReplayClaimV1, ErasureScopeExtensionInputV1,
+    ErasureReceiptInputV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_runtime::{
@@ -44,6 +44,12 @@ impl ErasureAuthorityEvidenceVerifierV1 for TestEvidenceVerifier {
 }
 
 fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn std::error::Error>> {
+    authority_with(true)
+}
+
+fn authority_with(
+    allow_rejection: bool,
+) -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn std::error::Error>> {
     let request = persistence_request()?;
     let request_reference = request.reference();
     let target = persistence_target();
@@ -75,7 +81,7 @@ fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn st
         reference(40),
         b"host-proof".to_vec(),
         reference(7),
-        true,
+        allow_rejection,
     )?;
     let configuration =
         ErasureAuthorityConfigurationV1::new(reference(6), reference(8), vec![request_binding])?;
@@ -246,5 +252,116 @@ fn admit_resolution_and_fork(
             child,
         },
     )?;
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_unbound_and_invalid_inputs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    assert!(authority
+        .verified_topology_observation(reference(99), reference(50))
+        .is_err());
+    assert!(authority
+        .verified_topology_observation(request_reference, ErasureReferenceV1::from_digest([0; 32]))
+        .is_err());
+    let foreign_request = erasure_support::request(erasure_support::RequestFixtureInput {
+        request: reference(99),
+        subject: reference(2),
+        scope: pos_core::ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(3)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 9,
+        horizon_position: 20,
+        provenance: reference(7),
+    })?;
+    assert!(authority.authenticate(&foreign_request).is_err());
+    assert!(authority
+        .admit_authorization(
+            request_reference,
+            reference(99),
+            ErasureAuthorizationDecisionV1::Authorized
+        )
+        .is_err());
+    assert!(authority
+        .admit_atomic_freeze(
+            request_reference,
+            &ErasureStateTransitionV1 {
+                lifecycle: ErasureLifecycleV1::Authorized,
+                freeze_position: Some(10),
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                acknowledged_targets: Vec::new(),
+                replay_claim: ErasureReplayClaimV1::Exact,
+                provenance: reference(7),
+            },
+        )
+        .is_err());
+    assert!(authority
+        .admit_atomic_freeze(
+            request_reference,
+            &ErasureStateTransitionV1 {
+                lifecycle: ErasureLifecycleV1::AccessFrozen,
+                freeze_position: None,
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                acknowledged_targets: Vec::new(),
+                replay_claim: ErasureReplayClaimV1::Exact,
+                provenance: reference(7),
+            },
+        )
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn std::error::Error>>
+{
+    let target = persistence_target();
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        Vec::new(),
+        vec![target],
+        [reference(1), reference(2), reference(3), reference(4)],
+        None,
+        reference(5),
+    )
+    .is_err());
+    let mut malformed_target = target;
+    malformed_target.artifact_digest = ErasureReferenceV1::from_digest([0; 32]);
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(1)],
+        vec![malformed_target],
+        [reference(2), reference(3), reference(4), reference(5)],
+        None,
+        reference(6),
+    )
+    .is_err());
+    let request = persistence_request()?;
+    assert!(ErasureAuthorityRequestBindingV1::new(
+        request.clone(),
+        Vec::new(),
+        ErasureAuthorityFreezeProfileV1::new(
+            vec![reference(9)],
+            vec![target],
+            [reference(21), reference(22), reference(23), reference(24)],
+            Some(reference(25)),
+            reference(26),
+        )?,
+        reference(40),
+        Vec::new(),
+        reference(7),
+        true,
+    )
+    .is_err());
+    assert!(ErasureAuthorityConfigurationV1::new(
+        ErasureReferenceV1::from_digest([0; 32]),
+        reference(8),
+        Vec::new(),
+    )
+    .is_err());
     Ok(())
 }
