@@ -8,11 +8,15 @@ publish.workspace = true
 
 [dependencies]
 pos-core = { path = "../pos-core" }
+pos-crypto = { path = "../pos-crypto" }
 pos-store = { path = "../pos-store" }
 pos-state = { path = "../pos-state" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
 
 [lints]
 workspace = true

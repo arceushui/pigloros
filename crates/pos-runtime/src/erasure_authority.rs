@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use pos_core::{
-    destruction_command_reference, ErasureAcknowledgementProvenanceV1,
+    destruction_command_reference, CanonicalBytes, ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionV1, ErasureApplicabilityDecisionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeResultV1,
     ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
@@ -24,7 +24,7 @@ use pos_core::{
     ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
     ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureStateTransitionV1,
-    ErasureVerifiedTopologyObservationV1, TimelineId, TimelineMeta,
+    ErasureVerifiedTopologyObservationV1, PublicKey, Signature, TimelineId, TimelineMeta,
 };
 
 use super::erasure_host::ErasureCoordinatorAuthorityV1;
@@ -62,6 +62,84 @@ pub trait ErasureAuthorityEvidenceVerifierV1: std::fmt::Debug + Send + Sync {
         context: &[u8],
         evidence: &[u8],
     ) -> Result<(), ErasureErrorV1>;
+}
+
+/// Ed25519 verifier for host authority evidence bundles.
+///
+/// Evidence is a concatenation of entries, each encoded as a big-endian
+/// `u32` context length, the exact context bytes, and a 64-byte Ed25519
+/// signature over those context bytes. A deployment can pre-authorize every
+/// request/lifecycle context it expects without giving this crate access to a
+/// store, key material, or policy engine.
+#[derive(Clone, Copy, Debug)]
+pub struct Ed25519ErasureAuthorityEvidenceVerifierV1 {
+    public_key: PublicKey,
+}
+
+impl Ed25519ErasureAuthorityEvidenceVerifierV1 {
+    /// Construct a verifier after validating the compressed Ed25519 key.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::TrustSnapshotInvalid`] when `public_key` is
+    /// not a valid Ed25519 verifying key.
+    pub fn new(public_key: PublicKey) -> Result<Self, ErasureErrorV1> {
+        pos_crypto::signing::verifying_key_from_public_key(&public_key)
+            .map(|_| Self { public_key })
+            .map_err(|_| ErasureErrorV1::TrustSnapshotInvalid)
+    }
+}
+
+impl ErasureAuthorityEvidenceVerifierV1 for Ed25519ErasureAuthorityEvidenceVerifierV1 {
+    fn verify(
+        &self,
+        _kind: ErasureAuthorityEvidenceKindV1,
+        _request: &ErasureRequestV1,
+        context: &[u8],
+        evidence: &[u8],
+    ) -> Result<(), ErasureErrorV1> {
+        let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&self.public_key)
+            .map_err(|_| ErasureErrorV1::TrustSnapshotInvalid)?;
+        let mut cursor = 0;
+        while cursor < evidence.len() {
+            let length_end = cursor
+                .checked_add(4)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?;
+            let length_bytes = evidence
+                .get(cursor..length_end)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?;
+            let context_length = usize::try_from(u32::from_be_bytes(
+                length_bytes
+                    .try_into()
+                    .map_err(|_| ErasureErrorV1::InvalidEncoding)?,
+            ))
+            .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+            cursor = length_end;
+            let context_end = cursor
+                .checked_add(context_length)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?;
+            let signature_end = context_end
+                .checked_add(64)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?;
+            let signed_context = evidence
+                .get(cursor..context_end)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?;
+            let signature_bytes = evidence
+                .get(context_end..signature_end)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?;
+            cursor = signature_end;
+            if signed_context == context {
+                let signature = Signature::from_bytes(
+                    signature_bytes
+                        .try_into()
+                        .map_err(|_| ErasureErrorV1::InvalidEncoding)?,
+                );
+                let payload = CanonicalBytes::from_vec(context.to_vec());
+                return pos_crypto::signing::verify(&verifying_key, &payload, &signature)
+                    .map_err(|_| ErasureErrorV1::Unauthorized);
+            }
+        }
+        Err(ErasureErrorV1::Unauthorized)
+    }
 }
 
 /// One host-authenticated mapping between a request and a Timeline/Fork.
