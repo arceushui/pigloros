@@ -7,15 +7,17 @@ use pos_core::erasure::target_closure_digest;
 use pos_core::{
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1,
-    ErasureForkAdmissionInputV1, ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
+    ErasureAdministrativeResolutionV1, ErasureAttemptQuotaReservationV1,
+    ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1, ErasureForkAdmissionInputV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1, ErasureReceiptInputV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRetryAdmissionV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq,
+    TimelineId, TimelineMeta,
 };
 use pos_runtime::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
     ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
-    ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
+    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
     ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
     HostConfiguredErasureCoordinatorAuthorityV1,
 };
@@ -42,6 +44,45 @@ impl ErasureAuthorityEvidenceVerifierV1 for TestEvidenceVerifier {
         } else {
             Err(pos_core::ErasureErrorV1::Unauthorized)
         }
+    }
+}
+
+#[derive(Debug)]
+struct TestExecution;
+
+impl ErasureAuthorityExecutionV1 for TestExecution {
+    fn dispatch_destruction(
+        &self,
+        _request: ErasureReferenceV1,
+        commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), pos_core::ErasureErrorV1> {
+        (!commands.is_empty())
+            .then_some(())
+            .ok_or(pos_core::ErasureErrorV1::ScopeInvalid)
+    }
+
+    fn reserve_attempt(
+        &self,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, pos_core::ErasureErrorV1> {
+        Ok(ErasureAttemptQuotaReservationV1::new(
+            admission.reference(),
+            reference(99),
+        ))
+    }
+
+    fn admit_acknowledgement(
+        &self,
+        _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), pos_core::ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_receipt(
+        &self,
+        _input: &ErasureReceiptInputV1,
+    ) -> Result<(), pos_core::ErasureErrorV1> {
+        Ok(())
     }
 }
 
@@ -90,7 +131,8 @@ fn authority_with(
     Ok(HostConfiguredErasureCoordinatorAuthorityV1::new(
         configuration,
         Arc::new(TestEvidenceVerifier),
-    )?)
+        Arc::new(TestExecution),
+    ))
 }
 
 #[test]
@@ -113,7 +155,7 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
 
     let correction = pos_core::ErasureCorrectionProvenanceV1::new(
         pos_core::ErasureCorrectionProvenanceInputV1 {
-            rejected_request: request_reference,
+            rejected_request: reference(99),
             rejected_terminal_state: reference(51),
             correction_reason: reference(52),
             authorization_provenance: reference(7),
@@ -352,6 +394,17 @@ fn configured_authority_rejects_unbound_and_invalid_inputs(
         provenance: reference(7),
     })?;
     assert!(authority.authenticate(&foreign_request).is_err());
+    let same_request_correction = pos_core::ErasureCorrectionProvenanceV1::new(
+        pos_core::ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request_reference,
+            rejected_terminal_state: reference(51),
+            correction_reason: reference(52),
+            authorization_provenance: reference(7),
+        },
+    )?;
+    assert!(authority
+        .admit_corrected_submission(&request, &same_request_correction)
+        .is_err());
     assert!(authority
         .admit_authorization(
             request_reference,
