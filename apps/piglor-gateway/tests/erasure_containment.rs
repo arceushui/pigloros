@@ -380,7 +380,7 @@ async fn recovered_access_frozen_gateway_health_is_payload_free(
         path: path.to_string_lossy().into_owned(),
     };
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(HealthAuthority);
-    let composition = ErasureCoordinatorCompositionV1::new(authority, reference(30));
+    let composition = ErasureCoordinatorCompositionV1::new(authority, reference(30))?;
     let request = persistence_request()?;
     let mut initial = ErasureExecutionHostV1::open_gateway_with_authority(
         config(),
