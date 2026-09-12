@@ -12,8 +12,9 @@ use pos_reference::sandbox_provider_protocol::{
     AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedAdmissionGrant,
     HostCapabilityProfile, LaunchPolicy, NetworkExchangePlan, ProviderConformanceReport,
     SandboxAdministratorPolicy, SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord,
-    SandboxExecuteRequest, SandboxProviderAdmissionInputs, SandboxProviderReceipt,
-    SandboxRevocationSnapshot, SandboxTrustSnapshot, SelectorGrantCommitment,
+    SandboxExecuteRequest, SandboxProviderAdmissionInputs, SandboxProviderProtocolError,
+    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTrustSnapshot,
+    SelectorGrantCommitment,
 };
 use sha2::{Digest, Sha256};
 
@@ -1325,7 +1326,25 @@ fn provider_admission_rejects_rebound_hcp_proof_cardinality() -> TestResult {
         integer(1),
         bytes([18; 32]),
     ]));
-    for invalid_proofs in [proofs[..15].to_vec(), ordered(extra)?] {
+    let mut substituted = proofs.clone();
+    substituted[15] = extra[16].clone();
+    let mut duplicate = proofs.clone();
+    duplicate[15] = duplicate[0].clone();
+    for (invalid_proofs, expected) in [
+        (
+            proofs[..15].to_vec(),
+            SandboxProviderProtocolError::FieldOutOfBounds,
+        ),
+        (ordered(extra)?, SandboxProviderProtocolError::FieldOutOfBounds),
+        (
+            ordered(substituted)?,
+            SandboxProviderProtocolError::FieldOutOfBounds,
+        ),
+        (
+            ordered(duplicate)?,
+            SandboxProviderProtocolError::NonCanonicalOrder,
+        ),
+    ] {
         let hcp1 = resign_unsigned_field(
             &fixture.hcp1,
             "HCP1",
@@ -1361,7 +1380,7 @@ fn provider_admission_rejects_rebound_hcp_proof_cardinality() -> TestResult {
         };
         assert_eq!(
             AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs),
-            Err(SandboxAdmissionError::HostCapabilityMismatch)
+            Err(SandboxAdmissionError::Protocol(expected))
         );
     }
     Ok(())

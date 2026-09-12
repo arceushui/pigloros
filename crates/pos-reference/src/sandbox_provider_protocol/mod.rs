@@ -14,7 +14,10 @@ mod revocation;
 mod revocation_update;
 mod trust;
 
-/// ADR-069's closed SIC1/HCP1 feature set in bytewise identifier order.
+/// The closed HCP1 feature-probe set required by ADR-069.
+///
+/// The bytewise order is part of the signed SPM1/PCR1 commitment. HCP1 proofs
+/// carry the same IDs in preferred deterministic-CBOR order.
 pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
     "broker-lifecycle",
     "cgroup-kill",
