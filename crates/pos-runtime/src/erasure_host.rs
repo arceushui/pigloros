@@ -400,15 +400,21 @@ pub struct ErasureCoordinatorCompositionV1 {
 
 impl ErasureCoordinatorCompositionV1 {
     /// Bind one host-trusted authority Plugin to its coordinator identity.
-    #[must_use]
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when the coordinator
+    /// identity is zero.
     pub fn new(
         authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
         coordinator: ErasureReferenceV1,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ErasureErrorV1> {
+        if coordinator.digest() == [0; 32] {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(Self {
             authority,
             coordinator,
-        }
+        })
     }
 
     /// Build a composition from independently authenticated host authority
@@ -424,15 +430,12 @@ impl ErasureCoordinatorCompositionV1 {
         execution: Arc<dyn super::erasure_authority::ErasureAuthorityExecutionV1>,
         coordinator: ErasureReferenceV1,
     ) -> Result<Self, ErasureErrorV1> {
-        if coordinator.digest() == [0; 32] {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
         let authority = super::erasure_authority::HostConfiguredErasureCoordinatorAuthorityV1::new(
             configuration,
             verifier,
             execution,
         );
-        Ok(Self::new(Arc::new(authority), coordinator))
+        Self::new(Arc::new(authority), coordinator)
     }
 
     /// Construct an explicitly closed composition for a deployment that has
@@ -443,10 +446,10 @@ impl ErasureCoordinatorCompositionV1 {
     /// replaces this authority with a real, independently trusted provider.
     #[must_use]
     pub fn closed() -> Self {
-        Self::new(
-            Arc::new(ClosedErasureCoordinatorAuthorityV1),
-            ErasureReferenceV1::from_digest([0xee; 32]),
-        )
+        Self {
+            authority: Arc::new(ClosedErasureCoordinatorAuthorityV1),
+            coordinator: ErasureReferenceV1::from_digest([0xee; 32]),
+        }
     }
 
     const fn coordinator(&self) -> ErasureReferenceV1 {
@@ -1083,7 +1086,8 @@ impl ErasureExecutionHostV1 {
         coordinator: ErasureReferenceV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator);
+        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator)
+            .map_err(map_erasure_error)?;
         Self::open_with_authority(config, &composition, maximum_requests)
     }
 
@@ -1150,7 +1154,8 @@ impl ErasureExecutionHostV1 {
         coordinator: ErasureReferenceV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator);
+        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator)
+            .map_err(map_erasure_error)?;
         Self::open_read_only_with_authority(path, &composition, maximum_requests)
     }
 
@@ -1215,7 +1220,8 @@ impl ErasureExecutionHostV1 {
         coordinator: ErasureReferenceV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator);
+        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator)
+            .map_err(map_erasure_error)?;
         Self::open_gateway_with_authority(config, &composition, maximum_requests)
     }
 
