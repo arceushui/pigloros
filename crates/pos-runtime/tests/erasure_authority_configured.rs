@@ -885,7 +885,11 @@ fn configured_authority_rejects_unbound_public_admission_requests(
         provenance: reference(7),
     };
     assert!(authority
-        .admit_authorization(unknown, reference(7), ErasureAuthorizationDecisionV1::Authorized)
+        .admit_authorization(
+            unknown,
+            reference(7),
+            ErasureAuthorizationDecisionV1::Authorized
+        )
         .is_err());
     assert!(authority.admit_atomic_freeze(unknown, &transition).is_err());
     assert!(authority.dispatch_destruction(unknown, &[]).is_err());
@@ -893,7 +897,7 @@ fn configured_authority_rejects_unbound_public_admission_requests(
         request: unknown,
         attempt_ordinal: 0,
         source_receipt: None,
-        obligations: Vec::new(),
+        obligations: &[],
         policy: reference(6),
         trust: reference(8),
         admitted_position: 10,
@@ -924,9 +928,15 @@ fn configured_authority_rejects_unbound_public_admission_requests(
             issue_position: 12,
             predecessor_resolution: None,
         })?;
-    assert!(authority.admit_administrative_resolution(&resolution).is_err());
     assert!(authority
-        .admit_receipt(&receipt_input(unknown, ErasureLifecycleV1::Complete, reference(54)))
+        .admit_administrative_resolution(&resolution)
+        .is_err());
+    assert!(authority
+        .admit_receipt(&receipt_input(
+            unknown,
+            ErasureLifecycleV1::Complete,
+            reference(54)
+        ))
         .is_err());
     assert!(authority.authenticate(&request).is_ok());
     Ok(())
@@ -1112,15 +1122,14 @@ fn configured_authority_rejects_destruction_command_binding_mismatches(
 
     let mut wrong_command = ErasureDestructionCommandV1::from_obligation(&obligation, reference(7));
     wrong_command.command = reference(99);
-    wrong_command.obligation = pos_core::ErasureObligationV1::new(
-        pos_core::ErasureObligationInputV1 {
+    wrong_command.obligation =
+        pos_core::ErasureObligationV1::new(pos_core::ErasureObligationInputV1 {
             category: wrong_command.category,
             target: wrong_command.target,
             owner: wrong_command.owner,
             command_identity: wrong_command.command,
-        },
-    )?
-    .reference();
+        })?
+        .reference();
     assert!(matches!(
         authority.dispatch_destruction(request_reference, &[wrong_command]),
         Err(pos_core::ErasureErrorV1::ProvenanceMissing)
