@@ -22,6 +22,14 @@ pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
 pub mod profile;
+// Public module reachability keeps crate-only sibling access compatible with
+// both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod provider_transport;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod root_selector;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
@@ -30,6 +38,71 @@ pub mod selector;
 #[doc(hidden)]
 pub mod selector_protocol;
 pub mod signed_bundle;
+
+// Unit tests reuse the public integration corpus. Keeping this test-only module
+// reachable at the crate boundary preserves the integration helper's ordinary
+// public visibility without suppressing unused-item or reachability lints.
+#[cfg(test)]
+#[doc(hidden)]
+pub mod selector_test_support {
+    use crate as pos_reference;
+
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
+}
+
+#[cfg(test)]
+#[doc(hidden)]
+pub mod selector_transport_test_fixture {
+    use crate as pos_reference;
+
+    // The integration corpus is included only to reuse its independently
+    // signed provider fixture from crate-private transport tests.
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/sandbox_admission_public.rs"
+    ));
+
+    pub(crate) struct TransportAdmissionFixture {
+        pub(crate) provider: crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        pub(crate) request: crate::sandbox_provider_protocol::SandboxExecuteRequest,
+        pub(crate) commitment: crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        pub(crate) agr1: Vec<u8>,
+    }
+
+    pub(crate) fn authenticated_transport_fixture() -> TestResult<TransportAdmissionFixture> {
+        let fixture = Fixture::new()?;
+        let provider = fixture.admit()?;
+        let image =
+            provider.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+        let launch = provider.admit_launch_policy(&fixture.lps1, &image)?;
+        let spx1 = execute_request(&fixture, &launch, &["execute"])?;
+        let request =
+            crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(&spx1)?;
+        let commitment = fixture.selector_grant_commitment(&provider, &image, &launch, &request)?;
+        let agr1 = admission_grant(&fixture, &request, &launch, &commitment)?;
+        provider.authenticate_selector_grant(&agr1, &request, &commitment)?;
+        Ok(TransportAdmissionFixture {
+            provider,
+            request,
+            commitment,
+            agr1,
+        })
+    }
+}
+
+/// Run ADR-069's fixed root-owned selector executable.
+///
+/// This is the sole public binary entry point. It accepts no configuration,
+/// authority, endpoint, artifact path, or compatibility input; all authority
+/// is opened by the crate-private composition from fixed root-owned locations.
+///
+/// # Errors
+/// Returns a closed failure when normal selector composition cannot establish
+/// the required immutable installation, listener, provider, or peer boundary.
+#[cfg(unix)]
+pub fn run_fixed_root_selector() -> Result<(), selector::SelectorBoundaryError> {
+    root_selector::run_fixed()
+}
 
 /// Divergence classes emitted by the independent JSON evaluator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -5,6 +5,7 @@
 //! selector composition must authenticate before exposing its evaluator socket.
 
 pub mod authority;
+mod cases;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -30,6 +31,44 @@ const MANIFEST_NAME: &str = "installation.cbor";
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.SelectorInstallation.v1\0";
+
+/// A canonical case reconstructed only from authenticated SIC1 descriptors.
+///
+/// The root-selector composition retains this type inside the crate. It never
+/// accepts a caller-provided archive, artifact path, or compatibility fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedInstalledCase {
+    attempt: crate::evaluator::CaseAttempt,
+    fixture_contract_digest: [u8; 32],
+    profile_digest: [u8; 32],
+    bundle_digest: [u8; 32],
+}
+
+impl ResolvedInstalledCase {
+    /// Returns the exact ordinal attempt rebuilt from the verified CFB1 closure.
+    #[must_use]
+    pub(crate) const fn attempt(&self) -> &crate::evaluator::CaseAttempt {
+        &self.attempt
+    }
+
+    /// Returns the CPF1 `FixtureContract` binding for this attempt.
+    #[must_use]
+    pub(crate) const fn fixture_contract_digest(&self) -> [u8; 32] {
+        self.fixture_contract_digest
+    }
+
+    /// Returns the verified CPF1 identity.
+    #[must_use]
+    pub(crate) const fn profile_digest(&self) -> [u8; 32] {
+        self.profile_digest
+    }
+
+    /// Returns the complete verified CFB1 identity.
+    #[must_use]
+    pub(crate) const fn bundle_digest(&self) -> [u8; 32] {
+        self.bundle_digest
+    }
+}
 
 /// A closed SIC1 artifact role.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -165,7 +204,11 @@ impl InstallationManifest {
             return Err(ProtocolError::FieldOutOfBounds);
         }
         let root_public_key = fixed_bytes(&fields[3])?;
-        VerifyingKey::from_bytes(&root_public_key).map_err(|_| ProtocolError::InvalidEncoding)?;
+        let root_verifying_key = VerifyingKey::from_bytes(&root_public_key)
+            .map_err(|_| ProtocolError::InvalidEncoding)?;
+        if root_verifying_key.is_weak() {
+            return Err(ProtocolError::InvalidEncoding);
+        }
         let digest = nonzero_digest(&wrapper[1])?;
         if manifest_digest(&wrapper[0])? != digest {
             return Err(ProtocolError::DigestMismatch);
@@ -518,7 +561,11 @@ fn ordered_objects(value: &Value) -> Result<Vec<InstallationObject>, ProtocolErr
     Ok(objects)
 }
 
-fn open_directory_chain(
+/// Open one root-owned relative directory chain without following links.
+///
+/// This is crate-private because selector composition alone may validate the
+/// fixed SIC1-owned provider endpoint beneath the retained installation root.
+pub(crate) fn open_directory_chain(
     mut directory: File,
     relative: &Path,
     expected_owner: u32,
@@ -692,6 +739,9 @@ mod tests {
     use ciborium::value::Value;
     use ed25519_dalek::{Signer, SigningKey};
 
+    use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
+
+    use super::authority::AuthenticatedSelectorBootstrap;
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -1736,16 +1786,10 @@ mod tests {
         );
 
         let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
-        assert_eq!(
-            digest_reader(write_only, 1),
-            Err(SelectorBoundaryError::Io)
-        );
+        assert_eq!(digest_reader(write_only, 1), Err(SelectorBoundaryError::Io));
 
         let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
-        assert_eq!(
-            digest_reader(write_only, 0),
-            Err(SelectorBoundaryError::Io)
-        );
+        assert_eq!(digest_reader(write_only, 0), Err(SelectorBoundaryError::Io));
         Ok(())
     }
 
@@ -1828,6 +1872,102 @@ mod tests {
         assert_eq!(admitted.bootstrap().policy().policy_epoch(), 4);
         assert_eq!(admitted.provider().manifest().provider_id, "provider");
         assert_eq!(admitted.provider().host_profile().kernel_release, "6.12.0");
+        Ok(())
+    }
+
+    fn retain_case_artifact(
+        state: &mut InstalledSelectorState,
+        kind: u8,
+        identity: [u8; 32],
+        bytes: &[u8],
+    ) -> TestResult {
+        let artifact = held_artifact(kind, identity, bytes)?;
+        let key = (artifact.object.kind, artifact.object.identity);
+        state.manifest.objects.push(artifact.object.clone());
+        state
+            .manifest
+            .objects
+            .sort_by_key(|object| (object.kind, object.identity));
+        state.artifacts.insert(key, artifact);
+        Ok(())
+    }
+
+    fn installed_case_bootstrap(
+        corpus: &crate::selector_test_support::Corpus,
+    ) -> TestResult<(EvaluationRequest, AuthenticatedSelectorBootstrap)> {
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut state = authenticated_state()?;
+        retain_case_artifact(
+            &mut state,
+            14,
+            request.fixture_bundle_digest,
+            &corpus.archive,
+        )?;
+        retain_case_artifact(
+            &mut state,
+            15,
+            request.trust_policy_snapshot_digest,
+            &corpus.trust_policy,
+        )?;
+        state
+            .authenticate_bootstrap()
+            .map(|bootstrap| (request, bootstrap))
+            .map_err(Into::into)
+    }
+
+    fn rebound(mut request: EvaluationRequest) -> TestResult<EvaluationRequest> {
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        Ok(request)
+    }
+
+    #[test]
+    fn retained_sic1_descriptors_reconstruct_the_evr1_selected_case() -> TestResult {
+        let corpus = crate::selector_test_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        let resolved = bootstrap.resolve_installed_case(&request, 0)?;
+        assert_eq!(resolved.bundle_digest(), request.fixture_bundle_digest);
+        assert_eq!(resolved.profile_digest(), request.profile_digest);
+        assert_ne!(resolved.fixture_contract_digest(), [0; 32]);
+        assert_eq!(resolved.attempt().case_id, "case-0");
+        assert_eq!(resolved.attempt().mode, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn retained_sic1_case_resolution_rejects_foreign_identity_and_case_selection() -> TestResult {
+        let corpus = crate::selector_test_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        assert!(bootstrap.resolve_installed_case(&request, 7).is_err());
+        for request in [
+            rebound(EvaluationRequest {
+                subject_adapter: SubjectAdapterKind::PublicGatewayProtocol,
+                ..request.clone()
+            })?,
+            rebound(EvaluationRequest {
+                fixture_bundle_digest: [99; 32],
+                ..request
+            })?,
+        ] {
+            assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_sic1_case_resolution_enforces_preflight_and_verified_closure() -> TestResult {
+        let invalid_signature = crate::selector_test_support::corpus_with_bundle_mutation(
+            crate::selector_test_support::BundleMutation::Signature,
+        )?;
+        let (request, bootstrap) = installed_case_bootstrap(&invalid_signature)?;
+        assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
+
+        let cap_violation = crate::selector_test_support::corpus_with_profile_mutation(
+            crate::selector_test_support::ProfileMutation::SelectedClosureCapBoundary(0),
+        )?;
+        let (request, bootstrap) = installed_case_bootstrap(&cap_violation)?;
+        assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
         Ok(())
     }
 }

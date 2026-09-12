@@ -15,10 +15,10 @@ use super::codec::{
 use super::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, LaunchPolicy, ProviderCapability,
     ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxExecuteRequest,
-    SandboxExecutionMode, SandboxLimit, SandboxProviderManifest, SandboxProviderProtocolError,
-    SandboxProviderReceipt, SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet,
-    SandboxTerminalOutcome, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
-    SignedImageManifest, REQUIRED_HOST_FEATURES,
+    SandboxExecutionMode, SandboxLimit, SandboxProviderError, SandboxProviderManifest,
+    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult,
+    SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError,
+    SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest, REQUIRED_HOST_FEATURES,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
@@ -775,6 +775,44 @@ impl AdmittedSandboxProvider {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
         self.validate_execute_authority(request, image, launch)?;
+        self.authenticate_grant_with_commitment(bytes, request, commitment, launch.policy_digest)
+    }
+
+    /// Authenticate AGR1 from a sealed selector commitment and exact SPX1.
+    ///
+    /// This crate-private entry point deliberately accepts no caller-selected
+    /// image, launch policy, or expected digest. Those values were admitted
+    /// before deriving `commitment`; its private authority binds them to this
+    /// provider and `request` repeats the exact selected SPX1 authority.
+    ///
+    /// # Errors
+    /// Rejects a foreign commitment, substituted SPX1 authority, forged grant,
+    /// or any request, attempt, input, epoch, plan, or runtime-key mismatch.
+    pub(crate) fn authenticate_selector_grant(
+        &self,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+        commitment: &SelectorGrantCommitment,
+    ) -> Result<AuthenticatedAdmissionGrant, SandboxAdmissionError> {
+        if !commitment.matches_selected_provider(self) {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        self.validate_execute_authority_from_commitment(request, commitment)?;
+        self.authenticate_grant_with_commitment(
+            bytes,
+            request,
+            commitment,
+            commitment.authority.launch_policy,
+        )
+    }
+
+    fn authenticate_grant_with_commitment(
+        &self,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+        commitment: &SelectorGrantCommitment,
+        expected_launch_policy: [u8; 32],
+    ) -> Result<AuthenticatedAdmissionGrant, SandboxAdmissionError> {
         let grant = AdmissionGrant::from_canonical_cbor(bytes)?;
         if grant.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
             return Err(SandboxAdmissionError::ConformanceMismatch);
@@ -836,7 +874,7 @@ impl AdmittedSandboxProvider {
             ],
             input: request.adapter_input.digest,
             exchange_plans: expected_plans,
-            launch_policy: launch.policy_digest,
+            launch_policy: expected_launch_policy,
             effective_limits: commitment.effective_limits_digest,
             readback_set: commitment.expected_readback_set_digest,
         };
@@ -929,6 +967,30 @@ impl AdmittedSandboxProvider {
         Ok(AuthenticatedSandboxProviderResult(result))
     }
 
+    /// Authenticate a pre-admission SPE1 against one exact selector-owned SPX1.
+    ///
+    /// # Errors
+    /// Rejects a forged, unbound, non-execute, or foreign-provider failure.
+    pub(crate) fn authenticate_selector_error(
+        &self,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+    ) -> Result<(), SandboxAdmissionError> {
+        let error = SandboxProviderError::from_canonical_cbor(bytes)?;
+        if error.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        error.verify_signature(&self.runtime_key)?;
+        if error.operation != Some(1)
+            || error.request_id != Some(request.request.request_id)
+            || error.request_digest != Some(request.request_digest)
+            || error.attempt_id != Some(request.attempt_id)
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        Ok(())
+    }
+
     /// Authenticate the complete SAU1 chain referenced by SPR1 and mirrored by SPY1.
     ///
     /// # Errors
@@ -963,6 +1025,38 @@ impl AdmittedSandboxProvider {
             authority: SelectedExecuteAuthority {
                 launch_policy: launch.policy_digest,
                 image: image.manifest.manifest_digest,
+                administrator_policy: self.policy.policy_digest(),
+                trust: self.trust.snapshot_digest(),
+                revocation: self.revocation.snapshot_digest(),
+                provider_manifest: self.manifest.manifest_digest,
+                conformance_profile: self.manifest.pcf1_digest,
+                conformance_report: self.conformance_report.report_digest,
+                host_profile: self.host_profile.profile_digest,
+            },
+        };
+        if actual != expected {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_execute_authority_from_commitment(
+        &self,
+        request: &SandboxExecuteRequest,
+        commitment: &SelectorGrantCommitment,
+    ) -> Result<(), SandboxAdmissionError> {
+        let authority = &request.authority;
+        let actual = ExecuteBinding {
+            policy: request.request.apt1_digest,
+            policy_epoch: request.request.policy_epoch,
+            authority: SelectedExecuteAuthority::from_execute(authority),
+        };
+        let expected = ExecuteBinding {
+            policy: self.policy.policy_digest(),
+            policy_epoch: self.policy.policy_epoch(),
+            authority: SelectedExecuteAuthority {
+                launch_policy: commitment.authority.launch_policy,
+                image: commitment.authority.image,
                 administrator_policy: self.policy.policy_digest(),
                 trust: self.trust.snapshot_digest(),
                 revocation: self.revocation.snapshot_digest(),
@@ -1162,6 +1256,14 @@ impl SelectorGrantCommitment {
         launch: &LaunchPolicy,
     ) -> bool {
         self.authority == selector_commitment_authority(provider, image, launch)
+    }
+
+    fn matches_selected_provider(&self, provider: &AdmittedSandboxProvider) -> bool {
+        self.authority.provider_manifest == provider.manifest.manifest_digest
+            && self.authority.provider_binary == provider.manifest.binary_digest
+            && self.authority.host_profile == provider.host_profile.profile_digest
+            && self.authority.syscall_set == provider.syscall_set.syscall_set_digest
+            && self.authority.administrator_policy == provider.policy.policy_digest()
     }
 
     /// Selector-derived ELM1 limits retained for provider-independent audit.
