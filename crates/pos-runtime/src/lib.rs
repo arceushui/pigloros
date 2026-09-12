@@ -45,7 +45,7 @@ pub use driver::{
 };
 pub use erasure_host::{
     ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1,
-    ErasureReadSenderV1,
+    ErasureHostStatusV1, ErasureReadSenderV1,
 };
 pub use error::{ActionSubmissionError, RuntimeError};
 pub use recorder::{RecordedOutput, Recorder, RunMode};

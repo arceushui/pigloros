@@ -1368,6 +1368,38 @@ impl ErasureStateResolverV1 for MemoryStore {
     }
 }
 
+impl crate::ErasureRejoinPersistencePortV1 for MemoryStore {
+    fn store_rejoin_proof(
+        &mut self,
+        proof: &pos_core::ErasureRejoinProofV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        let bytes = crate::canonical_rejoin_bytes(proof);
+        match self.erasure_evidence.entry(proof.reference()) {
+            Entry::Vacant(entry) => {
+                entry.insert(bytes);
+                Ok(ErasureCasOutcomeV1::Applied)
+            }
+            Entry::Occupied(entry) if entry.get().as_slice() == bytes.as_slice() => {
+                Ok(ErasureCasOutcomeV1::ExactRetry)
+            }
+            Entry::Occupied(_) => Err(ErasureErrorV1::ProvenanceMissing),
+        }
+    }
+
+    fn load_rejoin_proof(
+        &self,
+        reference: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureRejoinProofV1>, ErasureErrorV1> {
+        self.erasure_evidence
+            .get(&reference)
+            .map(|bytes| pos_core::ErasureRejoinProofV1::from_canonical_cbor(bytes))
+            .map(|result| {
+                result.and_then(|proof| crate::validate_rejoin_proof_reference(reference, proof))
+            })
+            .transpose()
+    }
+}
+
 impl ErasureInventoryPersistencePortV1 for MemoryStore {
     fn complete_erasure_inventory_snapshot(
         &mut self,
@@ -3025,6 +3057,7 @@ impl MemoryStore {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::{
@@ -3137,6 +3170,39 @@ mod tests {
             .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
             .test_err();
         assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
+    }
+
+    #[test]
+    fn rejoin_adapter_rejects_missing_corrupt_and_remapped_evidence() {
+        let proof = crate::test_rejoin_proof();
+        let mut store = MemoryStore::new();
+        assert_eq!(
+            store.store_rejoin_proof(&proof).test_ok(),
+            ErasureCasOutcomeV1::Applied
+        );
+        assert_eq!(
+            store.store_rejoin_proof(&proof).test_ok(),
+            ErasureCasOutcomeV1::ExactRetry
+        );
+        let remapped = ErasureReferenceV1::from_digest([9; 32]);
+        store
+            .erasure_evidence
+            .insert(remapped, proof.to_canonical_cbor().test_ok());
+        assert_eq!(
+            store.load_rejoin_proof(remapped),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let missing = ErasureReferenceV1::from_digest([10; 32]);
+        assert_eq!(store.load_rejoin_proof(missing).test_ok(), None);
+        store.erasure_evidence.insert(proof.reference(), vec![0]);
+        assert_eq!(
+            store.load_rejoin_proof(proof.reference()),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            store.store_rejoin_proof(&proof),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
     }
 
     fn make_draft(entity: EntityId, payload: &[u8]) -> EventDraft {

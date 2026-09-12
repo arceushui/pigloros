@@ -4544,9 +4544,15 @@ pub use artifact::{
     ArtifactStateV1, ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1, RegisteredArtifactV1,
     ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
 };
+mod rejoin;
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
     inventories_match_frozen_obligations,
+};
+pub use rejoin::{
+    ErasureRejoinAdmissionV1, ErasureRejoinAttestationVerifierV1, ErasureRejoinDispositionV1,
+    ErasureRejoinInventoryV1, ErasureRejoinProofInputV1, ErasureRejoinProofV1,
+    ERASURE_REJOIN_PROOF_TAG_V1,
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureAcknowledgementV1 {
