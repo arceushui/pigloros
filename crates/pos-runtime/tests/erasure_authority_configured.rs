@@ -121,7 +121,7 @@ fn authority_with(
     let request_binding = ErasureAuthorityRequestBindingV1::new(
         request,
         topology,
-        profile,
+        profile.clone(),
         reference(40),
         b"host-proof".to_vec(),
         reference(7),
@@ -188,7 +188,7 @@ fn frozen_admission(
     }
 }
 
-fn receipt_input(
+const fn receipt_input(
     request: ErasureReferenceV1,
     lifecycle: ErasureLifecycleV1,
     terminal_state: ErasureReferenceV1,
@@ -746,7 +746,7 @@ fn configured_authority_rejects_profile_binding_and_configuration_duplicates(
     assert!(ErasureAuthorityRequestBindingV1::new(
         request.clone(),
         vec![topology_entry, topology_entry],
-        profile.clone(),
+        profile,
         reference(40),
         b"host-proof".to_vec(),
         reference(7),
