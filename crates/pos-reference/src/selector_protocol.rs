@@ -1,5 +1,7 @@
 //! Canonical SLX1/SLY1 codec for the root selector boundary.
 
+use std::io::Write;
+
 use ciborium::value::Value;
 
 use crate::adapter_transport::{read_observation, write_attempt};
@@ -11,13 +13,13 @@ use crate::evaluator_protocol::{
     EvaluationRequest,
 };
 use crate::sandbox_provider_protocol::{
-    AdmissionGrant, SandboxAuditRecord, SandboxExecuteRequest, SandboxLocalError,
-    SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderReceipt, SandboxProviderResult,
-    SandboxTerminalOutcome,
+    AdmissionAuthority, AdmissionGrant, PayloadDescriptor, ReceiptAuthority, SandboxAuditRecord,
+    SandboxExecuteRequest, SandboxLocalError, SandboxLocalErrorPhase, SandboxProviderError,
+    SandboxProviderReceipt, SandboxProviderResult, SandboxTerminalOutcome,
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
-const SELECTOR_INPUT_LIMIT: usize = 128 * 1024 * 1024;
+pub(crate) const SELECTOR_INPUT_LIMIT: usize = 128 * 1024 * 1024;
 const INPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxInputBytes.v1\0";
 const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
@@ -43,11 +45,15 @@ pub(crate) fn encode_request(
     attempt: &CaseAttempt,
     ordinal: u16,
 ) -> Result<EncodedSelectorRequest, AdapterError> {
-    let mut attempt_stream = Vec::new();
-    write_attempt(&mut attempt_stream, attempt).map_err(|_| AdapterError::ProtocolFailure)?;
-    if !selector_input_within_limit(attempt_stream.len()) {
+    if attempt.transport_caps.max_attempt_bytes > SELECTOR_INPUT_LIMIT as u64 {
         return Err(AdapterError::ProtocolFailure);
     }
+    let mut writer = SelectorInputWriter {
+        bytes: Vec::new(),
+        maximum: SELECTOR_INPUT_LIMIT,
+    };
+    write_attempt(&mut writer, attempt).map_err(|_| AdapterError::ProtocolFailure)?;
+    let attempt_stream = writer.bytes;
     let provider_request_id = derived_id(request.request_id, ordinal);
     let attempt_id = derived_id(request.request_id, ordinal ^ 0x8000);
     let input_digest = domain_digest(INPUT_DOMAIN, &attempt_stream);
@@ -91,6 +97,21 @@ pub(crate) fn decode_reply(
     decode_authenticated_reply(&value, trailing, request, evr1_digest, output_limit)
 }
 
+/// Whether a framed SLY1 reply carries admission evidence whose trailing bytes
+/// must not be downgraded to an ordinary transport failure.
+pub(crate) fn reply_carries_admission_evidence(control: &[u8]) -> bool {
+    let Ok(value) = decode_canonical_with_limit(control, CONTROL_LIMIT) else {
+        return false;
+    };
+    let Ok(wrapper) = array(&value, 2) else {
+        return false;
+    };
+    let Ok(fields) = array(&wrapper[0], 12) else {
+        return false;
+    };
+    matches!(text(&fields[0]), Ok("SLY1")) && fields_indicate_post_admission(fields)
+}
+
 fn decode_local_reply(
     control: &[u8],
     trailing: &[u8],
@@ -120,46 +141,68 @@ fn decode_authenticated_reply(
 ) -> Result<DecodedSelectorReply, AdapterError> {
     let wrapper = array(value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
     let fields = array(&wrapper[0], 12).map_err(|_| AdapterError::ProtocolFailure)?;
-    if text(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != "SLY1"
-        || uint(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)? != 1
-        || fixed_bytes::<16>(&fields[2]).map_err(|_| AdapterError::ProtocolFailure)?
-            != request.provider_request_id
-        || fixed_bytes::<16>(&fields[3]).map_err(|_| AdapterError::ProtocolFailure)?
-            != request.attempt_id
-        || fixed_bytes::<32>(&fields[4]).map_err(|_| AdapterError::ProtocolFailure)?
-            != request.digest
-    {
-        return Err(AdapterError::ProtocolFailure);
-    }
-    let unsigned =
-        encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
-    if fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?
-        != domain_digest(SLY1_DOMAIN, &unsigned)
-    {
-        return Err(AdapterError::ProtocolFailure);
-    }
-    let spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&fields[5])?)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
-    if spx.request.request_id != request.provider_request_id
-        || spx.attempt_id != request.attempt_id
-        || spx.authority.evr1_digest != evr1_digest
-        || spx.adapter_input.digest != domain_digest(INPUT_DOMAIN, &request.attempt_stream)
-    {
-        return Err(AdapterError::ProtocolFailure);
-    }
-    match uint(&fields[6]).map_err(|_| AdapterError::ProtocolFailure)? {
-        0 => decode_provider_result(fields, trailing, request, output_limit),
-        1 => {
-            SandboxProviderError::from_canonical_cbor(bytes(&fields[7])?)
-                .map_err(|_| AdapterError::ProtocolFailure)?;
-            require_absent_evidence(fields, trailing)?;
-            Ok(DecodedSelectorReply {
-                observation: Err(AdapterError::ProtocolFailure),
-                provenance: None,
-            })
+    let has_admission_evidence = fields_indicate_post_admission(fields);
+    let decoded = (|| {
+        if text(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != "SLY1"
+            || uint(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)? != 1
+            || fixed_bytes::<16>(&fields[2]).map_err(|_| AdapterError::ProtocolFailure)?
+                != request.provider_request_id
+            || fixed_bytes::<16>(&fields[3]).map_err(|_| AdapterError::ProtocolFailure)?
+                != request.attempt_id
+            || fixed_bytes::<32>(&fields[4]).map_err(|_| AdapterError::ProtocolFailure)?
+                != request.digest
+        {
+            return Err(AdapterError::ProtocolFailure);
         }
-        _ => Err(AdapterError::ProtocolFailure),
-    }
+        let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        if fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?
+            != domain_digest(SLY1_DOMAIN, &unsigned)
+        {
+            return Err(AdapterError::ProtocolFailure);
+        }
+        let attempt_stream_length = u64::try_from(request.attempt_stream.len())
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&fields[5])?)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        if spx.request.request_id != request.provider_request_id
+            || spx.attempt_id != request.attempt_id
+            || spx.authority.evr1_digest != evr1_digest
+            || spx.adapter_input.digest != domain_digest(INPUT_DOMAIN, &request.attempt_stream)
+            || spx.adapter_input.byte_length != attempt_stream_length
+        {
+            return Err(AdapterError::ProtocolFailure);
+        }
+        match uint(&fields[6]).map_err(|_| AdapterError::ProtocolFailure)? {
+            0 => decode_provider_result(fields, trailing, request, output_limit),
+            1 => {
+                let error = SandboxProviderError::from_canonical_cbor(bytes(&fields[7])?)
+                    .map_err(|_| AdapterError::ProtocolFailure)?;
+                if error.operation.is_some_and(|operation| operation != 1)
+                    || error.request_id.is_some_and(|id| id != spx.request.request_id)
+                    || error
+                        .request_digest
+                        .is_some_and(|digest| digest != spx.request_digest)
+                    || error.attempt_id.is_some_and(|id| id != spx.attempt_id)
+                {
+                    return Err(AdapterError::ProtocolFailure);
+                }
+                require_absent_evidence(fields, trailing)?;
+                Ok(DecodedSelectorReply {
+                    observation: Err(AdapterError::ProtocolFailure),
+                    provenance: None,
+                })
+            }
+            _ => Err(AdapterError::ProtocolFailure),
+        }
+    })();
+    decoded.map_err(|error| {
+        if has_admission_evidence {
+            AdapterError::AuthenticatedEvidenceFailure
+        } else {
+            error
+        }
+    })
 }
 
 fn decode_provider_result(
@@ -168,39 +211,65 @@ fn decode_provider_result(
     request: &EncodedSelectorRequest,
     output_limit: u64,
 ) -> Result<DecodedSelectorReply, AdapterError> {
-    let result = SandboxProviderResult::from_canonical_cbor(bytes(&fields[7])?)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let result_bytes = bytes(&fields[7]).map_err(|_| {
+        if fields[8] != Value::Null || fields[9] != Value::Null {
+            AdapterError::AuthenticatedEvidenceFailure
+        } else {
+            AdapterError::ProtocolFailure
+        }
+    })?;
+    let result = SandboxProviderResult::from_canonical_cbor(result_bytes).map_err(|_| {
+        if fields[8] != Value::Null || fields[9] != Value::Null {
+            AdapterError::AuthenticatedEvidenceFailure
+        } else {
+            AdapterError::ProtocolFailure
+        }
+    })?;
+    let post_admission = matches!(
+        result.outcome,
+        SandboxTerminalOutcome::Completed
+            | SandboxTerminalOutcome::Cancelled
+            | SandboxTerminalOutcome::UnavailableAfterAdmission
+    );
     let request_id_matches = result.request_id == request.provider_request_id;
     let attempt_id_matches = result.attempt_id == request.attempt_id;
     if !request_id_matches || !attempt_id_matches {
-        return Err(AdapterError::ProtocolFailure);
+        return Err(if post_admission {
+            AdapterError::AuthenticatedEvidenceFailure
+        } else {
+            AdapterError::ProtocolFailure
+        });
     }
-    match result.outcome {
+    let decoded = match result.outcome {
         SandboxTerminalOutcome::Completed
         | SandboxTerminalOutcome::Cancelled
-        | SandboxTerminalOutcome::UnavailableAfterAdmission => {
+        | SandboxTerminalOutcome::UnavailableAfterAdmission => (|| {
             let grant = AdmissionGrant::from_canonical_cbor(required_bytes(&fields[8])?)
                 .map_err(|_| AdapterError::ProtocolFailure)?;
             let receipt = SandboxProviderReceipt::from_canonical_cbor(required_bytes(&fields[9])?)
                 .map_err(|_| AdapterError::ProtocolFailure)?;
             validate_evidence(fields, &result, &grant, &receipt)?;
             let observation = if result.outcome == SandboxTerminalOutcome::Completed {
-                validate_output_descriptor(&fields[11], trailing)?;
-                read_observation(trailing, output_limit).map_err(|_| AdapterError::ProtocolFailure)
+                let descriptor = validate_output_descriptor(&fields[11], trailing)?;
+                if result.output.as_ref() != Some(&descriptor) {
+                    return Err(AdapterError::ProtocolFailure);
+                }
+                read_observation(trailing, output_limit)
+                    .map_err(|_| AdapterError::ProtocolFailure)?
             } else {
                 if fields[11] != Value::Null || !trailing.is_empty() {
                     return Err(AdapterError::ProtocolFailure);
                 }
-                Ok(SubjectObservation {
+                SubjectObservation {
                     result: SubjectResult::Unavailable,
                     usage: ResourceUsage::default(),
-                })
+                }
             };
             Ok(DecodedSelectorReply {
-                observation,
+                observation: Ok(observation),
                 provenance: Some(receipt.receipt_digest),
             })
-        }
+        })(),
         SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected => {
             require_absent_evidence(fields, trailing)?;
             Ok(DecodedSelectorReply {
@@ -211,7 +280,27 @@ fn decode_provider_result(
                 provenance: None,
             })
         }
+    };
+    decoded.map_err(|error| {
+        if post_admission { AdapterError::AuthenticatedEvidenceFailure } else { error }
+    })
+}
+
+fn fields_indicate_post_admission(fields: &[Value]) -> bool {
+    if fields[8] != Value::Null || fields[9] != Value::Null {
+        return true;
     }
+    bytes(&fields[7])
+        .ok()
+        .and_then(|result| SandboxProviderResult::from_canonical_cbor(result).ok())
+        .is_some_and(|result| {
+            matches!(
+                result.outcome,
+                SandboxTerminalOutcome::Completed
+                    | SandboxTerminalOutcome::Cancelled
+                    | SandboxTerminalOutcome::UnavailableAfterAdmission
+            )
+        })
 }
 
 fn validate_evidence(
@@ -220,14 +309,36 @@ fn validate_evidence(
     grant: &AdmissionGrant,
     receipt: &SandboxProviderReceipt,
 ) -> Result<(), AdapterError> {
-    if grant.request_id != result.request_id
-        || grant.attempt_id != result.attempt_id
-        || receipt.attempt_id != result.attempt_id
-        || result.agr1_digest != Some(grant.grant_digest)
-        || result.spr1_digest != Some(receipt.receipt_digest)
-        || receipt.authority.agr1_digest != grant.grant_digest
-        || grant.runtime_attestation_key_id != receipt.runtime_attestation_key_id
-        || receipt.runtime_attestation_key_id != result.runtime_attestation_key_id
+    let spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&fields[5])?)
+        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let expected_grant_authority = AdmissionAuthority {
+        evr1_digest: spx.authority.evr1_digest,
+        fixture_contract_digest: spx.authority.fixture_contract_digest,
+        fixture_digest: spx.authority.fixture_digest,
+        execution_profile_digest: spx.authority.execution_profile_digest,
+        lps1_digest: spx.authority.lps1_digest,
+        sim1_digest: spx.authority.sim1_digest,
+        apt1_digest: spx.authority.apt1_digest,
+        trs1_digest: spx.authority.trs1_digest,
+        rvs1_digest: spx.authority.rvs1_digest,
+        spm1_digest: spx.authority.spm1_digest,
+        pcf1_digest: spx.authority.pcf1_digest,
+        pcr1_digest: spx.authority.pcr1_digest,
+        hcp1_digest: spx.authority.hcp1_digest,
+    };
+    let expected_receipt_authority = ReceiptAuthority {
+        agr1_digest: grant.grant_digest,
+        spm1_digest: grant.authority.spm1_digest,
+        provider_binary_digest: receipt.authority.provider_binary_digest,
+        lps1_digest: grant.authority.lps1_digest,
+        sim1_digest: grant.authority.sim1_digest,
+        apt1_digest: grant.authority.apt1_digest,
+        trs1_digest: grant.authority.trs1_digest,
+        rvs1_digest: grant.authority.rvs1_digest,
+    };
+    if !result_matches_evidence(result, grant, receipt)
+        || !grant_matches_execute_request(grant, &spx, &expected_grant_authority)
+        || !receipt_matches_grant(receipt, grant, &expected_receipt_authority)
     {
         return Err(AdapterError::ProtocolFailure);
     }
@@ -247,6 +358,7 @@ fn validate_evidence(
             || record.previous_digest != previous
             || record.runtime_attestation_key_id != result.runtime_attestation_key_id
             || result.operational_events.get(index) != Some(&record.event_code)
+            || !audit_authority_matches(&record, receipt)
         {
             return Err(AdapterError::ProtocolFailure);
         }
@@ -258,14 +370,80 @@ fn validate_evidence(
     Ok(())
 }
 
-fn validate_output_descriptor(value: &Value, trailing: &[u8]) -> Result<(), AdapterError> {
+fn result_matches_evidence(
+    result: &SandboxProviderResult,
+    grant: &AdmissionGrant,
+    receipt: &SandboxProviderReceipt,
+) -> bool {
+    grant.request_id == result.request_id
+        && grant.attempt_id == result.attempt_id
+        && receipt.attempt_id == result.attempt_id
+        && result.agr1_digest == Some(grant.grant_digest)
+        && result.spr1_digest == Some(receipt.receipt_digest)
+        && grant.runtime_attestation_key_id == receipt.runtime_attestation_key_id
+        && receipt.runtime_attestation_key_id == result.runtime_attestation_key_id
+}
+
+fn grant_matches_execute_request(
+    grant: &AdmissionGrant,
+    spx: &SandboxExecuteRequest,
+    expected_authority: &AdmissionAuthority,
+) -> bool {
+    grant.authority == *expected_authority
+        && grant.input_digest == spx.adapter_input.digest
+        && grant.exchange_plan_digests
+            == spx.network_plans.iter().map(|plan| plan.plan_digest).collect::<Vec<_>>()
+        && grant.expected_launch_policy_digest == spx.authority.lps1_digest
+}
+
+fn receipt_matches_grant(
+    receipt: &SandboxProviderReceipt,
+    grant: &AdmissionGrant,
+    expected_authority: &ReceiptAuthority,
+) -> bool {
+    receipt.authority.agr1_digest == grant.grant_digest
+        && receipt.authority == *expected_authority
+        && receipt.trust_epoch == grant.trust_epoch
+        && receipt.revocation_epoch == grant.revocation_epoch
+        && receipt.policy_epoch == grant.policy_epoch
+        && receipt.hcp1_digest == grant.authority.hcp1_digest
+        && receipt.elm1_digest == grant.elm1_digest
+}
+
+fn audit_authority_matches(record: &SandboxAuditRecord, receipt: &SandboxProviderReceipt) -> bool {
+    let grant = receipt.authority.agr1_digest;
+    let observed = receipt.kernel_observation_evidence;
+    let expected = match record.event_code {
+        0..=10 => Some(vec![grant, receipt.elm1_digest, receipt.termination_evidence]),
+        11 => receipt
+            .ready1_digest
+            .map(|ready| vec![grant, ready, observed]),
+        12 => receipt.ready1_digest.zip(receipt.release1_digest).map(|(ready, release)| {
+            vec![grant, ready, release, observed]
+        }),
+        13 => receipt
+            .ready1_digest
+            .filter(|_| receipt.release1_digest.is_none())
+            .map(|ready| vec![grant, ready, observed]),
+        _ => None,
+    };
+    expected.is_some_and(|expected| expected == record.authority_digests)
+}
+
+fn validate_output_descriptor(
+    value: &Value,
+    trailing: &[u8],
+) -> Result<PayloadDescriptor, AdapterError> {
     let fields = array(value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
     let length = uint(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)?;
     let digest = fixed_bytes::<32>(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)?;
     if length != trailing.len() as u64 || digest != domain_digest(OUTPUT_DOMAIN, trailing) {
         return Err(AdapterError::ProtocolFailure);
     }
-    Ok(())
+    Ok(PayloadDescriptor {
+        byte_length: length,
+        digest,
+    })
 }
 
 fn require_absent_evidence(fields: &[Value], trailing: &[u8]) -> Result<(), AdapterError> {
@@ -295,8 +473,26 @@ fn descriptor(payload: &[u8], digest: [u8; 32]) -> Value {
     ])
 }
 
-const fn selector_input_within_limit(bytes: usize) -> bool {
-    bytes <= SELECTOR_INPUT_LIMIT
+struct SelectorInputWriter {
+    bytes: Vec<u8>,
+    maximum: usize,
+}
+
+impl Write for SelectorInputWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.maximum.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("selector input exceeds its byte limit"));
+        }
+        self.bytes
+            .try_reserve_exact(bytes.len())
+            .map_err(std::io::Error::other)?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
@@ -421,9 +617,39 @@ mod tests {
     }
 
     #[test]
-    fn selector_input_ceiling_rejects_a_descriptor_above_128_mib() {
-        assert!(selector_input_within_limit(SELECTOR_INPUT_LIMIT));
-        assert!(!selector_input_within_limit(SELECTOR_INPUT_LIMIT + 1));
+    fn selector_input_ceiling_rejects_untranslated_caps_before_encoding() {
+        let mut attempt = attempt();
+        attempt.transport_caps.max_attempt_bytes = SELECTOR_INPUT_LIMIT as u64;
+        assert!(encode_request(&request(), b"evr1", &attempt, 0).is_ok());
+        attempt.transport_caps.max_attempt_bytes += 1;
+        assert_eq!(
+            encode_request(&request(), b"evr1", &attempt, 0).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+    }
+
+    #[test]
+    fn selector_input_writer_stops_before_materializing_an_oversized_stream(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let attempt = attempt();
+        let encoded = encode_request(&request(), b"evr1", &attempt, 0)?;
+        let mut exact = SelectorInputWriter {
+            bytes: Vec::new(),
+            maximum: encoded.attempt_stream.len(),
+        };
+        write_attempt(&mut exact, &attempt)?;
+        assert_eq!(exact.bytes, encoded.attempt_stream);
+        assert!(exact.write_all(&[0]).is_err());
+        assert_eq!(exact.bytes, encoded.attempt_stream);
+
+        let mut bounded = SelectorInputWriter {
+            bytes: Vec::new(),
+            maximum: encoded.attempt_stream.len() - 1,
+        };
+        assert!(write_attempt(&mut bounded, &attempt).is_err());
+        assert!(bounded.bytes.len() <= bounded.maximum);
+        assert!(bounded.bytes.capacity() <= bounded.maximum);
+        Ok(())
     }
 
     #[test]
@@ -607,6 +833,20 @@ mod tests {
             Value::Text("runtime-key".to_owned()),
         ]);
         fields[4] = Value::Bytes(evr1_digest.to_vec());
+        fields[5] = Value::Bytes(vec![23; 32]);
+        fields[6] = Value::Bytes(vec![24; 32]);
+        fields[7] = Value::Bytes(vec![25; 32]);
+        fields[8] = Value::Bytes(vec![26; 32]);
+        fields[9] = Value::Bytes(vec![27; 32]);
+        fields[10] = Value::Bytes(vec![12; 32]);
+        fields[11] = Value::Bytes(vec![29; 32]);
+        fields[12] = Value::Bytes(vec![30; 32]);
+        fields[13] = Value::Bytes(vec![31; 32]);
+        fields[14] = Value::Bytes(vec![32; 32]);
+        fields[15] = Value::Bytes(vec![33; 32]);
+        fields[16] = Value::Bytes(vec![34; 32]);
+        fields[21] = Value::Bytes(domain_digest(INPUT_DOMAIN, &request.attempt_stream).to_vec());
+        fields[23] = Value::Bytes(vec![26; 32]);
         protocol_record("AGR1", fields, true)
     }
 
@@ -661,18 +901,18 @@ mod tests {
                 integer(1),
                 Value::Bytes(request.attempt_id.to_vec()),
                 Value::Bytes(grant_digest.to_vec()),
+                Value::Bytes(vec![31; 32]),
                 Value::Bytes(vec![66; 32]),
-                Value::Bytes(vec![67; 32]),
-                Value::Bytes(vec![68; 32]),
-                Value::Bytes(vec![69; 32]),
-                Value::Bytes(vec![70; 32]),
-                Value::Bytes(vec![71; 32]),
-                Value::Bytes(vec![72; 32]),
+                Value::Bytes(vec![26; 32]),
+                Value::Bytes(vec![27; 32]),
+                Value::Bytes(vec![12; 32]),
+                Value::Bytes(vec![29; 32]),
+                Value::Bytes(vec![30; 32]),
                 integer(1),
                 integer(2),
                 integer(3),
-                Value::Bytes(vec![73; 32]),
-                Value::Bytes(vec![64; 32]),
+                Value::Bytes(vec![34; 32]),
+                Value::Bytes(vec![53; 32]),
                 Value::Array(Vec::new()),
                 optional_digest(ready),
                 optional_digest(release),
@@ -932,7 +1172,8 @@ mod tests {
 
         let valid_cases = [
             (0, None, None, None, None, 2),
-            (0, Some(0), None, None, None, 4),
+            (0, None, None, None, None, 6),
+            (0, None, None, None, None, 4),
             (0, Some(1), Some([1; 16]), Some([2; 16]), None, 5),
             (0, Some(1), Some([1; 16]), Some([2; 16]), None, 6),
             (1, Some(1), Some([1; 16]), Some([2; 16]), None, 0),
@@ -976,11 +1217,15 @@ mod tests {
                 integer(2),
                 Value::Null,
             ])?;
-            let decoded = SandboxLocalError::from_canonical_cbor(&bytes)
-                .map_err(|_| AdapterError::ProtocolFailure)?;
-            assert_eq!(decoded.operation, Some(expected));
-            assert_eq!(decoded.phase, SandboxLocalErrorPhase::BeforeSpx1);
-            assert_eq!(decoded.code, SandboxLocalErrorCode::PolicyUnavailable);
+            if expected == SandboxProviderOperation::Execute {
+                let decoded = SandboxLocalError::from_canonical_cbor(&bytes)
+                    .map_err(|_| AdapterError::ProtocolFailure)?;
+                assert_eq!(decoded.operation, Some(expected));
+                assert_eq!(decoded.phase, SandboxLocalErrorPhase::BeforeSpx1);
+                assert_eq!(decoded.code, SandboxLocalErrorCode::PolicyUnavailable);
+            } else {
+                assert!(SandboxLocalError::from_canonical_cbor(&bytes).is_err());
+            }
         }
         Ok(())
     }
@@ -993,6 +1238,7 @@ mod tests {
             (0, Some(1), Some([1; 16]), Some([0; 16]), None, 5),
             (0, Some(1), Some([1; 16]), Some([2; 16]), Some([0; 32]), 5),
             (0, Some(0), Some([1; 16]), Some([2; 16]), None, 5),
+            (0, Some(0), None, None, None, 4),
             (0, Some(1), Some([1; 16]), None, None, 5),
             (0, Some(1), Some([1; 16]), Some([2; 16]), Some([3; 32]), 5),
             (1, None, Some([1; 16]), Some([2; 16]), None, 0),
@@ -1066,6 +1312,45 @@ mod tests {
     }
 
     #[test]
+    fn admitted_completed_reply_aborts_on_signed_malformed_output() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, _, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let evidence = admitted_evidence(&control)?;
+        let trailing = vec![0xff];
+        let descriptor = Value::Array(vec![
+            integer(u64::try_from(trailing.len()).map_err(|_| AdapterError::ProtocolFailure)?),
+            Value::Bytes(domain_digest(OUTPUT_DOMAIN, &trailing).to_vec()),
+        ]);
+        let mut fields = rewrite_provider_result(&evidence.fields, |result| {
+            result[5] = descriptor.clone();
+        })?;
+        fields[11] = descriptor;
+        let (control, _) = protocol_record("SLY1", fields, false)?;
+        assert_eq!(
+            decode_reply(&control, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identifiable_post_admission_result_aborts_before_evidence_is_decoded(
+    ) -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let mut fields = admitted_evidence(&control)?.fields;
+        fields[2] = Value::Bytes(vec![99; 16]);
+        fields[8] = Value::Null;
+        fields[9] = Value::Null;
+        let (control, _) = protocol_record("SLY1", fields, false)?;
+        assert_eq!(
+            decode_reply(&control, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn admitted_reply_rejects_each_result_identity_and_noncompleted_output(
     ) -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
@@ -1088,7 +1373,7 @@ mod tests {
             })?;
             assert_eq!(
                 decode_provider_result(&fields, &[], &encoded, 1024),
-                Err(AdapterError::ProtocolFailure)
+                Err(AdapterError::AuthenticatedEvidenceFailure)
             );
         }
 
@@ -1096,18 +1381,18 @@ mod tests {
         descriptor[11] = Value::Array(vec![integer(0), Value::Bytes(vec![0; 32])]);
         assert_eq!(
             decode_provider_result(&descriptor, &[], &encoded, 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         assert_eq!(
             decode_provider_result(&evidence.fields, &[1], &encoded, 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         Ok(())
     }
 
     #[test]
-    fn sly1_rejects_outer_identity_digest_and_evidence_shape_mismatches() -> Result<(), AdapterError>
-    {
+    fn sly1_rejects_outer_identity_digest_and_evidence_shape_mismatches(
+    ) -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
         let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
         let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
@@ -1120,7 +1405,7 @@ mod tests {
             let (changed, _) = protocol_record("SLY1", changed, false)?;
             assert_eq!(
                 decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-                Err(AdapterError::ProtocolFailure)
+                Err(AdapterError::AuthenticatedEvidenceFailure)
             );
         }
         let mut changed = unsigned.to_vec();
@@ -1128,7 +1413,7 @@ mod tests {
         let (changed, _) = protocol_record("SLY1", changed, false)?;
         assert_eq!(
             decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         let unavailable = unavailable_reply(&encoded, [14; 32], 2)?;
         assert_eq!(
@@ -1153,7 +1438,7 @@ mod tests {
             let (changed, _) = protocol_record("SLY1", changed, false)?;
             assert_eq!(
                 decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-                Err(AdapterError::ProtocolFailure)
+                Err(AdapterError::AuthenticatedEvidenceFailure)
             );
         }
         for malformed in [
@@ -1180,7 +1465,7 @@ mod tests {
             let (changed, _) = protocol_record("SLY1", changed, false)?;
             assert_eq!(
                 decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-                Err(AdapterError::ProtocolFailure)
+                Err(AdapterError::AuthenticatedEvidenceFailure)
             );
         }
         Ok(())
@@ -1211,7 +1496,7 @@ mod tests {
         let (changed, _) = protocol_record("SLY1", fields, false)?;
         assert_eq!(
             decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         Ok(())
     }
@@ -1256,6 +1541,37 @@ mod tests {
                 provenance: None,
             })
         );
+        let spx_bytes = execute_request(&encoded, [14; 32])?;
+        let spx = SandboxExecuteRequest::from_canonical_cbor(&spx_bytes)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        for index in 2..=5 {
+            let mut error_fields = vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                integer(1),
+                Value::Bytes(encoded.provider_request_id.to_vec()),
+                Value::Bytes(spx.request_digest.to_vec()),
+                Value::Bytes(encoded.attempt_id.to_vec()),
+                integer(0),
+                Value::Null,
+                Value::Text("runtime-key".to_owned()),
+            ];
+            error_fields[index] = match index {
+                2 => integer(0),
+                3 | 5 => Value::Bytes(vec![99; 16]),
+                4 => Value::Bytes(vec![99; 32]),
+                _ => return Err(AdapterError::ProtocolFailure),
+            };
+            let (error, _) = protocol_record("SPE1", error_fields, true)?;
+            let mut changed = fields.clone();
+            changed[5] = Value::Bytes(spx_bytes.clone());
+            changed[7] = Value::Bytes(error);
+            let (changed, _) = protocol_record("SLY1", changed, false)?;
+            assert_eq!(
+                decode_reply(&changed, &[], &encoded, [14; 32], 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
         let mut malformed_error = fields.clone();
         malformed_error[7] = Value::Bytes(b"not-cbor".to_vec());
         let (control, _) = protocol_record("SLY1", malformed_error, false)?;
@@ -1285,7 +1601,7 @@ mod tests {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
         let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
         let evidence = admitted_evidence(&control)?;
-        for index in [2_usize, 3, 4, 20] {
+        for index in [2_usize, 3, 4, 20, 21] {
             let changed = rewrite_spx(&evidence.fields, |spx| {
                 match index {
                     2 => {
@@ -1302,13 +1618,19 @@ mod tests {
                         };
                         descriptor[1] = Value::Bytes(vec![99; 32]);
                     }
+                    21 => {
+                        let Value::Array(descriptor) = &mut spx[20] else {
+                            return Err(AdapterError::ProtocolFailure);
+                        };
+                        descriptor[0] = integer(0);
+                    }
                     _ => return Err(AdapterError::ProtocolFailure),
                 }
                 Ok(())
             })?;
             assert_eq!(
                 decode_reply(&changed, &trailing, &encoded, [14; 32], 1024),
-                Err(AdapterError::ProtocolFailure)
+                Err(AdapterError::AuthenticatedEvidenceFailure)
             );
         }
         let document = decode_canonical_with_limit(&control, CONTROL_LIMIT)
@@ -1341,12 +1663,16 @@ mod tests {
             Ok(())
         );
 
-        for field in 0..3 {
+        for field in 0..7 {
             let mut grant = evidence.grant.clone();
             match field {
-                0 => grant.request_id = [99; 16],
-                1 => grant.attempt_id = [99; 16],
-                2 => grant.runtime_attestation_key_id = "other-key".to_owned(),
+            0 => grant.request_id = [99; 16],
+            1 => grant.attempt_id = [99; 16],
+            2 => grant.runtime_attestation_key_id = "other-key".to_owned(),
+            3 => grant.authority.fixture_digest = [99; 32],
+            4 => grant.input_digest = [99; 32],
+            5 => grant.expected_launch_policy_digest = [99; 32],
+            6 => grant.exchange_plan_digests = vec![[99; 32]],
                 _ => return Err(AdapterError::ProtocolFailure),
             }
             assert_eq!(
@@ -1360,12 +1686,16 @@ mod tests {
             );
         }
 
-        for field in 0..3 {
+        for field in 0..7 {
             let mut receipt = evidence.receipt.clone();
             match field {
                 0 => receipt.attempt_id = [99; 16],
                 1 => receipt.authority.agr1_digest = [99; 32],
-                2 => receipt.runtime_attestation_key_id = "other-key".to_owned(),
+            2 => receipt.runtime_attestation_key_id = "other-key".to_owned(),
+            3 => receipt.authority.spm1_digest = [99; 32],
+            4 => receipt.trust_epoch = 99,
+            5 => receipt.hcp1_digest = [99; 32],
+            6 => receipt.elm1_digest = [99; 32],
                 _ => return Err(AdapterError::ProtocolFailure),
             }
             assert_eq!(
@@ -1407,7 +1737,7 @@ mod tests {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
         let (control, _, _) = admitted_reply(&encoded, [14; 32], 0)?;
         let evidence = admitted_evidence(&control)?;
-        for variant in 0_usize..5 {
+        for variant in 0_usize..6 {
             let index = usize::from(variant == 2);
             let changed = rewrite_audit(&evidence.fields, index, |record| match variant {
                 0 => record[2] = Value::Bytes(vec![99; 16]),
@@ -1418,6 +1748,7 @@ mod tests {
                 2 => record[6] = Value::Bytes(vec![99; 32]),
                 3 => record[7] = Value::Text("other-key".to_owned()),
                 4 => record[4] = integer(10),
+                5 => record[5] = Value::Array(vec![Value::Bytes(vec![99; 32]); 3]),
                 _ => {}
             })?;
             assert_eq!(
@@ -1499,7 +1830,7 @@ mod tests {
             changed[index] = Value::Null;
             assert_eq!(
                 decode_provider_result(&changed, &trailing, &encoded, 1024),
-                Err(AdapterError::ProtocolFailure)
+                Err(AdapterError::AuthenticatedEvidenceFailure)
             );
         }
         for index in [7_usize, 8, 9] {
@@ -1507,20 +1838,20 @@ mod tests {
             changed[index] = Value::Bytes(b"not-cbor".to_vec());
             assert_eq!(
                 decode_provider_result(&changed, &trailing, &encoded, 1024),
-                Err(AdapterError::ProtocolFailure)
+                Err(AdapterError::AuthenticatedEvidenceFailure)
             );
         }
         let mut malformed_audit = evidence.fields.clone();
         malformed_audit[10] = Value::Array(vec![Value::Null]);
         assert_eq!(
             decode_provider_result(&malformed_audit, &trailing, &encoded, 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         let mut malformed_audit_record = evidence.fields.clone();
         malformed_audit_record[10] = Value::Array(vec![Value::Bytes(b"not-cbor".to_vec())]);
         assert_eq!(
             decode_provider_result(&malformed_audit_record, &trailing, &encoded, 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         for descriptor in [
             Value::Array(vec![Value::Null, Value::Bytes(vec![1; 32])]),
@@ -1530,7 +1861,7 @@ mod tests {
             changed[11] = descriptor;
             assert_eq!(
                 decode_provider_result(&changed, &trailing, &encoded, 1024),
-                Err(AdapterError::ProtocolFailure)
+                Err(AdapterError::AuthenticatedEvidenceFailure)
             );
         }
         Ok(())
@@ -1543,7 +1874,13 @@ mod tests {
             integer(3),
             Value::Bytes(domain_digest(OUTPUT_DOMAIN, &trailing).to_vec()),
         ]);
-        assert_eq!(validate_output_descriptor(&valid, &trailing), Ok(()));
+        assert_eq!(
+            validate_output_descriptor(&valid, &trailing),
+            Ok(PayloadDescriptor {
+                byte_length: 3,
+                digest: domain_digest(OUTPUT_DOMAIN, &trailing),
+            })
+        );
         for invalid in [
             Value::Null,
             Value::Array(vec![

@@ -261,7 +261,7 @@ pub struct SandboxLocalErrorV1 {
     pub operation: Option<SandboxProviderOperationV1>,
     /// Request identity, absent only when no complete canonical nonzero ID was decoded.
     pub request_id: Option<[u8; 16]>,
-    /// Attempt identity, present exactly after complete SPX1 construction.
+    /// Attempt identity, present after complete SPX1 construction when known.
     pub attempt_id: Option<[u8; 16]>,
     /// Authenticated AGR1 digest, present exactly after admission.
     pub agr1_digest: Option<[u8; 32]>,
@@ -830,6 +830,7 @@ fn validate_local_error_shape(error: &SandboxLocalErrorV1) -> Result<(), Sandbox
     let valid_shape = match error.phase {
         SandboxLocalErrorPhaseV1::BeforeSpx1 => {
             !admission
+                && (error.operation.is_none() || execute)
                 && matches!(
                     error.code,
                     SandboxLocalErrorCodeV1::PolicyUnavailable
@@ -840,9 +841,10 @@ fn validate_local_error_shape(error: &SandboxLocalErrorV1) -> Result<(), Sandbox
                 && if matches!(
                     error.code,
                     SandboxLocalErrorCodeV1::RequestAuthorityMismatch
-                        | SandboxLocalErrorCodeV1::PayloadLimitExceeded
                 ) {
                     execute && request && attempt
+                } else if error.code == SandboxLocalErrorCodeV1::PayloadLimitExceeded {
+                    (!request && !attempt) || (execute && request && attempt)
                 } else {
                     (!request && !attempt) || (request && execute)
                 }

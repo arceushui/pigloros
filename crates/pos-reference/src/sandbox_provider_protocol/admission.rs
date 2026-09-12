@@ -596,7 +596,11 @@ impl AdmittedSandboxProvider {
         {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        if host_profile.feature_proofs.iter().any(|proof| !proof.passed) {
+        if host_profile
+            .feature_proofs
+            .iter()
+            .any(|proof| !proof.passed)
+        {
             return Err(SandboxAdmissionError::HostCapabilityMismatch);
         }
         let architecture = syscall_set.architecture;

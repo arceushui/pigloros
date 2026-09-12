@@ -903,10 +903,7 @@ fn complete_provider_and_image_admission_binds_all_authority() -> TestResult {
         admitted.syscall_set().architecture,
         SandboxArchitecture::X86_64
     );
-    assert_eq!(
-        admitted.host_profile().architecture,
-        SandboxArchitecture::X86_64
-    );
+    assert_eq!(admitted.host_profile().architecture, SandboxArchitecture::X86_64);
     assert_eq!(
         admitted.conformance_report().architecture,
         SandboxArchitecture::X86_64
