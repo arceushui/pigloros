@@ -7,6 +7,8 @@
 //! persistence. A deployment that has not supplied a complete configuration
 //! must continue using [`super::ClosedErasureCoordinatorAuthorityV1`].
 
+use std::sync::Arc;
+
 use pos_core::{
     destruction_command_reference, ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionV1, ErasureApplicabilityDecisionV1,
@@ -27,6 +29,37 @@ use pos_core::{
 
 use super::erasure_host::ErasureCoordinatorAuthorityV1;
 
+/// Operation whose host evidence is being checked by an authority provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureAuthorityEvidenceKindV1 {
+    /// Authentication of a complete ERQ1 request.
+    Request,
+    /// Authentication of a request/manifest topology observation.
+    Topology,
+    /// Authentication of a lifecycle or external-owner admission.
+    Lifecycle,
+    /// Authentication of an ERFA1 freeze authorization body.
+    Freeze,
+}
+
+/// Host-owned evidence verifier used by the concrete authority provider.
+///
+/// The runtime deliberately does not interpret opaque identity, policy, trust,
+/// or proof bytes. A deployment supplies this seam with its independently
+/// authenticated identity/policy implementation (for example, a signature or
+/// HSM-backed verifier). The provider refuses every admission when no verifier
+/// is installed, so equality of opaque references can never become authority.
+pub trait ErasureAuthorityEvidenceVerifierV1: std::fmt::Debug + Send + Sync {
+    /// Verify evidence for one exact request-bound operation and context.
+    fn verify(
+        &self,
+        kind: ErasureAuthorityEvidenceKindV1,
+        request: &ErasureRequestV1,
+        context: &[u8],
+        evidence: &[u8],
+    ) -> Result<(), ErasureErrorV1>;
+}
+
 /// One host-authenticated mapping between a request and a Timeline/Fork.
 ///
 /// `scope = None` marks an unaffected Timeline. `Some` is an opaque resolved
@@ -35,6 +68,8 @@ use super::erasure_host::ErasureCoordinatorAuthorityV1;
 pub struct ErasureAuthorityTopologyBindingV1 {
     /// ERQ1 to which this topology observation belongs.
     pub request: ErasureReferenceV1,
+    /// Manifest revision for which this observation was authenticated.
+    pub manifest_digest: ErasureReferenceV1,
     /// Timeline/Fork identity observed at the same durable revision.
     pub timeline: TimelineId,
     /// Resolved affected scope, or `None` for an unaffected Timeline.
@@ -46,11 +81,13 @@ impl ErasureAuthorityTopologyBindingV1 {
     #[must_use]
     pub const fn new(
         request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
         timeline: TimelineId,
         scope: Option<ErasureReferenceV1>,
     ) -> Self {
         Self {
             request,
+            manifest_digest,
             timeline,
             scope,
         }
@@ -106,6 +143,73 @@ impl ErasureAuthorityFreezeProfileV1 {
     }
 }
 
+/// Host-authenticated material for one ERQ1 request.
+///
+/// Keeping the complete request beside its topology and freeze profile makes
+/// every later admission request-specific. A non-zero reference alone is never
+/// sufficient to select this binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureAuthorityRequestBindingV1 {
+    /// The exact validated ERQ1 request admitted by the host.
+    pub request: ErasureRequestV1,
+    /// Complete topology observations authenticated for this request.
+    pub topology: Vec<ErasureAuthorityTopologyBindingV1>,
+    /// Freeze target, scope, and owner profile for this request.
+    pub freeze: ErasureAuthorityFreezeProfileV1,
+    /// Principal allowed to perform administrative resolution.
+    pub principal: ErasureReferenceV1,
+    /// Host evidence interpreted by the injected verifier.
+    pub authorization_evidence: Vec<u8>,
+    /// Provenance used for host-authenticated lifecycle admissions.
+    pub lifecycle_provenance: ErasureReferenceV1,
+    /// Whether this request admits pre-freeze rejection decisions.
+    pub allow_rejection: bool,
+}
+
+impl ErasureAuthorityRequestBindingV1 {
+    /// Validate one request-bound host configuration.
+    pub fn new(
+        request: ErasureRequestV1,
+        mut topology: Vec<ErasureAuthorityTopologyBindingV1>,
+        freeze: ErasureAuthorityFreezeProfileV1,
+        principal: ErasureReferenceV1,
+        authorization_evidence: Vec<u8>,
+        lifecycle_provenance: ErasureReferenceV1,
+        allow_rejection: bool,
+    ) -> Result<Self, ErasureErrorV1> {
+        if !reference_present(request.reference())
+            || !reference_present(request.provenance())
+            || !reference_present(principal)
+            || !reference_present(lifecycle_provenance)
+            || authorization_evidence.is_empty()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        topology.sort_unstable_by_key(|binding| {
+            (binding.manifest_digest, binding.timeline, binding.scope)
+        });
+        if topology.windows(2).any(|pair| {
+            pair[0].manifest_digest == pair[1].manifest_digest
+                && pair[0].timeline == pair[1].timeline
+        }) || topology.iter().any(|binding| {
+            binding.request != request.reference()
+                || !reference_present(binding.manifest_digest)
+                || binding.scope.is_some_and(|scope| !reference_present(scope))
+        }) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        Ok(Self {
+            request,
+            topology,
+            freeze,
+            principal,
+            authorization_evidence,
+            lifecycle_provenance,
+            allow_rejection,
+        })
+    }
+}
+
 /// Complete host-trusted material needed by a concrete authority Plugin.
 ///
 /// The values are intentionally opaque references and proof bytes. The
@@ -117,18 +221,8 @@ pub struct ErasureAuthorityConfigurationV1 {
     pub policy: ErasureReferenceV1,
     /// Trust revision accepted for all admissions.
     pub trust: ErasureReferenceV1,
-    /// Complete host-resolved topology observations.
-    pub topology: Vec<ErasureAuthorityTopologyBindingV1>,
-    /// Freeze target, scope, and owner profile.
-    pub freeze: ErasureAuthorityFreezeProfileV1,
-    /// Principal allowed to perform administrative resolution.
-    pub principal: ErasureReferenceV1,
-    /// Opaque #187 proof material retained in ERFAA1.
-    pub authorization_evidence: Vec<u8>,
-    /// Provenance used for host-authenticated lifecycle admissions.
-    pub lifecycle_provenance: ErasureReferenceV1,
-    /// Whether this deployment admits pre-freeze rejection decisions.
-    pub allow_rejection: bool,
+    /// Complete request-specific host bindings.
+    pub requests: Vec<ErasureAuthorityRequestBindingV1>,
 }
 
 impl ErasureAuthorityConfigurationV1 {
@@ -136,41 +230,25 @@ impl ErasureAuthorityConfigurationV1 {
     pub fn new(
         policy: ErasureReferenceV1,
         trust: ErasureReferenceV1,
-        mut topology: Vec<ErasureAuthorityTopologyBindingV1>,
-        freeze: ErasureAuthorityFreezeProfileV1,
-        principal: ErasureReferenceV1,
-        authorization_evidence: Vec<u8>,
-        lifecycle_provenance: ErasureReferenceV1,
-        allow_rejection: bool,
+        mut requests: Vec<ErasureAuthorityRequestBindingV1>,
     ) -> Result<Self, ErasureErrorV1> {
-        if !reference_present(policy)
-            || !reference_present(trust)
-            || !reference_present(principal)
-            || !reference_present(lifecycle_provenance)
-            || authorization_evidence.is_empty()
-        {
+        if !reference_present(policy) || !reference_present(trust) || requests.is_empty() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        topology.sort_unstable_by_key(|binding| (binding.request, binding.timeline));
-        if topology
+        requests.sort_unstable_by_key(|binding| binding.request.reference());
+        if requests
             .windows(2)
-            .any(|pair| pair[0].request == pair[1].request && pair[0].timeline == pair[1].timeline)
-            || topology.iter().any(|binding| {
-                !reference_present(binding.request)
-                    || binding.scope.is_some_and(|scope| !reference_present(scope))
-            })
+            .any(|pair| pair[0].request.reference() == pair[1].request.reference())
+            || requests
+                .iter()
+                .any(|binding| binding.request.policy() != policy)
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         Ok(Self {
             policy,
             trust,
-            topology,
-            freeze,
-            principal,
-            authorization_evidence,
-            lifecycle_provenance,
-            allow_rejection,
+            requests,
         })
     }
 }
@@ -185,21 +263,53 @@ impl ErasureAuthorityConfigurationV1 {
 #[derive(Clone, Debug)]
 pub struct HostConfiguredErasureCoordinatorAuthorityV1 {
     configuration: ErasureAuthorityConfigurationV1,
+    verifier: Arc<dyn ErasureAuthorityEvidenceVerifierV1>,
 }
 
 impl HostConfiguredErasureCoordinatorAuthorityV1 {
     /// Construct an authority from independently authenticated host material.
-    pub fn new(configuration: ErasureAuthorityConfigurationV1) -> Result<Self, ErasureErrorV1> {
-        if configuration.topology.is_empty() {
+    pub fn new(
+        configuration: ErasureAuthorityConfigurationV1,
+        verifier: Arc<dyn ErasureAuthorityEvidenceVerifierV1>,
+    ) -> Result<Self, ErasureErrorV1> {
+        if configuration.requests.is_empty() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        Ok(Self { configuration })
+        Ok(Self {
+            configuration,
+            verifier,
+        })
     }
 
     /// Return the immutable host configuration for composition diagnostics.
     #[must_use]
     pub const fn configuration(&self) -> &ErasureAuthorityConfigurationV1 {
         &self.configuration
+    }
+
+    fn binding_for(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<&ErasureAuthorityRequestBindingV1, ErasureErrorV1> {
+        self.configuration
+            .requests
+            .iter()
+            .find(|binding| binding.request.reference() == request)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn verify(
+        &self,
+        kind: ErasureAuthorityEvidenceKindV1,
+        binding: &ErasureAuthorityRequestBindingV1,
+        context: &[u8],
+    ) -> Result<(), ErasureErrorV1> {
+        self.verifier.verify(
+            kind,
+            &binding.request,
+            context,
+            &binding.authorization_evidence,
+        )
     }
 
     fn check_policy_trust(
@@ -212,27 +322,25 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
             .ok_or(ErasureErrorV1::PolicyConflict)
     }
 
-    fn check_request_reference(&self, request: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
-        reference_present(request)
-            .then_some(())
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
-    }
-
     fn check_lifecycle_provenance(
         &self,
+        binding: &ErasureAuthorityRequestBindingV1,
         provenance: ErasureReferenceV1,
+        context: &[u8],
     ) -> Result<(), ErasureErrorV1> {
-        (provenance == self.configuration.lifecycle_provenance)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        if provenance != binding.lifecycle_provenance {
+            return Err(ErasureErrorV1::Unauthorized);
+        }
+        self.verify(ErasureAuthorityEvidenceKindV1::Lifecycle, binding, context)
     }
 
     fn build_freeze_admission(
         &self,
-        request: ErasureReferenceV1,
+        binding: &ErasureAuthorityRequestBindingV1,
         freeze_position: u64,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
-        let targets = self.configuration.freeze.targets.clone();
+        let request = binding.request.reference();
+        let targets = binding.freeze.targets.clone();
         let target_closure = pos_core::erasure::target_closure_digest(&targets);
         let mut obligations = Vec::with_capacity(
             targets
@@ -241,7 +349,7 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
         );
         let mut applicability_matrix = Vec::with_capacity(obligations.capacity());
         for category in ErasureInventoryCategoryV1::CANONICAL {
-            let owner = category_owner(self.configuration.freeze.owners, category);
+            let owner = category_owner(binding.freeze.owners, category);
             for (target_index, target) in targets.iter().copied().enumerate() {
                 obligations.push(ErasureObligationV1::new(ErasureObligationInputV1 {
                     category,
@@ -275,9 +383,9 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
         })?;
         let scope = ErasureScopeCommitmentInputV1 {
             request,
-            scope_members: self.configuration.freeze.scope_members.clone(),
+            scope_members: binding.freeze.scope_members.clone(),
             target_closure,
-            lineage_rule: self.configuration.freeze.lineage_rule,
+            lineage_rule: binding.freeze.lineage_rule,
         };
         let scope_reference = pos_core::ErasureScopeCommitmentV1::new(scope.clone())?.reference();
         let placeholder =
@@ -287,7 +395,7 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
                 obligation_set: obligation_set.reference(),
                 applicability_matrix,
                 freeze_position,
-                policy: self.configuration.policy,
+                policy: binding.request.policy(),
                 trust: self.configuration.trust,
                 authorization_provenance: ErasureReferenceV1::from_digest([0; 32]),
             })?;
@@ -295,9 +403,9 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
         let authorization =
             ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
                 admission_body_digest,
-                policy: self.configuration.policy,
+                policy: binding.request.policy(),
                 trust: self.configuration.trust,
-                evidence: self.configuration.authorization_evidence.clone(),
+                evidence: binding.authorization_evidence.clone(),
             })?;
         let admission =
             ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
@@ -325,11 +433,14 @@ impl ErasureFreezeAuthorizationVerifierV1 for HostConfiguredErasureCoordinatorAu
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
         authorization.verify_admission_body_binding(admission)?;
+        let binding = self.binding_for(admission.request())?;
+        if authorization.evidence() != binding.authorization_evidence.as_slice() {
+            return Err(ErasureErrorV1::Unauthorized);
+        }
         self.check_policy_trust(admission.policy(), admission.trust())?;
         self.check_policy_trust(authorization.policy(), authorization.trust())?;
-        (authorization.evidence() == self.configuration.authorization_evidence.as_slice())
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        let context = admission.authorization_body_digest()?.digest();
+        self.verify(ErasureAuthorityEvidenceKindV1::Freeze, binding, &context)
     }
 }
 
@@ -338,16 +449,23 @@ impl ErasureRecoveryAuthorizationVerifierV1 for HostConfiguredErasureCoordinator
         &self,
         extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(extension.request())?;
+        let binding = self.binding_for(extension.request())?;
         for reference in [
             extension.scope_commitment(),
             extension.fork(),
             extension.lineage_rule(),
             extension.admission_provenance(),
         ] {
-            self.check_request_reference(reference)?;
+            if !reference_present(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
-        self.check_lifecycle_provenance(extension.admission_provenance())
+        let context = lifecycle_context(
+            b"scope-extension",
+            extension.request(),
+            extension.reference(),
+        );
+        self.check_lifecycle_provenance(binding, extension.admission_provenance(), &context)
     }
 
     fn validate_administrative_resolution(
@@ -364,15 +482,16 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        self.check_request_reference(request)?;
-        self.check_request_reference(manifest_digest)?;
+        let binding = self.binding_for(request)?;
+        if !reference_present(manifest_digest) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         let mut bindings = Vec::new();
         let mut unaffected = Vec::new();
-        for entry in self
-            .configuration
+        for entry in binding
             .topology
             .iter()
-            .filter(|entry| entry.request == request)
+            .filter(|entry| entry.manifest_digest == manifest_digest)
         {
             match entry.scope {
                 Some(scope) => bindings.push((entry.timeline, scope)),
@@ -382,17 +501,21 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         if bindings.is_empty() && unaffected.is_empty() {
             return Ok(None);
         }
-        Ok(Some(ErasureVerifiedTopologyObservationV1::new(
-            manifest_digest,
-            bindings,
-            unaffected,
-        )))
+        let observation =
+            ErasureVerifiedTopologyObservationV1::new(manifest_digest, bindings, unaffected);
+        let context = topology_context(request, manifest_digest, &observation);
+        self.verify(ErasureAuthorityEvidenceKindV1::Topology, binding, &context)?;
+        Ok(Some(observation))
     }
 
     fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(request.reference())?;
-        self.check_request_reference(request.provenance())?;
-        self.check_policy_trust(request.policy(), self.configuration.trust)
+        let binding = self.binding_for(request.reference())?;
+        if &binding.request != request {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.check_policy_trust(request.policy(), self.configuration.trust)?;
+        let context = request.to_canonical_cbor()?;
+        self.verify(ErasureAuthorityEvidenceKindV1::Request, binding, &context)
     }
 
     fn admit_authorization(
@@ -401,10 +524,14 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         provenance: ErasureReferenceV1,
         decision: ErasureAuthorizationDecisionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(request)?;
-        self.check_lifecycle_provenance(provenance)?;
-        if matches!(decision, ErasureAuthorizationDecisionV1::Rejected)
-            && !self.configuration.allow_rejection
+        let binding = self.binding_for(request)?;
+        let context = lifecycle_context(
+            b"authorization",
+            request,
+            ErasureReferenceV1::from_digest([decision_code(decision); 32]),
+        );
+        self.check_lifecycle_provenance(binding, provenance, &context)?;
+        if matches!(decision, ErasureAuthorizationDecisionV1::Rejected) && !binding.allow_rejection
         {
             return Err(ErasureErrorV1::Unauthorized);
         }
@@ -426,9 +553,17 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             correction.authorization_provenance(),
             correction.reference(),
         ] {
-            self.check_request_reference(reference)?;
+            if !reference_present(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
-        self.check_lifecycle_provenance(correction.authorization_provenance())
+        let binding = self.binding_for(request.reference())?;
+        let context = lifecycle_context(
+            b"corrected-submission",
+            request.reference(),
+            correction.reference(),
+        );
+        self.check_lifecycle_provenance(binding, correction.authorization_provenance(), &context)
     }
 
     fn admit_atomic_freeze(
@@ -436,15 +571,20 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
-        self.check_request_reference(request)?;
+        let binding = self.binding_for(request)?;
         if requested.lifecycle != ErasureLifecycleV1::AccessFrozen {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let freeze_position = requested
             .freeze_position
             .ok_or(ErasureErrorV1::ScopeInvalid)?;
-        self.check_lifecycle_provenance(requested.provenance)?;
-        self.build_freeze_admission(request, freeze_position)
+        let context = lifecycle_context(
+            b"atomic-freeze",
+            request,
+            position_reference(freeze_position),
+        );
+        self.check_lifecycle_provenance(binding, requested.provenance, &context)?;
+        self.build_freeze_admission(binding, freeze_position)
     }
 
     fn admit_scope_extension(
@@ -465,7 +605,9 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             input.expected_inventory_generation,
             input.child_scope,
         ] {
-            self.check_request_reference(reference)?;
+            if !reference_present(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
         (extension.fork() == input.child_scope)
             .then_some(())
@@ -477,10 +619,19 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         parent: TimelineId,
         child: &TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        let mut child_scopes = self
+            .configuration
+            .requests
+            .iter()
+            .map(|binding| binding.freeze.child_scope);
+        let child_scope = child_scopes
+            .next()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if child_scopes.any(|scope| scope != child_scope) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
         match child.fork_point {
-            Some((actual_parent, _)) if actual_parent == parent => {
-                Ok(self.configuration.freeze.child_scope)
-            }
+            Some((actual_parent, _)) if actual_parent == parent => Ok(child_scope),
             _ => Err(ErasureErrorV1::ScopeInvalid),
         }
     }
@@ -490,7 +641,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
-        self.check_request_reference(requirement.request())?;
+        let binding = self.binding_for(requirement.request())?;
         for reference in [
             requirement.scope_commitment(),
             requirement.lineage_rule(),
@@ -498,9 +649,11 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             input.expected_inventory_generation,
             input.child_scope,
         ] {
-            self.check_request_reference(reference)?;
+            if !reference_present(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
-        (input.child_scope == self.configuration.freeze.child_scope)
+        (input.child_scope == binding.freeze.child_scope)
             .then_some(())
             .ok_or(ErasureErrorV1::ScopeInvalid)?;
         ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
@@ -509,7 +662,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             fork: input.child_scope,
             lineage_rule: requirement.lineage_rule(),
             predecessor_extension: requirement.predecessor_extension(),
-            admission_provenance: self.configuration.lifecycle_provenance,
+            admission_provenance: binding.lifecycle_provenance,
         })
     }
 
@@ -517,12 +670,17 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(resolution.request())?;
+        let binding = self.binding_for(resolution.request())?;
         self.check_policy_trust(resolution.policy(), resolution.trust())?;
-        (resolution.principal() == self.configuration.principal)
+        (resolution.principal() == binding.principal)
             .then_some(())
             .ok_or(ErasureErrorV1::Unauthorized)?;
-        self.check_lifecycle_provenance(resolution.authorization_provenance())?;
+        let context = lifecycle_context(
+            b"administrative-resolution",
+            resolution.request(),
+            resolution.reference(),
+        );
+        self.check_lifecycle_provenance(binding, resolution.authorization_provenance(), &context)?;
         for reference in [
             resolution.scope_commitment(),
             resolution.reason(),
@@ -532,7 +690,9 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         .chain(resolution.affected_digests().iter().copied())
         .chain(resolution.predecessor_resolution())
         {
-            self.check_request_reference(reference)?;
+            if !reference_present(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
         Ok(())
     }
@@ -542,18 +702,37 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         request: ErasureReferenceV1,
         commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(request)?;
+        let binding = self.binding_for(request)?;
         if commands.is_empty() {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         for command in commands {
-            self.check_lifecycle_provenance(command.provenance)?;
+            let context = lifecycle_context(b"destruction", request, command.command);
+            self.check_lifecycle_provenance(binding, command.provenance, &context)?;
             for reference in [command.obligation, command.owner, command.command] {
-                self.check_request_reference(reference)?;
+                if !reference_present(reference) {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
             }
-            (command.owner == category_owner(self.configuration.freeze.owners, command.category))
+            (command.owner == category_owner(binding.freeze.owners, command.category))
                 .then_some(())
                 .ok_or(ErasureErrorV1::Unauthorized)?;
+            binding
+                .freeze
+                .targets
+                .contains(&command.target)
+                .then_some(())
+                .ok_or(ErasureErrorV1::ScopeInvalid)?;
+            let obligation =
+                pos_core::ErasureObligationV1::new(pos_core::ErasureObligationInputV1 {
+                    category: command.category,
+                    target: command.target,
+                    owner: command.owner,
+                    command_identity: command.command,
+                })?;
+            (obligation.reference() == command.obligation)
+                .then_some(())
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             (command.command == destruction_command_reference(request, command.target))
                 .then_some(())
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
@@ -565,9 +744,10 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-        self.check_request_reference(admission.request())?;
+        let binding = self.binding_for(admission.request())?;
         self.check_policy_trust(admission.policy(), admission.trust())?;
-        self.check_lifecycle_provenance(admission.authorization_provenance())?;
+        let context = lifecycle_context(b"attempt", admission.request(), admission.reference());
+        self.check_lifecycle_provenance(binding, admission.authorization_provenance(), &context)?;
         if admission.unresolved_obligations().len() != admission.command_identities().len() {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
@@ -577,11 +757,13 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             .chain(admission.command_identities().iter())
             .copied()
         {
-            self.check_request_reference(reference)?;
+            if !reference_present(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
         Ok(ErasureAttemptQuotaReservationV1::new(
             admission.reference(),
-            self.configuration.lifecycle_provenance,
+            binding.lifecycle_provenance,
         ))
     }
 
@@ -589,7 +771,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         &self,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(acknowledgement.request())?;
+        let binding = self.binding_for(acknowledgement.request())?;
         self.check_policy_trust(acknowledgement.policy(), acknowledgement.trust())?;
         for reference in [
             acknowledgement.command(),
@@ -600,13 +782,21 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             acknowledgement.evidence(),
             acknowledgement.reference(),
         ] {
-            self.check_request_reference(reference)?;
+            if !reference_present(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
+        let context = lifecycle_context(
+            b"acknowledgement",
+            acknowledgement.request(),
+            acknowledgement.reference(),
+        );
+        self.verify(ErasureAuthorityEvidenceKindV1::Lifecycle, binding, &context)?;
         Ok(())
     }
 
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-        self.check_request_reference(input.request)?;
+        let binding = self.binding_for(input.request)?;
         self.check_policy_trust(input.policy, input.trust)?;
         if !matches!(
             input.lifecycle,
@@ -614,14 +804,17 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        self.check_lifecycle_provenance(input.provenance)?;
+        let context = lifecycle_context(b"receipt", input.request, input.receipt_digest);
+        self.check_lifecycle_provenance(binding, input.provenance, &context)?;
         for reference in [
             input.terminal_state,
             input.coordinator,
             input.provenance,
             input.signature,
         ] {
-            self.check_request_reference(reference)?;
+            if !reference_present(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
         Ok(())
     }
@@ -649,6 +842,50 @@ fn category_owner(
         ErasureInventoryCategoryV1::Replica => owners[2],
         ErasureInventoryCategoryV1::Backup => owners[3],
     }
+}
+
+fn lifecycle_context(
+    operation: &[u8],
+    request: ErasureReferenceV1,
+    detail: ErasureReferenceV1,
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(operation.len() + 64);
+    context.extend_from_slice(operation);
+    context.extend_from_slice(&request.digest());
+    context.extend_from_slice(&detail.digest());
+    context
+}
+
+fn position_reference(position: u64) -> ErasureReferenceV1 {
+    let mut digest = [0; 32];
+    digest[..8].copy_from_slice(&position.to_le_bytes());
+    ErasureReferenceV1::from_digest(digest)
+}
+
+fn decision_code(decision: ErasureAuthorizationDecisionV1) -> u8 {
+    match decision {
+        ErasureAuthorizationDecisionV1::Authorized => 1,
+        ErasureAuthorizationDecisionV1::Rejected => 2,
+    }
+}
+
+fn topology_context(
+    request: ErasureReferenceV1,
+    manifest_digest: ErasureReferenceV1,
+    observation: &ErasureVerifiedTopologyObservationV1,
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(64 + observation.bindings().len() * 48);
+    context.extend_from_slice(b"topology");
+    context.extend_from_slice(&request.digest());
+    context.extend_from_slice(&manifest_digest.digest());
+    for (timeline, scope) in observation.bindings() {
+        context.extend_from_slice(&timeline.inner().to_bytes());
+        context.extend_from_slice(&scope.digest());
+    }
+    for timeline in observation.unaffected() {
+        context.extend_from_slice(&timeline.inner().to_bytes());
+    }
+    context
 }
 
 fn placeholder_input(
