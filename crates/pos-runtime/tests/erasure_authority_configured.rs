@@ -342,7 +342,7 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
     .is_err());
     let request = persistence_request()?;
     assert!(ErasureAuthorityRequestBindingV1::new(
-        request.clone(),
+        request,
         Vec::new(),
         ErasureAuthorityFreezeProfileV1::new(
             vec![reference(9)],
