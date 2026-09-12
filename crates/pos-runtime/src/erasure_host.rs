@@ -419,13 +419,16 @@ impl ErasureCoordinatorCompositionV1 {
         verifier: Arc<dyn super::erasure_authority::ErasureAuthorityEvidenceVerifierV1>,
         execution: Arc<dyn super::erasure_authority::ErasureAuthorityExecutionV1>,
         coordinator: ErasureReferenceV1,
-    ) -> Self {
+    ) -> Result<Self, ErasureErrorV1> {
+        if coordinator.digest() == [0; 32] {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         let authority = super::erasure_authority::HostConfiguredErasureCoordinatorAuthorityV1::new(
             configuration,
             verifier,
             execution,
         );
-        Self::new(Arc::new(authority), coordinator)
+        Ok(Self::new(Arc::new(authority), coordinator))
     }
 
     /// Construct an explicitly closed composition for a deployment that has
