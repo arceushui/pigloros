@@ -1004,7 +1004,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let context = lifecycle_context(b"receipt", input.request, input.receipt_digest);
+        let context = lifecycle_context(b"receipt", input.request, input.signature);
         self.check_lifecycle_provenance(binding, input.provenance, &context)?;
         for reference in [
             input.terminal_state,
