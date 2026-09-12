@@ -889,7 +889,7 @@ mod tests {
                     release.ok_or(AdapterError::ProtocolFailure)?,
                     [63; 32],
                 ],
-                _ => vec![grant_digest, [53; 32], [74; 32]],
+                _ => vec![grant_digest, [53; 32], [65; 32]],
             };
             let (bytes, digest) = audit_record(
                 request,
