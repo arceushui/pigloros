@@ -150,46 +150,28 @@ impl ErasureAuthorityEvidenceVerifierV1 for Ed25519ErasureAuthorityEvidenceVerif
         }
         let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&self.public_key)
             .map_err(|_| ErasureErrorV1::TrustSnapshotInvalid)?;
-        let mut cursor = 0;
+        let mut remaining = evidence;
         let mut matched = false;
         let mut matched_valid = false;
-        while cursor < evidence.len() {
-            let length_end = cursor
-                .checked_add(4)
+        while !remaining.is_empty() {
+            let (length_bytes, after_length) = remaining
+                .split_first_chunk::<4>()
                 .ok_or(ErasureErrorV1::InvalidEncoding)?;
-            let length_bytes = evidence
-                .get(cursor..length_end)
+            let context_length = usize::try_from(u32::from_be_bytes(*length_bytes))
+                .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+            let (signed_context, after_context) = after_length
+                .split_at_checked(context_length)
                 .ok_or(ErasureErrorV1::InvalidEncoding)?;
-            let context_length = usize::try_from(u32::from_be_bytes(
-                length_bytes
-                    .try_into()
-                    .map_err(|_| ErasureErrorV1::InvalidEncoding)?,
-            ))
-            .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-            cursor = length_end;
-            let context_end = cursor
-                .checked_add(context_length)
+            let (signature_bytes, after_signature) = after_context
+                .split_first_chunk::<64>()
                 .ok_or(ErasureErrorV1::InvalidEncoding)?;
-            let signature_end = context_end
-                .checked_add(64)
-                .ok_or(ErasureErrorV1::InvalidEncoding)?;
-            let signed_context = evidence
-                .get(cursor..context_end)
-                .ok_or(ErasureErrorV1::InvalidEncoding)?;
-            let signature_bytes = evidence
-                .get(context_end..signature_end)
-                .ok_or(ErasureErrorV1::InvalidEncoding)?;
-            cursor = signature_end;
+            remaining = after_signature;
             if signed_context == context {
                 if matched {
                     return Err(ErasureErrorV1::Unauthorized);
                 }
                 matched = true;
-                let signature = Signature::from_bytes(
-                    signature_bytes
-                        .try_into()
-                        .map_err(|_| ErasureErrorV1::InvalidEncoding)?,
-                );
+                let signature = Signature::from_bytes(*signature_bytes);
                 let payload = CanonicalBytes::from_vec(context.to_vec());
                 matched_valid =
                     pos_crypto::signing::verify(&verifying_key, &payload, &signature).is_ok();
@@ -539,11 +521,6 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
             .iter()
             .map(ErasureObligationV1::reference)
             .collect::<Vec<_>>();
-        obligation_references
-            .windows(2)
-            .all(|pair| pair[0] < pair[1])
-            .then_some(())
-            .ok_or(ErasureErrorV1::ScopeInvalid)?;
         let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
             request,
             obligations: obligation_references,
