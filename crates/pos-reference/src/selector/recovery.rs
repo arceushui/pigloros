@@ -13,7 +13,7 @@ const MAX_LIVE_ATTEMPTS: usize = 256;
 
 /// Closed failures at the root-owned recovery seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum RecoveryDomainError {
+pub(super) enum RecoveryDomainError {
     /// The authenticated SIR1 identity is malformed or ambiguous.
     #[error("sandbox recovery transaction identity is invalid")]
     InvalidTransactionIdentity,
@@ -43,10 +43,10 @@ pub(crate) enum RecoveryDomainError {
 /// starting recovery because the slot's identifiers are private and remain
 /// bound into [`RecoveryTransactionIdentity`].
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct RecoveryPeerSlot {
-    runtime_instance_id: [u8; 16],
-    lifecycle_scope_id: [u8; 16],
-    endpoint_id: [u8; 16],
+pub(super) struct RecoveryPeerSlot {
+    runtime_instance: [u8; 16],
+    lifecycle_scope: [u8; 16],
+    endpoint: [u8; 16],
 }
 
 impl RecoveryPeerSlot {
@@ -54,7 +54,7 @@ impl RecoveryPeerSlot {
     ///
     /// # Errors
     /// Returns a closed failure for zero or non-distinct SIR1 slot identities.
-    pub(crate) fn from_authenticated_sir1(
+    pub(super) fn from_authenticated_sir1(
         runtime_instance_id: [u8; 16],
         lifecycle_scope_id: [u8; 16],
         endpoint_id: [u8; 16],
@@ -69,29 +69,29 @@ impl RecoveryPeerSlot {
             Err(RecoveryDomainError::InvalidTransactionIdentity)
         } else {
             Ok(Self {
-                runtime_instance_id,
-                lifecycle_scope_id,
-                endpoint_id,
+                runtime_instance: runtime_instance_id,
+                lifecycle_scope: lifecycle_scope_id,
+                endpoint: endpoint_id,
             })
         }
     }
 
     /// Root-selected recovery-peer runtime identity.
     #[must_use]
-    pub(crate) const fn runtime_instance_id(&self) -> [u8; 16] {
-        self.runtime_instance_id
+    pub(super) const fn runtime_instance_id(&self) -> [u8; 16] {
+        self.runtime_instance
     }
 
     /// Root-selected recovery-peer lifecycle-scope identity.
     #[must_use]
-    pub(crate) const fn lifecycle_scope_id(&self) -> [u8; 16] {
-        self.lifecycle_scope_id
+    pub(super) const fn lifecycle_scope_id(&self) -> [u8; 16] {
+        self.lifecycle_scope
     }
 
     /// Root-selected recovery-peer endpoint identity.
     #[must_use]
-    pub(crate) const fn endpoint_id(&self) -> [u8; 16] {
-        self.endpoint_id
+    pub(super) const fn endpoint_id(&self) -> [u8; 16] {
+        self.endpoint
     }
 }
 
@@ -101,7 +101,7 @@ impl RecoveryPeerSlot {
 /// SIR1, previous provider, previous runtime/lifecycle scope, complete ordered
 /// live-attempt set, and the root-selected recovery-peer slot.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct RecoveryTransactionIdentity {
+pub(super) struct RecoveryTransactionIdentity {
     sir1_digest: [u8; 32],
     previous_provider_binding_digest: [u8; 32],
     previous_runtime_instance_id: [u8; 16],
@@ -145,37 +145,37 @@ impl RecoveryTransactionIdentity {
 
     /// Exact SIR1 self-digest for this recovery transaction.
     #[must_use]
-    pub(crate) const fn sir1_digest(&self) -> [u8; 32] {
+    pub(super) const fn sir1_digest(&self) -> [u8; 32] {
         self.sir1_digest
     }
 
     /// Exact prior-provider binding committed by SIR1.
     #[must_use]
-    pub(crate) const fn previous_provider_binding_digest(&self) -> [u8; 32] {
+    pub(super) const fn previous_provider_binding_digest(&self) -> [u8; 32] {
         self.previous_provider_binding_digest
     }
 
     /// Exact previous root-selected runtime identity.
     #[must_use]
-    pub(crate) const fn previous_runtime_instance_id(&self) -> [u8; 16] {
+    pub(super) const fn previous_runtime_instance_id(&self) -> [u8; 16] {
         self.previous_runtime_instance_id
     }
 
     /// Exact previous root-selected lifecycle scope.
     #[must_use]
-    pub(crate) const fn previous_lifecycle_scope_id(&self) -> [u8; 16] {
+    pub(super) const fn previous_lifecycle_scope_id(&self) -> [u8; 16] {
         self.previous_lifecycle_scope_id
     }
 
     /// Full SIR1-committed live-attempt set, in canonical order.
     #[must_use]
-    pub(crate) fn previous_live_attempt_ids(&self) -> &[[u8; 16]] {
+    pub(super) fn previous_live_attempt_ids(&self) -> &[[u8; 16]] {
         &self.previous_live_attempt_ids
     }
 
     /// Exact root-selected recovery-peer slot.
     #[must_use]
-    pub(crate) const fn recovery_peer_slot(&self) -> &RecoveryPeerSlot {
+    pub(super) const fn recovery_peer_slot(&self) -> &RecoveryPeerSlot {
         &self.recovery_peer_slot
     }
 
@@ -189,9 +189,9 @@ impl RecoveryTransactionIdentity {
         for attempt_id in &self.previous_live_attempt_ids {
             hasher.update(attempt_id);
         }
-        hasher.update(&self.recovery_peer_slot.runtime_instance_id);
-        hasher.update(&self.recovery_peer_slot.lifecycle_scope_id);
-        hasher.update(&self.recovery_peer_slot.endpoint_id);
+        hasher.update(&self.recovery_peer_slot.runtime_instance);
+        hasher.update(&self.recovery_peer_slot.lifecycle_scope);
+        hasher.update(&self.recovery_peer_slot.endpoint);
         *hasher.finalize().as_bytes()
     }
 }
@@ -203,7 +203,7 @@ impl RecoveryTransactionIdentity {
 /// reconstruction path after a proof begins consuming it.
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct PendingRecovery {
+pub(super) struct PendingRecovery {
     identity: RecoveryTransactionIdentity,
 }
 
@@ -213,7 +213,7 @@ impl PendingRecovery {
     /// # Errors
     /// Returns a closed failure when authenticated fields cannot express one
     /// canonical recovery transaction identity.
-    pub(crate) fn from_authenticated_sir1(
+    pub(super) fn from_authenticated_sir1(
         sir1_digest: [u8; 32],
         previous_provider_binding_digest: [u8; 32],
         previous_runtime_instance_id: [u8; 16],
@@ -238,7 +238,7 @@ impl PendingRecovery {
     /// Returns the closed lifecycle-port failure. On failure the pending
     /// transaction is consumed, so callers cannot retry with substitute proof
     /// inputs or begin a peer for an unproven prior runtime.
-    pub(crate) fn terminate_previous_runtime(
+    pub(super) fn terminate_previous_runtime(
         self,
         lifecycle: &mut impl PreviousRuntimeTerminationPort,
     ) -> Result<PreviousRuntimeTerminationProof<Unconsumed>, RecoveryDomainError> {
@@ -258,14 +258,14 @@ impl PendingRecovery {
 /// The request borrows a sealed identity. It never accepts caller-provided
 /// runtime, lifecycle, attempt, or resource identifiers.
 #[derive(Debug)]
-pub(crate) struct PreviousRuntimeTerminationRequest<'a> {
+pub(super) struct PreviousRuntimeTerminationRequest<'a> {
     identity: &'a RecoveryTransactionIdentity,
 }
 
 impl PreviousRuntimeTerminationRequest<'_> {
     /// SIR1-bound recovery transaction identity.
     #[must_use]
-    pub(crate) const fn transaction_identity(&self) -> &RecoveryTransactionIdentity {
+    pub(super) const fn transaction_identity(&self) -> &RecoveryTransactionIdentity {
         self.identity
     }
 }
@@ -276,7 +276,7 @@ impl PreviousRuntimeTerminationRequest<'_> {
 /// runtime, descendants, live attempts, and transaction-owned resources, then
 /// reconciled the whole scope to empty. This module deliberately does not
 /// implement systemd or process cleanup.
-pub(crate) trait PreviousRuntimeTerminationPort {
+pub(super) trait PreviousRuntimeTerminationPort {
     /// Terminate and reconcile the exact sealed previous-runtime scope.
     fn terminate_and_reconcile(
         &mut self,
@@ -286,13 +286,13 @@ pub(crate) trait PreviousRuntimeTerminationPort {
 
 /// Marker carried by a previous-runtime proof before recovery-peer start.
 #[derive(Debug)]
-pub(crate) struct Unconsumed {
+pub(super) struct Unconsumed {
     _private: (),
 }
 
 /// Marker carried by a previous-runtime proof after peer exchange and cleanup.
 #[derive(Debug)]
-pub(crate) struct Consumed {
+pub(super) struct Consumed {
     _private: (),
 }
 
@@ -302,7 +302,7 @@ pub(crate) struct Consumed {
 /// back to [`Unconsumed`]. Starting a peer consumes the unconsumed state.
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct PreviousRuntimeTerminationProof<State> {
+pub(super) struct PreviousRuntimeTerminationProof<State> {
     identity: RecoveryTransactionIdentity,
     state: PhantomData<State>,
 }
@@ -313,7 +313,7 @@ impl PreviousRuntimeTerminationProof<Unconsumed> {
     /// # Errors
     /// Returns the closed peer-start failure. On failure the unconsumed proof
     /// is consumed, preventing a retry with another endpoint or identity.
-    pub(crate) fn start_recovery_peer(
+    pub(super) fn start_recovery_peer(
         self,
         peer: &mut impl RecoveryPeerPort,
     ) -> Result<RecoveryPeerSession, RecoveryDomainError> {
@@ -329,14 +329,14 @@ impl PreviousRuntimeTerminationProof<Unconsumed> {
 /// It is built only by the state machine and binds both the recovery exchange
 /// and RCA1 authentication to one [`RecoveryTransactionIdentity`].
 #[derive(Debug)]
-pub(crate) struct RecoveryPeerRequest<'a> {
+pub(super) struct RecoveryPeerRequest<'a> {
     identity: &'a RecoveryTransactionIdentity,
 }
 
 impl RecoveryPeerRequest<'_> {
     /// SIR1-bound recovery transaction identity.
     #[must_use]
-    pub(crate) const fn transaction_identity(&self) -> &RecoveryTransactionIdentity {
+    pub(super) const fn transaction_identity(&self) -> &RecoveryTransactionIdentity {
         self.identity
     }
 }
@@ -346,7 +346,7 @@ impl RecoveryPeerRequest<'_> {
 /// This is not a proof: its RCA1 bytes must still be authenticated through
 /// [`RecoveryResponseAuthenticator`] before the state machine can transition.
 #[derive(Debug)]
-pub(crate) struct RecoveryPeerExchange {
+pub(super) struct RecoveryPeerExchange {
     acknowledgement_bytes: Vec<u8>,
     recovery_peer_pid: u64,
     recovery_peer_start_time_ticks: u64,
@@ -357,7 +357,7 @@ impl RecoveryPeerExchange {
     ///
     /// # Errors
     /// Returns a closed failure for an absent RCA1 payload or invalid peer PID.
-    pub(crate) fn after_cleanup(
+    pub(super) fn after_cleanup(
         acknowledgement_bytes: Vec<u8>,
         recovery_peer_pid: u64,
         recovery_peer_start_time_ticks: u64,
@@ -376,13 +376,13 @@ impl RecoveryPeerExchange {
     }
 }
 
-/// Port implemented by #354's recovery-peer socket and #214 cleanup adapter.
+/// Port implemented by #349's recovery-peer socket and #214 cleanup adapter.
 ///
 /// Its second operation may return only after the dedicated peer has reached
 /// EOF and its complete transaction-owned resource scope was reconciled empty.
 /// It returns raw RCA1 bytes; authentication remains a separate mandatory
 /// recovery-domain operation.
-pub(crate) trait RecoveryPeerPort {
+pub(super) trait RecoveryPeerPort {
     /// Start the recovery peer at the root-selected slot.
     fn start(&mut self, request: &RecoveryPeerRequest<'_>) -> Result<(), RecoveryDomainError>;
 
@@ -395,7 +395,7 @@ pub(crate) trait RecoveryPeerPort {
 
 /// Opaque RCA1 digest released only by the selector's authenticated verifier.
 #[derive(Debug)]
-pub(crate) struct AuthenticatedRecoveryAcknowledgement {
+pub(super) struct AuthenticatedRecoveryAcknowledgement {
     acknowledgement_digest: [u8; 32],
 }
 
@@ -404,7 +404,7 @@ impl AuthenticatedRecoveryAcknowledgement {
     ///
     /// # Errors
     /// Returns a closed failure for the absent sentinel digest.
-    pub(crate) fn from_authenticated_rca1(
+    pub(super) fn from_authenticated_rca1(
         acknowledgement_digest: [u8; 32],
     ) -> Result<Self, RecoveryDomainError> {
         if acknowledgement_digest == [0; 32] {
@@ -416,17 +416,17 @@ impl AuthenticatedRecoveryAcknowledgement {
         }
     }
 
-    fn digest(&self) -> [u8; 32] {
+    const fn digest(&self) -> [u8; 32] {
         self.acknowledgement_digest
     }
 }
 
 /// Mandatory RCA1 authentication port for the exact sealed transaction.
 ///
-/// #354 will adapt the selector's retained previous runtime key and RCU1/RCC1
+/// #349 will adapt the selector's retained previous runtime key and RCU1/RCC1
 /// state to this port. The transport adapter cannot bypass this interface by
 /// returning a digest instead of raw response bytes.
-pub(crate) trait RecoveryResponseAuthenticator {
+pub(super) trait RecoveryResponseAuthenticator {
     /// Authenticate raw RCA1 for the exact recovery-peer request.
     fn authenticate(
         &mut self,
@@ -441,7 +441,7 @@ pub(crate) trait RecoveryResponseAuthenticator {
 /// completion proofs only after both cleanup and response authentication.
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct RecoveryPeerSession {
+pub(super) struct RecoveryPeerSession {
     previous: PreviousRuntimeTerminationProof<Unconsumed>,
 }
 
@@ -451,7 +451,7 @@ impl RecoveryPeerSession {
     /// # Errors
     /// Returns a closed exchange, cleanup, or authentication failure. In every
     /// failure case the private session is consumed and no proof is released.
-    pub(crate) fn authenticate_and_cleanup(
+    pub(super) fn authenticate_and_cleanup(
         self,
         peer: &mut impl RecoveryPeerPort,
         authenticator: &mut impl RecoveryResponseAuthenticator,
@@ -492,46 +492,44 @@ impl RecoveryPeerSession {
 /// authenticated RCA1 digest, and the observed recovery-peer PID/start-time.
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct RecoveryPeerTerminationProof {
+pub(super) struct RecoveryPeerTerminationProof {
     transaction_binding_digest: [u8; 32],
     acknowledgement_digest: [u8; 32],
     recovery_peer_pid: u64,
     recovery_peer_start_time_ticks: u64,
 }
 
-/// Matched sealed capabilities ready for #354's durable recovery completion.
+/// Matched sealed capabilities ready for #349's durable recovery completion.
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct RecoveryCompletion {
+pub(super) struct RecoveryCompletion {
     identity: RecoveryTransactionIdentity,
-    acknowledgement_digest: [u8; 32],
-    recovery_peer_pid: u64,
-    recovery_peer_start_time_ticks: u64,
+    recovery_peer: RecoveryPeerTerminationProof,
 }
 
 impl RecoveryCompletion {
     /// Exact SIR1-bound identity whose durable recovery may now complete.
     #[must_use]
-    pub(crate) const fn transaction_identity(&self) -> &RecoveryTransactionIdentity {
+    pub(super) const fn transaction_identity(&self) -> &RecoveryTransactionIdentity {
         &self.identity
     }
 
     /// Exact authenticated RCA1 self-digest.
     #[must_use]
-    pub(crate) const fn acknowledgement_digest(&self) -> [u8; 32] {
-        self.acknowledgement_digest
+    pub(super) const fn acknowledgement_digest(&self) -> [u8; 32] {
+        self.recovery_peer.acknowledgement_digest
     }
 
     /// Exact observed recovery-peer PID.
     #[must_use]
-    pub(crate) const fn recovery_peer_pid(&self) -> u64 {
-        self.recovery_peer_pid
+    pub(super) const fn recovery_peer_pid(&self) -> u64 {
+        self.recovery_peer.recovery_peer_pid
     }
 
     /// Exact observed recovery-peer process start time.
     #[must_use]
-    pub(crate) const fn recovery_peer_start_time_ticks(&self) -> u64 {
-        self.recovery_peer_start_time_ticks
+    pub(super) const fn recovery_peer_start_time_ticks(&self) -> u64 {
+        self.recovery_peer.recovery_peer_start_time_ticks
     }
 }
 
@@ -540,19 +538,17 @@ impl RecoveryCompletion {
 /// # Errors
 /// Returns a closed failure when the proof pair is from different SIR1
 /// transactions. Both arguments are consumed in every outcome.
-pub(crate) fn complete_recovery(
+pub(super) fn complete_recovery(
     previous: PreviousRuntimeTerminationProof<Consumed>,
     recovery_peer: RecoveryPeerTerminationProof,
 ) -> Result<RecoveryCompletion, RecoveryDomainError> {
-    if previous.identity.binding_digest() != recovery_peer.transaction_binding_digest {
-        Err(RecoveryDomainError::CrossTransactionProof)
-    } else {
+    if previous.identity.binding_digest() == recovery_peer.transaction_binding_digest {
         Ok(RecoveryCompletion {
             identity: previous.identity,
-            acknowledgement_digest: recovery_peer.acknowledgement_digest,
-            recovery_peer_pid: recovery_peer.recovery_peer_pid,
-            recovery_peer_start_time_ticks: recovery_peer.recovery_peer_start_time_ticks,
+            recovery_peer,
         })
+    } else {
+        Err(RecoveryDomainError::CrossTransactionProof)
     }
 }
 
@@ -643,21 +639,21 @@ mod tests {
         }
     }
 
-    fn successful_peer() -> Result<RecordingRecoveryPeerPort, RecoveryDomainError> {
-        Ok(RecordingRecoveryPeerPort {
+    fn successful_peer() -> RecordingRecoveryPeerPort {
+        RecordingRecoveryPeerPort {
             start_result: Ok(()),
             exchange_result: Some(RecoveryPeerExchange::after_cleanup(vec![1, 2], 7, 11)),
             observed_start_binding: None,
             observed_exchange_binding: None,
-        })
+        }
     }
 
-    fn successful_authenticator() -> Result<RecordingAuthenticator, RecoveryDomainError> {
-        Ok(RecordingAuthenticator {
+    fn successful_authenticator() -> RecordingAuthenticator {
+        RecordingAuthenticator {
             result: Some(AuthenticatedRecoveryAcknowledgement::from_authenticated_rca1([9; 32])),
             observed_binding: None,
             observed_response: None,
-        })
+        }
     }
 
     fn complete(
@@ -671,9 +667,9 @@ mod tests {
     > {
         let mut lifecycle = successful_lifecycle();
         let previous = pending(seed)?.terminate_previous_runtime(&mut lifecycle)?;
-        let mut peer = successful_peer()?;
+        let mut peer = successful_peer();
         let session = previous.start_recovery_peer(&mut peer)?;
-        let mut authenticator = successful_authenticator()?;
+        let mut authenticator = successful_authenticator();
         session.authenticate_and_cleanup(&mut peer, &mut authenticator)
     }
 
@@ -734,10 +730,10 @@ mod tests {
         let binding = lifecycle
             .observed_binding
             .ok_or(RecoveryDomainError::PreviousRuntimeTerminationRejected)?;
-        let mut peer = successful_peer()?;
+        let mut peer = successful_peer();
         let session = previous.start_recovery_peer(&mut peer)?;
         assert_eq!(peer.observed_start_binding, Some(binding));
-        let mut authenticator = successful_authenticator()?;
+        let mut authenticator = successful_authenticator();
         let (consumed, recovery_peer) =
             session.authenticate_and_cleanup(&mut peer, &mut authenticator)?;
         assert_eq!(peer.observed_exchange_binding, Some(binding));
@@ -757,6 +753,33 @@ mod tests {
         assert_eq!(completion.acknowledgement_digest(), [9; 32]);
         assert_eq!(completion.recovery_peer_pid(), 7);
         assert_eq!(completion.recovery_peer_start_time_ticks(), 11);
+        Ok(())
+    }
+
+    #[test]
+    fn completion_retains_the_authenticated_peer_evidence() -> Result<(), RecoveryDomainError> {
+        for (pid, start_ticks, acknowledgement) in [(17, 0, [3; 32]), (53, 234, [11; 32])] {
+            let mut lifecycle = successful_lifecycle();
+            let previous = pending(1)?.terminate_previous_runtime(&mut lifecycle)?;
+            let mut peer = successful_peer();
+            peer.exchange_result = Some(RecoveryPeerExchange::after_cleanup(
+                vec![1, 2],
+                pid,
+                start_ticks,
+            ));
+            let mut authenticator = successful_authenticator();
+            authenticator.result = Some(
+                AuthenticatedRecoveryAcknowledgement::from_authenticated_rca1(acknowledgement),
+            );
+            let session = previous.start_recovery_peer(&mut peer)?;
+            let (previous, recovery_peer) =
+                session.authenticate_and_cleanup(&mut peer, &mut authenticator)?;
+            let completion = complete_recovery(previous, recovery_peer)?;
+            assert_eq!(completion.transaction_identity().sir1_digest(), [1; 32]);
+            assert_eq!(completion.acknowledgement_digest(), acknowledgement);
+            assert_eq!(completion.recovery_peer_pid(), pid);
+            assert_eq!(completion.recovery_peer_start_time_ticks(), start_ticks);
+        }
         Ok(())
     }
 
@@ -794,14 +817,14 @@ mod tests {
             observed_exchange_binding: None,
         };
         let session = previous.start_recovery_peer(&mut cleanup_failure)?;
-        let mut authenticator = successful_authenticator()?;
+        let mut authenticator = successful_authenticator();
         assert_error(
             session.authenticate_and_cleanup(&mut cleanup_failure, &mut authenticator),
             RecoveryDomainError::RecoveryPeerExchangeOrCleanupRejected,
         );
 
         let previous = pending(4)?.terminate_previous_runtime(&mut lifecycle)?;
-        let mut peer = successful_peer()?;
+        let mut peer = successful_peer();
         let session = previous.start_recovery_peer(&mut peer)?;
         let mut rejected_authenticator = RecordingAuthenticator {
             result: Some(Err(RecoveryDomainError::RecoveryAcknowledgementRejected)),
