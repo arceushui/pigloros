@@ -5,7 +5,7 @@
 //! selector composition must authenticate before exposing its evaluator socket.
 
 pub mod authority;
-pub(crate) mod cases;
+mod cases;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -31,6 +31,44 @@ const MANIFEST_NAME: &str = "installation.cbor";
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.SelectorInstallation.v1\0";
+
+/// A canonical case reconstructed only from authenticated SIC1 descriptors.
+///
+/// The root-selector composition retains this type inside the crate. It never
+/// accepts a caller-provided archive, artifact path, or compatibility fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedInstalledCase {
+    attempt: crate::evaluator::CaseAttempt,
+    fixture_contract_digest: [u8; 32],
+    profile_digest: [u8; 32],
+    bundle_digest: [u8; 32],
+}
+
+impl ResolvedInstalledCase {
+    /// Returns the exact ordinal attempt rebuilt from the verified CFB1 closure.
+    #[must_use]
+    pub(crate) const fn attempt(&self) -> &crate::evaluator::CaseAttempt {
+        &self.attempt
+    }
+
+    /// Returns the CPF1 `FixtureContract` binding for this attempt.
+    #[must_use]
+    pub(crate) const fn fixture_contract_digest(&self) -> [u8; 32] {
+        self.fixture_contract_digest
+    }
+
+    /// Returns the verified CPF1 identity.
+    #[must_use]
+    pub(crate) const fn profile_digest(&self) -> [u8; 32] {
+        self.profile_digest
+    }
+
+    /// Returns the complete verified CFB1 identity.
+    #[must_use]
+    pub(crate) const fn bundle_digest(&self) -> [u8; 32] {
+        self.bundle_digest
+    }
+}
 
 /// A closed SIC1 artifact role.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

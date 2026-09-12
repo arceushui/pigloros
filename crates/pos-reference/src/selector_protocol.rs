@@ -331,8 +331,7 @@ fn encode_result_terminal<'a>(
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
     let result = SandboxProviderResult::from_canonical_cbor(result_bytes)
         .map_err(|_| AdapterError::ProtocolFailure)?;
-    if (result.request_id, result.attempt_id)
-        != (request.provider_request_id, request.attempt_id)
+    if (result.request_id, result.attempt_id) != (request.provider_request_id, request.attempt_id)
     {
         return Err(AdapterError::ProtocolFailure);
     }

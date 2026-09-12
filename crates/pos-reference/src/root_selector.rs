@@ -48,7 +48,7 @@ const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
 /// rejects it before any listener can be exposed, until #214 supplies the
 /// required lifecycle-backed recovery composition.
-pub fn run_fixed() -> Result<(), SelectorBoundaryError> {
+pub(super) fn run_fixed() -> Result<(), SelectorBoundaryError> {
     let admitted = InstalledSelectorState::open()?
         .authenticate_bootstrap()?
         .admit_provider()?;
@@ -225,7 +225,7 @@ fn read_installed(
 fn selector_execute_bytes(
     admitted: &AdmittedSelectorProvider,
     decoded: &DecodedSelectorRequest,
-    resolved: &crate::selector::installation::cases::ResolvedInstalledCase,
+    resolved: &crate::selector::installation::ResolvedInstalledCase,
     requirement: &crate::evaluator_protocol::SandboxRequirement,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
     let bootstrap = admitted.bootstrap();
@@ -448,8 +448,7 @@ fn read_selector_request(stream: &mut UnixStream) -> Result<(DecodedSelectorRequ
 }
 
 fn root_peer(stream: &UnixStream) -> bool {
-    socket_peercred(stream.as_fd())
-        .is_ok_and(|credentials| credentials.uid.as_raw() == ROOT_UID)
+    socket_peercred(stream.as_fd()).is_ok_and(|credentials| credentials.uid.as_raw() == ROOT_UID)
 }
 
 struct FixedListener {
