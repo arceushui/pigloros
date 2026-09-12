@@ -2133,7 +2133,7 @@ fn selector_commitment_rejects_invalid_evaluation_bindings() -> TestResult {
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
 
-    let mut missing_requirement = evaluation.clone();
+    let mut missing_requirement = evaluation;
     missing_requirement.sandbox_requirement = None;
     refresh_evaluation_request(&mut missing_requirement)?;
     assert_eq!(
@@ -2177,7 +2177,7 @@ fn selector_commitment_rejects_invalid_requirement_authority() -> TestResult {
         );
     }
 
-    let mut epoch_mismatch = evaluation.clone();
+    let mut epoch_mismatch = evaluation;
     let Some(requirement) = epoch_mismatch.sandbox_requirement.as_mut() else {
         return Err("sandbox requirement missing".into());
     };
@@ -2239,13 +2239,13 @@ fn selector_commitment_rejects_invalid_attempt_bindings() -> TestResult {
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
 
-    let mut unsupported_requirement = evaluation.clone();
+    let mut unsupported_requirement = evaluation;
     let Some(requirement) = unsupported_requirement.sandbox_requirement.as_mut() else {
         return Err("sandbox requirement missing".into());
     };
     requirement.required_provider_capability.capability_id = "missing".to_owned();
     refresh_evaluation_request(&mut unsupported_requirement)?;
-    let mut unsupported_capability = attempt.clone();
+    let mut unsupported_capability = attempt;
     unsupported_capability.capability_ids = vec!["missing".to_owned()];
     assert_eq!(
         admitted.derive_selector_grant_commitment(
