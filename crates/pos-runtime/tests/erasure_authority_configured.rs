@@ -7,16 +7,16 @@ use pos_core::erasure::target_closure_digest;
 use pos_core::{
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1,
-    ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1, ErasureForkAdmissionInputV1,
-    ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
+    ErasureAdministrativeResolutionV1, ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1,
+    ErasureForkAdmissionInputV1, ErasureFreezeAuthorizationEvidenceInputV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1, ErasureReceiptInputV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_runtime::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
+    ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
     ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
     ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, HostConfiguredErasureCoordinatorAuthorityV1,

@@ -1146,9 +1146,8 @@ fn memory_host_resolves_configured_fork_scope_through_public_sender(
         .ok_or("configured fork state missing")?
         .manifest_digest()
     };
-    authority.install_configured_fork_authority(configured_fork_authority(
-        request, manifest, parent,
-    )?);
+    authority
+        .install_configured_fork_authority(configured_fork_authority(request, manifest, parent)?);
     let child = {
         let mut commands = test_stage("open configured fork sender", host.command_sender())?;
         test_stage(
