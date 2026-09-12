@@ -1,5 +1,7 @@
 //! Contract tests for the host-configured erasure authority Plugin.
 
+use std::sync::Arc;
+
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
     destruction_command_reference, ErasureAcknowledgementProvenanceInputV1,
@@ -12,9 +14,10 @@ use pos_core::{
     TimelineId, TimelineMeta,
 };
 use pos_runtime::{
-    ErasureAuthorityConfigurationV1, ErasureAuthorityFreezeProfileV1,
-    ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
-    HostConfiguredErasureCoordinatorAuthorityV1,
+    ErasureAuthorityConfigurationV1, ErasureAuthorityEvidenceKindV1,
+    ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityFreezeProfileV1,
+    ErasureAuthorityRequestBindingV1, ErasureAuthorityTopologyBindingV1,
+    ErasureCoordinatorAuthorityV1, HostConfiguredErasureCoordinatorAuthorityV1,
 };
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
@@ -22,8 +25,28 @@ mod erasure_support;
 
 use erasure_support::{persistence_request, persistence_target, reference, retry_admission};
 
+#[derive(Debug)]
+struct TestEvidenceVerifier;
+
+impl ErasureAuthorityEvidenceVerifierV1 for TestEvidenceVerifier {
+    fn verify(
+        &self,
+        _kind: ErasureAuthorityEvidenceKindV1,
+        _request: &pos_core::ErasureRequestV1,
+        context: &[u8],
+        evidence: &[u8],
+    ) -> Result<(), pos_core::ErasureErrorV1> {
+        if !context.is_empty() && evidence == b"host-proof" {
+            Ok(())
+        } else {
+            Err(pos_core::ErasureErrorV1::Unauthorized)
+        }
+    }
+}
+
 fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn std::error::Error>> {
-    let request = reference(1);
+    let request = persistence_request()?;
+    let request_reference = request.reference();
     let target = persistence_target();
     let profile = ErasureAuthorityFreezeProfileV1::new(
         vec![reference(9)],
@@ -33,12 +56,21 @@ fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn st
         reference(26),
     )?;
     let topology = vec![
-        ErasureAuthorityTopologyBindingV1::new(request, TimelineId::new(), Some(reference(9))),
-        ErasureAuthorityTopologyBindingV1::new(request, TimelineId::new(), None),
+        ErasureAuthorityTopologyBindingV1::new(
+            request_reference,
+            reference(50),
+            TimelineId::new(),
+            Some(reference(9)),
+        ),
+        ErasureAuthorityTopologyBindingV1::new(
+            request_reference,
+            reference(50),
+            TimelineId::new(),
+            None,
+        ),
     ];
-    let configuration = ErasureAuthorityConfigurationV1::new(
-        reference(6),
-        reference(8),
+    let request_binding = ErasureAuthorityRequestBindingV1::new(
+        request,
         topology,
         profile,
         reference(40),
@@ -46,8 +78,11 @@ fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn st
         reference(7),
         true,
     )?;
+    let configuration =
+        ErasureAuthorityConfigurationV1::new(reference(6), reference(8), vec![request_binding])?;
     Ok(HostConfiguredErasureCoordinatorAuthorityV1::new(
         configuration,
+        Arc::new(TestEvidenceVerifier),
     )?)
 }
 
@@ -60,7 +95,7 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
         .verified_topology_observation(request_reference, reference(50))?
         .is_some());
     assert!(authority
-        .verified_topology_observation(reference(99), reference(50))?
+        .verified_topology_observation(request_reference, reference(51))?
         .is_none());
     authority.authenticate(&request)?;
     authority.admit_authorization(

@@ -416,10 +416,12 @@ impl ErasureCoordinatorCompositionV1 {
     /// is read while constructing the authority.
     pub fn from_host_configuration(
         configuration: super::erasure_authority::ErasureAuthorityConfigurationV1,
+        verifier: Arc<dyn super::erasure_authority::ErasureAuthorityEvidenceVerifierV1>,
         coordinator: ErasureReferenceV1,
     ) -> Result<Self, ErasureErrorV1> {
         let authority = super::erasure_authority::HostConfiguredErasureCoordinatorAuthorityV1::new(
             configuration,
+            verifier,
         )?;
         Ok(Self::new(Arc::new(authority), coordinator))
     }
