@@ -71,13 +71,13 @@ pub trait ErasureAuthorityEvidenceVerifierV1: std::fmt::Debug + Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureAuthorityTopologyBindingV1 {
     /// ERQ1 to which this topology observation belongs.
-    pub request: ErasureReferenceV1,
+    request: ErasureReferenceV1,
     /// Manifest revision for which this observation was authenticated.
-    pub manifest_digest: ErasureReferenceV1,
+    manifest_digest: ErasureReferenceV1,
     /// Timeline/Fork identity observed at the same durable revision.
-    pub timeline: TimelineId,
+    timeline: TimelineId,
     /// Resolved affected scope, or `None` for an unaffected Timeline.
-    pub scope: Option<ErasureReferenceV1>,
+    scope: Option<ErasureReferenceV1>,
 }
 
 impl ErasureAuthorityTopologyBindingV1 {
@@ -102,15 +102,15 @@ impl ErasureAuthorityTopologyBindingV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureAuthorityFreezeProfileV1 {
     /// Canonical affected scope members, independent of Timeline IDs.
-    pub scope_members: Vec<ErasureReferenceV1>,
+    scope_members: Vec<ErasureReferenceV1>,
     /// Canonical target closure admitted by policy.
-    pub targets: Vec<pos_core::ErasureRequiredTargetV1>,
+    targets: Vec<pos_core::ErasureRequiredTargetV1>,
     /// Owner identity for Artifact, Key, Replica, and Backup categories.
-    pub owners: [ErasureReferenceV1; 4],
+    owners: [ErasureReferenceV1; 4],
     /// Optional immutable future-Fork lineage rule.
-    pub lineage_rule: Option<ErasureReferenceV1>,
+    lineage_rule: Option<ErasureReferenceV1>,
     /// Scope reference assigned to an admitted child Fork.
-    pub child_scope: ErasureReferenceV1,
+    child_scope: ErasureReferenceV1,
 }
 
 impl ErasureAuthorityFreezeProfileV1 {
@@ -126,7 +126,13 @@ impl ErasureAuthorityFreezeProfileV1 {
         lineage_rule: Option<ErasureReferenceV1>,
         child_scope: ErasureReferenceV1,
     ) -> Result<Self, ErasureErrorV1> {
-        if scope_members.is_empty() || targets.is_empty() || !references_present(&owners) {
+        if scope_members.is_empty()
+            || targets.is_empty()
+            || !references_present(&owners)
+            || targets
+                .iter()
+                .any(|target| !target_references_present(*target))
+        {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         scope_members.sort_unstable();
@@ -159,19 +165,19 @@ impl ErasureAuthorityFreezeProfileV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureAuthorityRequestBindingV1 {
     /// The exact validated ERQ1 request admitted by the host.
-    pub request: ErasureRequestV1,
+    request: ErasureRequestV1,
     /// Complete topology observations authenticated for this request.
-    pub topology: Vec<ErasureAuthorityTopologyBindingV1>,
+    topology: Vec<ErasureAuthorityTopologyBindingV1>,
     /// Freeze target, scope, and owner profile for this request.
-    pub freeze: ErasureAuthorityFreezeProfileV1,
+    freeze: ErasureAuthorityFreezeProfileV1,
     /// Principal allowed to perform administrative resolution.
-    pub principal: ErasureReferenceV1,
+    principal: ErasureReferenceV1,
     /// Host evidence interpreted by the injected verifier.
-    pub authorization_evidence: Vec<u8>,
+    authorization_evidence: Vec<u8>,
     /// Provenance used for host-authenticated lifecycle admissions.
-    pub lifecycle_provenance: ErasureReferenceV1,
+    lifecycle_provenance: ErasureReferenceV1,
     /// Whether this request admits pre-freeze rejection decisions.
-    pub allow_rejection: bool,
+    allow_rejection: bool,
 }
 
 impl ErasureAuthorityRequestBindingV1 {
@@ -230,11 +236,11 @@ impl ErasureAuthorityRequestBindingV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureAuthorityConfigurationV1 {
     /// Policy revision accepted for all admissions.
-    pub policy: ErasureReferenceV1,
+    policy: ErasureReferenceV1,
     /// Trust revision accepted for all admissions.
-    pub trust: ErasureReferenceV1,
+    trust: ErasureReferenceV1,
     /// Complete request-specific host bindings.
-    pub requests: Vec<ErasureAuthorityRequestBindingV1>,
+    requests: Vec<ErasureAuthorityRequestBindingV1>,
 }
 
 impl ErasureAuthorityConfigurationV1 {
@@ -846,6 +852,17 @@ fn reference_present(reference: ErasureReferenceV1) -> bool {
 
 fn references_present(references: &[ErasureReferenceV1]) -> bool {
     references.iter().copied().all(reference_present)
+}
+
+fn target_references_present(target: pos_core::ErasureRequiredTargetV1) -> bool {
+    [
+        target.artifact_digest,
+        target.key_digest,
+        target.replica_set,
+        target.replica_id,
+    ]
+    .into_iter()
+    .all(reference_present)
 }
 
 fn has_duplicate<T: PartialEq>(values: &[T]) -> bool {
