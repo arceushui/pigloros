@@ -121,7 +121,7 @@ fn authority_with(
     let request_binding = ErasureAuthorityRequestBindingV1::new(
         request,
         topology,
-        profile.clone(),
+        profile,
         reference(40),
         b"host-proof".to_vec(),
         reference(7),
