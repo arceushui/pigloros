@@ -1096,7 +1096,11 @@ impl SelectorGrantCommitment {
         super::execution::validate_network_plans(network_plans)?;
         let effective_limits =
             derive_effective_limits(&provider.broker_hard_caps, launch, attempt)?;
-        let effective_limits_digest = effective_limits_digest(
+        let network_plan_digests = network_plans
+            .iter()
+            .map(|plan| plan.plan_digest)
+            .collect::<Vec<_>>();
+        let derived_artifacts = effective_limits_digest(
             &effective_limits,
             provider.broker_hard_caps_digest,
             provider.policy.policy_digest(),
@@ -1104,21 +1108,31 @@ impl SelectorGrantCommitment {
             evaluation.execution_profile_digest,
             attempt.fixture_digest,
             &provider.manifest.runtime_attestation_key_id,
-        )?;
-        let expected_fdl1_digest = expected_fdl1_digest(launch.execution_mode)?;
-        let network_plan_digests = network_plans
-            .iter()
-            .map(|plan| plan.plan_digest)
-            .collect::<Vec<_>>();
-        let (readback_set, expected_readback_set_digest) = readback_set(
-            provider,
-            image,
-            launch,
-            &requirement.required_provider_capability,
-            effective_limits_digest,
-            expected_fdl1_digest,
-            &network_plan_digests,
-        )?;
+        )
+        .and_then(|effective_limits_digest| {
+            expected_fdl1_digest(launch.execution_mode)
+                .map(|expected_fdl1_digest| (effective_limits_digest, expected_fdl1_digest))
+        })
+        .and_then(|(effective_limits_digest, expected_fdl1_digest)| {
+            readback_set(
+                provider,
+                image,
+                launch,
+                &requirement.required_provider_capability,
+                effective_limits_digest,
+                expected_fdl1_digest,
+                &network_plan_digests,
+            )
+            .map(|(readback_set, expected_readback_set_digest)| {
+                (
+                    effective_limits_digest,
+                    readback_set,
+                    expected_readback_set_digest,
+                )
+            })
+        });
+        let (effective_limits_digest, readback_set, expected_readback_set_digest) =
+            derived_artifacts?;
         Ok(Self {
             authority: selector_commitment_authority(provider, image, launch),
             required_provider_capability: requirement.required_provider_capability.clone(),
