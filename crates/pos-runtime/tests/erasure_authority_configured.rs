@@ -181,6 +181,26 @@ fn ed25519_evidence_verifier_requires_exact_signed_context(
             &[0, 0, 0],
         )
         .is_err());
+    let mut truncated = evidence.clone();
+    truncated.push(0);
+    assert!(verifier
+        .verify(
+            ErasureAuthorityEvidenceKindV1::Request,
+            &request,
+            context,
+            &truncated,
+        )
+        .is_err());
+    let mut duplicate = evidence.clone();
+    duplicate.extend_from_slice(&evidence);
+    assert!(verifier
+        .verify(
+            ErasureAuthorityEvidenceKindV1::Request,
+            &request,
+            context,
+            &duplicate,
+        )
+        .is_err());
     assert!(
         Ed25519ErasureAuthorityEvidenceVerifierV1::new(pos_core::PublicKey::from_bytes([0; 32]),)
             .is_err()
