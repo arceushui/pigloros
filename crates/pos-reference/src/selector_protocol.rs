@@ -281,6 +281,11 @@ fn validate_execute_request(
     if execute.request.request_id != request.provider_request_id
         || execute.attempt_id != request.attempt_id
         || execute.authority.evr1_digest != request.request.request_digest
+        || execute.authority.cpf1_digest != request.request.profile_digest
+        || execute.authority.cfb1_digest != request.request.fixture_bundle_digest
+        || execute.authority.fixture_digest != request.attempt.fixture_digest
+        || execute.authority.execution_profile_digest != request.request.execution_profile_digest
+        || execute.capability_ids != request.attempt.capability_ids
         || execute.adapter_input.byte_length != request.input_length
         || execute.adapter_input.digest != request.input_digest
     {
@@ -1177,26 +1182,38 @@ mod tests {
                 usage: ResourceUsage::default(),
             }
         );
-        let changed = rewrite_spx(fields, |spx| {
-            spx[5] = Value::Bytes(vec![99; 32]);
-            Ok(())
-        })?;
-        let changed = decode_canonical_with_limit(&changed, CONTROL_LIMIT)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
-        let changed_wrapper = array_values(&changed).map_err(|_| AdapterError::ProtocolFailure)?;
-        let changed_fields =
-            array_values(&changed_wrapper[0]).map_err(|_| AdapterError::ProtocolFailure)?;
-        assert_eq!(
-            encode_authenticated_reply(
-                &server_request,
-                AuthenticatedSelectorReply {
-                    execute_request: bytes(&changed_fields[5])?,
-                    ..reply
-                },
-            )
-            .map(|_| ()),
-            Err(AdapterError::ProtocolFailure)
-        );
+        for (field, value) in [
+            (5, Value::Bytes(vec![99; 32])),
+            (6, Value::Bytes(vec![99; 32])),
+            (8, Value::Bytes(vec![99; 32])),
+            (9, Value::Bytes(vec![99; 32])),
+            (
+                19,
+                Value::Array(vec![Value::Text("other-capability".to_owned())]),
+            ),
+        ] {
+            let changed = rewrite_spx(fields, |spx| {
+                spx[field] = value;
+                Ok(())
+            })?;
+            let changed = decode_canonical_with_limit(&changed, CONTROL_LIMIT)
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            let changed_wrapper =
+                array_values(&changed).map_err(|_| AdapterError::ProtocolFailure)?;
+            let changed_fields =
+                array_values(&changed_wrapper[0]).map_err(|_| AdapterError::ProtocolFailure)?;
+            assert_eq!(
+                encode_authenticated_reply(
+                    &server_request,
+                    AuthenticatedSelectorReply {
+                        execute_request: bytes(&changed_fields[5])?,
+                        ..reply
+                    },
+                )
+                .map(|_| ()),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
         Ok(())
     }
 
@@ -1339,6 +1356,10 @@ mod tests {
         for digest in 20_u8..35 {
             fields.push(Value::Bytes(vec![digest; 32]));
         }
+        fields[5] = Value::Bytes(vec![2; 32]);
+        fields[6] = Value::Bytes(vec![3; 32]);
+        fields[8] = Value::Bytes(vec![15; 32]);
+        fields[9] = Value::Bytes(vec![9; 32]);
         fields[12] = Value::Bytes(vec![12; 32]);
         fields.extend([
             Value::Array(vec![Value::Text("execute".to_owned())]),

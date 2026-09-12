@@ -204,7 +204,11 @@ impl InstallationManifest {
             return Err(ProtocolError::FieldOutOfBounds);
         }
         let root_public_key = fixed_bytes(&fields[3])?;
-        VerifyingKey::from_bytes(&root_public_key).map_err(|_| ProtocolError::InvalidEncoding)?;
+        let root_verifying_key = VerifyingKey::from_bytes(&root_public_key)
+            .map_err(|_| ProtocolError::InvalidEncoding)?;
+        if root_verifying_key.is_weak() {
+            return Err(ProtocolError::InvalidEncoding);
+        }
         let digest = nonzero_digest(&wrapper[1])?;
         if manifest_digest(&wrapper[0])? != digest {
             return Err(ProtocolError::DigestMismatch);
