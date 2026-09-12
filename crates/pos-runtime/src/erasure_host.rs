@@ -414,22 +414,18 @@ impl ErasureCoordinatorCompositionV1 {
     /// Build a composition from independently authenticated host authority
     /// material. This is the production injection seam; no persistence data
     /// is read while constructing the authority.
-    ///
-    /// # Errors
-    /// Returns a closed provenance or scope error when the host configuration
-    /// is incomplete or the provider cannot be constructed.
     pub fn from_host_configuration(
         configuration: super::erasure_authority::ErasureAuthorityConfigurationV1,
         verifier: Arc<dyn super::erasure_authority::ErasureAuthorityEvidenceVerifierV1>,
         execution: Arc<dyn super::erasure_authority::ErasureAuthorityExecutionV1>,
         coordinator: ErasureReferenceV1,
-    ) -> Result<Self, ErasureErrorV1> {
+    ) -> Self {
         let authority = super::erasure_authority::HostConfiguredErasureCoordinatorAuthorityV1::new(
             configuration,
             verifier,
             execution,
         );
-        Ok(Self::new(Arc::new(authority), coordinator))
+        Self::new(Arc::new(authority), coordinator)
     }
 
     /// Construct an explicitly closed composition for a deployment that has
