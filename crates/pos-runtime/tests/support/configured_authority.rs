@@ -27,6 +27,21 @@ impl ErasureAuthorityEvidenceVerifierV1 for TestEvidenceVerifier {
 }
 
 #[derive(Debug)]
+pub(super) struct RejectingEvidenceVerifier;
+
+impl ErasureAuthorityEvidenceVerifierV1 for RejectingEvidenceVerifier {
+    fn verify(
+        &self,
+        _kind: ErasureAuthorityEvidenceKindV1,
+        _request: &ErasureRequestV1,
+        _context: &[u8],
+        _evidence: &[u8],
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::Unauthorized)
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct TestExecution;
 
 impl ErasureAuthorityExecutionV1 for TestExecution {
