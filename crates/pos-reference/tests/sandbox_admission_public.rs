@@ -2,16 +2,42 @@
 
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
-use pos_reference::evaluator_protocol::RequiredProviderCapability;
+use pos_reference::evaluator::{AttemptArtifact, AttemptTransportCaps, CaseAttempt};
+use pos_reference::evaluator_protocol::{
+    EvaluationRequest, ImplementationIdentity, OutputCapability, RequiredProviderCapability,
+    SandboxRequirement, SubjectAdapterKind,
+};
+use pos_reference::profile::DeterministicBudget;
 use pos_reference::sandbox_provider_protocol::{
-    AdmissionGrant, AdmittedSandboxProvider, HostCapabilityProfile, LaunchPolicy,
-    ProviderConformanceReport, SandboxAdministratorPolicy, SandboxAdmissionError,
-    SandboxArchitecture, SandboxAuditRecord, SandboxExecuteRequest, SandboxProviderAdmissionInputs,
-    SandboxProviderReceipt, SandboxRevocationSnapshot, SandboxTrustSnapshot,
+    AdmissionGrant, AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedAdmissionGrant,
+    HostCapabilityProfile, LaunchPolicy, NetworkExchangePlan, ProviderConformanceReport,
+    SandboxAdministratorPolicy, SandboxAdmissionError, SandboxArchitecture, SandboxAuditRecord,
+    SandboxExecuteRequest, SandboxProviderAdmissionInputs, SandboxProviderReceipt,
+    SandboxRevocationSnapshot, SandboxTrustSnapshot, SelectorGrantCommitment,
 };
 use sha2::{Digest, Sha256};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+// Independent copy of ADR-069 section 6, also used by the external golden vectors.
+const REQUIRED_HOST_FEATURES: [&str; 16] = [
+    "broker-lifecycle",
+    "cgroup-kill",
+    "cgroup-v2-cpu",
+    "cgroup-v2-memory",
+    "cgroup-v2-pids",
+    "ipc-namespace",
+    "limit-observation",
+    "managed-attempt-exec",
+    "mount-namespace",
+    "network-namespace",
+    "nftables-atomic",
+    "pid-namespace",
+    "process-isolation-controls",
+    "signed-root-image",
+    "user-namespace",
+    "uts-namespace",
+];
 
 const ROOT_DATA_X86_64: [u8; 16] = [
     0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84, 0xb7, 0x09,
@@ -21,6 +47,21 @@ const ROOT_VERITY_X86_64: [u8; 16] = [
 ];
 const ROOT_SIGNATURE_X86_64: [u8; 16] = [
     0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08, 0xb1, 0x76,
+];
+
+const ROOT_PARTITIONS_AARCH64: [[u8; 16]; 3] = [
+    [
+        0xb9, 0x21, 0xb0, 0x45, 0x1d, 0xf0, 0x41, 0xc3, 0xaf, 0x44, 0x4c, 0x6f, 0x28, 0x0d, 0x3f,
+        0xae,
+    ],
+    [
+        0xdf, 0x33, 0x00, 0xce, 0xd6, 0x9f, 0x4c, 0x92, 0x97, 0x8c, 0x9b, 0xfb, 0x0f, 0x38, 0xd8,
+        0x20,
+    ],
+    [
+        0x6d, 0xb6, 0x9d, 0xe6, 0x29, 0xf4, 0x47, 0x58, 0xa7, 0xa5, 0x96, 0x21, 0x90, 0xf0, 0x0c,
+        0xe3,
+    ],
 ];
 
 fn integer(value: u64) -> Value {
@@ -251,6 +292,7 @@ fn provider_manifest(
     authority: &SigningAuthority,
     binary_digest: [u8; 32],
     feature_digest: [u8; 32],
+    architecture: u64,
 ) -> TestResult<Vec<u8>> {
     sign_record(
         "SPM1",
@@ -264,7 +306,7 @@ fn provider_manifest(
             bytes([12; 32]),
             Value::Text("runtime".to_owned()),
             Value::Array(vec![capability_value()]),
-            Value::Array(vec![integer(0)]),
+            Value::Array(vec![integer(architecture)]),
             bytes([13; 32]),
             bytes([14; 32]),
             bytes([15; 32]),
@@ -304,11 +346,18 @@ fn host_profile(
             integer(1),
             integer(architecture),
             Value::Text("6.12.0".to_owned()),
-            Value::Array(vec![Value::Array(vec![
-                Value::Text(feature_id.to_owned()),
-                integer(passed),
-                bytes([18; 32]),
-            ])]),
+            Value::Array(ordered(
+                REQUIRED_HOST_FEATURES
+                    .iter()
+                    .map(|id| {
+                        Value::Array(vec![
+                            Value::Text((*id).to_owned()),
+                            integer(if *id == feature_id { passed } else { 1 }),
+                            bytes([18; 32]),
+                        ])
+                    })
+                    .collect(),
+            )?),
             bytes([19; 32]),
             bytes([20; 32]),
             bytes([21; 32]),
@@ -366,6 +415,11 @@ fn image_manifest(
     architecture: u64,
 ) -> TestResult<Vec<u8>> {
     let der = b"pkcs7";
+    let partition_types = if architecture == 1 {
+        ROOT_PARTITIONS_AARCH64
+    } else {
+        [ROOT_DATA_X86_64, ROOT_VERITY_X86_64, ROOT_SIGNATURE_X86_64]
+    };
     sign_record(
         "SIM1",
         Value::Array(vec![
@@ -376,9 +430,9 @@ fn image_manifest(
             integer(u64::try_from(root_image.len())?),
             bytes(*blake3::hash(root_image).as_bytes()),
             Value::Array(vec![
-                partition(0, ROOT_DATA_X86_64, 1, 0),
-                partition(1, ROOT_VERITY_X86_64, 2, 1),
-                partition(2, ROOT_SIGNATURE_X86_64, 3, 2),
+                partition(0, partition_types[0], 1, 0),
+                partition(1, partition_types[1], 2, 1),
+                partition(2, partition_types[2], 3, 2),
             ]),
             bytes([22; 32]),
             integer(4096),
@@ -444,18 +498,63 @@ fn administrator_policy(
 }
 
 fn launch_policy(sim1_digest: [u8; 32]) -> TestResult<Vec<u8>> {
+    launch_policy_with_limits(sim1_digest, 1, commitment_limit_values())
+}
+
+fn launch_policy_with_limits(
+    sim1_digest: [u8; 32],
+    execution_mode: u64,
+    limits: Vec<Value>,
+) -> TestResult<Vec<u8>> {
     self_digested_record(
         "LPS1",
         Value::Array(vec![
             Value::Text("LPS1".to_owned()),
             integer(1),
             Value::Text("air-gapped".to_owned()),
-            integer(1),
+            integer(execution_mode),
             bytes(sim1_digest),
-            Value::Array(vec![Value::Array(vec![integer(0), integer(1)])]),
+            Value::Array(limits),
             Value::Array(vec![]),
         ]),
     )
+}
+
+fn commitment_limit_values() -> Vec<Value> {
+    commitment_limit_values_with_concurrency(256)
+}
+
+fn commitment_limit_values_with_concurrency(concurrent_attempts: u64) -> Vec<Value> {
+    (0..17)
+        .map(|limit_id| {
+            let value = if limit_id == 13 {
+                concurrent_attempts
+            } else {
+                2_000
+            };
+            Value::Array(vec![integer(limit_id), integer(value)])
+        })
+        .collect()
+}
+
+fn broker_hard_caps() -> TestResult<Vec<u8>> {
+    broker_hard_caps_with_limits(commitment_limit_values())
+}
+
+fn broker_hard_caps_with_limits(limits: Vec<Value>) -> TestResult<Vec<u8>> {
+    encode(&Value::Array(vec![
+        Value::Text("BHC1".to_owned()),
+        integer(1),
+        Value::Array(limits),
+    ]))
+}
+
+fn broker_hard_caps_record(limits: Value) -> TestResult<Vec<u8>> {
+    encode(&Value::Array(vec![
+        Value::Text("BHC1".to_owned()),
+        integer(1),
+        limits,
+    ]))
 }
 
 fn payload_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
@@ -471,24 +570,26 @@ fn execute_request(
     capability_ids: &[&str],
 ) -> TestResult<Vec<u8>> {
     let input = b"input";
+    let evaluation = fixture.evaluation_request(launch)?;
+    let attempt = selector_attempt();
     self_digested_record(
         "SPX1",
         Value::Array(vec![
             Value::Text("SPX1".to_owned()),
             integer(1),
             Value::Array(vec![
-                Value::Bytes(vec![31; 16]),
+                Value::Bytes(evaluation.request_id.to_vec()),
                 bytes(fixture.policy.policy_digest()),
                 integer(fixture.policy.policy_epoch()),
                 Value::Bytes(vec![32; 16]),
             ]),
             Value::Bytes(vec![33; 16]),
-            bytes([34; 32]),
+            bytes(evaluation.request_digest),
             bytes([35; 32]),
             bytes([36; 32]),
             bytes([37; 32]),
-            bytes([38; 32]),
-            bytes([39; 32]),
+            bytes(attempt.fixture_digest),
+            bytes(evaluation.execution_profile_digest),
             bytes(launch.policy_digest),
             bytes(wrapped_digest(&fixture.sim1)?),
             bytes(fixture.policy.policy_digest()),
@@ -517,6 +618,7 @@ fn admission_grant(
     fixture: &Fixture,
     request: &SandboxExecuteRequest,
     launch: &LaunchPolicy,
+    commitment: &SelectorGrantCommitment,
 ) -> TestResult<Vec<u8>> {
     let authority = &request.authority;
     sign_record(
@@ -542,15 +644,85 @@ fn admission_grant(
             integer(fixture.trust.trust_epoch()),
             integer(fixture.revocation.revocation_epoch()),
             integer(fixture.policy.policy_epoch()),
-            bytes([39; 32]),
+            bytes(commitment.effective_limits_digest()),
             bytes(request.adapter_input.digest),
             Value::Array(vec![]),
             bytes(launch.policy_digest),
-            bytes([40; 32]),
+            bytes(commitment.expected_readback_set_digest()),
             Value::Text("runtime".to_owned()),
         ]),
         &fixture.authority.runtime,
     )
+}
+
+fn selector_attempt() -> CaseAttempt {
+    let artifact = |bytes: Vec<u8>| AttemptArtifact {
+        digest: *blake3::hash(&bytes).as_bytes(),
+        bytes,
+    };
+    CaseAttempt {
+        case_id: "case".to_owned(),
+        claim_layer: 1,
+        family: 1,
+        mode: 1,
+        fixture_digest: [38; 32],
+        schema: artifact(vec![1]),
+        payload: artifact(vec![2]),
+        auxiliary: Vec::new(),
+        budget: DeterministicBudget {
+            memory_bytes: 1,
+            cpu_fuel: 1,
+            host_calls: 1,
+            event_count: 1,
+            output_bytes: 1,
+            storage_bytes: 1,
+            execution_steps: 1,
+            simulation_time_ns: 1,
+        },
+        watchdog_ms: 1,
+        network_allowed: false,
+        capability_ids: vec!["execute".to_owned()],
+        transport_caps: AttemptTransportCaps {
+            max_member_bytes: 1,
+            max_attempt_bytes: 3,
+        },
+    }
+}
+
+fn refresh_evaluation_request(request: &mut EvaluationRequest) -> TestResult {
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    Ok(())
+}
+
+fn network_exchange_plan() -> TestResult<NetworkExchangePlan> {
+    let exchange_id = [41; 16];
+    let request_digest = [42; 32];
+    let expected_response_digest = [43; 32];
+    let retention_policy_digest = [44; 32];
+    let unsigned = Value::Array(vec![
+        Value::Text("NXP1".to_owned()),
+        integer(1),
+        Value::Bytes(exchange_id.to_vec()),
+        integer(0),
+        Value::Text("execute".to_owned()),
+        integer(1),
+        bytes(request_digest),
+        integer(1),
+        bytes(expected_response_digest),
+        bytes(retention_policy_digest),
+    ]);
+    Ok(NetworkExchangePlan {
+        exchange_id,
+        occurrence: 0,
+        capability_id: "execute".to_owned(),
+        request_length: 1,
+        request_digest,
+        response_maximum: 1,
+        expected_response_digest,
+        retention_policy_digest,
+        plan_digest: digest_value(b"PiglorOS.NetworkExchangePlan.v1\0", &unsigned)?,
+    })
 }
 
 fn audit_record(
@@ -724,27 +896,32 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> TestResult<Self> {
+        Self::with_architecture(0)
+    }
+
+    fn with_architecture(architecture: u64) -> TestResult<Self> {
         let authority = SigningAuthority::fixed();
         let trust = authority.trust()?;
         let revocation = revocation(&trust, &authority, vec![], vec![])?;
-        let required_features = vec!["cgroup-v2".to_owned()];
+        let required_features = REQUIRED_HOST_FEATURES.map(str::to_owned).to_vec();
         let feature_digest = feature_set_digest(&required_features)?;
         let provider_binary = b"exact provider binary".to_vec();
-        let broker_hard_caps = b"broker hard caps".to_vec();
+        let broker_hard_caps = broker_hard_caps()?;
         let binary_digest = *blake3::hash(&provider_binary).as_bytes();
-        let provider_record = provider_manifest(&authority, binary_digest, feature_digest)?;
-        let scs1 = syscall_set(0)?;
-        let hcp1 = host_profile(&authority, "cgroup-v2", 1, 0)?;
+        let provider_record =
+            provider_manifest(&authority, binary_digest, feature_digest, architecture)?;
+        let scs1 = syscall_set(architecture)?;
+        let hcp1 = host_profile(&authority, "cgroup-v2-cpu", 1, architecture)?;
         let pcr1 = conformance_report(
             &authority,
             binary_digest,
             feature_digest,
             wrapped_digest(&hcp1)?,
-            0,
+            architecture,
         )?;
         let root_image = b"img".to_vec();
         let executable = b"adapter executable".to_vec();
-        let image_record = image_manifest(&authority, &root_image, &executable, 0)?;
+        let image_record = image_manifest(&authority, &root_image, &executable, architecture)?;
         let lps1 = launch_policy(wrapped_digest(&image_record)?)?;
         let policy = administrator_policy(
             &trust,
@@ -795,6 +972,100 @@ impl Fixture {
         AdmittedSandboxProvider::admit(&self.policy, &self.trust, &self.revocation, self.inputs())
     }
 
+    fn evaluation_request(&self, launch: &LaunchPolicy) -> TestResult<EvaluationRequest> {
+        let mut request = EvaluationRequest {
+            request_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+            profile_digest: [2; 32],
+            fixture_bundle_digest: [3; 32],
+            subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+            subject_artifact_digest: *blake3::hash(&self.executable).as_bytes(),
+            implementation: ImplementationIdentity {
+                implementation_id: "subject".to_owned(),
+                source_digest: [4; 32],
+                build_digest: [5; 32],
+                binary_digest: [6; 32],
+                public_contract_digest: [7; 32],
+                organization_id: None,
+            },
+            execution_profile_digest: [8; 32],
+            trust_policy_snapshot_digest: [9; 32],
+            output_capability: OutputCapability {
+                capability_digest: [10; 32],
+                report_bytes_limit: 1,
+                diagnostic_bytes_limit: 0,
+            },
+            evaluator_protocol_digest: [11; 32],
+            evaluator_hard_caps_digest: [12; 32],
+            sandbox_requirement: Some(SandboxRequirement {
+                lps1_digest: launch.policy_digest,
+                sim1_digest: wrapped_digest(&self.sim1)?,
+                required_provider_capability: RequiredProviderCapability {
+                    capability_id: "execute".to_owned(),
+                    capability_version: 1,
+                    minimum_strength: 1,
+                },
+                apt1_digest: self.policy.policy_digest(),
+                policy_epoch: self.policy.policy_epoch(),
+            }),
+            request_digest: [13; 32],
+        };
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        Ok(request)
+    }
+
+    fn selector_grant_commitment(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+        request: &SandboxExecuteRequest,
+    ) -> TestResult<SelectorGrantCommitment> {
+        let evaluation = self.evaluation_request(launch)?;
+        let attempt = selector_attempt();
+        Ok(admitted.derive_selector_grant_commitment(
+            image,
+            launch,
+            &evaluation,
+            &attempt,
+            &request.network_plans,
+        )?)
+    }
+
+    fn admission_grant(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+        request: &SandboxExecuteRequest,
+    ) -> TestResult<Vec<u8>> {
+        let commitment = self.selector_grant_commitment(admitted, image, launch, request)?;
+        admission_grant(self, request, launch, &commitment)
+    }
+
+    fn authenticate_grant(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        bytes: &[u8],
+        request: &SandboxExecuteRequest,
+        image: &AdmittedSandboxImage,
+        launch: &LaunchPolicy,
+    ) -> Result<AuthenticatedAdmissionGrant, SandboxAdmissionError> {
+        let evaluation = self
+            .evaluation_request(launch)
+            .map_err(|_| SandboxAdmissionError::ConformanceMismatch)?;
+        let attempt = selector_attempt();
+        let commitment = admitted.derive_selector_grant_commitment(
+            image,
+            launch,
+            &evaluation,
+            &attempt,
+            &request.network_plans,
+        )?;
+        admitted.authenticate_grant(bytes, request, image, launch, &commitment)
+    }
+
     fn policy_for_provider(
         &self,
         revocation: &SandboxRevocationSnapshot,
@@ -836,6 +1107,41 @@ impl Fixture {
                 image_manifest: wrapped_digest(image_manifest)?,
             },
         )
+    }
+
+    fn policy_for_commitment_artifacts(
+        &self,
+        broker_hard_caps: &[u8],
+        launch_policy: &[u8],
+    ) -> TestResult<SandboxAdministratorPolicy> {
+        administrator_policy(
+            &self.trust,
+            &self.revocation,
+            &self.authority,
+            &PolicySelectionDigests {
+                provider_manifest: wrapped_digest(&self.spm1)?,
+                provider_binary: *blake3::hash(&self.provider_binary).as_bytes(),
+                broker_hard_caps: *blake3::hash(broker_hard_caps).as_bytes(),
+                conformance_report: wrapped_digest(&self.pcr1)?,
+                syscall_set: wrapped_digest(&self.scs1)?,
+                launch_policy: wrapped_digest(launch_policy)?,
+                image_manifest: wrapped_digest(&self.sim1)?,
+            },
+        )
+    }
+
+    fn admit_with_broker_hard_caps(
+        &self,
+        broker_hard_caps: &[u8],
+    ) -> Result<AdmittedSandboxProvider, SandboxAdmissionError> {
+        let policy = self
+            .policy_for_commitment_artifacts(broker_hard_caps, &self.lps1)
+            .map_err(|_| SandboxAdmissionError::ConformanceMismatch)?;
+        let inputs = SandboxProviderAdmissionInputs {
+            broker_hard_caps,
+            ..self.inputs()
+        };
+        AdmittedSandboxProvider::admit(&policy, &self.trust, &self.revocation, inputs)
     }
 }
 
@@ -925,7 +1231,7 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
         ),
         Err(SandboxAdmissionError::PolicyMismatch)
     );
-    let failed_hcp1 = host_profile(&fixture.authority, "cgroup-v2", 0, 0)?;
+    let failed_hcp1 = host_profile(&fixture.authority, "cgroup-v2-cpu", 0, 0)?;
     let failed_pcr1 = conformance_report(
         &fixture.authority,
         *blake3::hash(&fixture.provider_binary).as_bytes(),
@@ -967,7 +1273,7 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
 #[test]
 fn provider_admission_rejects_cross_record_architecture_mismatch() -> TestResult {
     let fixture = Fixture::new()?;
-    let hcp1 = host_profile(&fixture.authority, "cgroup-v2", 1, 1)?;
+    let hcp1 = host_profile(&fixture.authority, "cgroup-v2-cpu", 1, 1)?;
     let pcr1 = conformance_report(
         &fixture.authority,
         *blake3::hash(&fixture.provider_binary).as_bytes(),
@@ -998,6 +1304,66 @@ fn provider_admission_rejects_cross_record_architecture_mismatch() -> TestResult
         AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs),
         Err(SandboxAdmissionError::ArchitectureMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn provider_admission_rejects_rebound_hcp_proof_cardinality() -> TestResult {
+    let fixture = Fixture::new()?;
+    let Value::Array(wrapper) = ciborium::from_reader(&fixture.hcp1[..])? else {
+        return Err("HCP1 wrapper must be an array".into());
+    };
+    let Value::Array(unsigned) = &wrapper[0] else {
+        return Err("HCP1 unsigned record must be an array".into());
+    };
+    let Value::Array(proofs) = &unsigned[4] else {
+        return Err("HCP1 proofs must be an array".into());
+    };
+    let mut extra = proofs.clone();
+    extra.push(Value::Array(vec![
+        Value::Text("extra-feature".to_owned()),
+        integer(1),
+        bytes([18; 32]),
+    ]));
+    for invalid_proofs in [proofs[..15].to_vec(), ordered(extra)?] {
+        let hcp1 = resign_unsigned_field(
+            &fixture.hcp1,
+            "HCP1",
+            4,
+            Value::Array(invalid_proofs),
+            &fixture.authority.runtime,
+        )?;
+        let pcr1 = conformance_report(
+            &fixture.authority,
+            *blake3::hash(&fixture.provider_binary).as_bytes(),
+            feature_set_digest(&fixture.required_features)?,
+            wrapped_digest(&hcp1)?,
+            0,
+        )?;
+        let policy = administrator_policy(
+            &fixture.trust,
+            &fixture.revocation,
+            &fixture.authority,
+            &PolicySelectionDigests {
+                provider_manifest: wrapped_digest(&fixture.spm1)?,
+                provider_binary: *blake3::hash(&fixture.provider_binary).as_bytes(),
+                broker_hard_caps: *blake3::hash(&fixture.broker_hard_caps).as_bytes(),
+                conformance_report: wrapped_digest(&pcr1)?,
+                syscall_set: wrapped_digest(&fixture.scs1)?,
+                launch_policy: wrapped_digest(&fixture.lps1)?,
+                image_manifest: wrapped_digest(&fixture.sim1)?,
+            },
+        )?;
+        let inputs = SandboxProviderAdmissionInputs {
+            host_profile: &hcp1,
+            conformance_report: &pcr1,
+            ..fixture.inputs()
+        };
+        assert_eq!(
+            AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs),
+            Err(SandboxAdmissionError::HostCapabilityMismatch)
+        );
+    }
     Ok(())
 }
 
@@ -1278,7 +1644,7 @@ fn image_admission_rejects_each_selection_and_authority_substitution() -> TestRe
 fn image_admission_rejects_provider_architecture_substitution() -> TestResult {
     let fixture = Fixture::new()?;
     let syscall_set = syscall_set(1)?;
-    let host_profile = host_profile(&fixture.authority, "cgroup-v2", 1, 1)?;
+    let host_profile = host_profile(&fixture.authority, "cgroup-v2-cpu", 1, 1)?;
     let report = conformance_report(
         &fixture.authority,
         *blake3::hash(&fixture.provider_binary).as_bytes(),
@@ -1352,8 +1718,9 @@ fn launch_and_execute_admission_reject_each_selected_authority_mismatch() -> Tes
     let changed_request = redigest_unsigned_field(&request_bytes, "SPX1", 10, bytes([99; 32]))?;
     let request = SandboxExecuteRequest::from_canonical_cbor(&changed_request)?;
     assert_eq!(
-        admitted.authenticate_grant(
-            &admission_grant(&fixture, &request, &launch)?,
+        fixture.authenticate_grant(
+            &admitted,
+            &fixture.admission_grant(&admitted, &image, &launch, &request)?,
             &request,
             &image,
             &launch,
@@ -1427,8 +1794,9 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
+    let grant = fixture.authenticate_grant(
+        &admitted,
+        &fixture.admission_grant(&admitted, &image, &launch, &request)?,
         &request,
         &image,
         &launch,
@@ -1459,8 +1827,9 @@ fn provider_lifecycle_records_are_authenticated_against_admission() -> TestResul
         &["unsupported"],
     )?)?;
     assert_eq!(
-        admitted.authenticate_grant(
-            &admission_grant(&fixture, &unsupported, &launch)?,
+        fixture.authenticate_grant(
+            &admitted,
+            &fixture.admission_grant(&admitted, &image, &launch, &unsupported)?,
             &unsupported,
             &image,
             &launch,
@@ -1481,8 +1850,9 @@ fn provider_terminal_audit_authority_covers_failure_and_denial_paths() -> TestRe
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
+    let grant = fixture.authenticate_grant(
+        &admitted,
+        &fixture.admission_grant(&admitted, &image, &launch, &request)?,
         &request,
         &image,
         &launch,
@@ -1653,8 +2023,9 @@ fn admission_entry_points_reject_malformed_records() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
+    let grant = fixture.authenticate_grant(
+        &admitted,
+        &fixture.admission_grant(&admitted, &image, &launch, &request)?,
         &request,
         &image,
         &launch,
@@ -1669,8 +2040,8 @@ fn admission_entry_points_reject_malformed_records() -> TestResult {
         .admit_image(b"not-cbor", &fixture.root_image, &fixture.executable)
         .is_err());
     assert!(admitted.admit_launch_policy(b"not-cbor", &image).is_err());
-    assert!(admitted
-        .authenticate_grant(b"not-cbor", &request, &image, &launch)
+    assert!(fixture
+        .authenticate_grant(&admitted, b"not-cbor", &request, &image, &launch)
         .is_err());
     assert!(admitted.authenticate_receipt(b"not-cbor", &grant).is_err());
     assert!(admitted
@@ -1724,11 +2095,18 @@ fn admission_entry_points_reject_forged_signatures() -> TestResult {
 #[test]
 fn provider_admission_rejects_invalid_required_feature_sets() -> TestResult {
     let fixture = Fixture::new()?;
+    let mut extra = fixture.required_features.clone();
+    extra.push("zzz-unknown".to_owned());
+    let mut substituted = fixture.required_features.clone();
+    substituted[0] = "aaa-unknown".to_owned();
     for required_features in [
         Vec::new(),
         vec![String::new()],
         vec!["cgroup-v2".to_owned(), "cgroup-v2".to_owned()],
         vec!["z-feature".to_owned(), "a-feature".to_owned()],
+        fixture.required_features[1..].to_vec(),
+        extra,
+        substituted,
     ] {
         let inputs = SandboxProviderAdmissionInputs {
             required_features: &required_features,
@@ -1748,6 +2126,551 @@ fn provider_admission_rejects_invalid_required_feature_sets() -> TestResult {
 }
 
 #[test]
+fn selector_derives_elm1_and_rbs1_from_selected_authority() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let commitment = fixture.selector_grant_commitment(&admitted, &image, &launch, &request)?;
+
+    assert_eq!(commitment.effective_limits().len(), 17);
+    assert_eq!(commitment.effective_limits()[0].value, 1);
+    assert_eq!(commitment.effective_limits()[4].value, 1);
+    assert_eq!(commitment.effective_limits()[8].value, 1);
+    assert_eq!(commitment.effective_limits()[9].value, 1);
+    assert_eq!(commitment.effective_limits()[13].value, 256);
+    assert!(commitment
+        .effective_limits()
+        .iter()
+        .enumerate()
+        .all(|(limit_id, limit)| usize::from(limit.limit_id) == limit_id));
+
+    let Value::Array(wrapper) = ciborium::from_reader(commitment.expected_readback_set())? else {
+        return Err("RBS1 wrapper must be an array".into());
+    };
+    let Some(Value::Array(unsigned)) = wrapper.first() else {
+        return Err("RBS1 unsigned record must be an array".into());
+    };
+    assert_eq!(unsigned[0], Value::Text("RBS1".to_owned()));
+    assert_eq!(
+        wrapped_digest(commitment.expected_readback_set())?,
+        commitment.expected_readback_set_digest()
+    );
+    assert_eq!(
+        commitment.expected_readback_set_digest(),
+        digest_value(
+            b"PiglorOS.SandboxReadbackSet.v1\0",
+            &Value::Array(unsigned.clone())
+        )?
+    );
+    assert_ne!(
+        commitment.expected_readback_set_digest(),
+        digest_value(b"PiglorOS.RBS1.v1\0", &Value::Array(unsigned.clone()))?
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_admission_rejects_malformed_broker_hard_cap_records() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut reordered = commitment_limit_values();
+    reordered.swap(0, 1);
+    let mut out_of_range = commitment_limit_values();
+    out_of_range[0] = Value::Array(vec![integer(257), integer(2_000)]);
+    let mut invalid_value = commitment_limit_values();
+    invalid_value[0] = Value::Array(vec![integer(0), Value::Null]);
+    let mut invalid_limit_shape = commitment_limit_values();
+    invalid_limit_shape[0] = Value::Null;
+    let mut invalid_limit_identifier = commitment_limit_values();
+    invalid_limit_identifier[0] = Value::Array(vec![Value::Null, integer(2_000)]);
+    let malformed_records = vec![
+        Vec::new(),
+        vec![0; 1_025],
+        vec![0xff],
+        encode(&Value::Null)?,
+        encode(&Value::Array(vec![
+            Value::Null,
+            integer(1),
+            Value::Array(commitment_limit_values()),
+        ]))?,
+        encode(&Value::Array(vec![
+            Value::Text("other".to_owned()),
+            integer(1),
+            Value::Array(commitment_limit_values()),
+        ]))?,
+        encode(&Value::Array(vec![
+            Value::Text("BHC1".to_owned()),
+            integer(2),
+            Value::Array(commitment_limit_values()),
+        ]))?,
+        encode(&Value::Array(vec![
+            Value::Text("BHC1".to_owned()),
+            Value::Text("one".to_owned()),
+            Value::Array(commitment_limit_values()),
+        ]))?,
+        broker_hard_caps_record(Value::Null)?,
+        broker_hard_caps_record(Value::Array(vec![]))?,
+        broker_hard_caps_with_limits(reordered)?,
+        broker_hard_caps_with_limits(out_of_range)?,
+        broker_hard_caps_with_limits(invalid_value)?,
+        broker_hard_caps_with_limits(invalid_limit_shape)?,
+        broker_hard_caps_with_limits(invalid_limit_identifier)?,
+    ];
+
+    for broker_hard_caps in malformed_records {
+        assert!(matches!(
+            fixture.admit_with_broker_hard_caps(&broker_hard_caps),
+            Err(SandboxAdmissionError::Protocol(_))
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_rejects_invalid_evaluation_bindings() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let evaluation = fixture.evaluation_request(&launch)?;
+    let attempt = selector_attempt();
+
+    let mut invalid_evaluation = evaluation.clone();
+    invalid_evaluation.execution_profile_digest = [0; 32];
+    assert_eq!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &invalid_evaluation,
+            &attempt,
+            &[]
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    let mut missing_requirement = evaluation;
+    missing_requirement.sandbox_requirement = None;
+    refresh_evaluation_request(&mut missing_requirement)?;
+    assert_eq!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &missing_requirement,
+            &attempt,
+            &[],
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_rejects_invalid_requirement_authority() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let evaluation = fixture.evaluation_request(&launch)?;
+    let attempt = selector_attempt();
+
+    for replacement in [[45; 32], [46; 32], [47; 32]] {
+        let mut mismatch = evaluation.clone();
+        let Some(requirement) = mismatch.sandbox_requirement.as_mut() else {
+            return Err("sandbox requirement missing".into());
+        };
+        match replacement[0] {
+            45 => requirement.lps1_digest = replacement,
+            46 => requirement.sim1_digest = replacement,
+            47 => requirement.apt1_digest = replacement,
+            _ => return Err("unknown selector authority field".into()),
+        }
+        refresh_evaluation_request(&mut mismatch)?;
+        assert_eq!(
+            admitted.derive_selector_grant_commitment(&image, &launch, &mismatch, &attempt, &[]),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+    }
+
+    let mut epoch_mismatch = evaluation;
+    let Some(requirement) = epoch_mismatch.sandbox_requirement.as_mut() else {
+        return Err("sandbox requirement missing".into());
+    };
+    requirement.policy_epoch += 1;
+    refresh_evaluation_request(&mut epoch_mismatch)?;
+    assert_eq!(
+        admitted.derive_selector_grant_commitment(&image, &launch, &epoch_mismatch, &attempt, &[]),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_rejects_invalid_attempt_bindings() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let evaluation = fixture.evaluation_request(&launch)?;
+    let attempt = selector_attempt();
+
+    let mut mode_mismatch = attempt.clone();
+    mode_mismatch.mode = 0;
+    assert_eq!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &evaluation,
+            &mode_mismatch,
+            &[]
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    let mut missing_fixture = attempt.clone();
+    missing_fixture.fixture_digest = [0; 32];
+    assert_eq!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &evaluation,
+            &missing_fixture,
+            &[]
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    let mut missing_capability = attempt.clone();
+    missing_capability.capability_ids.clear();
+    assert_eq!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &evaluation,
+            &missing_capability,
+            &[],
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    let mut unsupported_requirement = evaluation;
+    let Some(requirement) = unsupported_requirement.sandbox_requirement.as_mut() else {
+        return Err("sandbox requirement missing".into());
+    };
+    requirement.required_provider_capability.capability_id = "missing".to_owned();
+    refresh_evaluation_request(&mut unsupported_requirement)?;
+    let mut unsupported_capability = attempt;
+    unsupported_capability.capability_ids = vec!["missing".to_owned()];
+    assert_eq!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &unsupported_requirement,
+            &unsupported_capability,
+            &[],
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_rejects_invalid_network_plans_and_limits() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let evaluation = fixture.evaluation_request(&launch)?;
+    let attempt = selector_attempt();
+
+    let valid_plan = network_exchange_plan()?;
+    let too_many_plans = vec![valid_plan.clone(); 257];
+    assert!(matches!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &evaluation,
+            &attempt,
+            &too_many_plans,
+        ),
+        Err(SandboxAdmissionError::Protocol(_))
+    ));
+    let mut invalid_plan = valid_plan.clone();
+    invalid_plan.plan_digest = [0; 32];
+    assert!(matches!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &evaluation,
+            &attempt,
+            &[invalid_plan],
+        ),
+        Err(SandboxAdmissionError::Protocol(_))
+    ));
+    assert!(admitted
+        .derive_selector_grant_commitment(&image, &launch, &evaluation, &attempt, &[valid_plan])
+        .is_ok());
+
+    let mut incomplete_launch = launch.clone();
+    incomplete_launch.effective_limits.pop();
+    assert!(matches!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &incomplete_launch,
+            &evaluation,
+            &attempt,
+            &[],
+        ),
+        Err(SandboxAdmissionError::Protocol(_))
+    ));
+    let mut unordered_launch = launch.clone();
+    unordered_launch.effective_limits.swap(0, 1);
+    assert!(matches!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &unordered_launch,
+            &evaluation,
+            &attempt,
+            &[],
+        ),
+        Err(SandboxAdmissionError::Protocol(_))
+    ));
+    let mut no_watchdog_launch = launch;
+    no_watchdog_launch.effective_limits[4].value = 0;
+    assert!(matches!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &no_watchdog_launch,
+            &evaluation,
+            &attempt,
+            &[],
+        ),
+        Err(SandboxAdmissionError::Protocol(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_covers_each_execution_mode_and_concurrent_attempt_bound() -> TestResult {
+    let fixture = Fixture::new()?;
+    let sim1_digest = wrapped_digest(&fixture.sim1)?;
+    let mut readback_digests = Vec::new();
+
+    for mode in 0..4 {
+        let launch_bytes = launch_policy_with_limits(sim1_digest, mode, commitment_limit_values())?;
+        let policy =
+            fixture.policy_for_commitment_artifacts(&fixture.broker_hard_caps, &launch_bytes)?;
+        let inputs = SandboxProviderAdmissionInputs {
+            broker_hard_caps: &fixture.broker_hard_caps,
+            ..fixture.inputs()
+        };
+        let admitted =
+            AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs)?;
+        let image =
+            admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+        let launch = admitted.admit_launch_policy(&launch_bytes, &image)?;
+        let mut evaluation = fixture.evaluation_request(&launch)?;
+        let Some(requirement) = evaluation.sandbox_requirement.as_mut() else {
+            return Err("sandbox requirement missing".into());
+        };
+        requirement.apt1_digest = policy.policy_digest();
+        requirement.policy_epoch = policy.policy_epoch();
+        refresh_evaluation_request(&mut evaluation)?;
+        let mut attempt = selector_attempt();
+        attempt.mode = u8::try_from(mode)?;
+        let commitment = admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &evaluation,
+            &attempt,
+            &[],
+        )?;
+        readback_digests.push(commitment.expected_readback_set_digest());
+    }
+    readback_digests.sort_unstable();
+    readback_digests.dedup();
+    assert_eq!(readback_digests.len(), 4);
+
+    let high_limits = commitment_limit_values_with_concurrency(257);
+    let broker_hard_caps = broker_hard_caps_with_limits(high_limits.clone())?;
+    let launch_bytes = launch_policy_with_limits(sim1_digest, 1, high_limits)?;
+    let policy = fixture.policy_for_commitment_artifacts(&broker_hard_caps, &launch_bytes)?;
+    let inputs = SandboxProviderAdmissionInputs {
+        broker_hard_caps: &broker_hard_caps,
+        ..fixture.inputs()
+    };
+    let admitted =
+        AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs)?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&launch_bytes, &image)?;
+    let mut evaluation = fixture.evaluation_request(&launch)?;
+    let Some(requirement) = evaluation.sandbox_requirement.as_mut() else {
+        return Err("sandbox requirement missing".into());
+    };
+    requirement.apt1_digest = policy.policy_digest();
+    requirement.policy_epoch = policy.policy_epoch();
+    refresh_evaluation_request(&mut evaluation)?;
+    assert!(matches!(
+        admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &evaluation,
+            &selector_attempt(),
+            &[],
+        ),
+        Err(SandboxAdmissionError::Protocol(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_matches_independent_rbs1_golden_vectors() -> TestResult {
+    // Generated by an independent ADR-069 CBOR/BLAKE3 oracle.  These are complete
+    // RBS1 wrappers: their second item is the externally supplied expected digest.
+    let vectors: [(u64, u64, &[u8]); 8] = [
+        (0, 0, include_bytes!("vectors/rbs1-v1/x86_64-local.cbor")),
+        (
+            0,
+            1,
+            include_bytes!("vectors/rbs1-v1/x86_64-air_gapped.cbor"),
+        ),
+        (0, 2, include_bytes!("vectors/rbs1-v1/x86_64-replay.cbor")),
+        (0, 3, include_bytes!("vectors/rbs1-v1/x86_64-fork.cbor")),
+        (1, 0, include_bytes!("vectors/rbs1-v1/aarch64-local.cbor")),
+        (
+            1,
+            1,
+            include_bytes!("vectors/rbs1-v1/aarch64-air_gapped.cbor"),
+        ),
+        (1, 2, include_bytes!("vectors/rbs1-v1/aarch64-replay.cbor")),
+        (1, 3, include_bytes!("vectors/rbs1-v1/aarch64-fork.cbor")),
+    ];
+    for (architecture, mode, expected) in vectors {
+        let fixture = Fixture::with_architecture(architecture)?;
+        let launch_bytes = launch_policy_with_limits(
+            wrapped_digest(&fixture.sim1)?,
+            mode,
+            commitment_limit_values(),
+        )?;
+        let policy =
+            fixture.policy_for_commitment_artifacts(&fixture.broker_hard_caps, &launch_bytes)?;
+        let admitted = AdmittedSandboxProvider::admit(
+            &policy,
+            &fixture.trust,
+            &fixture.revocation,
+            fixture.inputs(),
+        )?;
+        let image =
+            admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+        let launch = admitted.admit_launch_policy(&launch_bytes, &image)?;
+        let mut evaluation = fixture.evaluation_request(&launch)?;
+        let Some(requirement) = evaluation.sandbox_requirement.as_mut() else {
+            return Err("sandbox requirement missing".into());
+        };
+        requirement.apt1_digest = policy.policy_digest();
+        requirement.policy_epoch = policy.policy_epoch();
+        refresh_evaluation_request(&mut evaluation)?;
+        let mut attempt = selector_attempt();
+        attempt.mode = u8::try_from(mode)?;
+        let commitment = admitted.derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &evaluation,
+            &attempt,
+            &[],
+        )?;
+        assert_eq!(commitment.expected_readback_set(), expected);
+        assert_eq!(
+            commitment.expected_readback_set_digest(),
+            wrapped_digest(expected)?,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn admission_grant_rejects_a_foreign_selector_commitment() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute"],
+    )?)?;
+    let commitment = fixture.selector_grant_commitment(&admitted, &image, &launch, &request)?;
+    let grant = admission_grant(&fixture, &request, &launch, &commitment)?;
+
+    let foreign_launch = LaunchPolicy {
+        policy_digest: [99; 32],
+        ..launch.clone()
+    };
+    assert_eq!(
+        admitted.authenticate_grant(&grant, &request, &image, &foreign_launch, &commitment),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    let mut foreign_evaluation = fixture.evaluation_request(&launch)?;
+    foreign_evaluation.execution_profile_digest = [99; 32];
+    foreign_evaluation.output_capability.capability_digest =
+        foreign_evaluation.expected_output_capability_digest()?;
+    foreign_evaluation.request_digest = foreign_evaluation.digest()?;
+    let foreign_commitment = admitted.derive_selector_grant_commitment(
+        &image,
+        &launch,
+        &foreign_evaluation,
+        &selector_attempt(),
+        &request.network_plans,
+    )?;
+
+    assert_eq!(
+        admitted.authenticate_grant(&grant, &request, &image, &launch, &foreign_commitment),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+
+    let unsupported_request = SandboxExecuteRequest::from_canonical_cbor(&execute_request(
+        &fixture,
+        &launch,
+        &["execute", "missing"],
+    )?)?;
+    let mut unsupported_attempt = selector_attempt();
+    unsupported_attempt.capability_ids = vec!["execute".to_owned(), "missing".to_owned()];
+    let unsupported_evaluation = fixture.evaluation_request(&launch)?;
+    let unsupported_commitment = admitted.derive_selector_grant_commitment(
+        &image,
+        &launch,
+        &unsupported_evaluation,
+        &unsupported_attempt,
+        &unsupported_request.network_plans,
+    )?;
+    let unsupported_grant = admission_grant(
+        &fixture,
+        &unsupported_request,
+        &launch,
+        &unsupported_commitment,
+    )?;
+    assert_eq!(
+        admitted.authenticate_grant(
+            &unsupported_grant,
+            &unsupported_request,
+            &image,
+            &launch,
+            &unsupported_commitment,
+        ),
+        Err(SandboxAdmissionError::ConformanceMismatch)
+    );
+    Ok(())
+}
+
+#[test]
 fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> TestResult {
     let fixture = Fixture::new()?;
     let admitted = fixture.admit()?;
@@ -1758,10 +2681,12 @@ fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> Te
         &launch,
         &["execute"],
     )?)?;
-    let grant_bytes = admission_grant(&fixture, &request, &launch)?;
+    let grant_bytes = fixture.admission_grant(&admitted, &image, &launch, &request)?;
 
     for (field, replacement) in [
+        (20, bytes([99; 32])),
         (21, bytes([99; 32])),
+        (24, bytes([99; 32])),
         (25, Value::Text("other-runtime".to_owned())),
     ] {
         let changed = resign_unsigned_field(
@@ -1772,12 +2697,12 @@ fn lifecycle_authentication_rejects_each_identity_and_chain_substitution() -> Te
             &fixture.authority.runtime,
         )?;
         assert_eq!(
-            admitted.authenticate_grant(&changed, &request, &image, &launch),
+            fixture.authenticate_grant(&admitted, &changed, &request, &image, &launch),
             Err(SandboxAdmissionError::ConformanceMismatch)
         );
     }
 
-    let grant = admitted.authenticate_grant(&grant_bytes, &request, &image, &launch)?;
+    let grant = fixture.authenticate_grant(&admitted, &grant_bytes, &request, &image, &launch)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
     for (field, replacement) in [
@@ -1858,16 +2783,17 @@ fn lifecycle_authentication_rejects_each_forged_signature() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant_bytes = admission_grant(&fixture, &request, &launch)?;
-    assert!(admitted
+    let grant_bytes = fixture.admission_grant(&admitted, &image, &launch, &request)?;
+    assert!(fixture
         .authenticate_grant(
+            &admitted,
             &replace_signed_signature(&grant_bytes, [9; 64])?,
             &request,
             &image,
             &launch,
         )
         .is_err());
-    let grant = admitted.authenticate_grant(&grant_bytes, &request, &image, &launch)?;
+    let grant = fixture.authenticate_grant(&admitted, &grant_bytes, &request, &image, &launch)?;
     let audit = audit_chain(&fixture, &grant)?;
     let receipt_bytes = provider_receipt(&fixture, &grant, wrapped_digest(&audit[1])?)?;
     assert!(admitted
@@ -1905,8 +2831,9 @@ fn audit_record_rejects_every_malformed_wire_field() -> TestResult {
         &launch,
         &["execute"],
     )?)?;
-    let grant = admitted.authenticate_grant(
-        &admission_grant(&fixture, &request, &launch)?,
+    let grant = fixture.authenticate_grant(
+        &admitted,
+        &fixture.admission_grant(&admitted, &image, &launch, &request)?,
         &request,
         &image,
         &launch,

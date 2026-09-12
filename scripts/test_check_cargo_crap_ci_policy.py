@@ -55,6 +55,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         gh_response: str,
         *,
         base_sha: str = EXAMPLE_BASE_SHA,
+        trusted_base_sha: str = EXAMPLE_BASE_SHA,
         git_status: int = 1,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         with tempfile.TemporaryDirectory() as directory:
@@ -80,6 +81,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             self.write_executable(
                 tools / "git",
                 "printf '%s\\n' \"$@\" >> \"${GIT_CALLS}\"\n"
+                "if [[ \"$1\" == \"merge-base\" ]]; then\n"
+                "  printf '%s\\n' \"${TRUSTED_BASE_SHA}\"\n"
+                "  exit 0\n"
+                "fi\n"
                 "exit \"${FAKE_GIT_STATUS}\"\n",
             )
             environment = os.environ.copy()
@@ -88,6 +93,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                     "PATH": f"{tools}:{environment['PATH']}",
                     "EVENT_NAME": "pull_request",
                     "BASE_SHA": base_sha,
+                    "TRUSTED_BASE_SHA": trusted_base_sha,
                     "GITHUB_OUTPUT": logs["output"],
                     "GITHUB_REPOSITORY": "owner/repository",
                     "GH_ARGS": logs["gh_args"],
@@ -136,10 +142,13 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         result, logs = self.run_resolver("4242\n")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(logs["output"], "run-id=4242\nbootstrap=false\n")
+        self.assertEqual(
+            logs["output"],
+            f"run-id=4242\nbaseline-sha={EXAMPLE_BASE_SHA}\nbootstrap=false\n",
+        )
         self.assertEqual(logs["gh_calls"], "call\n")
         self.assertEqual(logs["sleep_calls"], "")
-        self.assertEqual(logs["git_calls"], "")
+        self.assertEqual(logs["git_calls"], f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n")
         expected_query = (
             ".artifacts[] |\n"
             "      select(.expired == false) |\n"
@@ -173,11 +182,40 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertEqual(logs["output"], "")
         self.assertEqual(logs["gh_calls"].count("call\n"), 30)
         self.assertEqual(logs["sleep_calls"].count("10\n"), 29)
-        self.assertEqual(logs["git_calls"], "")
+        self.assertEqual(logs["git_calls"], f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n")
+
+    def test_resolver_uses_the_trusted_main_merge_base_for_stacked_pull_requests(self) -> None:
+        stacked_base = "b" * 40
+        result, logs = self.run_resolver(
+            "4242\n", base_sha=stacked_base, trusted_base_sha=EXAMPLE_BASE_SHA
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            logs["output"],
+            f"run-id=4242\nbaseline-sha={EXAMPLE_BASE_SHA}\nbootstrap=false\n",
+        )
+        self.assertIn(f"name=cargo-crap-baseline-{EXAMPLE_BASE_SHA}", logs["gh_args"])
+        self.assertEqual(logs["git_calls"], f"merge-base\n{stacked_base}\norigin/main\n")
+
+    def test_resolver_fails_closed_when_the_stacked_main_baseline_is_missing(self) -> None:
+        stacked_base = "b" * 40
+        result, logs = self.run_resolver(
+            "", base_sha=stacked_base, trusted_base_sha=EXAMPLE_BASE_SHA
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        self.assertEqual(logs["gh_calls"].count("call\n"), 30)
+        self.assertIn(f"name=cargo-crap-baseline-{EXAMPLE_BASE_SHA}", logs["gh_args"])
+        self.assertEqual(logs["git_calls"], f"merge-base\n{stacked_base}\norigin/main\n")
 
     def test_resolver_executes_only_the_approved_bootstrap(self) -> None:
         result, logs = self.run_resolver(
-            "", base_sha=BOOTSTRAP_BASE_SHA, git_status=0
+            "",
+            base_sha=BOOTSTRAP_BASE_SHA,
+            trusted_base_sha=BOOTSTRAP_BASE_SHA,
+            git_status=0,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -186,7 +224,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_resolver_rejects_bootstrap_when_policy_inputs_changed(self) -> None:
         result, logs = self.run_resolver(
-            "", base_sha=BOOTSTRAP_BASE_SHA, git_status=1
+            "",
+            base_sha=BOOTSTRAP_BASE_SHA,
+            trusted_base_sha=BOOTSTRAP_BASE_SHA,
+            git_status=1,
         )
 
         self.assertNotEqual(result.returncode, 0)
@@ -316,8 +357,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def test_rejects_whole_workflow_completion_dependency(self) -> None:
         self.assert_resolver_rejected(
             lambda resolver: resolver.replace(
-                'BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${BASE_SHA}"',
-                'BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${BASE_SHA}"\n'
+                'BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${TRUSTED_BASE_SHA}"',
+                'BASELINE_ARTIFACT_NAME="cargo-crap-baseline-${TRUSTED_BASE_SHA}"\n'
                 'LEGACY_LOOKUP="-f status=success"',
             )
         )
