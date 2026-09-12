@@ -29,7 +29,7 @@ mod erasure_support;
 #[path = "support/configured_authority.rs"]
 pub mod configured_authority_support;
 
-use configured_authority_support::{TestEvidenceVerifier, TestExecution};
+use configured_authority_support::{RejectingEvidenceVerifier, TestEvidenceVerifier, TestExecution};
 use erasure_support::{persistence_request, persistence_target, reference, retry_admission};
 
 fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn std::error::Error>> {
@@ -319,6 +319,24 @@ fn ed25519_evidence_verifier_requires_exact_signed_context(
             &request,
             context,
             &[0, 0, 0],
+        )
+        .is_err());
+    for malformed in [[0, 0, 0, 0].as_slice(), [0, 0, 0, 1, 0].as_slice()] {
+        assert!(verifier
+            .verify(
+                ErasureAuthorityEvidenceKindV1::Request,
+                &request,
+                context,
+                malformed,
+            )
+            .is_err());
+    }
+    assert!(verifier
+        .verify(
+            ErasureAuthorityEvidenceKindV1::Request,
+            &request,
+            context,
+            &[255, 255, 255, 255],
         )
         .is_err());
     let mut truncated = evidence.clone();
@@ -921,7 +939,8 @@ fn configured_authority_rejects_reachable_execution_boundary_mismatches(
         .dispatch_destruction(request_reference, &[wrong_target])
         .is_err());
 
-    let mut wrong_obligation = ErasureDestructionCommandV1::from_obligation(&obligation, reference(7));
+    let mut wrong_obligation =
+        ErasureDestructionCommandV1::from_obligation(&obligation, reference(7));
     wrong_obligation.obligation = reference(99);
     assert!(authority
         .dispatch_destruction(request_reference, &[wrong_obligation])
@@ -963,13 +982,20 @@ fn configured_authority_rejects_reachable_execution_boundary_mismatches(
         )?)
         .is_err());
 
-    let mut receipt = receipt_input(request_reference, ErasureLifecycleV1::Complete, reference(54));
+    let mut receipt = receipt_input(
+        request_reference,
+        ErasureLifecycleV1::Complete,
+        reference(54),
+    );
     receipt.policy = reference(99);
     assert!(authority.admit_receipt(&receipt).is_err());
 
-    for (principal, provenance) in [(reference(99), reference(7)), (reference(40), reference(99))] {
-        let resolution = ErasureAdministrativeResolutionV1::new(
-            ErasureAdministrativeResolutionInputV1 {
+    for (principal, provenance) in [
+        (reference(99), reference(7)),
+        (reference(40), reference(99)),
+    ] {
+        let resolution =
+            ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
                 request: request_reference,
                 affected_digests: vec![reference(58)],
                 action: ErasureAdministrativeResolutionActionV1::CloseContainment,
@@ -981,9 +1007,107 @@ fn configured_authority_rejects_reachable_execution_boundary_mismatches(
                 reason: reference(60),
                 issue_position: 12,
                 predecessor_resolution: None,
-            },
-        )?;
-        assert!(authority.admit_administrative_resolution(&resolution).is_err());
+            })?;
+        assert!(authority
+            .admit_administrative_resolution(&resolution)
+            .is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn configured_authority_propagates_rejected_evidence_at_each_public_admission(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let accepting = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    let admission = frozen_admission(&accepting, &request)?;
+    let authority = HostConfiguredErasureCoordinatorAuthorityV1::new(
+        accepting.configuration().clone(),
+        Arc::new(RejectingEvidenceVerifier),
+        Arc::new(TestExecution),
+    );
+    assert!(authority
+        .verified_topology_observation(request_reference, reference(50))
+        .is_err());
+    assert!(authority.authenticate(&request).is_err());
+    assert!(authority
+        .admit_authorization(
+            request_reference,
+            reference(7),
+            ErasureAuthorizationDecisionV1::Authorized,
+        )
+        .is_err());
+    let correction = pos_core::ErasureCorrectionProvenanceV1::new(
+        pos_core::ErasureCorrectionProvenanceInputV1 {
+            rejected_request: reference(99),
+            rejected_terminal_state: reference(51),
+            correction_reason: reference(52),
+            authorization_provenance: reference(7),
+        },
+    )?;
+    assert!(authority
+        .admit_corrected_submission(&request, &correction)
+        .is_err());
+    assert!(authority
+        .validate_freeze_authorization(
+            admission.freeze_admission_evidence(),
+            admission.freeze_authorization_evidence(),
+        )
+        .is_err());
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: request_reference,
+        scope_commitment: reference(59),
+        fork: reference(26),
+        lineage_rule: reference(25),
+        predecessor_extension: None,
+        admission_provenance: reference(7),
+    })?;
+    assert!(authority.admit_scope_extension(&extension).is_err());
+    assert!(authority
+        .admit_atomic_freeze(
+            request_reference,
+            &ErasureStateTransitionV1 {
+                lifecycle: ErasureLifecycleV1::AccessFrozen,
+                freeze_position: Some(10),
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                acknowledged_targets: Vec::new(),
+                replay_claim: ErasureReplayClaimV1::Exact,
+                provenance: reference(7),
+            },
+        )
+        .is_err());
+    let command =
+        ErasureDestructionCommandV1::from_obligation(&admission.obligations()[0], reference(7));
+    assert!(authority
+        .dispatch_destruction(request_reference, &[command])
+        .is_err());
+    let retry = retry_admission(erasure_support::RetryAdmissionFixture {
+        request: request_reference,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        obligations: admission.obligations(),
+        policy: reference(6),
+        trust: reference(8),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    assert!(authority.admit_attempt(&retry).is_err());
+    let acknowledgement = acknowledgement(
+        request_reference,
+        retry.reference(),
+        admission.obligations()[0].reference(),
+        admission.obligations()[0].command_identity(),
+    )?;
+    assert!(authority.admit_acknowledgement(&acknowledgement).is_err());
+    assert!(authority
+        .admit_receipt(&receipt_input(
+            request_reference,
+            ErasureLifecycleV1::Complete,
+            reference(54),
+        ))
+        .is_err());
     Ok(())
 }
