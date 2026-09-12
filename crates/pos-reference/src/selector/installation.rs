@@ -1416,6 +1416,10 @@ mod tests {
         invalid_root_key[3] = Value::Bytes(vec![0; 31]);
         assert_manifest_rejected(invalid_root_key)?;
 
+        let mut malformed_root_key = unsigned(valid_objects());
+        malformed_root_key[3] = Value::Bytes(vec![0; 32]);
+        assert_manifest_rejected(malformed_root_key)?;
+
         for (field, value) in [
             (0, Value::Integer(2.into())),
             (1, Value::Text("one".to_owned())),
@@ -1730,6 +1734,18 @@ mod tests {
             digest_complete_file(&file, 4)?,
             *blake3::hash(&[9; 4]).as_bytes()
         );
+
+        let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
+        assert_eq!(
+            digest_reader(write_only, 1),
+            Err(SelectorBoundaryError::Io)
+        );
+
+        let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
+        assert_eq!(
+            digest_reader(write_only, 0),
+            Err(SelectorBoundaryError::Io)
+        );
         Ok(())
     }
 
@@ -1783,6 +1799,24 @@ mod tests {
     fn provider_admission_rejects_untrusted_installed_provider_records() -> TestResult {
         let bootstrap = authenticated_state()?.authenticate_bootstrap()?;
         assert!(bootstrap.admit_provider().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_admission_rejects_missing_report_bound_host_profile() -> TestResult {
+        let mut installed = admitted_state()?;
+        let host_profile_kind = InstallationObjectKind::from_code(6)?;
+        let host_profile = installed
+            .artifacts
+            .keys()
+            .find(|(kind, _)| *kind == host_profile_kind)
+            .copied()
+            .ok_or("admitted state is missing the host profile")?;
+        installed.artifacts.remove(&host_profile);
+        assert!(installed
+            .authenticate_bootstrap()?
+            .admit_provider()
+            .is_err());
         Ok(())
     }
 

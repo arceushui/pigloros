@@ -1335,7 +1335,10 @@ fn provider_admission_rejects_rebound_hcp_proof_cardinality() -> TestResult {
             proofs[..15].to_vec(),
             SandboxProviderProtocolError::FieldOutOfBounds,
         ),
-        (ordered(extra)?, SandboxProviderProtocolError::FieldOutOfBounds),
+        (
+            ordered(extra)?,
+            SandboxProviderProtocolError::FieldOutOfBounds,
+        ),
         (
             ordered(substituted)?,
             SandboxProviderProtocolError::FieldOutOfBounds,
