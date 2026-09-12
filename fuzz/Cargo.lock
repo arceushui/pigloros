@@ -894,6 +894,7 @@ version = "0.1.0"
 dependencies = [
  "indexmap",
  "pos-core",
+ "pos-crypto",
  "pos-state",
  "pos-store",
  "serde_json",
