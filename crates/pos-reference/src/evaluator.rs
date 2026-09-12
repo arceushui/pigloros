@@ -365,7 +365,13 @@ fn evaluate_case(
     fixture: &Fixture,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
-    case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps).and_then(|attempt| {
+    let mut hard_caps = profile.evaluator_hard_caps;
+    if request.sandbox_requirement.is_some() {
+        let ceiling = crate::selector_protocol::SELECTOR_INPUT_LIMIT as u64;
+        hard_caps.max_member_bytes = hard_caps.max_member_bytes.min(ceiling);
+        hard_caps.max_total_bundle_bytes = hard_caps.max_total_bundle_bytes.min(ceiling);
+    }
+    case_attempt(bundle, fixture, bundle.mode, hard_caps).and_then(|attempt| {
         evaluate_attempt(
             request,
             fixture,
@@ -470,6 +476,55 @@ pub(crate) fn case_attempt(
     mode: u8,
     hard_caps: EvaluatorHardCaps,
 ) -> Result<CaseAttempt, EvaluatorError> {
+    let artifacts = bounded_attempt_artifacts(bundle, fixture, hard_caps)?;
+    Ok(CaseAttempt {
+        case_id: fixture.case_id.clone(),
+        claim_layer: fixture.claim_layer,
+        family: fixture.family,
+        mode,
+        fixture_digest: fixture.fixture_digest,
+        schema: artifacts.schema,
+        payload: artifacts.payload,
+        auxiliary: artifacts.auxiliary,
+        budget: fixture.deterministic_budget,
+        watchdog_ms: fixture.watchdog_ms,
+        network_allowed: fixture.network_allowed,
+        capability_ids: fixture.capability_ids.clone(),
+        transport_caps: AttemptTransportCaps {
+            max_member_bytes: hard_caps.max_member_bytes,
+            max_attempt_bytes: hard_caps.max_total_bundle_bytes,
+        },
+    })
+}
+
+struct AttemptArtifacts {
+    schema: AttemptArtifact,
+    payload: AttemptArtifact,
+    auxiliary: Vec<AttemptArtifact>,
+}
+
+fn bounded_attempt_artifacts(
+    bundle: &VerifiedBundle,
+    fixture: &Fixture,
+    hard_caps: EvaluatorHardCaps,
+) -> Result<AttemptArtifacts, EvaluatorError> {
+    let mut total_bytes = 0_u64;
+    for descriptor in std::iter::once(&fixture.schema)
+        .chain(std::iter::once(&fixture.payload))
+        .chain(&fixture.auxiliary)
+    {
+        let length = bundle
+            .member(&descriptor.member_path)
+            .ok_or(EvaluatorError::Bundle)?
+            .bytes
+            .len() as u64;
+        total_bytes = total_bytes
+            .checked_add(length)
+            .ok_or(EvaluatorError::Profile)?;
+        if length > hard_caps.max_member_bytes || total_bytes > hard_caps.max_total_bundle_bytes {
+            return Err(EvaluatorError::Profile);
+        }
+    }
     let member = |descriptor: &crate::profile::ArtifactDescriptor| {
         bundle
             .member(&descriptor.member_path)
@@ -486,23 +541,10 @@ pub(crate) fn case_attempt(
         .iter()
         .map(member)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(CaseAttempt {
-        case_id: fixture.case_id.clone(),
-        claim_layer: fixture.claim_layer,
-        family: fixture.family,
-        mode,
-        fixture_digest: fixture.fixture_digest,
+    Ok(AttemptArtifacts {
         schema,
         payload,
         auxiliary,
-        budget: fixture.deterministic_budget,
-        watchdog_ms: fixture.watchdog_ms,
-        network_allowed: fixture.network_allowed,
-        capability_ids: fixture.capability_ids.clone(),
-        transport_caps: AttemptTransportCaps {
-            max_member_bytes: hard_caps.max_member_bytes,
-            max_attempt_bytes: hard_caps.max_total_bundle_bytes,
-        },
     })
 }
 

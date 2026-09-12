@@ -50,6 +50,48 @@ pub mod selector_test_support {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
 }
 
+#[cfg(test)]
+#[doc(hidden)]
+pub mod selector_transport_test_fixture {
+    use crate as pos_reference;
+
+    // The integration corpus is included only to reuse its independently
+    // signed provider fixture from crate-private transport tests.
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/sandbox_admission_public.rs"
+    ));
+
+    pub(crate) struct TransportAdmissionFixture {
+        pub(crate) provider: crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        pub(crate) request: crate::sandbox_provider_protocol::SandboxExecuteRequest,
+        pub(crate) commitment: crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        pub(crate) agr1: Vec<u8>,
+    }
+
+    pub(crate) fn authenticated_transport_fixture() -> TestResult<TransportAdmissionFixture> {
+        let fixture = Fixture::new()?;
+        let provider = fixture.admit()?;
+        let image =
+            provider.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+        let launch = provider.admit_launch_policy(&fixture.lps1, &image)?;
+        let spx1 = execute_request(&fixture, &launch, &["execute"])?;
+        let request = crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
+            &spx1,
+        )?;
+        let commitment =
+            fixture.selector_grant_commitment(&provider, &image, &launch, &request)?;
+        let agr1 = admission_grant(&fixture, &request, &launch, &commitment)?;
+        provider.authenticate_selector_grant(&agr1, &request, &commitment)?;
+        Ok(TransportAdmissionFixture {
+            provider,
+            request,
+            commitment,
+            agr1,
+        })
+    }
+}
+
 /// Run ADR-069's fixed root-owned selector executable.
 ///
 /// This is the sole public binary entry point. It accepts no configuration,

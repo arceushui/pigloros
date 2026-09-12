@@ -17,7 +17,8 @@ use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 
 use crate::provider_transport::{
-    AuthenticatedProviderExecution, AuthenticatedProviderTerminal, ProviderTransport,
+    AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
+    ProviderTransport, ProviderTransportError,
 };
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, ExecuteAuthority, LaunchPolicy, RequestAuthority, SandboxExecuteRequest,
@@ -79,7 +80,7 @@ impl RootSelectorService {
             self.evaluator_listener.verify_continuity()?;
             let (stream, _) = match self.evaluator_listener.listener.accept() {
                 Ok(connection) => connection,
-                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) if should_retry_listener_accept(&error) => continue,
                 Err(_) => return Err(SelectorBoundaryError::Io),
             };
             match self.handle_connection(stream) {
@@ -104,12 +105,6 @@ impl RootSelectorService {
         let Ok((decoded, input)) = read_selector_request(&mut stream) else {
             return write_unidentified_request_error(&mut stream);
         };
-        stream
-            .set_read_timeout(Some(Duration::from_millis(decoded.attempt.watchdog_ms)))
-            .and_then(|()| {
-                stream.set_write_timeout(Some(Duration::from_millis(decoded.attempt.watchdog_ms)))
-            })
-            .map_err(|_| SelectorBoundaryError::Io)?;
         self.handle_decoded_request(&mut stream, &decoded, &input)
     }
 
@@ -134,6 +129,14 @@ impl RootSelectorService {
             Ok(resolved) if resolved.attempt() == &decoded.attempt => resolved,
             Ok(_) | Err(_) => return write_authority_mismatch(stream, decoded),
         };
+        stream
+            .set_read_timeout(Some(Duration::from_millis(resolved.attempt().watchdog_ms)))
+            .and_then(|()| {
+                stream.set_write_timeout(Some(Duration::from_millis(
+                    resolved.attempt().watchdog_ms,
+                )))
+            })
+            .map_err(|_| SelectorBoundaryError::Io)?;
         let Ok((image, launch)) = selected_image_and_launch(&self.admitted, requirement) else {
             return write_policy_error(stream, decoded);
         };
@@ -150,18 +153,40 @@ impl RootSelectorService {
         else {
             return write_authority_mismatch(stream, decoded);
         };
-        let Ok(terminal) = self.transport.execute(
-            &self.admitted,
+        let terminal = match self.transport.execute(
+            self.admitted.provider(),
             &commitment,
             &spx1,
             input,
-            Duration::from_millis(decoded.attempt.watchdog_ms),
-        ) else {
-            return write_provider_unavailable(stream, decoded);
+            Duration::from_millis(resolved.attempt().watchdog_ms),
+        ) {
+            Ok(terminal) => terminal,
+            Err(ProviderTransportError::BeforeAdmission) => {
+                return write_provider_unavailable(stream, decoded);
+            }
+            Err(ProviderTransportError::AfterAdmission {
+                agr1_digest,
+                failure,
+            }) => {
+                return write_post_admission_provider_failure(
+                    stream,
+                    decoded,
+                    agr1_digest,
+                    failure,
+                );
+            }
         };
         match terminal {
-            AuthenticatedProviderTerminal::Execution(execution) => {
-                write_authenticated_execution(stream, decoded, &spx1, execution)
+            AuthenticatedProviderTerminal::Execution(mut execution) => {
+                match prepare_authenticated_execution(decoded, &spx1, &mut execution) {
+                    Ok(reply) => write_reply(stream, &reply),
+                    Err(()) => write_post_admission_provider_failure(
+                        stream,
+                        decoded,
+                        execution.agr1_digest(),
+                        PostAdmissionProviderFailure::EvidenceInvalid,
+                    ),
+                }
             }
             AuthenticatedProviderTerminal::Error(error) => {
                 write_authenticated_error(stream, decoded, &spx1, &error)
@@ -283,12 +308,11 @@ fn fresh_nonce() -> Result<[u8; 16], SelectorBoundaryError> {
     }
 }
 
-fn write_authenticated_execution(
-    stream: &mut UnixStream,
+fn prepare_authenticated_execution(
     decoded: &DecodedSelectorRequest,
     spx1: &[u8],
-    mut execution: AuthenticatedProviderExecution,
-) -> Result<(), SelectorBoundaryError> {
+    execution: &mut AuthenticatedProviderExecution,
+) -> Result<EncodedSelectorReply, ()> {
     let output = execution.with_verified_output(|descriptor, reader| {
         let capacity = usize::try_from(descriptor.byte_length)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
@@ -301,8 +325,9 @@ fn write_authenticated_execution(
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         Ok(bytes)
-    })?;
-    let reply = encode_authenticated_reply(
+    })
+    .map_err(|_| ())?;
+    encode_authenticated_reply(
         decoded,
         AuthenticatedSelectorReply {
             execute_request: spx1,
@@ -315,8 +340,7 @@ fn write_authenticated_execution(
             },
         },
     )
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    write_reply(stream, &reply)
+    .map_err(|_| ())
 }
 
 fn write_authenticated_error(
@@ -405,6 +429,46 @@ fn write_provider_unavailable(
     )
 }
 
+fn write_post_admission_provider_failure(
+    stream: &mut UnixStream,
+    decoded: &DecodedSelectorRequest,
+    agr1_digest: [u8; 32],
+    failure: PostAdmissionProviderFailure,
+) -> Result<(), SelectorBoundaryError> {
+    let code = match failure {
+        PostAdmissionProviderFailure::TerminalUnavailable => {
+            SandboxLocalErrorCode::ProviderTerminalUnavailable
+        }
+        PostAdmissionProviderFailure::EvidenceInvalid => {
+            SandboxLocalErrorCode::ProviderEvidenceInvalid
+        }
+    };
+    let error = post_admission_provider_error(
+        decoded.provider_request_id,
+        decoded.attempt_id,
+        agr1_digest,
+        code,
+    );
+    write_local_error(stream, &error)
+}
+
+fn post_admission_provider_error(
+    request_id: [u8; 16],
+    attempt_id: [u8; 16],
+    agr1_digest: [u8; 32],
+    code: SandboxLocalErrorCode,
+) -> SandboxLocalError {
+    SandboxLocalError {
+        phase: SandboxLocalErrorPhase::AfterAdmission,
+        operation: Some(SandboxProviderOperation::Execute),
+        request_id: Some(request_id),
+        attempt_id: Some(attempt_id),
+        agr1_digest: Some(agr1_digest),
+        code,
+        safe_detail: None,
+    }
+}
+
 fn write_local_error(
     stream: &mut UnixStream,
     error: &SandboxLocalError,
@@ -446,6 +510,13 @@ fn read_selector_request(stream: &mut UnixStream) -> Result<(DecodedSelectorRequ
     decode_request(&control, &input)
         .map(|decoded| (decoded, input))
         .map_err(|_| ())
+}
+
+fn should_retry_listener_accept(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::Interrupted | ErrorKind::ConnectionAborted
+    )
 }
 
 fn root_peer(stream: &UnixStream) -> bool {
@@ -535,6 +606,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn listener_accept_retries_only_transient_connection_errors() {
+        for kind in [ErrorKind::Interrupted, ErrorKind::ConnectionAborted] {
+            assert!(should_retry_listener_accept(&std::io::Error::from(kind)));
+        }
+        for error in [
+            std::io::Error::from_raw_os_error(rustix::io::Errno::MFILE.raw_os_error()),
+            std::io::Error::from_raw_os_error(rustix::io::Errno::NFILE.raw_os_error()),
+            std::io::Error::from(ErrorKind::ConnectionReset),
+        ] {
+            assert!(!should_retry_listener_accept(&error));
+        }
+    }
+
+    #[test]
     fn listener_leaf_requires_an_exact_owner_only_socket_mode(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
@@ -546,6 +631,31 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o620))?;
         assert!(validate_listener_leaf(&fs::symlink_metadata(&path)?, owner).is_err());
         drop(listener);
+        Ok(())
+    }
+
+    #[test]
+    fn post_admission_provider_failures_retain_the_authenticated_grant(
+    ) -> Result<(), crate::evaluator::AdapterError> {
+        for code in [
+            SandboxLocalErrorCode::ProviderTerminalUnavailable,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+        ] {
+            let error = post_admission_provider_error([1; 16], [2; 16], [3; 32], code);
+            assert_eq!(error.phase, SandboxLocalErrorPhase::AfterAdmission);
+            assert_eq!(error.operation, Some(SandboxProviderOperation::Execute));
+            assert_eq!(error.request_id, Some([1; 16]));
+            assert_eq!(error.attempt_id, Some([2; 16]));
+            assert_eq!(error.agr1_digest, Some([3; 32]));
+            assert_eq!(error.code, code);
+            let encoded = encode_local_error_reply(&error)?;
+            assert!(encoded.trailing.is_empty());
+            assert_eq!(
+                SandboxLocalError::from_canonical_cbor(&encoded.control)
+                    .map_err(|_| crate::evaluator::AdapterError::ProtocolFailure)?,
+                error
+            );
+        }
         Ok(())
     }
 }

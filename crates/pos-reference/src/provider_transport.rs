@@ -20,8 +20,9 @@ use rustix::net::sockopt::{socket_error, socket_peercred};
 use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
 use crate::sandbox_provider_protocol::{
-    AuthenticatedSandboxProviderResult, PayloadDescriptor, PayloadDirection,
-    PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk, SelectorGrantCommitment,
+    AdmittedSandboxProvider, AuthenticatedSandboxProviderResult, PayloadDescriptor,
+    PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
+    SelectorGrantCommitment,
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::open_directory_chain;
@@ -42,6 +43,7 @@ pub(crate) struct ProviderTransport {
 #[derive(Debug)]
 pub(crate) struct AuthenticatedProviderExecution {
     frames: AuthenticatedProviderFrames,
+    agr1_digest: [u8; 32],
     output: Option<StagedProviderOutput>,
 }
 
@@ -54,7 +56,40 @@ pub(crate) enum AuthenticatedProviderTerminal {
     Error(Vec<u8>),
 }
 
+/// Closed outcome when the selected provider cannot yield one terminal reply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderTransportError {
+    /// No AGR1 was authenticated, so the root retains its pre-admission error shape.
+    BeforeAdmission,
+    /// An authenticated AGR1 forbids fallback and identifies the phase-two failure.
+    AfterAdmission {
+        agr1_digest: [u8; 32],
+        failure: PostAdmissionProviderFailure,
+    },
+}
+
+/// Exact failure class after AGR1 authentication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PostAdmissionProviderFailure {
+    /// Both the original stream and the sole recovery stream ended incomplete.
+    TerminalUnavailable,
+    /// A post-admission frame or evidence relationship was invalid.
+    EvidenceInvalid,
+}
+
+#[derive(Debug)]
+struct RetainedGrant {
+    bytes: Vec<u8>,
+    digest: [u8; 32],
+}
+
 impl AuthenticatedProviderExecution {
+    /// Returns the digest of the authenticated AGR1 frame retained by root.
+    #[must_use]
+    pub(crate) const fn agr1_digest(&self) -> [u8; 32] {
+        self.agr1_digest
+    }
+
     /// Returns the exact authenticated AGR1 frame bytes for root SLY1 composition.
     #[must_use]
     pub(crate) fn agr1_bytes(&self) -> &[u8] {
@@ -246,20 +281,22 @@ impl ProviderTransport {
     /// evidence fail closed without retry; a second incomplete connection fails.
     ///
     /// # Errors
-    /// Returns a closed selector boundary error for invalid exact bytes,
-    /// provider evidence, endpoint identity, timeouts, or I/O failure.
+    /// Returns whether the failure occurred before or after authentication of
+    /// the one retained AGR1 grant.
     pub(crate) fn execute(
         &self,
-        admitted: &AdmittedSelectorProvider,
+        admitted: &AdmittedSandboxProvider,
         commitment: &SelectorGrantCommitment,
         spx1: &[u8],
         input: &[u8],
         watchdog: Duration,
-    ) -> Result<AuthenticatedProviderTerminal, SelectorBoundaryError> {
+    ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
         let request = SandboxExecuteRequest::from_canonical_cbor(spx1)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        validate_input(&request.adapter_input, input)?;
-        let deadline = Deadline::new(watchdog)?;
+            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+        validate_input(&request.adapter_input, input)
+            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+        let deadline =
+            Deadline::new(watchdog).map_err(|_| ProviderTransportError::BeforeAdmission)?;
         let mut retained_grant = None;
         for recovery_attempt in 0..=1 {
             let result = self.execute_once(
@@ -273,25 +310,36 @@ impl ProviderTransport {
             );
             match result {
                 Ok(execution) => return Ok(execution),
-                Err(ReceiveFailure::Invalid) => return Err(SelectorBoundaryError::ArtifactInvalid),
+                Err(ReceiveFailure::Invalid) => {
+                    return Err(classify_receive_failure(
+                        &retained_grant,
+                        PostAdmissionProviderFailure::EvidenceInvalid,
+                    ));
+                }
                 Err(ReceiveFailure::Incomplete) if recovery_attempt == 0 => {}
                 Err(ReceiveFailure::Incomplete) => {
-                    return Err(SelectorBoundaryError::SelectorUnavailable)
+                    return Err(classify_receive_failure(
+                        &retained_grant,
+                        PostAdmissionProviderFailure::TerminalUnavailable,
+                    ));
                 }
             }
         }
-        Err(SelectorBoundaryError::SelectorUnavailable)
+        Err(classify_receive_failure(
+            &retained_grant,
+            PostAdmissionProviderFailure::TerminalUnavailable,
+        ))
     }
 
     fn execute_once(
         &self,
-        admitted: &AdmittedSelectorProvider,
+        admitted: &AdmittedSandboxProvider,
         commitment: &SelectorGrantCommitment,
         request: &SandboxExecuteRequest,
         spx1: &[u8],
         input: &[u8],
         deadline: &Deadline,
-        retained_grant: &mut Option<Vec<u8>>,
+        retained_grant: &mut Option<RetainedGrant>,
     ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
         let mut stream = self
             .endpoint
@@ -418,11 +466,11 @@ fn encode_input_chunk(
 
 fn read_response(
     stream: &mut UnixStream,
-    admitted: &AdmittedSelectorProvider,
+    admitted: &AdmittedSandboxProvider,
     commitment: &SelectorGrantCommitment,
     request: &SandboxExecuteRequest,
     deadline: &Deadline,
-    retained_grant: &mut Option<Vec<u8>>,
+    retained_grant: &mut Option<RetainedGrant>,
 ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
     let first = read_frame(stream, deadline)?.ok_or(ReceiveFailure::Incomplete)?;
     match record_magic(&first)?.as_str() {
@@ -435,7 +483,9 @@ fn read_response(
             retained_grant,
             first,
         ),
-        "SPE1" => read_error_response(stream, admitted, request, deadline, first),
+        "SPE1" if retained_grant.is_none() => {
+            read_error_response(stream, admitted, request, deadline, first)
+        }
         "SPY1" => {
             ensure_eof(stream, deadline)?;
             Err(ReceiveFailure::Invalid)
@@ -446,28 +496,28 @@ fn read_response(
 
 fn read_admitted_response(
     stream: &mut UnixStream,
-    admitted: &AdmittedSelectorProvider,
+    admitted: &AdmittedSandboxProvider,
     commitment: &SelectorGrantCommitment,
     request: &SandboxExecuteRequest,
     deadline: &Deadline,
-    retained_grant: &mut Option<Vec<u8>>,
+    retained_grant: &mut Option<RetainedGrant>,
     grant_bytes: Vec<u8>,
 ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
     verify_retained_grant(retained_grant, &grant_bytes)?;
-    let provider = admitted.provider();
-    let grant = provider
+    let grant = admitted
         .authenticate_selector_grant(&grant_bytes, request, commitment)
         .map_err(|_| ReceiveFailure::Invalid)?;
+    retain_authenticated_grant(retained_grant, grant_bytes.clone(), grant.grant_digest);
     let (audit_bytes, receipt_bytes) = read_audit_and_receipt(stream, deadline)?;
-    let receipt = provider
+    let receipt = admitted
         .authenticate_receipt(&receipt_bytes, &grant)
         .map_err(|_| ReceiveFailure::Invalid)?;
     let (file, chunks, result_bytes) = read_output_frames(stream, deadline)?;
-    let result = provider
+    let result = admitted
         .authenticate_terminal_result(&result_bytes, request, &grant, &receipt)
         .map_err(|_| ReceiveFailure::Invalid)?;
     ensure_eof(stream, deadline)?;
-    provider
+    admitted
         .authenticate_audit_chain(&audit_bytes, &receipt, &result)
         .map_err(|_| ReceiveFailure::Invalid)?;
     let output = stage_output(file, chunks, request, &result)?;
@@ -479,6 +529,7 @@ fn read_admitted_response(
                 result_bytes,
                 audit_bytes,
             ),
+            agr1_digest: grant.grant_digest,
             output,
         },
     ))
@@ -486,31 +537,52 @@ fn read_admitted_response(
 
 fn read_error_response(
     stream: &mut UnixStream,
-    admitted: &AdmittedSelectorProvider,
+    admitted: &AdmittedSandboxProvider,
     request: &SandboxExecuteRequest,
     deadline: &Deadline,
     error_bytes: Vec<u8>,
 ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
     ensure_eof(stream, deadline)?;
     admitted
-        .provider()
         .authenticate_selector_error(&error_bytes, request)
         .map_err(|_| ReceiveFailure::Invalid)?;
     Ok(AuthenticatedProviderTerminal::Error(error_bytes))
 }
 
 fn verify_retained_grant(
-    retained_grant: &mut Option<Vec<u8>>,
+    retained_grant: &Option<RetainedGrant>,
     current: &[u8],
 ) -> Result<(), ReceiveFailure> {
     if retained_grant
         .as_ref()
-        .is_some_and(|previous| previous.as_slice() != current)
+        .is_some_and(|previous| previous.bytes.as_slice() != current)
     {
         return Err(ReceiveFailure::Invalid);
     }
-    *retained_grant = Some(current.to_vec());
     Ok(())
+}
+
+fn retain_authenticated_grant(
+    retained_grant: &mut Option<RetainedGrant>,
+    bytes: Vec<u8>,
+    digest: [u8; 32],
+) {
+    if retained_grant.is_none() {
+        *retained_grant = Some(RetainedGrant { bytes, digest });
+    }
+}
+
+fn classify_receive_failure(
+    retained_grant: &Option<RetainedGrant>,
+    failure: PostAdmissionProviderFailure,
+) -> ProviderTransportError {
+    retained_grant.as_ref().map_or(
+        ProviderTransportError::BeforeAdmission,
+        |grant| ProviderTransportError::AfterAdmission {
+            agr1_digest: grant.digest,
+            failure,
+        },
+    )
 }
 
 fn read_audit_and_receipt(
@@ -912,14 +984,90 @@ mod tests {
     }
 
     #[test]
-    fn retained_grant_requires_byte_identity_across_one_recovery() {
-        let mut retained = None;
-        assert!(verify_retained_grant(&mut retained, b"grant").is_ok());
-        assert!(verify_retained_grant(&mut retained, b"grant").is_ok());
-        assert_eq!(
-            verify_retained_grant(&mut retained, b"other"),
+    fn authenticated_agr1_keeps_its_digest_when_the_sole_replay_is_incomplete() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut provider, mut root) = UnixStream::pair()?;
+        write_frame(&mut provider, &fixture.agr1, &deadline)
+            .map_err(|error| format!("AGR1 write failed: {error:?}"))?;
+        provider.shutdown(std::net::Shutdown::Write)?;
+        let mut retained_grant = None;
+        assert!(matches!(
+            read_response(
+                &mut root,
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.request,
+                &deadline,
+                &mut retained_grant,
+            ),
+            Err(ReceiveFailure::Incomplete)
+        ));
+        let (provider, mut root) = UnixStream::pair()?;
+        provider.shutdown(std::net::Shutdown::Write)?;
+        assert!(matches!(
+            read_response(
+                &mut root,
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.request,
+                &deadline,
+                &mut retained_grant,
+            ),
+            Err(ReceiveFailure::Incomplete)
+        ));
+        let grant = fixture
+            .provider
+            .authenticate_selector_grant(&fixture.agr1, &fixture.request, &fixture.commitment)?;
+        assert!(matches!(
+            classify_receive_failure(
+                &retained_grant,
+                PostAdmissionProviderFailure::TerminalUnavailable,
+            ),
+            ProviderTransportError::AfterAdmission {
+                agr1_digest,
+                failure: PostAdmissionProviderFailure::TerminalUnavailable,
+            } if agr1_digest == grant.grant_digest
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_evidence_after_authenticated_agr1_is_phase_two() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut provider, mut root) = UnixStream::pair()?;
+        write_frame(&mut provider, &fixture.agr1, &deadline)
+            .map_err(|error| format!("AGR1 write failed: {error:?}"))?;
+        write_frame(&mut provider, b"malformed terminal evidence", &deadline)
+            .map_err(|error| format!("malformed frame write failed: {error:?}"))?;
+        provider.shutdown(std::net::Shutdown::Write)?;
+        let mut retained_grant = None;
+        assert!(matches!(
+            read_response(
+                &mut root,
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.request,
+                &deadline,
+                &mut retained_grant,
+            ),
             Err(ReceiveFailure::Invalid)
-        );
+        ));
+        let grant = fixture
+            .provider
+            .authenticate_selector_grant(&fixture.agr1, &fixture.request, &fixture.commitment)?;
+        assert!(matches!(
+            classify_receive_failure(
+                &retained_grant,
+                PostAdmissionProviderFailure::EvidenceInvalid,
+            ),
+            ProviderTransportError::AfterAdmission {
+                agr1_digest,
+                failure: PostAdmissionProviderFailure::EvidenceInvalid,
+            } if agr1_digest == grant.grant_digest
+        ));
+        Ok(())
     }
 
     fn selector_record(magic: &str) -> TestResult<Vec<u8>> {

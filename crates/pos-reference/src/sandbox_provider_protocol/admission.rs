@@ -18,7 +18,7 @@ use super::{
     SandboxExecutionMode, SandboxLimit, SandboxProviderError, SandboxProviderManifest,
     SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult,
     SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError,
-    SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
+    SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest, REQUIRED_HOST_FEATURES,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
@@ -246,8 +246,7 @@ impl HostCapabilityProfile {
     fn validate(&self, unsigned: &[Value; 9]) -> Result<(), SandboxProviderProtocolError> {
         if self.kernel_release.is_empty()
             || self.kernel_release.len() > 128
-            || self.feature_proofs.is_empty()
-            || self.feature_proofs.len() > 256
+            || self.feature_proofs.len() != REQUIRED_HOST_FEATURES.len()
             || !valid_key_id(&self.runtime_attestation_key_id)
             || [
                 self.requested_configuration_evidence,
@@ -268,6 +267,15 @@ impl HostCapabilityProfile {
                 .map(feature_proof_value)
                 .collect::<Vec<_>>(),
         )?;
+        let mut feature_ids = self
+            .feature_proofs
+            .iter()
+            .map(|proof| proof.feature_id.as_str())
+            .collect::<Vec<_>>();
+        feature_ids.sort_unstable();
+        if !feature_ids.into_iter().eq(REQUIRED_HOST_FEATURES) {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
         require_signature(&self.signature)?;
         verify_digest("HCP1", unsigned, self.profile_digest)
     }
@@ -636,12 +644,11 @@ impl AdmittedSandboxProvider {
         {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        if required_features.iter().any(|required| {
-            !host_profile
-                .feature_proofs
-                .iter()
-                .any(|proof| proof.feature_id == required.as_str() && proof.passed)
-        }) {
+        if host_profile
+            .feature_proofs
+            .iter()
+            .any(|proof| !proof.passed)
+        {
             return Err(SandboxAdmissionError::HostCapabilityMismatch);
         }
         let architecture = syscall_set.architecture;
@@ -1190,7 +1197,11 @@ impl SelectorGrantCommitment {
         super::execution::validate_network_plans(network_plans)?;
         let effective_limits =
             derive_effective_limits(&provider.broker_hard_caps, launch, attempt)?;
-        let effective_limits_digest = effective_limits_digest(
+        let network_plan_digests = network_plans
+            .iter()
+            .map(|plan| plan.plan_digest)
+            .collect::<Vec<_>>();
+        let derived_artifacts = effective_limits_digest(
             &effective_limits,
             provider.broker_hard_caps_digest,
             provider.policy.policy_digest(),
@@ -1198,21 +1209,31 @@ impl SelectorGrantCommitment {
             evaluation.execution_profile_digest,
             attempt.fixture_digest,
             &provider.manifest.runtime_attestation_key_id,
-        )?;
-        let expected_fdl1_digest = expected_fdl1_digest(launch.execution_mode)?;
-        let network_plan_digests = network_plans
-            .iter()
-            .map(|plan| plan.plan_digest)
-            .collect::<Vec<_>>();
-        let (readback_set, expected_readback_set_digest) = readback_set(
-            provider,
-            image,
-            launch,
-            &requirement.required_provider_capability,
-            effective_limits_digest,
-            expected_fdl1_digest,
-            &network_plan_digests,
-        )?;
+        )
+        .and_then(|effective_limits_digest| {
+            expected_fdl1_digest(launch.execution_mode)
+                .map(|expected_fdl1_digest| (effective_limits_digest, expected_fdl1_digest))
+        })
+        .and_then(|(effective_limits_digest, expected_fdl1_digest)| {
+            readback_set(
+                provider,
+                image,
+                launch,
+                &requirement.required_provider_capability,
+                effective_limits_digest,
+                expected_fdl1_digest,
+                &network_plan_digests,
+            )
+            .map(|(readback_set, expected_readback_set_digest)| {
+                (
+                    effective_limits_digest,
+                    readback_set,
+                    expected_readback_set_digest,
+                )
+            })
+        });
+        let (effective_limits_digest, readback_set, expected_readback_set_digest) =
+            derived_artifacts?;
         Ok(Self {
             authority: selector_commitment_authority(provider, image, launch),
             required_provider_capability: requirement.required_provider_capability.clone(),
@@ -1500,14 +1521,10 @@ fn capability_set_digest(
 fn required_feature_set_digest(
     required_features: &[String],
 ) -> Result<[u8; 32], SandboxAdmissionError> {
-    if required_features.is_empty()
-        || required_features.len() > 256
-        || required_features
-            .iter()
-            .any(|feature| !valid_identifier(feature))
-        || !required_features
-            .windows(2)
-            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+    if !required_features
+        .iter()
+        .map(String::as_str)
+        .eq(super::REQUIRED_HOST_FEATURES)
     {
         return Err(SandboxAdmissionError::HostCapabilityMismatch);
     }

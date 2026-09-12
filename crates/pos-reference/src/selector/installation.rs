@@ -217,11 +217,17 @@ impl InstallationManifest {
             policy_digest: nonzero_digest(&fields[6])?,
             execute_socket: provider_socket(&fields[7])?,
             control_socket: provider_socket(&fields[8])?,
-            required_features: ordered_texts(&fields[9])?,
+            required_features: required_host_features(&fields[9])?,
             objects: ordered_objects(&fields[10])?,
             digest,
         };
-        if manifest.execute_socket == manifest.control_socket {
+        if manifest.execute_socket == manifest.control_socket
+            || !manifest
+                .required_features
+                .iter()
+                .map(String::as_str)
+                .eq(crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES)
+        {
             return Err(ProtocolError::InvalidEncoding);
         }
         for (kind, identity) in [
@@ -517,13 +523,20 @@ fn provider_socket(value: &Value) -> Result<String, ProtocolError> {
     Ok(path.to_owned())
 }
 
-fn ordered_texts(value: &Value) -> Result<Vec<String>, ProtocolError> {
+fn required_host_features(value: &Value) -> Result<Vec<String>, ProtocolError> {
     let values = array_values(value)?;
-    require_preferred_order(values)?;
-    values
+    let features = values
         .iter()
         .map(|value| text(value).map(str::to_owned))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if !features
+        .iter()
+        .map(String::as_str)
+        .eq(crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES)
+    {
+        return Err(ProtocolError::InvalidEncoding);
+    }
+    Ok(features)
 }
 
 fn ordered_objects(value: &Value) -> Result<Vec<InstallationObject>, ProtocolError> {
@@ -542,21 +555,6 @@ fn ordered_objects(value: &Value) -> Result<Vec<InstallationObject>, ProtocolErr
         return Err(ProtocolError::NonCanonicalOrder);
     }
     Ok(objects)
-}
-
-fn require_preferred_order(values: &[Value]) -> Result<(), ProtocolError> {
-    let mut previous = None;
-    for value in values {
-        let encoded = encode(value)?;
-        if previous
-            .as_ref()
-            .is_some_and(|previous| previous >= &encoded)
-        {
-            return Err(ProtocolError::NonCanonicalOrder);
-        }
-        previous = Some(encoded);
-    }
-    Ok(())
 }
 
 /// Open one root-owned relative directory chain without following links.
@@ -773,12 +771,18 @@ mod tests {
             digest([3; 32]),
             Value::Text("/run/pigloros/provider-execute.sock".to_owned()),
             Value::Text("/run/pigloros/provider-control.sock".to_owned()),
-            Value::Array(vec![
-                Value::Text("a".to_owned()),
-                Value::Text("b".to_owned()),
-            ]),
+            required_features_value(),
             Value::Array(objects),
         ]
+    }
+
+    fn required_features_value() -> Value {
+        Value::Array(
+            crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
+                .iter()
+                .map(|feature| Value::Text((*feature).to_owned()))
+                .collect(),
+        )
     }
 
     fn encode_manifest(fields: Vec<Value>) -> Result<Vec<u8>, ProtocolError> {
@@ -931,7 +935,9 @@ mod tests {
                 policy_digest,
                 execute_socket: "/run/pigloros/provider-execute.sock".to_owned(),
                 control_socket: "/run/pigloros/provider-control.sock".to_owned(),
-                required_features: Vec::new(),
+                required_features: crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
+                    .map(str::to_owned)
+                    .to_vec(),
                 objects,
                 digest: [1; 32],
             },
@@ -1081,6 +1087,18 @@ mod tests {
     }
 
     fn host_profile(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
+        let proofs = ordered(
+            crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
+                .iter()
+                .map(|feature| {
+                    Value::Array(vec![
+                        Value::Text((*feature).to_owned()),
+                        integer(1),
+                        digest([18; 32]),
+                    ])
+                })
+                .collect(),
+        )?;
         sign_record(
             "HCP1",
             Value::Array(vec![
@@ -1088,11 +1106,7 @@ mod tests {
                 integer(1),
                 integer(0),
                 Value::Text("6.12.0".to_owned()),
-                Value::Array(vec![Value::Array(vec![
-                    Value::Text("cgroup-v2".to_owned()),
-                    integer(1),
-                    digest([18; 32]),
-                ])]),
+                Value::Array(proofs),
                 digest([19; 32]),
                 digest([20; 32]),
                 digest([21; 32]),
@@ -1175,7 +1189,9 @@ mod tests {
         let trust_digest = signed_record_digest(&trust)?;
         let revocation = provider_revocation(&authority, trust_digest)?;
         let revocation_digest = signed_record_digest(&revocation)?;
-        let features = vec!["cgroup-v2".to_owned()];
+        let features = crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
+            .map(str::to_owned)
+            .to_vec();
         let features_digest = feature_digest(&features)?;
         let provider_binary = b"exact provider binary";
         let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
@@ -1260,7 +1276,10 @@ mod tests {
         ))?)?;
         assert_eq!(manifest.offline_root().0, "offline-root");
         assert_eq!(manifest.authority_digests(), [[1; 32], [2; 32], [3; 32]]);
-        assert_eq!(manifest.required_features(), ["a", "b"]);
+        assert_eq!(
+            manifest.required_features(),
+            crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
+        );
         assert_eq!(manifest.objects().len(), 16);
         assert_eq!(
             manifest.provider_sockets(),
@@ -1305,10 +1324,7 @@ mod tests {
             (8, Value::Text(SANDBOX_ADMIN_SOCKET.to_owned())),
             (
                 9,
-                Value::Array(vec![
-                    Value::Text("b".to_owned()),
-                    Value::Text("a".to_owned()),
-                ]),
+                Value::Array(vec![Value::Text("broker-lifecycle".to_owned())]),
             ),
         ] {
             let mut fields = unsigned(valid_objects());
@@ -1347,7 +1363,10 @@ mod tests {
                 Path::new("/run/pigloros/provider-control.sock"),
             )
         );
-        assert_eq!(manifest.required_features(), ["a", "b"]);
+        assert_eq!(
+            manifest.required_features(),
+            crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
+        );
         assert_eq!(manifest.objects().len(), 16);
         assert_ne!(manifest.digest(), [0; 32]);
         let provider_binary_identity = manifest.objects()[11].identity();

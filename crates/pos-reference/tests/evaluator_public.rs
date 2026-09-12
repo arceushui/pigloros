@@ -925,6 +925,82 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
 }
 
 #[test]
+fn sandbox_attempts_translate_authenticated_transport_caps_before_execution() -> TestResult {
+    for corpus in [
+        support::corpus()?,
+        support::corpus_with_profile_mutation(ProfileMutation::SelectedClosureCapExact(3))?,
+    ] {
+        for sandboxed in [false, true] {
+            let request_bytes = request_with(&corpus.request, |request| {
+                if sandboxed {
+                    request.request_id[14..].fill(0);
+                    request.sandbox_requirement = Some(SandboxRequirement {
+                        lps1_digest: [31; 32],
+                        sim1_digest: [32; 32],
+                        required_provider_capability: RequiredProviderCapability {
+                            capability_id: "sandbox.execute".to_owned(),
+                            capability_version: 1,
+                            minimum_strength: 1,
+                        },
+                        apt1_digest: [33; 32],
+                        policy_epoch: 1,
+                    });
+                }
+            })?;
+            let request = EvaluationRequest::from_canonical_cbor(&request_bytes)?;
+            let mut archive = Cursor::new(&corpus.archive);
+            let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+            let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
+            let mut adapter = RecordingAdapter {
+                subject_digest: corpus.subject_digest,
+                output: corpus.expected_output.clone(),
+                attempts: Vec::new(),
+                case_ordinals: Vec::new(),
+            };
+            let result = evaluate(
+                &request_bytes,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity()?,
+                &mut adapter,
+            );
+            if sandboxed {
+                // This recording adapter observes inputs but cannot authenticate SPR1.
+                assert_eq!(result, Err(EvaluatorError::AdapterIdentity));
+            } else {
+                assert!(result.is_ok());
+            }
+            let attempt = adapter.attempts.first().ok_or("no attempt was executed")?;
+            let ceiling = if sandboxed {
+                128 * 1024 * 1024
+            } else {
+                u64::MAX
+            };
+            assert_eq!(
+                attempt.transport_caps.max_attempt_bytes,
+                caps.max_total_bundle_bytes.min(ceiling)
+            );
+            assert_eq!(
+                attempt.transport_caps.max_member_bytes,
+                caps.max_member_bytes.min(ceiling)
+            );
+            #[cfg(unix)]
+            if sandboxed {
+                let mut untranslated = attempt.clone();
+                untranslated.transport_caps.max_attempt_bytes = 128 * 1024 * 1024 + 1;
+                let mut selector = pos_reference::selector::SelectorAdapter::new(request)?;
+                selector.set_case_ordinal(0);
+                assert_eq!(
+                    selector.execute(&untranslated),
+                    Err(AdapterError::ProtocolFailure)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_semantically_invalid_signed_release_admission() -> TestResult {
     let corpus = support::corpus_with_invalid_release_admission()?;
     let mut adapter = PublicAdapter {

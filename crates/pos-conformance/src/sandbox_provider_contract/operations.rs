@@ -261,7 +261,7 @@ pub struct SandboxLocalErrorV1 {
     pub operation: Option<SandboxProviderOperationV1>,
     /// Request identity, absent only when no complete canonical nonzero ID was decoded.
     pub request_id: Option<[u8; 16]>,
-    /// Attempt identity, present exactly after complete SPX1 construction.
+    /// Attempt identity, present after complete SPX1 construction when known.
     pub attempt_id: Option<[u8; 16]>,
     /// Authenticated AGR1 digest, present exactly after admission.
     pub agr1_digest: Option<[u8; 32]>,
@@ -823,70 +823,90 @@ fn decode_local_error(fields: &[Value; 9]) -> Result<SandboxLocalErrorV1, Sandbo
 }
 
 fn validate_local_error_shape(error: &SandboxLocalErrorV1) -> Result<(), SandboxContractErrorV1> {
-    let execute = error.operation == Some(SandboxProviderOperationV1::Execute);
-    let request = error.request_id.is_some_and(|id| id != [0; 16]);
-    let attempt = error.attempt_id.is_some_and(|id| id != [0; 16]);
-    let admission = error.agr1_digest.is_some_and(|digest| digest != [0; 32]);
-    let valid_shape = match error.phase {
-        SandboxLocalErrorPhaseV1::BeforeSpx1 => {
-            !admission
-                && matches!(
-                    error.code,
-                    SandboxLocalErrorCodeV1::PolicyUnavailable
-                        | SandboxLocalErrorCodeV1::InvalidSelectorRequest
-                        | SandboxLocalErrorCodeV1::RequestAuthorityMismatch
-                        | SandboxLocalErrorCodeV1::PayloadLimitExceeded
-                )
-                && if matches!(
-                    error.code,
-                    SandboxLocalErrorCodeV1::RequestAuthorityMismatch
-                        | SandboxLocalErrorCodeV1::PayloadLimitExceeded
-                ) {
-                    execute && request && attempt
-                } else {
-                    (!request && !attempt) || (request && execute)
-                }
-        }
-        SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission => {
-            execute
-                && request
-                && attempt
-                && !admission
-                && matches!(
-                    error.code,
-                    SandboxLocalErrorCodeV1::ProviderUnavailable
-                        | SandboxLocalErrorCodeV1::ProviderIdentityInvalid
-                        | SandboxLocalErrorCodeV1::ControlChannelUnavailable
-                        | SandboxLocalErrorCodeV1::ProviderEvidenceInvalid
-                )
-        }
-        SandboxLocalErrorPhaseV1::AfterAdmission => {
-            execute
-                && request
-                && attempt
-                && admission
-                && matches!(
-                    error.code,
-                    SandboxLocalErrorCodeV1::ControlChannelUnavailable
-                        | SandboxLocalErrorCodeV1::ProviderTerminalUnavailable
-                        | SandboxLocalErrorCodeV1::ProviderEvidenceInvalid
-                )
-        }
-    };
-    if error.request_id == Some([0; 16])
-        || error.attempt_id == Some([0; 16])
-        || error.agr1_digest == Some([0; 32])
-        || !valid_shape
-        || error.safe_detail.as_ref().is_some_and(|detail| {
-            detail.is_empty()
-                || detail.len() > MAX_SANDBOX_SAFE_DETAIL_BYTES_V1
-                || detail.contains('\0')
-        })
+    if !local_error_identifiers_are_nonzero(error)
+        || !local_error_phase_shape_is_valid(error)
+        || !local_error_detail_is_valid(error)
     {
-        Err(SandboxContractErrorV1::FieldOutOfBounds)
-    } else {
-        Ok(())
+        return Err(SandboxContractErrorV1::FieldOutOfBounds);
     }
+    Ok(())
+}
+
+fn local_error_identifiers_are_nonzero(error: &SandboxLocalErrorV1) -> bool {
+    error.request_id != Some([0; 16])
+        && error.attempt_id != Some([0; 16])
+        && error.agr1_digest != Some([0; 32])
+}
+
+fn local_error_detail_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    !error.safe_detail.as_ref().is_some_and(|detail| {
+        detail.is_empty()
+            || detail.len() > MAX_SANDBOX_SAFE_DETAIL_BYTES_V1
+            || detail.contains('\0')
+    })
+}
+
+fn local_error_phase_shape_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    match error.phase {
+        SandboxLocalErrorPhaseV1::BeforeSpx1 => local_error_before_spx1_is_valid(error),
+        SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission => {
+            local_error_before_admission_is_valid(error)
+        }
+        SandboxLocalErrorPhaseV1::AfterAdmission => local_error_after_admission_is_valid(error),
+    }
+}
+
+fn local_error_before_spx1_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    let execute = error.operation == Some(SandboxProviderOperationV1::Execute);
+    let request = error.request_id.is_some();
+    let attempt = error.attempt_id.is_some();
+    let admission = error.agr1_digest.is_some();
+    !admission
+        && (error.operation.is_none() || execute)
+        && matches!(
+            error.code,
+            SandboxLocalErrorCodeV1::PolicyUnavailable
+                | SandboxLocalErrorCodeV1::InvalidSelectorRequest
+                | SandboxLocalErrorCodeV1::RequestAuthorityMismatch
+                | SandboxLocalErrorCodeV1::PayloadLimitExceeded
+        )
+        && if matches!(
+            error.code,
+            SandboxLocalErrorCodeV1::RequestAuthorityMismatch
+        ) {
+            execute && request && attempt
+        } else if error.code == SandboxLocalErrorCodeV1::PayloadLimitExceeded {
+            (!request && !attempt) || (execute && request && attempt)
+        } else {
+            (!request && !attempt) || (request && execute)
+        }
+}
+
+fn local_error_before_admission_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    error.operation == Some(SandboxProviderOperationV1::Execute)
+        && error.request_id.is_some()
+        && error.attempt_id.is_some()
+        && error.agr1_digest.is_none()
+        && matches!(
+            error.code,
+            SandboxLocalErrorCodeV1::ProviderUnavailable
+                | SandboxLocalErrorCodeV1::ProviderIdentityInvalid
+                | SandboxLocalErrorCodeV1::ControlChannelUnavailable
+                | SandboxLocalErrorCodeV1::ProviderEvidenceInvalid
+        )
+}
+
+fn local_error_after_admission_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    error.operation == Some(SandboxProviderOperationV1::Execute)
+        && error.request_id.is_some()
+        && error.attempt_id.is_some()
+        && error.agr1_digest.is_some()
+        && matches!(
+            error.code,
+            SandboxLocalErrorCodeV1::ControlChannelUnavailable
+                | SandboxLocalErrorCodeV1::ProviderTerminalUnavailable
+                | SandboxLocalErrorCodeV1::ProviderEvidenceInvalid
+        )
 }
 
 fn decode_optional_operation(
