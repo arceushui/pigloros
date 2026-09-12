@@ -7,7 +7,7 @@ use pos_core::erasure::target_closure_digest;
 use pos_core::{
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureAttemptQuotaReservationV1,
+    ErasureAdministrativeResolutionV1,
     ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1, ErasureForkAdmissionInputV1,
     ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationVerifierV1,
     ErasureLifecycleV1, ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1,
@@ -17,8 +17,7 @@ use pos_core::{
 };
 use pos_runtime::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
-    ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
-    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
+    ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
     ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, HostConfiguredErasureCoordinatorAuthorityV1,
 };
@@ -27,65 +26,11 @@ use pos_runtime::{
 #[expect(dead_code, unreachable_pub)]
 mod erasure_support;
 
+#[path = "support/configured_authority.rs"]
+pub mod configured_authority_support;
+
+use configured_authority_support::{TestEvidenceVerifier, TestExecution};
 use erasure_support::{persistence_request, persistence_target, reference, retry_admission};
-
-#[derive(Debug)]
-struct TestEvidenceVerifier;
-
-impl ErasureAuthorityEvidenceVerifierV1 for TestEvidenceVerifier {
-    fn verify(
-        &self,
-        _kind: ErasureAuthorityEvidenceKindV1,
-        _request: &pos_core::ErasureRequestV1,
-        context: &[u8],
-        evidence: &[u8],
-    ) -> Result<(), pos_core::ErasureErrorV1> {
-        if !context.is_empty() && evidence == b"host-proof" {
-            Ok(())
-        } else {
-            Err(pos_core::ErasureErrorV1::Unauthorized)
-        }
-    }
-}
-
-#[derive(Debug)]
-struct TestExecution;
-
-impl ErasureAuthorityExecutionV1 for TestExecution {
-    fn dispatch_destruction(
-        &self,
-        _request: ErasureReferenceV1,
-        commands: &[ErasureDestructionCommandV1],
-    ) -> Result<(), pos_core::ErasureErrorV1> {
-        (!commands.is_empty())
-            .then_some(())
-            .ok_or(pos_core::ErasureErrorV1::ScopeInvalid)
-    }
-
-    fn reserve_attempt(
-        &self,
-        admission: &ErasureRetryAdmissionV1,
-    ) -> Result<ErasureAttemptQuotaReservationV1, pos_core::ErasureErrorV1> {
-        Ok(ErasureAttemptQuotaReservationV1::new(
-            admission.reference(),
-            reference(99),
-        ))
-    }
-
-    fn admit_acknowledgement(
-        &self,
-        _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
-    ) -> Result<(), pos_core::ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_receipt(
-        &self,
-        _input: &ErasureReceiptInputV1,
-    ) -> Result<(), pos_core::ErasureErrorV1> {
-        Ok(())
-    }
-}
 
 fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn std::error::Error>> {
     authority_with(true)
