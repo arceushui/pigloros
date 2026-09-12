@@ -263,9 +263,15 @@ fn ed25519_evidence_verifier_requires_exact_signed_context(
             &duplicate,
         )
         .is_err());
+    // An all-zero compressed point is accepted by the crypto library; use the
+    // known-invalid encoding covered by pos-crypto's public-key tests.
+    let mut invalid_public_key = [0; 32];
+    invalid_public_key[31] = 0xff;
     assert!(
-        Ed25519ErasureAuthorityEvidenceVerifierV1::new(pos_core::PublicKey::from_bytes([0; 32]),)
-            .is_err()
+        Ed25519ErasureAuthorityEvidenceVerifierV1::new(pos_core::PublicKey::from_bytes(
+            invalid_public_key
+        ),)
+        .is_err()
     );
     let oversized = vec![0; pos_runtime::MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES + 1];
     assert!(verifier
