@@ -643,7 +643,10 @@ impl AdmittedSandboxProvider {
                     .iter()
                     .any(|proof| proof.feature_id == *required)
             })
-            || host_profile.feature_proofs.iter().any(|proof| !proof.passed)
+            || host_profile
+                .feature_proofs
+                .iter()
+                .any(|proof| !proof.passed)
         {
             return Err(SandboxAdmissionError::HostCapabilityMismatch);
         }

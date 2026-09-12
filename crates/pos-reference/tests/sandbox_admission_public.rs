@@ -2536,11 +2536,19 @@ fn selector_commitment_matches_independent_rbs1_golden_vectors() -> TestResult {
     // RBS1 wrappers: their second item is the externally supplied expected digest.
     let vectors: [(u64, u64, &[u8]); 8] = [
         (0, 0, include_bytes!("vectors/rbs1-v1/x86_64-local.cbor")),
-        (0, 1, include_bytes!("vectors/rbs1-v1/x86_64-air_gapped.cbor")),
+        (
+            0,
+            1,
+            include_bytes!("vectors/rbs1-v1/x86_64-air_gapped.cbor"),
+        ),
         (0, 2, include_bytes!("vectors/rbs1-v1/x86_64-replay.cbor")),
         (0, 3, include_bytes!("vectors/rbs1-v1/x86_64-fork.cbor")),
         (1, 0, include_bytes!("vectors/rbs1-v1/aarch64-local.cbor")),
-        (1, 1, include_bytes!("vectors/rbs1-v1/aarch64-air_gapped.cbor")),
+        (
+            1,
+            1,
+            include_bytes!("vectors/rbs1-v1/aarch64-air_gapped.cbor"),
+        ),
         (1, 2, include_bytes!("vectors/rbs1-v1/aarch64-replay.cbor")),
         (1, 3, include_bytes!("vectors/rbs1-v1/aarch64-fork.cbor")),
     ];
@@ -2551,17 +2559,16 @@ fn selector_commitment_matches_independent_rbs1_golden_vectors() -> TestResult {
             mode,
             commitment_limit_values(),
         )?;
-        let policy = fixture.policy_for_commitment_artifacts(
-            &fixture.broker_hard_caps,
-            &launch_bytes,
-        )?;
+        let policy =
+            fixture.policy_for_commitment_artifacts(&fixture.broker_hard_caps, &launch_bytes)?;
         let admitted = AdmittedSandboxProvider::admit(
             &policy,
             &fixture.trust,
             &fixture.revocation,
             fixture.inputs(),
         )?;
-        let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+        let image =
+            admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
         let launch = admitted.admit_launch_policy(&launch_bytes, &image)?;
         let mut evaluation = fixture.evaluation_request(&launch)?;
         let Some(requirement) = evaluation.sandbox_requirement.as_mut() else {
@@ -2573,7 +2580,11 @@ fn selector_commitment_matches_independent_rbs1_golden_vectors() -> TestResult {
         let mut attempt = selector_attempt();
         attempt.mode = u8::try_from(mode)?;
         let commitment = admitted.derive_selector_grant_commitment(
-            &image, &launch, &evaluation, &attempt, &[],
+            &image,
+            &launch,
+            &evaluation,
+            &attempt,
+            &[],
         )?;
         assert_eq!(commitment.expected_readback_set(), expected);
         assert_eq!(

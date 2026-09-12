@@ -1041,6 +1041,18 @@ mod tests {
     }
 
     fn host_profile(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
+        let proofs = ordered(
+            crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
+                .iter()
+                .map(|feature| {
+                    Value::Array(vec![
+                        Value::Text((*feature).to_owned()),
+                        integer(1),
+                        digest([18; 32]),
+                    ])
+                })
+                .collect(),
+        )?;
         sign_record(
             "HCP1",
             Value::Array(vec![
@@ -1048,11 +1060,7 @@ mod tests {
                 integer(1),
                 integer(0),
                 Value::Text("6.12.0".to_owned()),
-                Value::Array(vec![Value::Array(vec![
-                    Value::Text("cgroup-v2".to_owned()),
-                    integer(1),
-                    digest([18; 32]),
-                ])]),
+                Value::Array(proofs),
                 digest([19; 32]),
                 digest([20; 32]),
                 digest([21; 32]),
@@ -1135,7 +1143,9 @@ mod tests {
         let trust_digest = signed_record_digest(&trust)?;
         let revocation = provider_revocation(&authority, trust_digest)?;
         let revocation_digest = signed_record_digest(&revocation)?;
-        let features = vec!["cgroup-v2".to_owned()];
+        let features = crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
+            .map(str::to_owned)
+            .to_vec();
         let features_digest = feature_digest(&features)?;
         let provider_binary = b"exact provider binary";
         let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
@@ -1266,7 +1276,10 @@ mod tests {
             (4, digest([0; 32])),
             (7, Value::Text(SANDBOX_SELECTOR_SOCKET.to_owned())),
             (8, Value::Text(SANDBOX_ADMIN_SOCKET.to_owned())),
-            (9, Value::Array(vec![Value::Text("broker-lifecycle".to_owned())])),
+            (
+                9,
+                Value::Array(vec![Value::Text("broker-lifecycle".to_owned())]),
+            ),
         ] {
             let mut fields = unsigned(valid_objects());
             fields[field] = value;
