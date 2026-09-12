@@ -161,10 +161,7 @@ fn validate_local_error_shape(
                         | SandboxLocalErrorCode::RequestAuthorityMismatch
                         | SandboxLocalErrorCode::PayloadLimitExceeded
                 )
-                && if matches!(
-                    error.code,
-                    SandboxLocalErrorCode::RequestAuthorityMismatch
-                ) {
+                && if matches!(error.code, SandboxLocalErrorCode::RequestAuthorityMismatch) {
                     execute && request && attempt
                 } else if error.code == SandboxLocalErrorCode::PayloadLimitExceeded {
                     (!request && !attempt) || (execute && request && attempt)

@@ -212,8 +212,7 @@ impl SelectorAdapter {
                 AdapterError::ProtocolFailure
             }
         })?;
-        if trailing_length > MAX_SELECTOR_TRAILING_BYTES
-        {
+        if trailing_length > MAX_SELECTOR_TRAILING_BYTES {
             return Err(if has_admission_evidence {
                 AdapterError::AuthenticatedEvidenceFailure
             } else {
@@ -271,7 +270,9 @@ fn connect_at(
     expected_uid: u32,
     deadline: &AttemptDeadline,
 ) -> Result<UnixStream, SelectorBoundaryError> {
-    connect_at_with(path, expected_uid, |socket_path| deadline.connect(socket_path))
+    connect_at_with(path, expected_uid, |socket_path| {
+        deadline.connect(socket_path)
+    })
 }
 
 fn connect_at_with(
@@ -786,7 +787,9 @@ mod tests {
             },
         };
         assert_eq!(
-            stream.read(&mut [0]).map_err(|error| transport_error(&error)),
+            stream
+                .read(&mut [0])
+                .map_err(|error| transport_error(&error)),
             Err(AdapterError::WatchdogExpired)
         );
         assert_eq!(

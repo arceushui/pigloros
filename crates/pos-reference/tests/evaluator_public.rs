@@ -971,7 +971,11 @@ fn sandbox_attempts_translate_authenticated_transport_caps_before_execution() ->
                 assert!(result.is_ok());
             }
             let attempt = adapter.attempts.first().ok_or("no attempt was executed")?;
-            let ceiling = if sandboxed { 128 * 1024 * 1024 } else { u64::MAX };
+            let ceiling = if sandboxed {
+                128 * 1024 * 1024
+            } else {
+                u64::MAX
+            };
             assert_eq!(
                 attempt.transport_caps.max_attempt_bytes,
                 caps.max_total_bundle_bytes.min(ceiling)

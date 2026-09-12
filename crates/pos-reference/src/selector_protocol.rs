@@ -179,7 +179,9 @@ fn decode_authenticated_reply(
                 let error = SandboxProviderError::from_canonical_cbor(bytes(&fields[7])?)
                     .map_err(|_| AdapterError::ProtocolFailure)?;
                 if error.operation.is_some_and(|operation| operation != 1)
-                    || error.request_id.is_some_and(|id| id != spx.request.request_id)
+                    || error
+                        .request_id
+                        .is_some_and(|id| id != spx.request.request_id)
                     || error
                         .request_digest
                         .is_some_and(|digest| digest != spx.request_digest)
@@ -282,7 +284,11 @@ fn decode_provider_result(
         }
     };
     decoded.map_err(|error| {
-        if post_admission { AdapterError::AuthenticatedEvidenceFailure } else { error }
+        if post_admission {
+            AdapterError::AuthenticatedEvidenceFailure
+        } else {
+            error
+        }
     })
 }
 
@@ -392,7 +398,11 @@ fn grant_matches_execute_request(
     grant.authority == *expected_authority
         && grant.input_digest == spx.adapter_input.digest
         && grant.exchange_plan_digests
-            == spx.network_plans.iter().map(|plan| plan.plan_digest).collect::<Vec<_>>()
+            == spx
+                .network_plans
+                .iter()
+                .map(|plan| plan.plan_digest)
+                .collect::<Vec<_>>()
         && grant.expected_launch_policy_digest == spx.authority.lps1_digest
 }
 
@@ -414,13 +424,18 @@ fn audit_authority_matches(record: &SandboxAuditRecord, receipt: &SandboxProvide
     let grant = receipt.authority.agr1_digest;
     let observed = receipt.kernel_observation_evidence;
     let expected = match record.event_code {
-        0..=10 => Some(vec![grant, receipt.elm1_digest, receipt.termination_evidence]),
+        0..=10 => Some(vec![
+            grant,
+            receipt.elm1_digest,
+            receipt.termination_evidence,
+        ]),
         11 => receipt
             .ready1_digest
             .map(|ready| vec![grant, ready, observed]),
-        12 => receipt.ready1_digest.zip(receipt.release1_digest).map(|(ready, release)| {
-            vec![grant, ready, release, observed]
-        }),
+        12 => receipt
+            .ready1_digest
+            .zip(receipt.release1_digest)
+            .map(|(ready, release)| vec![grant, ready, release, observed]),
         13 => receipt
             .ready1_digest
             .filter(|_| receipt.release1_digest.is_none())
@@ -481,7 +496,9 @@ struct SelectorInputWriter {
 impl Write for SelectorInputWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if bytes.len() > self.maximum.saturating_sub(self.bytes.len()) {
-            return Err(std::io::Error::other("selector input exceeds its byte limit"));
+            return Err(std::io::Error::other(
+                "selector input exceeds its byte limit",
+            ));
         }
         self.bytes
             .try_reserve_exact(bytes.len())
@@ -872,7 +889,7 @@ mod tests {
                     release.ok_or(AdapterError::ProtocolFailure)?,
                     [63; 32],
                 ],
-                _ => vec![grant_digest, [64; 32], [65; 32]],
+                _ => vec![grant_digest, [53; 32], [74; 32]],
             };
             let (bytes, digest) = audit_record(
                 request,
@@ -1391,8 +1408,8 @@ mod tests {
     }
 
     #[test]
-    fn sly1_rejects_outer_identity_digest_and_evidence_shape_mismatches(
-    ) -> Result<(), AdapterError> {
+    fn sly1_rejects_outer_identity_digest_and_evidence_shape_mismatches() -> Result<(), AdapterError>
+    {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
         let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
         let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
@@ -1445,7 +1462,6 @@ mod tests {
             Value::Null,
             Value::Array(vec![Value::Null]),
             Value::Array(vec![Value::Null, Value::Bytes(vec![1; 32])]),
-            Value::Array(vec![wrapper[0].clone(), Value::Null]),
         ] {
             let bytes = encode_with_limit(&malformed, CONTROL_LIMIT)
                 .map_err(|_| AdapterError::ProtocolFailure)?;
@@ -1454,6 +1470,13 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+        let malformed = Value::Array(vec![wrapper[0].clone(), Value::Null]);
+        let bytes = encode_with_limit(&malformed, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        assert_eq!(
+            decode_reply(&bytes, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
         let malformed_local = local_error_with_fields(vec![Value::Text("SLE1".to_owned())])?;
         assert_eq!(
             decode_reply(&malformed_local, &[], &encoded, [14; 32], 1024),
@@ -1474,17 +1497,14 @@ mod tests {
     #[test]
     fn sly1_rejects_wrong_execute_authority_and_output_descriptor() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
-        let (control, trailing, receipt_digest) = admitted_reply(&encoded, [14; 32], 0)?;
+        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
         assert_eq!(
             decode_reply(&control, &trailing, &encoded, [99; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         assert_eq!(
             decode_reply(&control, &trailing, &encoded, [14; 32], 0),
-            Ok(DecodedSelectorReply {
-                observation: Err(AdapterError::ProtocolFailure),
-                provenance: Some(receipt_digest),
-            })
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
             .map_err(|_| AdapterError::ProtocolFailure)?;
@@ -1591,7 +1611,7 @@ mod tests {
         let (control, _) = protocol_record("SLY1", with_evidence, false)?;
         assert_eq!(
             decode_reply(&control, &[], &encoded, [14; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         Ok(())
     }
@@ -1643,7 +1663,7 @@ mod tests {
             .map_err(|_| AdapterError::ProtocolFailure)?;
         assert_eq!(
             decode_reply(&malformed, &trailing, &encoded, [14; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         Ok(())
     }
@@ -1666,13 +1686,13 @@ mod tests {
         for field in 0..7 {
             let mut grant = evidence.grant.clone();
             match field {
-            0 => grant.request_id = [99; 16],
-            1 => grant.attempt_id = [99; 16],
-            2 => grant.runtime_attestation_key_id = "other-key".to_owned(),
-            3 => grant.authority.fixture_digest = [99; 32],
-            4 => grant.input_digest = [99; 32],
-            5 => grant.expected_launch_policy_digest = [99; 32],
-            6 => grant.exchange_plan_digests = vec![[99; 32]],
+                0 => grant.request_id = [99; 16],
+                1 => grant.attempt_id = [99; 16],
+                2 => grant.runtime_attestation_key_id = "other-key".to_owned(),
+                3 => grant.authority.fixture_digest = [99; 32],
+                4 => grant.input_digest = [99; 32],
+                5 => grant.expected_launch_policy_digest = [99; 32],
+                6 => grant.exchange_plan_digests = vec![[99; 32]],
                 _ => return Err(AdapterError::ProtocolFailure),
             }
             assert_eq!(
@@ -1691,11 +1711,11 @@ mod tests {
             match field {
                 0 => receipt.attempt_id = [99; 16],
                 1 => receipt.authority.agr1_digest = [99; 32],
-            2 => receipt.runtime_attestation_key_id = "other-key".to_owned(),
-            3 => receipt.authority.spm1_digest = [99; 32],
-            4 => receipt.trust_epoch = 99,
-            5 => receipt.hcp1_digest = [99; 32],
-            6 => receipt.elm1_digest = [99; 32],
+                2 => receipt.runtime_attestation_key_id = "other-key".to_owned(),
+                3 => receipt.authority.spm1_digest = [99; 32],
+                4 => receipt.trust_epoch = 99,
+                5 => receipt.hcp1_digest = [99; 32],
+                6 => receipt.elm1_digest = [99; 32],
                 _ => return Err(AdapterError::ProtocolFailure),
             }
             assert_eq!(

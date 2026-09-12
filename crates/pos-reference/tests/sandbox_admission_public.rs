@@ -903,7 +903,10 @@ fn complete_provider_and_image_admission_binds_all_authority() -> TestResult {
         admitted.syscall_set().architecture,
         SandboxArchitecture::X86_64
     );
-    assert_eq!(admitted.host_profile().architecture, SandboxArchitecture::X86_64);
+    assert_eq!(
+        admitted.host_profile().architecture,
+        SandboxArchitecture::X86_64
+    );
     assert_eq!(
         admitted.conformance_report().architecture,
         SandboxArchitecture::X86_64
@@ -1822,10 +1825,13 @@ fn provider_admission_rejects_closed_host_feature_proof_variants() -> TestResult
             host_profile: &hcp1,
             ..fixture.inputs()
         };
-        assert!(
-            AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs)
-                .is_err()
-        );
+        assert!(AdmittedSandboxProvider::admit(
+            &policy,
+            &fixture.trust,
+            &fixture.revocation,
+            inputs
+        )
+        .is_err());
     }
     Ok(())
 }
