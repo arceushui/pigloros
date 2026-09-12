@@ -545,6 +545,30 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
             })?,
         )))
     }
+
+    fn obligation_is_configured(
+        &self,
+        binding: &ErasureAuthorityRequestBindingV1,
+        obligation: ErasureReferenceV1,
+    ) -> Result<bool, ErasureErrorV1> {
+        for category in ErasureInventoryCategoryV1::CANONICAL {
+            for target in binding.freeze.targets.iter().copied() {
+                let candidate = ErasureObligationV1::new(ErasureObligationInputV1 {
+                    category,
+                    target,
+                    owner: category_owner(binding.freeze.owners, category),
+                    command_identity: destruction_command_reference(
+                        binding.request.reference(),
+                        target,
+                    ),
+                })?;
+                if candidate.reference() == obligation {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl ErasureFreezeAuthorizationVerifierV1 for HostConfiguredErasureCoordinatorAuthorityV1 {
@@ -774,6 +798,9 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
+        if binding.freeze.lineage_rule != Some(requirement.lineage_rule()) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         (input.child_scope == binding.freeze.child_scope)
             .then_some(())
             .ok_or(ErasureErrorV1::ScopeInvalid)?;
@@ -882,6 +909,11 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
+        for obligation in admission.unresolved_obligations().iter().copied() {
+            if !self.obligation_is_configured(binding, obligation)? {
+                return Err(ErasureErrorV1::ScopeInvalid);
+            }
+        }
         Ok(ErasureAttemptQuotaReservationV1::new(
             admission.reference(),
             binding.lifecycle_provenance,
@@ -906,6 +938,9 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             if !reference_present(reference) {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
+        }
+        if !self.obligation_is_configured(binding, acknowledgement.obligation())? {
+            return Err(ErasureErrorV1::ScopeInvalid);
         }
         let context = lifecycle_context(
             b"acknowledgement",
