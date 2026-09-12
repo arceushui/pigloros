@@ -66,7 +66,15 @@ pub mod selector_transport_test_fixture {
         pub(crate) provider: crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         pub(crate) request: crate::sandbox_provider_protocol::SandboxExecuteRequest,
         pub(crate) commitment: crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        pub(crate) spx1: Vec<u8>,
         pub(crate) agr1: Vec<u8>,
+        pub(crate) sau1: Vec<Vec<u8>>,
+        pub(crate) spr1: Vec<u8>,
+        pub(crate) output_chunk: Vec<u8>,
+        pub(crate) spy1: Vec<u8>,
+        pub(crate) spe1: Vec<u8>,
+        pub(crate) non_output_result:
+            crate::sandbox_provider_protocol::AuthenticatedSandboxProviderResult,
     }
 
     pub(crate) fn authenticated_transport_fixture() -> TestResult<TransportAdmissionFixture> {
@@ -75,17 +83,87 @@ pub mod selector_transport_test_fixture {
         let image =
             provider.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
         let launch = provider.admit_launch_policy(&fixture.lps1, &image)?;
-        let spx1 = execute_request(&fixture, &launch, &["execute"])?;
-        let request =
-            crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(&spx1)?;
+        let execute_request_bytes = execute_request(&fixture, &launch, &["execute"])?;
+        let request = crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
+            &execute_request_bytes,
+        )?;
         let commitment = fixture.selector_grant_commitment(&provider, &image, &launch, &request)?;
         let agr1 = admission_grant(&fixture, &request, &launch, &commitment)?;
-        provider.authenticate_selector_grant(&agr1, &request, &commitment)?;
+        let authenticated_grant =
+            provider.authenticate_selector_grant(&agr1, &request, &commitment)?;
+        let grant = AdmissionGrant::from_canonical_cbor(&agr1)?;
+        let sau1 = audit_chain(&fixture, &grant)?;
+        let audit_digest = wrapped_digest(sau1.last().ok_or("audit chain is empty")?)?;
+        let receipt_bytes = provider_receipt(&fixture, &grant, audit_digest)?;
+        let receipt = SandboxProviderReceipt::from_canonical_cbor(&receipt_bytes)?;
+        let terminal_result_bytes = terminal_result(&fixture, &request, &grant, &receipt)?;
+        let denied_events = vec![0];
+        let denied_audit = audit_chain_for_events(&fixture, &authenticated_grant, &denied_events)?;
+        let denied_receipt = provider.authenticate_receipt(
+            &provider_receipt_for_lifecycle(
+                &fixture,
+                &authenticated_grant,
+                wrapped_digest(denied_audit.last().ok_or("denied audit missing")?)?,
+                None,
+                None,
+            )?,
+            &authenticated_grant,
+        )?;
+        let non_output_result = provider.authenticate_terminal_result(
+            &terminal_result_for_outcome(
+                &fixture,
+                &request,
+                &authenticated_grant,
+                &denied_receipt,
+                4,
+                &denied_events,
+            )?,
+            &request,
+            &authenticated_grant,
+            &denied_receipt,
+        )?;
+        let spe1 = sign_record(
+            "SPE1",
+            Value::Array(vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                integer(1),
+                Value::Bytes(request.request.request_id.to_vec()),
+                Value::Bytes(request.request_digest.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(17),
+                Value::Null,
+                Value::Text("runtime".to_owned()),
+            ]),
+            &fixture.authority.runtime,
+        )?;
+        let output = b"output";
+        let output_chunk = self_digested_record(
+            "SBC1",
+            Value::Array(vec![
+                Value::Text("SBC1".to_owned()),
+                integer(1),
+                bytes(wrapped_digest(&terminal_result_bytes)?),
+                Value::Bytes(request.request.request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(1),
+                integer(0),
+                integer(0),
+                Value::Bytes(output.to_vec()),
+            ]),
+        )?;
         Ok(TransportAdmissionFixture {
             provider,
             request,
             commitment,
+            spx1: execute_request_bytes,
             agr1,
+            sau1,
+            spr1: receipt_bytes,
+            output_chunk,
+            spy1: terminal_result_bytes,
+            spe1,
+            non_output_result,
         })
     }
 }

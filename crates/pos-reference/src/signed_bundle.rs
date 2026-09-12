@@ -544,12 +544,12 @@ fn canonical_argument<R: Read + ?Sized>(
     archive: &mut R,
     additional: u8,
 ) -> Result<u64, BundleError> {
-    let width = match additional {
+    let (width, minimum) = match additional {
         value @ 0..=23 => return Ok(u64::from(value)),
-        24 => 1,
-        25 => 2,
-        26 => 4,
-        27 => 8,
+        24 => (1, 24),
+        25 => (2, 256),
+        26 => (4, 65_536),
+        27 => (8, 4_294_967_296),
         _ => return Err(BundleError::InvalidEncoding),
     };
     let mut encoded = [0_u8; 8];
@@ -557,13 +557,6 @@ fn canonical_argument<R: Read + ?Sized>(
         .read_exact(&mut encoded[8 - width..])
         .map_err(snapshot_unavailable)?;
     let value = u64::from_be_bytes(encoded);
-    let minimum = match width {
-        1 => 24,
-        2 => 256,
-        4 => 65_536,
-        8 => 4_294_967_296,
-        _ => return Err(BundleError::InvalidEncoding),
-    };
     (value >= minimum)
         .then_some(value)
         .ok_or(BundleError::InvalidEncoding)
@@ -1524,5 +1517,132 @@ fn validated_path(path: &str) -> Result<String, BundleError> {
         Err(BundleError::FieldOutOfBounds)
     } else {
         Ok(path.to_owned())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn canonical_archive_reader_covers_each_supported_major_type_and_width() {
+        for bytes in [
+            vec![0x00],
+            vec![0x18, 0x18],
+            vec![0x19, 0x01, 0x00],
+            vec![0x1a, 0x00, 0x01, 0x00, 0x00],
+            vec![0x1b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+            vec![0x41, b'x'],
+            vec![0x61, b'x'],
+            vec![0x81, 0x00],
+            vec![0xf4],
+            vec![0xf5],
+            vec![0xf6],
+        ] {
+            assert_eq!(verify_canonical_archive(&mut Cursor::new(bytes)), Ok(()));
+        }
+    }
+
+    #[test]
+    fn canonical_archive_reader_rejects_depth_bounds_noncanonical_widths_and_trailing_data() {
+        assert_eq!(
+            verify_canonical_item(&mut Cursor::new(vec![0]), 33),
+            Err(BundleError::FieldOutOfBounds)
+        );
+        for bytes in [
+            vec![0xa0],
+            vec![0x9f],
+            vec![0x18, 23],
+            vec![0x19, 0, 255],
+            vec![0x1a, 0, 0, 255, 255],
+            vec![0x1b, 0, 0, 0, 0, 255, 255, 255, 255],
+            vec![0x9a, 0x00, 0x01, 0x00, 0x01],
+        ] {
+            assert!(verify_canonical_archive(&mut Cursor::new(bytes)).is_err());
+        }
+        assert_eq!(
+            verify_canonical_archive(&mut Cursor::new(vec![0, 0])),
+            Err(BundleError::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn authenticated_reader_rejects_empty_and_digest_substituted_archives() {
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(Vec::<u8>::new()), [0; 32]),
+            Err(BundleError::FieldOutOfBounds)
+        );
+        let mut cursor = Cursor::new(vec![0]);
+        assert_eq!(
+            authenticate_reader(&mut cursor, [0; 32]),
+            Err(BundleError::DigestMismatch)
+        );
+        let mut bytes = Cursor::new(vec![1, 2, 3]);
+        assert_eq!(drain_exact(&mut bytes, 3), Ok(()));
+        assert_eq!(
+            drain_exact(&mut bytes, 1),
+            Err(BundleError::SnapshotUnavailable)
+        );
+    }
+
+    #[test]
+    fn verified_member_reader_rejects_cardinality_order_role_and_trailing_bytes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        fn archive(
+            members: Vec<Value>,
+            trailing: bool,
+        ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            let value = Value::Array(vec![
+                Value::Null,
+                Value::Array(members),
+                Value::Bytes(vec![1; 32]),
+                Value::Bytes(vec![2; 64]),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&value, &mut bytes)?;
+            if trailing {
+                bytes.push(0);
+            }
+            Ok(bytes)
+        }
+
+        let member = |path: &str, role: u8| {
+            Value::Array(vec![
+                Value::Text(path.to_owned()),
+                Value::Bytes(vec![1]),
+                Value::Integer(u64::from(role).into()),
+            ])
+        };
+        for bytes in [
+            archive(Vec::new(), false)?,
+            archive(vec![member("a", 20)], false)?,
+            archive(vec![member("b", 1), member("a", 1)], false)?,
+            archive(vec![member("a", 1)], true)?,
+        ] {
+            let length = bytes.len() as u64;
+            assert!(read_verified_members(&mut Cursor::new(bytes), length).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn member_paths_reject_every_ambiguous_or_unsafe_shape() {
+        let oversized = "a".repeat(MAX_PATH_BYTES + 1);
+        for path in [
+            "",
+            oversized.as_str(),
+            "café",
+            "/absolute",
+            "trailing/",
+            "double//segment",
+            "dot/./segment",
+            "parent/../segment",
+        ] {
+            assert_eq!(validated_path(path), Err(BundleError::FieldOutOfBounds));
+        }
+        assert_eq!(validated_path("safe/member"), Ok("safe/member".to_owned()));
     }
 }

@@ -730,7 +730,8 @@ fn hex_name(digest: [u8; 32]) -> String {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+#[doc(hidden)]
+pub mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::Write;
@@ -738,13 +739,18 @@ mod tests {
 
     use ciborium::value::Value;
     use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
 
-    use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
+    use crate::evaluator_protocol::{
+        EvaluationRequest, RequiredProviderCapability, SandboxRequirement, SubjectAdapterKind,
+    };
 
-    use super::authority::AuthenticatedSelectorBootstrap;
+    use super::authority::{AdmittedSelectorProvider, AuthenticatedSelectorBootstrap};
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const ROOT_SELECTOR_CAPABILITY: &str = "read-public-bundle";
 
     fn integer(value: u64) -> Value {
         Value::Integer(value.into())
@@ -955,6 +961,7 @@ mod tests {
         release: SigningKey,
         runtime: SigningKey,
         reviewer: SigningKey,
+        image: SigningKey,
     }
 
     fn provider_authority() -> ProviderAuthority {
@@ -964,6 +971,7 @@ mod tests {
             release: SigningKey::from_bytes(&[3; 32]),
             runtime: SigningKey::from_bytes(&[4; 32]),
             reviewer: SigningKey::from_bytes(&[5; 32]),
+            image: SigningKey::from_bytes(&[6; 32]),
         }
     }
 
@@ -991,6 +999,7 @@ mod tests {
             trust_key("release", 2, &authority.release),
             trust_key("runtime", 3, &authority.runtime),
             trust_key("reviewer", 4, &authority.reviewer),
+            trust_key("image", 5, &authority.image),
         ])?;
         sign_record(
             "TRS1",
@@ -999,7 +1008,11 @@ mod tests {
                 integer(1),
                 integer(2),
                 Value::Array(keys),
-                Value::Array(Vec::new()),
+                Value::Array(vec![Value::Array(vec![
+                    digest([9; 32]),
+                    integer(77),
+                    integer(2),
+                ])]),
                 Value::Text("root".to_owned()),
             ]),
             &authority.root,
@@ -1055,7 +1068,7 @@ mod tests {
                 digest([12; 32]),
                 Value::Text("runtime".to_owned()),
                 Value::Array(vec![Value::Array(vec![
-                    Value::Text("execute".to_owned()),
+                    Value::Text(ROOT_SELECTOR_CAPABILITY.to_owned()),
                     integer(1),
                     integer(1),
                 ])]),
@@ -1127,7 +1140,7 @@ mod tests {
         host_profile_digest: [u8; 32],
     ) -> TestResult<Vec<u8>> {
         let capability = Value::Array(vec![
-            Value::Text("execute".to_owned()),
+            Value::Text(ROOT_SELECTOR_CAPABILITY.to_owned()),
             integer(1),
             integer(1),
         ]);
@@ -1153,15 +1166,21 @@ mod tests {
         )
     }
 
-    fn provider_policy(
-        authority: &ProviderAuthority,
-        trust_digest: [u8; 32],
-        revocation_digest: [u8; 32],
+    struct ProviderPolicySelection {
         provider_manifest: [u8; 32],
         provider_binary: [u8; 32],
         hard_caps: [u8; 32],
         conformance_report: [u8; 32],
         syscall_set: [u8; 32],
+        launch_policy: [u8; 32],
+        image_manifest: [u8; 32],
+    }
+
+    fn provider_policy(
+        authority: &ProviderAuthority,
+        trust_digest: [u8; 32],
+        revocation_digest: [u8; 32],
+        selection: &ProviderPolicySelection,
     ) -> TestResult<Vec<u8>> {
         sign_record(
             "APT1",
@@ -1169,22 +1188,126 @@ mod tests {
                 Value::Text("APT1".to_owned()),
                 integer(1),
                 integer(4),
-                digest(provider_manifest),
-                digest(provider_binary),
-                Value::Array(Vec::new()),
-                Value::Array(Vec::new()),
-                digest(hard_caps),
+                digest(selection.provider_manifest),
+                digest(selection.provider_binary),
+                Value::Array(vec![digest(selection.launch_policy)]),
+                Value::Array(vec![digest(selection.image_manifest)]),
+                digest(selection.hard_caps),
                 digest([17; 32]),
-                digest(conformance_report),
+                digest(selection.conformance_report),
                 digest(trust_digest),
                 digest(revocation_digest),
                 integer(2),
                 integer(3),
-                digest(syscall_set),
+                digest(selection.syscall_set),
                 Value::Text("policy".to_owned()),
             ]),
             &authority.policy,
         )
+    }
+
+    fn image_manifest(
+        authority: &ProviderAuthority,
+        root_image: &[u8],
+        executable: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        const PARTITION_TYPES: [[u8; 16]; 3] = [
+            [
+                0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84,
+                0xb7, 0x09,
+            ],
+            [
+                0x2c, 0x73, 0x57, 0xed, 0xeb, 0xd2, 0x46, 0xd9, 0xae, 0xc1, 0x23, 0xd4, 0x37, 0xec,
+                0x2b, 0xf5,
+            ],
+            [
+                0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08,
+                0xb1, 0x76,
+            ],
+        ];
+        let partitions = PARTITION_TYPES
+            .into_iter()
+            .enumerate()
+            .map(|(index, partition_type)| {
+                let ordinal = u8::try_from(index + 1)?;
+                Ok(Value::Array(vec![
+                    integer(u64::try_from(index)?),
+                    Value::Bytes(partition_type.to_vec()),
+                    Value::Bytes(vec![ordinal; 16]),
+                    integer(u64::try_from(index)?),
+                    integer(1),
+                    digest([ordinal; 32]),
+                ]))
+            })
+            .collect::<TestResult<Vec<_>>>()?;
+        let der = b"pkcs7";
+        sign_record(
+            "SIM1",
+            Value::Array(vec![
+                Value::Text("SIM1".to_owned()),
+                integer(1),
+                Value::Text("image".to_owned()),
+                integer(0),
+                integer(u64::try_from(root_image.len())?),
+                digest(*blake3::hash(root_image).as_bytes()),
+                Value::Array(partitions),
+                digest([22; 32]),
+                integer(4096),
+                integer(4096),
+                integer(1),
+                Value::Bytes(Vec::new()),
+                Value::Array(vec![
+                    integer(u64::try_from(der.len())?),
+                    Value::Bytes(Sha256::digest(der).to_vec()),
+                    Value::Bytes(der.to_vec()),
+                ]),
+                digest([9; 32]),
+                integer(77),
+                Value::Text("/adapter".to_owned()),
+                digest(*blake3::hash(executable).as_bytes()),
+                Value::Array(Vec::new()),
+                integer(2),
+                Value::Text("image".to_owned()),
+            ]),
+            &authority.image,
+        )
+    }
+
+    fn launch_policy(image_manifest: [u8; 32]) -> TestResult<Vec<u8>> {
+        let unsigned = Value::Array(vec![
+            Value::Text("LPS1".to_owned()),
+            integer(1),
+            Value::Text("air-gapped".to_owned()),
+            integer(1),
+            digest(image_manifest),
+            Value::Array(selector_limit_values()),
+            Value::Array(Vec::new()),
+        ]);
+        let encoded = encode(&unsigned)?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.LPS1.v1\0");
+        hasher.update(&encoded);
+        Ok(encode(&Value::Array(vec![
+            unsigned,
+            digest(*hasher.finalize().as_bytes()),
+        ]))?)
+    }
+
+    fn selector_limit_values() -> Vec<Value> {
+        (0..17)
+            .map(|limit_id| {
+                let value = if limit_id == 13 { 256 } else { 2_000 };
+                Value::Array(vec![integer(limit_id), integer(value)])
+            })
+            .collect()
+    }
+
+    fn broker_hard_caps() -> Result<Vec<u8>, ProtocolError> {
+        encode(&Value::Array(vec![
+            Value::Text("BHC1".to_owned()),
+            integer(1),
+            Value::Array(selector_limit_values()),
+        ]))
     }
 
     fn admitted_state() -> TestResult<InstalledSelectorState> {
@@ -1199,15 +1322,7 @@ mod tests {
         let features_digest = feature_digest(&features)?;
         let provider_binary = b"exact provider binary";
         let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
-        let hard_caps = encode(&Value::Array(vec![
-            Value::Text("BHC1".to_owned()),
-            integer(1),
-            Value::Array(
-                (0..17)
-                    .map(|limit_id| Value::Array(vec![integer(limit_id), integer(2_000)]))
-                    .collect(),
-            ),
-        ]))?;
+        let hard_caps = broker_hard_caps()?;
         let hard_caps_digest = *blake3::hash(&hard_caps).as_bytes();
         let manifest = provider_manifest(&authority, provider_binary_digest, features_digest)?;
         let manifest_digest = signed_record_digest(&manifest)?;
@@ -1222,15 +1337,25 @@ mod tests {
             host_digest,
         )?;
         let report_digest = signed_record_digest(&report)?;
+        let root_image = b"root-image";
+        let executable = b"adapter";
+        let image = image_manifest(&authority, root_image, executable)?;
+        let image_digest = signed_record_digest(&image)?;
+        let launch = launch_policy(image_digest)?;
+        let launch_digest = signed_record_digest(&launch)?;
         let policy = provider_policy(
             &authority,
             trust_digest,
             revocation_digest,
-            manifest_digest,
-            provider_binary_digest,
-            hard_caps_digest,
-            report_digest,
-            syscall_digest,
+            &ProviderPolicySelection {
+                provider_manifest: manifest_digest,
+                provider_binary: provider_binary_digest,
+                hard_caps: hard_caps_digest,
+                conformance_report: report_digest,
+                syscall_set: syscall_digest,
+                launch_policy: launch_digest,
+                image_manifest: image_digest,
+            },
         )?;
         let policy_digest = signed_record_digest(&policy)?;
         let artifacts = [
@@ -1242,8 +1367,20 @@ mod tests {
             (5, [17; 32], b"conformance-profile".as_slice()),
             (6, host_digest, host.as_slice()),
             (7, syscall_digest, syscall.as_slice()),
+            (8, launch_digest, launch.as_slice()),
+            (9, image_digest, image.as_slice()),
             (10, hard_caps_digest, hard_caps.as_slice()),
             (11, provider_binary_digest, provider_binary.as_slice()),
+            (
+                12,
+                *blake3::hash(root_image).as_bytes(),
+                root_image.as_slice(),
+            ),
+            (
+                13,
+                *blake3::hash(executable).as_bytes(),
+                executable.as_slice(),
+            ),
         ];
         let mut installed = BTreeMap::new();
         for (kind, identity, bytes) in artifacts {
@@ -1913,6 +2050,58 @@ mod tests {
             .authenticate_bootstrap()
             .map(|bootstrap| (request, bootstrap))
             .map_err(Into::into)
+    }
+
+    pub(crate) fn root_selector_fixture() -> Result<
+        (
+            EvaluationRequest,
+            AdmittedSelectorProvider,
+            ResolvedInstalledCase,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let corpus = crate::selector_test_support::air_gapped_corpus()?;
+        let mut request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut state = admitted_state()?;
+        let object_identity = |kind| {
+            state
+                .manifest
+                .objects()
+                .iter()
+                .find(|object| object.kind().code() == kind)
+                .map(InstallationObject::identity)
+                .ok_or("root selector fixture object missing")
+        };
+        request.sandbox_requirement = Some(SandboxRequirement {
+            lps1_digest: object_identity(8)?,
+            sim1_digest: object_identity(9)?,
+            required_provider_capability: RequiredProviderCapability {
+                capability_id: ROOT_SELECTOR_CAPABILITY.to_owned(),
+                capability_version: 1,
+                minimum_strength: 1,
+            },
+            apt1_digest: state.manifest.policy_digest,
+            policy_epoch: 4,
+        });
+        request.request_id[14..].copy_from_slice(&0_u16.to_be_bytes());
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        retain_case_artifact(
+            &mut state,
+            14,
+            request.fixture_bundle_digest,
+            &corpus.archive,
+        )?;
+        retain_case_artifact(
+            &mut state,
+            15,
+            request.trust_policy_snapshot_digest,
+            &corpus.trust_policy,
+        )?;
+        let admitted = state.authenticate_bootstrap()?.admit_provider()?;
+        let resolved = admitted.bootstrap().resolve_installed_case(&request, 0)?;
+        Ok((request, admitted, resolved))
     }
 
     fn rebound(mut request: EvaluationRequest) -> TestResult<EvaluationRequest> {

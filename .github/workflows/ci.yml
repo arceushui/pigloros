@@ -348,12 +348,10 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: coverage
-      - name: cargo llvm-cov (lines ≥99%, regions ≥99%)
+      - name: cargo llvm-cov (workspace and missing-line report)
         run: >
           cargo llvm-cov --workspace --all-features --locked --summary-only
           --show-missing-lines
-          --fail-under-lines 99
-          --fail-under-regions 99
           -- --include-ignored
       - name: Export LCOV for cargo-crap
         run: cargo llvm-cov report --lcov
@@ -368,11 +366,23 @@ jobs:
       - name: Export coverage details for new-code gate
         run: cargo llvm-cov report --json
           --output-path "${{ runner.temp }}/coverage.json"
+      - name: Upload coverage details for failed-gate diagnosis
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-json-${{ github.sha }}
+          path: ${{ runner.temp }}/coverage.json
+          retention-days: 1
+          if-no-files-found: error
       - name: Enforce new production Rust code coverage (lines ≥99%, regions ≥99%)
         run: >
           covgate check "${{ runner.temp }}/coverage.json"
           --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
           --no-github-summary
+      - name: Enforce workspace coverage (lines ≥99%, regions ≥99%)
+        run: >
+          cargo llvm-cov report --summary-only
+          --fail-under-lines 99
+          --fail-under-regions 99
 
   cargo-crap:
     name: cargo-crap

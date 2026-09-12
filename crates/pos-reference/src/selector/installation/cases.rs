@@ -7,7 +7,7 @@ use super::{
     authority::AuthenticatedSelectorBootstrap, InstallationObjectKind, ResolvedInstalledCase,
     MANIFEST_LIMIT,
 };
-use crate::evaluator::case_attempt;
+use crate::evaluator::{case_attempt, selector_bounded_hard_caps};
 use crate::evaluator_protocol::EvaluationRequest;
 use crate::profile::Profile;
 use crate::selector::SelectorBoundaryError;
@@ -50,13 +50,9 @@ impl AuthenticatedSelectorBootstrap {
             .nth(usize::from(ordinal))
             .filter(|fixture| fixture.modes.contains(&verified.mode))
             .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
-        let attempt = case_attempt(
-            &verified,
-            fixture,
-            verified.mode,
-            profile.evaluator_hard_caps,
-        )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        let hard_caps = selector_bounded_hard_caps(hard_caps, request);
+        let attempt = case_attempt(&verified, fixture, verified.mode, hard_caps)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
         Ok(ResolvedInstalledCase {
             attempt,
             fixture_contract_digest: profile.fixture_contract_digest(),

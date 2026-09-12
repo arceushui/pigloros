@@ -48,6 +48,30 @@ pub(crate) struct DecodedSelectorRequest {
     input_digest: [u8; 32],
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn decoded_request_for_execute_test(
+    mut request: EvaluationRequest,
+    mut attempt: CaseAttempt,
+    execute: &SandboxExecuteRequest,
+) -> DecodedSelectorRequest {
+    request.request_digest = execute.authority.evr1_digest;
+    request.profile_digest = execute.authority.cpf1_digest;
+    request.fixture_bundle_digest = execute.authority.cfb1_digest;
+    request.execution_profile_digest = execute.authority.execution_profile_digest;
+    attempt.fixture_digest = execute.authority.fixture_digest;
+    attempt.capability_ids.clone_from(&execute.capability_ids);
+    DecodedSelectorRequest {
+        provider_request_id: execute.request.request_id,
+        attempt_id: execute.attempt_id,
+        slx1_digest: [1; 32],
+        request,
+        attempt,
+        input_length: execute.adapter_input.byte_length,
+        input_digest: execute.adapter_input.digest,
+    }
+}
+
 /// One complete server reply: canonical control followed only by SLY1 output.
 pub(crate) struct EncodedSelectorReply {
     pub(crate) control: Vec<u8>,
@@ -1214,6 +1238,170 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn server_encoder_covers_pre_admission_results_and_rejects_mixed_evidence(
+    ) -> Result<(), AdapterError> {
+        let evaluation_request = canonical_request()?;
+        let request_bytes = evaluation_request
+            .to_canonical_cbor()
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let client_request = encode_request(&evaluation_request, &request_bytes, &attempt(), 0)?;
+        let server_request =
+            decode_request(&client_request.control, &client_request.attempt_stream)?;
+
+        for outcome in [2, 3] {
+            let control =
+                unavailable_reply(&client_request, evaluation_request.request_digest, outcome)?;
+            let document = decode_canonical_with_limit(&control, CONTROL_LIMIT)
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            let wrapper = array_values(&document).map_err(|_| AdapterError::ProtocolFailure)?;
+            let fields = array_values(&wrapper[0]).map_err(|_| AdapterError::ProtocolFailure)?;
+            let reply = AuthenticatedSelectorReply {
+                execute_request: bytes(&fields[5])?,
+                terminal: SelectorProviderTerminal::Result {
+                    result: bytes(&fields[7])?,
+                    grant: None,
+                    receipt: None,
+                    audit_records: &[],
+                    output: None,
+                },
+            };
+            assert!(encode_authenticated_reply(&server_request, reply).is_ok());
+
+            let mixed = AuthenticatedSelectorReply {
+                execute_request: bytes(&fields[5])?,
+                terminal: SelectorProviderTerminal::Result {
+                    result: bytes(&fields[7])?,
+                    grant: Some(b"unexpected"),
+                    receipt: None,
+                    audit_records: &[],
+                    output: None,
+                },
+            };
+            assert_eq!(
+                encode_authenticated_reply(&server_request, mixed).map(|_| ()),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn server_encoder_covers_admitted_non_output_results() -> Result<(), AdapterError> {
+        let evaluation_request = canonical_request()?;
+        let request_bytes = evaluation_request
+            .to_canonical_cbor()
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let client_request = encode_request(&evaluation_request, &request_bytes, &attempt(), 0)?;
+        let server_request =
+            decode_request(&client_request.control, &client_request.attempt_stream)?;
+        for outcome in [1, 4] {
+            let (control, trailing, _) =
+                admitted_reply(&client_request, evaluation_request.request_digest, outcome)?;
+            let evidence = admitted_evidence(&control)?;
+            let audit_records = array_values(&evidence.fields[10])
+                .map_err(|_| AdapterError::ProtocolFailure)?
+                .iter()
+                .map(|record| bytes(record).map(ToOwned::to_owned))
+                .collect::<Result<Vec<_>, _>>()?;
+            let encoded = encode_authenticated_reply(
+                &server_request,
+                AuthenticatedSelectorReply {
+                    execute_request: bytes(&evidence.fields[5])?,
+                    terminal: SelectorProviderTerminal::Result {
+                        result: bytes(&evidence.fields[7])?,
+                        grant: Some(required_bytes(&evidence.fields[8])?),
+                        receipt: Some(required_bytes(&evidence.fields[9])?),
+                        audit_records: &audit_records,
+                        output: None,
+                    },
+                },
+            )?;
+            assert!(encoded.trailing.is_empty());
+            assert!(trailing.is_empty());
+            assert_eq!(
+                encode_authenticated_reply(
+                    &server_request,
+                    AuthenticatedSelectorReply {
+                        execute_request: bytes(&evidence.fields[5])?,
+                        terminal: SelectorProviderTerminal::Result {
+                            result: bytes(&evidence.fields[7])?,
+                            grant: Some(required_bytes(&evidence.fields[8])?),
+                            receipt: Some(required_bytes(&evidence.fields[9])?),
+                            audit_records: &audit_records,
+                            output: Some(b"unexpected"),
+                        },
+                    },
+                )
+                .map(|_| ()),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+
+        let (completed, _, _) =
+            admitted_reply(&client_request, evaluation_request.request_digest, 0)?;
+        let completed = admitted_evidence(&completed)?;
+        let completed_audit = array_values(&completed.fields[10])
+            .map_err(|_| AdapterError::ProtocolFailure)?
+            .iter()
+            .map(|record| bytes(record).map(ToOwned::to_owned))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            encode_authenticated_reply(
+                &server_request,
+                AuthenticatedSelectorReply {
+                    execute_request: bytes(&completed.fields[5])?,
+                    terminal: SelectorProviderTerminal::Result {
+                        result: bytes(&completed.fields[7])?,
+                        grant: Some(required_bytes(&completed.fields[8])?),
+                        receipt: Some(required_bytes(&completed.fields[9])?),
+                        audit_records: &completed_audit,
+                        output: Some(b"wrong output"),
+                    },
+                },
+            )
+            .map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_encoder_covers_signed_provider_error() -> Result<(), AdapterError> {
+        let evaluation_request = canonical_request()?;
+        let request_bytes = evaluation_request
+            .to_canonical_cbor()
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let client_request = encode_request(&evaluation_request, &request_bytes, &attempt(), 0)?;
+        let server_request =
+            decode_request(&client_request.control, &client_request.attempt_stream)?;
+        let (error, _) = protocol_record(
+            "SPE1",
+            vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                integer(0),
+                Value::Null,
+                Value::Text("runtime-key".to_owned()),
+            ],
+            true,
+        )?;
+        let execute = execute_request(&client_request, evaluation_request.request_digest)?;
+        let encoded = encode_authenticated_reply(
+            &server_request,
+            AuthenticatedSelectorReply {
+                execute_request: &execute,
+                terminal: SelectorProviderTerminal::Error { error: &error },
+            },
+        )?;
+        assert!(encoded.trailing.is_empty());
         Ok(())
     }
 

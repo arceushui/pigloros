@@ -84,6 +84,27 @@ struct RetainedGrant {
 }
 
 impl AuthenticatedProviderExecution {
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn from_test_frames(
+        grant_frame: Vec<u8>,
+        receipt_frame: Vec<u8>,
+        result_frame: Vec<u8>,
+        audit_frames: Vec<Vec<u8>>,
+        output: Option<(tempfile::NamedTempFile, PayloadDescriptor)>,
+    ) -> Self {
+        Self {
+            frames: AuthenticatedProviderFrames::new(
+                grant_frame,
+                receipt_frame,
+                result_frame,
+                audit_frames,
+            ),
+            agr1_digest: [7; 32],
+            output: output.map(|(file, descriptor)| StagedProviderOutput::new(file, descriptor)),
+        }
+    }
+
     /// Returns the digest of the authenticated AGR1 frame retained by root.
     #[must_use]
     pub(crate) const fn agr1_digest(&self) -> [u8; 32] {
@@ -206,6 +227,7 @@ struct SelectedProviderEndpoint {
     path: PathBuf,
     device: u64,
     inode: u64,
+    owner: u32,
 }
 
 impl SelectedProviderEndpoint {
@@ -218,16 +240,17 @@ impl SelectedProviderEndpoint {
         if !root_owned_ancestors(execute) {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        let metadata = endpoint_metadata(execute, None)?;
+        let metadata = endpoint_metadata(execute, None, ROOT_UID)?;
         Ok(Self {
             path: execute.to_path_buf(),
             device: metadata.dev(),
             inode: metadata.ino(),
+            owner: ROOT_UID,
         })
     }
 
     fn connect(&self, timeout: Duration) -> Result<UnixStream, SelectorBoundaryError> {
-        let before = endpoint_metadata(&self.path, Some((self.device, self.inode)))?;
+        let before = endpoint_metadata(&self.path, Some((self.device, self.inode)), self.owner)?;
         let address =
             SocketAddrUnix::new(&self.path).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
         let descriptor = socket_with(
@@ -250,13 +273,13 @@ impl SelectedProviderEndpoint {
         stream
             .set_nonblocking(false)
             .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-        let after = endpoint_metadata(&self.path, Some((self.device, self.inode)))?;
+        let after = endpoint_metadata(&self.path, Some((self.device, self.inode)), self.owner)?;
         if before.dev() != after.dev() || before.ino() != after.ino() {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         let peer =
             socket_peercred(stream.as_fd()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        if peer.uid.as_raw() != ROOT_UID {
+        if peer.uid.as_raw() != self.owner {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         Ok(stream)
@@ -273,6 +296,20 @@ impl ProviderTransport {
         admitted: &AdmittedSelectorProvider,
     ) -> Result<Self, SelectorBoundaryError> {
         SelectedProviderEndpoint::from_admitted(admitted).map(|endpoint| Self { endpoint })
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn from_path_for_test(path: &Path) -> Result<Self, SelectorBoundaryError> {
+        let metadata = std::fs::symlink_metadata(path).map_err(|_| SelectorBoundaryError::Io)?;
+        Ok(Self {
+            endpoint: SelectedProviderEndpoint {
+                path: path.to_path_buf(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                owner: metadata.uid(),
+            },
+        })
     }
 
     /// Execute exact constructed SPX1/input bytes and authenticate the full reply.
@@ -298,37 +335,43 @@ impl ProviderTransport {
         let deadline =
             Deadline::new(watchdog).map_err(|_| ProviderTransportError::BeforeAdmission)?;
         let mut retained_grant = None;
-        for recovery_attempt in 0..=1 {
-            let result = self.execute_once(
-                admitted,
-                commitment,
-                &request,
-                spx1,
-                input,
-                &deadline,
-                &mut retained_grant,
-            );
-            match result {
-                Ok(execution) => return Ok(execution),
-                Err(ReceiveFailure::Invalid) => {
-                    return Err(classify_receive_failure(
-                        retained_grant.as_ref(),
-                        PostAdmissionProviderFailure::EvidenceInvalid,
-                    ));
-                }
-                Err(ReceiveFailure::Incomplete) if recovery_attempt == 0 => {}
-                Err(ReceiveFailure::Incomplete) => {
-                    return Err(classify_receive_failure(
-                        retained_grant.as_ref(),
-                        PostAdmissionProviderFailure::TerminalUnavailable,
-                    ));
-                }
+        match self.execute_once(
+            admitted,
+            commitment,
+            &request,
+            spx1,
+            input,
+            &deadline,
+            &mut retained_grant,
+        ) {
+            Ok(execution) => return Ok(execution),
+            Err(ReceiveFailure::Invalid) => {
+                return Err(classify_receive_failure(
+                    retained_grant.as_ref(),
+                    PostAdmissionProviderFailure::EvidenceInvalid,
+                ));
             }
+            Err(ReceiveFailure::Incomplete) => {}
         }
-        Err(classify_receive_failure(
-            retained_grant.as_ref(),
-            PostAdmissionProviderFailure::TerminalUnavailable,
-        ))
+        match self.execute_once(
+            admitted,
+            commitment,
+            &request,
+            spx1,
+            input,
+            &deadline,
+            &mut retained_grant,
+        ) {
+            Ok(execution) => Ok(execution),
+            Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
+                retained_grant.as_ref(),
+                PostAdmissionProviderFailure::EvidenceInvalid,
+            )),
+            Err(ReceiveFailure::Incomplete) => Err(classify_receive_failure(
+                retained_grant.as_ref(),
+                PostAdmissionProviderFailure::TerminalUnavailable,
+            )),
+        }
     }
 
     fn execute_once(
@@ -797,13 +840,14 @@ fn payload_digest(direction: PayloadDirection, bytes: &[u8]) -> [u8; 32] {
 fn endpoint_metadata(
     path: &Path,
     expected_identity: Option<(u64, u64)>,
+    expected_owner: u32,
 ) -> Result<Metadata, SelectorBoundaryError> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
     let identity_matches = expected_identity
         .is_none_or(|(device, inode)| metadata.dev() == device && metadata.ino() == inode);
     if !metadata.file_type().is_socket()
-        || metadata.uid() != ROOT_UID
+        || metadata.uid() != expected_owner
         || metadata.mode() & 0o7777 != 0o600
         || !identity_matches
     {
@@ -826,6 +870,8 @@ fn root_owned_ancestors(path: &Path) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -867,6 +913,45 @@ mod tests {
     }
 
     #[test]
+    fn frame_io_closes_empty_oversized_and_truncated_boundaries() -> TestResult {
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut writer, _) = UnixStream::pair()?;
+        assert_eq!(
+            write_frame(&mut writer, &[], &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+        assert_eq!(
+            {
+                let oversized = vec![0; CONTROL_LIMIT + 1];
+                write_frame(&mut writer, &oversized, &deadline)
+            },
+            Err(ReceiveFailure::Invalid)
+        );
+
+        for bytes in [vec![0], vec![0, 0, 0], vec![0, 0, 0, 2, 1]] {
+            let (mut writer, mut reader) = UnixStream::pair()?;
+            writer.write_all(&bytes)?;
+            writer.shutdown(std::net::Shutdown::Write)?;
+            assert_eq!(
+                read_frame(&mut reader, &deadline),
+                Err(ReceiveFailure::Incomplete)
+            );
+        }
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        writer.write_all(&u32::try_from(CONTROL_LIMIT + 1)?.to_be_bytes())?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert_eq!(
+            read_frame(&mut reader, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+
+        let (writer, mut reader) = UnixStream::pair()?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert!(ensure_eof(&mut reader, &deadline).is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn audit_reader_returns_spr1_with_the_preceding_ordered_sau1_frames() -> TestResult {
         let (mut writer, mut reader) = UnixStream::pair()?;
         let deadline = Deadline::new(Duration::from_secs(1))?;
@@ -895,6 +980,52 @@ mod tests {
             read_audit_and_receipt(&mut reader, &deadline),
             Err(ReceiveFailure::Invalid)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_response_readers_reject_eof_and_record_overflow() -> TestResult {
+        let deadline = Deadline::new(Duration::from_secs(2))?;
+        let (writer, mut reader) = UnixStream::pair()?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert_eq!(
+            read_audit_and_receipt(&mut reader, &deadline),
+            Err(ReceiveFailure::Incomplete)
+        );
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        let audit = selector_record("SAU1")?;
+        let audit_writer = std::thread::spawn(move || -> Result<(), String> {
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("audit deadline failed: {error}"))?;
+            for _ in 0..=MAX_AUDIT_RECORDS {
+                write_frame(&mut writer, &audit, &deadline)
+                    .map_err(|error| format!("audit write failed: {error:?}"))?;
+            }
+            writer
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| format!("audit shutdown failed: {error}"))
+        });
+        assert_eq!(
+            read_audit_and_receipt(&mut reader, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+        audit_writer.join().map_err(|_| "audit writer panicked")??;
+
+        let (writer, mut reader) = UnixStream::pair()?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert!(matches!(
+            read_output_frames(&mut reader, &deadline),
+            Err(ReceiveFailure::Incomplete)
+        ));
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        write_frame(&mut writer, &selector_record("SPR1")?, &deadline)
+            .map_err(|error| format!("receipt write failed: {error:?}"))?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert!(matches!(
+            read_output_frames(&mut reader, &deadline),
+            Err(ReceiveFailure::Invalid)
+        ));
         Ok(())
     }
 
@@ -975,9 +1106,26 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_validation_rejects_non_absolute_and_missing_locations() {
+    fn endpoint_validation_closes_path_owner_mode_and_identity() -> TestResult {
         assert!(!root_owned_ancestors(Path::new("provider.sock")));
-        assert!(endpoint_metadata(Path::new("/missing-provider.sock"), None).is_err());
+        assert!(root_owned_ancestors(Path::new("/provider.sock")));
+        assert!(endpoint_metadata(Path::new("/missing-provider.sock"), None, ROOT_UID).is_err());
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        assert!(endpoint_metadata(&path, None, metadata.uid()).is_ok());
+        assert!(endpoint_metadata(&path, None, metadata.uid() ^ 1).is_err());
+        assert!(endpoint_metadata(
+            &path,
+            Some((metadata.dev(), metadata.ino() ^ 1)),
+            metadata.uid()
+        )
+        .is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660))?;
+        assert!(endpoint_metadata(&path, None, metadata.uid()).is_err());
+        Ok(())
     }
 
     #[test]
@@ -1032,6 +1180,22 @@ mod tests {
     }
 
     #[test]
+    fn retained_grant_is_write_once_and_rejects_replay_substitution() -> TestResult {
+        let mut retained = None;
+        retain_authenticated_grant(&mut retained, b"first".to_vec(), [1; 32]);
+        retain_authenticated_grant(&mut retained, b"second".to_vec(), [2; 32]);
+        let retained = retained.ok_or("grant was not retained")?;
+        assert_eq!(retained.bytes, b"first");
+        assert_eq!(retained.digest, [1; 32]);
+        assert!(verify_retained_grant(Some(&retained), b"first").is_ok());
+        assert_eq!(
+            verify_retained_grant(Some(&retained), b"second"),
+            Err(ReceiveFailure::Invalid)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn malformed_evidence_after_authenticated_agr1_is_phase_two() -> TestResult {
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let deadline = Deadline::new(Duration::from_secs(1))?;
@@ -1068,6 +1232,593 @@ mod tests {
                 failure: PostAdmissionProviderFailure::EvidenceInvalid,
             } if agr1_digest == grant.grant_digest
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn response_authentication_rejects_each_malformed_evidence_stage() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let malformed_cases = vec![
+            vec![selector_record("AGR1")?],
+            vec![fixture.agr1.clone(), b"malformed audit".to_vec()],
+            vec![fixture.agr1.clone(), selector_record("SPR1")?],
+            std::iter::once(fixture.agr1.clone())
+                .chain(fixture.sau1.clone())
+                .chain([fixture.spr1.clone(), selector_record("SBC1")?])
+                .collect(),
+            std::iter::once(fixture.agr1.clone())
+                .chain(fixture.sau1.clone())
+                .chain([
+                    fixture.spr1.clone(),
+                    fixture.output_chunk.clone(),
+                    selector_record("SPY1")?,
+                ])
+                .collect(),
+            std::iter::once(fixture.agr1.clone())
+                .chain(fixture.sau1.clone())
+                .chain([
+                    fixture.spr1.clone(),
+                    fixture.output_chunk.clone(),
+                    fixture.spy1.clone(),
+                    selector_record("EXTRA")?,
+                ])
+                .collect(),
+        ];
+        for frames in malformed_cases {
+            let deadline = Deadline::new(Duration::from_secs(2))?;
+            let (mut provider, mut root) = UnixStream::pair()?;
+            for frame in frames {
+                write_frame(&mut provider, &frame, &deadline)
+                    .map_err(|error| format!("evidence write failed: {error:?}"))?;
+            }
+            provider.shutdown(std::net::Shutdown::Write)?;
+            let mut retained_grant = None;
+            assert!(matches!(
+                read_response(
+                    &mut root,
+                    &fixture.provider,
+                    &fixture.commitment,
+                    &fixture.request,
+                    &deadline,
+                    &mut retained_grant,
+                ),
+                Err(ReceiveFailure::Invalid)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_authenticated_response_releases_only_verified_output() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let deadline = Deadline::new(Duration::from_secs(2))?;
+        let (mut provider, mut root) = UnixStream::pair()?;
+        for frame in std::iter::once(&fixture.agr1)
+            .chain(fixture.sau1.iter())
+            .chain([&fixture.spr1, &fixture.output_chunk, &fixture.spy1])
+        {
+            write_frame(&mut provider, frame, &deadline)
+                .map_err(|error| format!("provider frame write failed: {error:?}"))?;
+        }
+        provider.shutdown(std::net::Shutdown::Write)?;
+
+        let mut retained_grant = None;
+        let terminal = read_response(
+            &mut root,
+            &fixture.provider,
+            &fixture.commitment,
+            &fixture.request,
+            &deadline,
+            &mut retained_grant,
+        )
+        .map_err(|error| format!("provider response failed: {error:?}"))?;
+        let AuthenticatedProviderTerminal::Execution(mut execution) = terminal else {
+            return Err("expected authenticated execution".into());
+        };
+        assert_eq!(execution.agr1_bytes(), fixture.agr1);
+        assert_eq!(execution.spr1_bytes(), fixture.spr1);
+        assert_eq!(execution.spy1_bytes(), fixture.spy1);
+        assert_eq!(execution.sau1_frames(), fixture.sau1);
+        let grant =
+            crate::sandbox_provider_protocol::AdmissionGrant::from_canonical_cbor(&fixture.agr1)?;
+        assert_eq!(execution.agr1_digest(), grant.grant_digest);
+        let output = execution
+            .with_verified_output(|descriptor, reader| {
+                let mut bytes = Vec::new();
+                reader
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| SelectorBoundaryError::Io)?;
+                assert_eq!(descriptor.byte_length, bytes.len() as u64);
+                Ok(bytes)
+            })?
+            .ok_or("completed response omitted output")?;
+        assert_eq!(output, b"output");
+        assert!(retained_grant.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn complete_authenticated_error_is_returned_without_admission_evidence() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let deadline = Deadline::new(Duration::from_secs(2))?;
+        let (mut provider, mut root) = UnixStream::pair()?;
+        write_frame(&mut provider, &fixture.spe1, &deadline)
+            .map_err(|error| format!("provider error write failed: {error:?}"))?;
+        provider.shutdown(std::net::Shutdown::Write)?;
+
+        let mut retained_grant = None;
+        let terminal = read_response(
+            &mut root,
+            &fixture.provider,
+            &fixture.commitment,
+            &fixture.request,
+            &deadline,
+            &mut retained_grant,
+        )
+        .map_err(|error| format!("provider error response failed: {error:?}"))?;
+        let AuthenticatedProviderTerminal::Error(error) = terminal else {
+            return Err("expected authenticated provider error".into());
+        };
+        assert_eq!(error, fixture.spe1);
+        assert!(retained_grant.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn non_output_terminal_does_not_release_a_staging_file() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        assert!(stage_output(
+            tempfile::NamedTempFile::new()?,
+            Vec::new(),
+            &fixture.request,
+            &fixture.non_output_result,
+        )
+        .map_err(|failure| format!("non-output staging failed: {failure:?}"))?
+        .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn selected_endpoint_returns_an_authenticated_pre_admission_error() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let expected_spx1 = fixture.spx1.clone();
+        let error = fixture.spe1.clone();
+        let provider = std::thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|failure| format!("provider accept failed: {failure}"))?;
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|failure| format!("provider deadline failed: {failure}"))?;
+            read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
+            write_frame(&mut stream, &error, &deadline)
+                .map_err(|failure| format!("provider error write failed: {failure:?}"))?;
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|failure| format!("provider shutdown failed: {failure}"))
+        });
+
+        let terminal = transport
+            .execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(5),
+            )
+            .map_err(|failure| format!("provider execution failed: {failure:?}"))?;
+        let AuthenticatedProviderTerminal::Error(error) = terminal else {
+            return Err("expected authenticated provider error".into());
+        };
+        assert_eq!(error, fixture.spe1);
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_endpoint_executes_the_complete_authenticated_exchange() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let expected_spx1 = fixture.spx1.clone();
+        let response_frames = std::iter::once(fixture.agr1.clone())
+            .chain(fixture.sau1.clone())
+            .chain([
+                fixture.spr1.clone(),
+                fixture.output_chunk.clone(),
+                fixture.spy1.clone(),
+            ])
+            .collect::<Vec<_>>();
+        let provider = std::thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| format!("provider accept failed: {error}"))?;
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("provider deadline failed: {error}"))?;
+            let spx1 = read_frame(&mut stream, &deadline)
+                .map_err(|error| format!("SPX1 read failed: {error:?}"))?
+                .ok_or("SPX1 frame missing")?;
+            if spx1 != expected_spx1 {
+                return Err("SPX1 bytes changed in transport".to_owned());
+            }
+            let input = read_frame(&mut stream, &deadline)
+                .map_err(|error| format!("input read failed: {error:?}"))?
+                .ok_or("input frame missing")?;
+            let input = SandboxPayloadChunk::from_canonical_cbor(&input)
+                .map_err(|error| format!("input chunk invalid: {error}"))?;
+            if input.bytes != b"input" {
+                return Err("input bytes changed in transport".to_owned());
+            }
+            if read_frame(&mut stream, &deadline)
+                .map_err(|error| format!("input EOF read failed: {error:?}"))?
+                .is_some()
+            {
+                return Err("unexpected extra input frame".to_owned());
+            }
+            for frame in response_frames {
+                write_frame(&mut stream, &frame, &deadline)
+                    .map_err(|error| format!("response write failed: {error:?}"))?;
+            }
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| format!("provider shutdown failed: {error}"))
+        });
+
+        let terminal = transport
+            .execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(5),
+            )
+            .map_err(|error| format!("provider execution failed: {error:?}"))?;
+        let AuthenticatedProviderTerminal::Execution(mut execution) = terminal else {
+            return Err("expected authenticated execution".into());
+        };
+        let output = execution
+            .with_verified_output(|_, reader| {
+                let mut bytes = Vec::new();
+                reader
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| SelectorBoundaryError::Io)?;
+                Ok(bytes)
+            })?
+            .ok_or("authenticated output missing")?;
+        assert_eq!(output, b"output");
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_endpoint_replays_once_after_an_authenticated_interruption() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let expected_spx1 = fixture.spx1.clone();
+        let agr1 = fixture.agr1.clone();
+        let response_frames = fixture
+            .sau1
+            .clone()
+            .into_iter()
+            .chain([
+                fixture.spr1.clone(),
+                fixture.output_chunk.clone(),
+                fixture.spy1.clone(),
+            ])
+            .collect::<Vec<_>>();
+        let provider = std::thread::spawn(move || -> Result<(), String> {
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("provider deadline failed: {error}"))?;
+            let (mut first, _) = listener
+                .accept()
+                .map_err(|error| format!("first provider accept failed: {error}"))?;
+            read_expected_attempt(&mut first, &expected_spx1, &deadline)?;
+            write_frame(&mut first, &agr1, &deadline)
+                .map_err(|error| format!("first AGR1 write failed: {error:?}"))?;
+            drop(first);
+
+            let (mut replay, _) = listener
+                .accept()
+                .map_err(|error| format!("replay provider accept failed: {error}"))?;
+            read_expected_attempt(&mut replay, &expected_spx1, &deadline)?;
+            write_frame(&mut replay, &agr1, &deadline)
+                .map_err(|error| format!("replay AGR1 write failed: {error:?}"))?;
+            for frame in response_frames {
+                write_frame(&mut replay, &frame, &deadline)
+                    .map_err(|error| format!("replay response write failed: {error:?}"))?;
+            }
+            replay
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| format!("provider shutdown failed: {error}"))
+        });
+
+        assert!(matches!(
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(5),
+            ),
+            Ok(AuthenticatedProviderTerminal::Execution(_))
+        ));
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_endpoint_classifies_invalid_pre_admission_evidence() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let expected_spx1 = fixture.spx1.clone();
+        let provider = std::thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| format!("provider accept failed: {error}"))?;
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("provider deadline failed: {error}"))?;
+            read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
+            write_frame(
+                &mut stream,
+                &selector_record("AGR1").map_err(|error| error.to_string())?,
+                &deadline,
+            )
+            .map_err(|error| format!("invalid AGR1 write failed: {error:?}"))?;
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| format!("provider shutdown failed: {error}"))
+        });
+
+        assert!(matches!(
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(5),
+            ),
+            Err(ProviderTransportError::BeforeAdmission)
+        ));
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_endpoint_retains_grant_when_both_terminal_attempts_end() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let expected_spx1 = fixture.spx1.clone();
+        let grant_frame = fixture.agr1.clone();
+        let provider = std::thread::spawn(move || -> Result<(), String> {
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("provider deadline failed: {error}"))?;
+            for _ in 0..2 {
+                let (mut stream, _) = listener
+                    .accept()
+                    .map_err(|error| format!("provider accept failed: {error}"))?;
+                read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
+                write_frame(&mut stream, &grant_frame, &deadline)
+                    .map_err(|error| format!("AGR1 write failed: {error:?}"))?;
+                stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .map_err(|error| format!("provider shutdown failed: {error}"))?;
+            }
+            Ok(())
+        });
+
+        let grant = fixture.provider.authenticate_selector_grant(
+            &fixture.agr1,
+            &fixture.request,
+            &fixture.commitment,
+        )?;
+        assert!(matches!(
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(5),
+            ),
+            Err(ProviderTransportError::AfterAdmission {
+                agr1_digest,
+                failure: PostAdmissionProviderFailure::TerminalUnavailable,
+            }) if agr1_digest == grant.grant_digest
+        ));
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn execute_rejects_invalid_requests_inputs_and_deadlines_before_connecting() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        for result in [
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                b"not SPX1",
+                b"input",
+                Duration::from_secs(1),
+            ),
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                b"substituted input",
+                Duration::from_secs(1),
+            ),
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                b"input",
+                Duration::MAX,
+            ),
+        ] {
+            assert!(matches!(
+                result,
+                Err(ProviderTransportError::BeforeAdmission)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn input_writer_emits_the_exact_parent_bound_chunk() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let (mut root, mut provider) = UnixStream::pair()?;
+        write_input(&mut root, &fixture.request, b"input", &deadline)
+            .map_err(|error| format!("input write failed: {error:?}"))?;
+        root.shutdown(std::net::Shutdown::Write)?;
+
+        let bytes = read_frame(&mut provider, &deadline)
+            .map_err(|error| format!("input read failed: {error:?}"))?
+            .ok_or("input chunk missing")?;
+        let chunk = SandboxPayloadChunk::from_canonical_cbor(&bytes)?;
+        assert_eq!(chunk.parent_digest, fixture.request.request_digest);
+        assert_eq!(chunk.request_id, fixture.request.request.request_id);
+        assert_eq!(chunk.attempt_id, fixture.request.attempt_id);
+        assert_eq!(chunk.direction, PayloadDirection::Input);
+        assert_eq!(chunk.index, 0);
+        assert_eq!(chunk.offset, 0);
+        assert_eq!(chunk.bytes, b"input");
+        assert!(read_frame(&mut provider, &deadline)
+            .map_err(|error| format!("input EOF read failed: {error:?}"))?
+            .is_none());
+        Ok(())
+    }
+
+    fn read_expected_attempt(
+        stream: &mut UnixStream,
+        expected_spx1: &[u8],
+        deadline: &Deadline,
+    ) -> Result<(), String> {
+        let spx1 = read_frame(stream, deadline)
+            .map_err(|error| format!("SPX1 read failed: {error:?}"))?
+            .ok_or("SPX1 frame missing")?;
+        if spx1 != expected_spx1 {
+            return Err("SPX1 bytes changed in transport".to_owned());
+        }
+        let input = read_frame(stream, deadline)
+            .map_err(|error| format!("input read failed: {error:?}"))?
+            .ok_or("input frame missing")?;
+        let input = SandboxPayloadChunk::from_canonical_cbor(&input)
+            .map_err(|error| format!("input chunk invalid: {error}"))?;
+        if input.bytes != b"input" {
+            return Err("input bytes changed in transport".to_owned());
+        }
+        if read_frame(stream, deadline)
+            .map_err(|error| format!("input EOF read failed: {error:?}"))?
+            .is_some()
+        {
+            return Err("unexpected extra input frame".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn response_dispatch_rejects_unadmitted_and_unknown_terminal_frames() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        for first in [selector_record("SPY1")?, selector_record("UNKNOWN")?] {
+            let (mut provider, mut root) = UnixStream::pair()?;
+            write_frame(&mut provider, &first, &deadline)
+                .map_err(|error| format!("terminal write failed: {error:?}"))?;
+            provider.shutdown(std::net::Shutdown::Write)?;
+            let mut retained_grant = None;
+            assert!(matches!(
+                read_response(
+                    &mut root,
+                    &fixture.provider,
+                    &fixture.commitment,
+                    &fixture.request,
+                    &deadline,
+                    &mut retained_grant,
+                ),
+                Err(ReceiveFailure::Invalid)
+            ));
+        }
+        assert_eq!(
+            classify_receive_failure(None, PostAdmissionProviderFailure::EvidenceInvalid),
+            ProviderTransportError::BeforeAdmission
+        );
+
+        let (mut provider, mut root) = UnixStream::pair()?;
+        write_frame(&mut provider, &selector_record("SPE1")?, &deadline)
+            .map_err(|error| format!("error write failed: {error:?}"))?;
+        provider.shutdown(std::net::Shutdown::Write)?;
+        let mut retained_grant = Some(RetainedGrant {
+            bytes: fixture.agr1.clone(),
+            digest: [4; 32],
+        });
+        assert!(matches!(
+            read_response(
+                &mut root,
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.request,
+                &deadline,
+                &mut retained_grant,
+            ),
+            Err(ReceiveFailure::Invalid)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn framing_helpers_reject_closed_shapes_and_expired_deadlines() -> TestResult {
+        for value in [
+            Value::Null,
+            Value::Array(Vec::new()),
+            Value::Array(vec![Value::Null]),
+            Value::Array(vec![Value::Array(Vec::new())]),
+            Value::Array(vec![Value::Array(vec![Value::Null])]),
+        ] {
+            let encoded =
+                encode_value(&value).map_err(|error| format!("encode failed: {error:?}"))?;
+            assert_eq!(record_magic(&encoded), Err(ReceiveFailure::Invalid));
+        }
+        assert_eq!(
+            encode_input_chunk(
+                &crate::selector_transport_test_fixture::authenticated_transport_fixture()?.request,
+                u64::MAX,
+                b"x",
+            ),
+            Err(ReceiveFailure::Invalid)
+        );
+        let expired = Deadline::new(Duration::ZERO)?;
+        assert_eq!(expired.remaining(), Err(ReceiveFailure::Incomplete));
+        let (stream, _) = UnixStream::pair()?;
+        assert_eq!(expired.set_read(&stream), Err(ReceiveFailure::Incomplete));
+        assert_eq!(expired.set_write(&stream), Err(ReceiveFailure::Incomplete));
+        assert_eq!(
+            wait_for_connection(&UnixStream::pair()?.0, Duration::MAX),
+            Err(rustix::io::Errno::INVAL)
+        );
         Ok(())
     }
 

@@ -685,3 +685,36 @@ fn validate_response_identity(
         Err(SandboxProviderProtocolError::InconsistentFields)
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selector_wire_codes_cover_every_operation_and_local_failure() {
+        for (operation, code) in [
+            (SandboxProviderOperation::Describe, 0),
+            (SandboxProviderOperation::Execute, 1),
+            (SandboxProviderOperation::Cancel, 2),
+            (SandboxProviderOperation::Reconcile, 3),
+        ] {
+            assert_eq!(operation.wire_code(), code);
+            assert_eq!(SandboxProviderOperation::decode(code), Ok(operation));
+        }
+        for (error, code) in [
+            (SandboxLocalErrorCode::ProviderUnavailable, 0),
+            (SandboxLocalErrorCode::ProviderIdentityInvalid, 1),
+            (SandboxLocalErrorCode::PolicyUnavailable, 2),
+            (SandboxLocalErrorCode::ControlChannelUnavailable, 3),
+            (SandboxLocalErrorCode::InvalidSelectorRequest, 4),
+            (SandboxLocalErrorCode::RequestAuthorityMismatch, 5),
+            (SandboxLocalErrorCode::PayloadLimitExceeded, 6),
+            (SandboxLocalErrorCode::ProviderTerminalUnavailable, 7),
+            (SandboxLocalErrorCode::ProviderEvidenceInvalid, 8),
+        ] {
+            assert_eq!(error.wire_code(), code);
+            assert_eq!(SandboxLocalErrorCode::decode(code), Ok(error));
+        }
+    }
+}
