@@ -51,6 +51,10 @@ pub enum ErasureAuthorityEvidenceKindV1 {
 /// is installed, so equality of opaque references can never become authority.
 pub trait ErasureAuthorityEvidenceVerifierV1: std::fmt::Debug + Send + Sync {
     /// Verify evidence for one exact request-bound operation and context.
+    ///
+    /// # Errors
+    /// Returns a closed authorization or provenance error when the host
+    /// evidence does not authenticate the supplied context.
     fn verify(
         &self,
         kind: ErasureAuthorityEvidenceKindV1,
@@ -111,6 +115,10 @@ pub struct ErasureAuthorityFreezeProfileV1 {
 
 impl ErasureAuthorityFreezeProfileV1 {
     /// Validate and canonicalize one host-owned freeze profile.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] for an empty, duplicate, or
+    /// zero-valued scope, target, owner, or lineage reference.
     pub fn new(
         mut scope_members: Vec<ErasureReferenceV1>,
         mut targets: Vec<pos_core::ErasureRequiredTargetV1>,
@@ -168,6 +176,10 @@ pub struct ErasureAuthorityRequestBindingV1 {
 
 impl ErasureAuthorityRequestBindingV1 {
     /// Validate one request-bound host configuration.
+    ///
+    /// # Errors
+    /// Returns a closed provenance or scope error when request, topology,
+    /// identity, evidence, or lifecycle material is incomplete or conflicting.
     pub fn new(
         request: ErasureRequestV1,
         mut topology: Vec<ErasureAuthorityTopologyBindingV1>,
@@ -227,6 +239,10 @@ pub struct ErasureAuthorityConfigurationV1 {
 
 impl ErasureAuthorityConfigurationV1 {
     /// Validate and canonicalize host configuration.
+    ///
+    /// # Errors
+    /// Returns a closed provenance or scope error when policy, trust, or
+    /// request bindings are incomplete or conflicting.
     pub fn new(
         policy: ErasureReferenceV1,
         trust: ErasureReferenceV1,
@@ -268,6 +284,10 @@ pub struct HostConfiguredErasureCoordinatorAuthorityV1 {
 
 impl HostConfiguredErasureCoordinatorAuthorityV1 {
     /// Construct an authority from independently authenticated host material.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when no request binding is
+    /// configured. The supplied verifier is invoked for every admission.
     pub fn new(
         configuration: ErasureAuthorityConfigurationV1,
         verifier: Arc<dyn ErasureAuthorityEvidenceVerifierV1>,
@@ -832,7 +852,7 @@ fn has_duplicate<T: PartialEq>(values: &[T]) -> bool {
     values.windows(2).any(|pair| pair[0] == pair[1])
 }
 
-fn category_owner(
+const fn category_owner(
     owners: [ErasureReferenceV1; 4],
     category: ErasureInventoryCategoryV1,
 ) -> ErasureReferenceV1 {
@@ -862,7 +882,7 @@ fn position_reference(position: u64) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest(digest)
 }
 
-fn decision_code(decision: ErasureAuthorizationDecisionV1) -> u8 {
+const fn decision_code(decision: ErasureAuthorizationDecisionV1) -> u8 {
     match decision {
         ErasureAuthorizationDecisionV1::Authorized => 1,
         ErasureAuthorizationDecisionV1::Rejected => 2,
