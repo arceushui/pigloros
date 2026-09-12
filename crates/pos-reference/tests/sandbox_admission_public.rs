@@ -2064,10 +2064,20 @@ fn provider_admission_rejects_malformed_broker_hard_cap_records() -> TestResult 
     out_of_range[0] = Value::Array(vec![integer(257), integer(2_000)]);
     let mut invalid_value = commitment_limit_values();
     invalid_value[0] = Value::Array(vec![integer(0), Value::Null]);
+    let mut invalid_limit_shape = commitment_limit_values();
+    invalid_limit_shape[0] = Value::Null;
+    let mut invalid_limit_identifier = commitment_limit_values();
+    invalid_limit_identifier[0] = Value::Array(vec![Value::Null, integer(2_000)]);
     let malformed_records = vec![
         Vec::new(),
         vec![0; 1_025],
+        vec![0xff],
         encode(&Value::Null)?,
+        encode(&Value::Array(vec![
+            Value::Null,
+            integer(1),
+            Value::Array(commitment_limit_values()),
+        ]))?,
         encode(&Value::Array(vec![
             Value::Text("other".to_owned()),
             integer(1),
@@ -2078,11 +2088,18 @@ fn provider_admission_rejects_malformed_broker_hard_cap_records() -> TestResult 
             integer(2),
             Value::Array(commitment_limit_values()),
         ]))?,
+        encode(&Value::Array(vec![
+            Value::Text("BHC1".to_owned()),
+            Value::Text("one".to_owned()),
+            Value::Array(commitment_limit_values()),
+        ]))?,
         broker_hard_caps_record(Value::Null)?,
         broker_hard_caps_record(Value::Array(vec![]))?,
         broker_hard_caps_with_limits(reordered)?,
         broker_hard_caps_with_limits(out_of_range)?,
         broker_hard_caps_with_limits(invalid_value)?,
+        broker_hard_caps_with_limits(invalid_limit_shape)?,
+        broker_hard_caps_with_limits(invalid_limit_identifier)?,
     ];
 
     for broker_hard_caps in malformed_records {
@@ -2095,7 +2112,7 @@ fn provider_admission_rejects_malformed_broker_hard_cap_records() -> TestResult 
 }
 
 #[test]
-fn selector_commitment_rejects_invalid_authority_limits_and_network_plans() -> TestResult {
+fn selector_commitment_rejects_invalid_evaluation_bindings() -> TestResult {
     let fixture = Fixture::new()?;
     let admitted = fixture.admit()?;
     let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
@@ -2130,6 +2147,18 @@ fn selector_commitment_rejects_invalid_authority_limits_and_network_plans() -> T
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
 
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_rejects_invalid_requirement_authority() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let evaluation = fixture.evaluation_request(&launch)?;
+    let attempt = selector_attempt();
+
     for replacement in [[45; 32], [46; 32], [47; 32]] {
         let mut mismatch = evaluation.clone();
         let Some(requirement) = mismatch.sandbox_requirement.as_mut() else {
@@ -2158,6 +2187,18 @@ fn selector_commitment_rejects_invalid_authority_limits_and_network_plans() -> T
         admitted.derive_selector_grant_commitment(&image, &launch, &epoch_mismatch, &attempt, &[]),
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
+
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_rejects_invalid_attempt_bindings() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let evaluation = fixture.evaluation_request(&launch)?;
+    let attempt = selector_attempt();
 
     let mut mode_mismatch = attempt.clone();
     mode_mismatch.mode = 0;
@@ -2216,6 +2257,18 @@ fn selector_commitment_rejects_invalid_authority_limits_and_network_plans() -> T
         ),
         Err(SandboxAdmissionError::ConformanceMismatch)
     );
+
+    Ok(())
+}
+
+#[test]
+fn selector_commitment_rejects_invalid_network_plans_and_limits() -> TestResult {
+    let fixture = Fixture::new()?;
+    let admitted = fixture.admit()?;
+    let image = admitted.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+    let launch = admitted.admit_launch_policy(&fixture.lps1, &image)?;
+    let evaluation = fixture.evaluation_request(&launch)?;
+    let attempt = selector_attempt();
 
     let valid_plan = network_exchange_plan()?;
     let too_many_plans = vec![valid_plan.clone(); 257];
