@@ -10,7 +10,8 @@ use pos_reference::evaluator::{
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_protocol::{
-    CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
+    CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence,
+    RequiredProviderCapability, SandboxRequirement, SubjectAdapterKind,
 };
 use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
@@ -25,6 +26,12 @@ struct PublicAdapter {
     output: Vec<u8>,
 }
 
+struct ProvenanceAdapter {
+    subject_digest: [u8; 32],
+    output: Vec<u8>,
+    provenance_digest: [u8; 32],
+}
+
 struct KindAdapter {
     kind: SubjectAdapterKind,
     subject_digest: [u8; 32],
@@ -35,6 +42,7 @@ struct RecordingAdapter {
     subject_digest: [u8; 32],
     output: Vec<u8>,
     attempts: Vec<CaseAttempt>,
+    case_ordinals: Vec<u16>,
 }
 
 struct FaultingArchive {
@@ -138,6 +146,7 @@ struct MismatchedOracleAdapter {
 enum AdverseBehavior {
     WrongOutput,
     AdapterUnavailable,
+    AuthenticatedEvidenceFailure,
     ExcessiveUsage,
     SubjectUnavailable,
     WrongResultKind,
@@ -165,6 +174,27 @@ impl SubjectAdapter for PublicAdapter {
     }
 }
 
+impl SubjectAdapter for ProvenanceAdapter {
+    fn kind(&self) -> SubjectAdapterKind {
+        SubjectAdapterKind::ExportedArtifact
+    }
+
+    fn subject_artifact_digest(&self) -> [u8; 32] {
+        self.subject_digest
+    }
+
+    fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        Ok(SubjectObservation {
+            result: SubjectResult::Output(self.output.clone()),
+            usage: ResourceUsage::default(),
+        })
+    }
+
+    fn take_execution_provenance_digest(&mut self) -> Option<[u8; 32]> {
+        Some(self.provenance_digest)
+    }
+}
+
 impl SubjectAdapter for KindAdapter {
     fn kind(&self) -> SubjectAdapterKind {
         self.kind
@@ -189,6 +219,10 @@ impl SubjectAdapter for RecordingAdapter {
 
     fn subject_artifact_digest(&self) -> [u8; 32] {
         self.subject_digest
+    }
+
+    fn set_case_ordinal(&mut self, ordinal: u16) {
+        self.case_ordinals.push(ordinal);
     }
 
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
@@ -272,6 +306,9 @@ impl SubjectAdapter for AdverseAdapter {
     fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
         match self.behavior {
             AdverseBehavior::AdapterUnavailable => Err(AdapterError::Unavailable),
+            AdverseBehavior::AuthenticatedEvidenceFailure => {
+                Err(AdapterError::AuthenticatedEvidenceFailure)
+            }
             AdverseBehavior::WrongOutput => Ok(SubjectObservation {
                 result: SubjectResult::Output(b"wrong".to_vec()),
                 usage: ResourceUsage::default(),
@@ -391,6 +428,97 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
     assert_eq!(
         ConformanceReport::from_canonical_cbor(&first.report_bytes),
         Ok(first.report)
+    );
+    Ok(())
+}
+
+#[test]
+fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = request_with(&corpus.request, |request| {
+        request.request_id[14..].fill(0);
+        request.sandbox_requirement = Some(SandboxRequirement {
+            lps1_digest: [31; 32],
+            sim1_digest: [32; 32],
+            required_provider_capability: RequiredProviderCapability {
+                capability_id: "sandbox.execute".to_owned(),
+                capability_version: 1,
+                minimum_strength: 1,
+            },
+            apt1_digest: [33; 32],
+            policy_epoch: 1,
+        });
+    })?;
+    let receipt_digest = [91; 32];
+    let mut admitted = ProvenanceAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output.clone(),
+        provenance_digest: receipt_digest,
+    };
+    let report = evaluate(
+        &request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity()?,
+        &mut admitted,
+    )?
+    .report;
+    assert!(report
+        .cases
+        .iter()
+        .all(|case| case.provenance_digest == receipt_digest));
+
+    let mut missing = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output.clone(),
+    };
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut missing,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
+    );
+
+    admitted.provenance_digest = [0; 32];
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut admitted,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
+    );
+    let mut unavailable = AdverseAdapter {
+        subject_digest: corpus.subject_digest,
+        behavior: AdverseBehavior::AdapterUnavailable,
+    };
+    assert!(evaluate(
+        &request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity()?,
+        &mut unavailable,
+    )
+    .is_ok());
+    let mut unauthenticated = AdverseAdapter {
+        subject_digest: corpus.subject_digest,
+        behavior: AdverseBehavior::AuthenticatedEvidenceFailure,
+    };
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity()?,
+            &mut unauthenticated,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
     );
     Ok(())
 }
@@ -775,6 +903,7 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
         subject_digest: corpus.subject_digest,
         output: corpus.expected_output,
         attempts: Vec::new(),
+        case_ordinals: Vec::new(),
     };
     let result = evaluate(
         &corpus.request,
@@ -785,12 +914,89 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
     )?;
     assert_eq!(result.report.cases.len(), 7);
     assert_eq!(adapter.attempts.len(), 7);
+    assert_eq!(adapter.case_ordinals, (0..7).collect::<Vec<_>>());
     assert!(adapter.attempts.iter().all(|attempt| {
         attempt.mode == 1
             && !attempt.network_allowed
             && attempt.capability_ids.len() == 1
             && attempt.capability_ids[0] == "read-public-bundle"
     }));
+    Ok(())
+}
+
+#[test]
+fn sandbox_attempts_translate_authenticated_transport_caps_before_execution() -> TestResult {
+    for corpus in [
+        support::corpus()?,
+        support::corpus_with_profile_mutation(ProfileMutation::SelectedClosureCapExact(3))?,
+    ] {
+        for sandboxed in [false, true] {
+            let request_bytes = request_with(&corpus.request, |request| {
+                if sandboxed {
+                    request.request_id[14..].fill(0);
+                    request.sandbox_requirement = Some(SandboxRequirement {
+                        lps1_digest: [31; 32],
+                        sim1_digest: [32; 32],
+                        required_provider_capability: RequiredProviderCapability {
+                            capability_id: "sandbox.execute".to_owned(),
+                            capability_version: 1,
+                            minimum_strength: 1,
+                        },
+                        apt1_digest: [33; 32],
+                        policy_epoch: 1,
+                    });
+                }
+            })?;
+            let request = EvaluationRequest::from_canonical_cbor(&request_bytes)?;
+            let mut archive = Cursor::new(&corpus.archive);
+            let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+            let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
+            let mut adapter = RecordingAdapter {
+                subject_digest: corpus.subject_digest,
+                output: corpus.expected_output.clone(),
+                attempts: Vec::new(),
+                case_ordinals: Vec::new(),
+            };
+            let result = evaluate(
+                &request_bytes,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity()?,
+                &mut adapter,
+            );
+            if sandboxed {
+                // This recording adapter observes inputs but cannot authenticate SPR1.
+                assert_eq!(result, Err(EvaluatorError::AdapterIdentity));
+            } else {
+                assert!(result.is_ok());
+            }
+            let attempt = adapter.attempts.first().ok_or("no attempt was executed")?;
+            let ceiling = if sandboxed {
+                128 * 1024 * 1024
+            } else {
+                u64::MAX
+            };
+            assert_eq!(
+                attempt.transport_caps.max_attempt_bytes,
+                caps.max_total_bundle_bytes.min(ceiling)
+            );
+            assert_eq!(
+                attempt.transport_caps.max_member_bytes,
+                caps.max_member_bytes.min(ceiling)
+            );
+            #[cfg(unix)]
+            if sandboxed {
+                let mut untranslated = attempt.clone();
+                untranslated.transport_caps.max_attempt_bytes = 128 * 1024 * 1024 + 1;
+                let mut selector = pos_reference::selector::SelectorAdapter::new(request)?;
+                selector.set_case_ordinal(0);
+                assert_eq!(
+                    selector.execute(&untranslated),
+                    Err(AdapterError::ProtocolFailure)
+                );
+            }
+        }
+    }
     Ok(())
 }
 

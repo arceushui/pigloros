@@ -1,14 +1,16 @@
 use ciborium::value::Value;
 
 use super::codec::{
-    array, bool_value, bytes_value, decode_document, digest32, id16, key_id, optional_id16,
-    optional_text, require_signature, self_digested, signed, text_value, uint, uint_value,
-    valid_key_id, validate_magic, verify_digest, verify_signature, MAX_SAFE_DETAIL_BYTES,
+    array, bool_value, bytes_value, decode_document, digest32, id16, key_id, optional_digest,
+    optional_id16, optional_text, require_signature, self_digested, signed, text_value, uint,
+    uint_value, valid_key_id, validate_magic, verify_digest, verify_signature,
+    MAX_SAFE_DETAIL_BYTES,
 };
 use super::SandboxProviderProtocolError;
 
 /// Closed Sandbox Provider operation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
 pub enum SandboxProviderOperation {
     Describe,
     Execute,
@@ -17,33 +19,68 @@ pub enum SandboxProviderOperation {
 }
 
 impl SandboxProviderOperation {
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
-        match code {
-            0 => Ok(Self::Describe),
-            1 => Ok(Self::Execute),
-            2 => Ok(Self::Cancel),
-            3 => Ok(Self::Reconcile),
-            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
-        }
+    const ALL: [Self; 4] = [Self::Describe, Self::Execute, Self::Cancel, Self::Reconcile];
+
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
     }
 }
 
 /// Closed unsigned local selector failure code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
 pub enum SandboxLocalErrorCode {
     ProviderUnavailable,
     ProviderIdentityInvalid,
     PolicyUnavailable,
     ControlChannelUnavailable,
+    InvalidSelectorRequest,
+    RequestAuthorityMismatch,
+    PayloadLimitExceeded,
+    ProviderTerminalUnavailable,
+    ProviderEvidenceInvalid,
 }
 
 impl SandboxLocalErrorCode {
+    const ALL: [Self; 9] = [
+        Self::ProviderUnavailable,
+        Self::ProviderIdentityInvalid,
+        Self::PolicyUnavailable,
+        Self::ControlChannelUnavailable,
+        Self::InvalidSelectorRequest,
+        Self::RequestAuthorityMismatch,
+        Self::PayloadLimitExceeded,
+        Self::ProviderTerminalUnavailable,
+        Self::ProviderEvidenceInvalid,
+    ];
+
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+    }
+}
+
+/// Closed point in selector processing at which a local failure occurred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxLocalErrorPhase {
+    BeforeSpx1,
+    AfterSpx1BeforeAdmission,
+    AfterAdmission,
+}
+
+impl SandboxLocalErrorPhase {
     const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
-            0 => Ok(Self::ProviderUnavailable),
-            1 => Ok(Self::ProviderIdentityInvalid),
-            2 => Ok(Self::PolicyUnavailable),
-            3 => Ok(Self::ControlChannelUnavailable),
+            0 => Ok(Self::BeforeSpx1),
+            1 => Ok(Self::AfterSpx1BeforeAdmission),
+            2 => Ok(Self::AfterAdmission),
             _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
         }
     }
@@ -52,8 +89,11 @@ impl SandboxLocalErrorCode {
 /// Independently decoded unsigned SLE1 local selector evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxLocalError {
+    pub phase: SandboxLocalErrorPhase,
     pub operation: Option<SandboxProviderOperation>,
     pub request_id: Option<[u8; 16]>,
+    pub attempt_id: Option<[u8; 16]>,
+    pub agr1_digest: Option<[u8; 32]>,
     pub code: SandboxLocalErrorCode,
     pub safe_detail: Option<String>,
 }
@@ -65,19 +105,99 @@ impl SandboxLocalError {
     /// Returns a closed protocol error for malformed or inconsistent input.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxProviderProtocolError> {
         let value = decode_document(bytes)?;
-        let fields = array::<6>(&value)?;
+        let fields = array::<9>(&value)?;
         validate_magic(fields, "SLE1")?;
-        Ok(Self {
-            operation: if fields[2] == Value::Null {
-                None
-            } else {
-                Some(SandboxProviderOperation::decode(uint(&fields[2])?)?)
-            },
-            request_id: optional_id16(&fields[3])?,
-            code: SandboxLocalErrorCode::decode(uint(&fields[4])?)?,
-            safe_detail: optional_text(&fields[5], MAX_SAFE_DETAIL_BYTES)?,
-        })
+        decode_local_error(fields)
     }
+}
+
+fn decode_local_error(
+    fields: &[Value; 9],
+) -> Result<SandboxLocalError, SandboxProviderProtocolError> {
+    let error = SandboxLocalError {
+        phase: SandboxLocalErrorPhase::decode(uint(&fields[2])?)?,
+        operation: decode_optional_operation(&fields[3])?,
+        request_id: optional_id16(&fields[4])?,
+        attempt_id: optional_id16(&fields[5])?,
+        agr1_digest: optional_digest(&fields[6])?,
+        code: SandboxLocalErrorCode::decode(uint(&fields[7])?)?,
+        safe_detail: optional_text(&fields[8], MAX_SAFE_DETAIL_BYTES)?,
+    };
+    validate_local_error_shape(&error)?;
+    Ok(error)
+}
+
+fn decode_optional_operation(
+    value: &Value,
+) -> Result<Option<SandboxProviderOperation>, SandboxProviderProtocolError> {
+    if value == &Value::Null {
+        Ok(None)
+    } else {
+        SandboxProviderOperation::decode(uint(value)?).map(Some)
+    }
+}
+
+fn validate_local_error_shape(
+    error: &SandboxLocalError,
+) -> Result<(), SandboxProviderProtocolError> {
+    if error.request_id == Some([0; 16])
+        || error.attempt_id == Some([0; 16])
+        || error.agr1_digest == Some([0; 32])
+    {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    let execute = error.operation == Some(SandboxProviderOperation::Execute);
+    let request = error.request_id.is_some_and(|id| id != [0; 16]);
+    let attempt = error.attempt_id.is_some_and(|id| id != [0; 16]);
+    let admission = error.agr1_digest.is_some_and(|digest| digest != [0; 32]);
+    let valid = match error.phase {
+        SandboxLocalErrorPhase::BeforeSpx1 => {
+            !admission
+                && (error.operation.is_none() || execute)
+                && matches!(
+                    error.code,
+                    SandboxLocalErrorCode::PolicyUnavailable
+                        | SandboxLocalErrorCode::InvalidSelectorRequest
+                        | SandboxLocalErrorCode::RequestAuthorityMismatch
+                        | SandboxLocalErrorCode::PayloadLimitExceeded
+                )
+                && if matches!(error.code, SandboxLocalErrorCode::RequestAuthorityMismatch) {
+                    execute && request && attempt
+                } else if error.code == SandboxLocalErrorCode::PayloadLimitExceeded {
+                    (!request && !attempt) || (execute && request && attempt)
+                } else {
+                    (!request && !attempt) || (request && execute)
+                }
+        }
+        SandboxLocalErrorPhase::AfterSpx1BeforeAdmission => {
+            execute
+                && request
+                && attempt
+                && !admission
+                && matches!(
+                    error.code,
+                    SandboxLocalErrorCode::ProviderUnavailable
+                        | SandboxLocalErrorCode::ProviderIdentityInvalid
+                        | SandboxLocalErrorCode::ControlChannelUnavailable
+                        | SandboxLocalErrorCode::ProviderEvidenceInvalid
+                )
+        }
+        SandboxLocalErrorPhase::AfterAdmission => {
+            execute
+                && request
+                && attempt
+                && admission
+                && matches!(
+                    error.code,
+                    SandboxLocalErrorCode::ControlChannelUnavailable
+                        | SandboxLocalErrorCode::ProviderTerminalUnavailable
+                        | SandboxLocalErrorCode::ProviderEvidenceInvalid
+                )
+        }
+    };
+    valid
+        .then_some(())
+        .ok_or(SandboxProviderProtocolError::InconsistentFields)
 }
 
 /// Authority common to every request operation.

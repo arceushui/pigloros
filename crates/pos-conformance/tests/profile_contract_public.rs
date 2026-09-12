@@ -1204,6 +1204,7 @@ fn public_request_validation_rejects_each_closed_invalid_field(
 fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult {
     let caps = profile_for_digest().evaluator_protocol.hard_caps;
     let mut request = request_for_caps(&caps);
+    request.request_id[14..].fill(0);
     let unsandboxed_capability = request.output_capability.capability_digest;
     request.sandbox_requirement = Some(SandboxRequirementV1 {
         lps1_digest: [31; 32],
@@ -1266,6 +1267,7 @@ fn public_request_directly_replaces_evr1_with_sandbox_authority() -> TestResult 
 fn sandbox_authority_fields_change_output_capability_identity() -> TestResult {
     let caps = profile_for_digest().evaluator_protocol.hard_caps;
     let mut request = request_for_caps(&caps);
+    request.request_id[14..].fill(0);
     request.sandbox_requirement = Some(SandboxRequirementV1 {
         lps1_digest: [31; 32],
         sim1_digest: [32; 32],
@@ -1312,6 +1314,7 @@ fn sandbox_authority_fields_change_output_capability_identity() -> TestResult {
 fn public_request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
     let caps = profile_for_digest().evaluator_protocol.hard_caps;
     let mut request = request_for_caps(&caps);
+    request.request_id[14..].fill(0);
     request.sandbox_requirement = Some(SandboxRequirementV1 {
         lps1_digest: [31; 32],
         sim1_digest: [32; 32],
