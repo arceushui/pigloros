@@ -365,7 +365,13 @@ fn evaluate_case(
     fixture: &Fixture,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
-    case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps).and_then(|attempt| {
+    let mut hard_caps = profile.evaluator_hard_caps;
+    if request.sandbox_requirement.is_some() {
+        let ceiling = crate::selector_protocol::SELECTOR_INPUT_LIMIT as u64;
+        hard_caps.max_member_bytes = hard_caps.max_member_bytes.min(ceiling);
+        hard_caps.max_total_bundle_bytes = hard_caps.max_total_bundle_bytes.min(ceiling);
+    }
+    case_attempt(bundle, fixture, bundle.mode, hard_caps).and_then(|attempt| {
         evaluate_attempt(
             request,
             fixture,
@@ -470,6 +476,23 @@ fn case_attempt(
     mode: u8,
     hard_caps: EvaluatorHardCaps,
 ) -> Result<CaseAttempt, EvaluatorError> {
+    let mut total_bytes = 0_u64;
+    for descriptor in std::iter::once(&fixture.schema)
+        .chain(std::iter::once(&fixture.payload))
+        .chain(&fixture.auxiliary)
+    {
+        let length = bundle
+            .member(&descriptor.member_path)
+            .ok_or(EvaluatorError::Bundle)?
+            .bytes
+            .len() as u64;
+        total_bytes = total_bytes
+            .checked_add(length)
+            .ok_or(EvaluatorError::Profile)?;
+        if length > hard_caps.max_member_bytes || total_bytes > hard_caps.max_total_bundle_bytes {
+            return Err(EvaluatorError::Profile);
+        }
+    }
     let member = |descriptor: &crate::profile::ArtifactDescriptor| {
         bundle
             .member(&descriptor.member_path)
