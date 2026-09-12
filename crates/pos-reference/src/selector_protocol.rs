@@ -1896,7 +1896,7 @@ mod tests {
         )?;
         let record = SandboxAuditRecord::from_canonical_cbor(&bytes)
             .map_err(|_| AdapterError::ProtocolFailure)?;
-        let mut receipt = evidence.receipt.clone();
+        let mut receipt = evidence.receipt;
         receipt.release1_digest = None;
         assert!(audit_authority_matches(&record, &receipt));
         receipt.release1_digest = Some([62; 32]);

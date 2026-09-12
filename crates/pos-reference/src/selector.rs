@@ -557,7 +557,9 @@ mod tests {
             temporary.path().display(),
             "./".repeat(128)
         ));
-        assert!(std::fs::symlink_metadata(&overlong)?.file_type().is_socket());
+        assert!(std::fs::symlink_metadata(&overlong)?
+            .file_type()
+            .is_socket());
         let mut adapter = SelectorAdapter::new(selector_request()?)?;
         adapter.set_case_ordinal(0);
         assert_eq!(
