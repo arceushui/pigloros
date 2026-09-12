@@ -144,7 +144,14 @@ fn configured_composition_constructs_from_host_material() -> Result<(), Box<dyn 
         Arc::new(TestEvidenceVerifier),
         Arc::new(TestExecution),
         reference(70),
-    );
+    )?;
+    assert!(ErasureCoordinatorCompositionV1::from_host_configuration(
+        authority.configuration().clone(),
+        Arc::new(TestEvidenceVerifier),
+        Arc::new(TestExecution),
+        ErasureReferenceV1::from_digest([0; 32]),
+    )
+    .is_err());
     Ok(())
 }
 
