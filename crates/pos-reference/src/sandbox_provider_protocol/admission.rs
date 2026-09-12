@@ -17,6 +17,7 @@ use super::{
     SandboxProviderManifest, SandboxProviderProtocolError, SandboxProviderReceipt,
     SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome,
     SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
+    REQUIRED_HOST_FEATURES,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
@@ -205,8 +206,7 @@ impl HostCapabilityProfile {
     fn validate(&self, unsigned: &[Value; 9]) -> Result<(), SandboxProviderProtocolError> {
         if self.kernel_release.is_empty()
             || self.kernel_release.len() > 128
-            || self.feature_proofs.is_empty()
-            || self.feature_proofs.len() > 256
+            || self.feature_proofs.len() != REQUIRED_HOST_FEATURES.len()
             || !valid_key_id(&self.runtime_attestation_key_id)
             || [
                 self.requested_configuration_evidence,
@@ -227,6 +227,15 @@ impl HostCapabilityProfile {
                 .map(feature_proof_value)
                 .collect::<Vec<_>>(),
         )?;
+        let mut feature_ids = self
+            .feature_proofs
+            .iter()
+            .map(|proof| proof.feature_id.as_str())
+            .collect::<Vec<_>>();
+        feature_ids.sort_unstable();
+        if !feature_ids.into_iter().eq(REQUIRED_HOST_FEATURES) {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
         require_signature(&self.signature)?;
         verify_digest("HCP1", unsigned, self.profile_digest)
     }
@@ -587,12 +596,7 @@ impl AdmittedSandboxProvider {
         {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        if required_features.iter().any(|required| {
-            !host_profile
-                .feature_proofs
-                .iter()
-                .any(|proof| proof.feature_id == required.as_str() && proof.passed)
-        }) {
+        if host_profile.feature_proofs.iter().any(|proof| !proof.passed) {
             return Err(SandboxAdmissionError::HostCapabilityMismatch);
         }
         let architecture = syscall_set.architecture;
@@ -992,14 +996,11 @@ fn capability_set_digest(
 fn required_feature_set_digest(
     required_features: &[String],
 ) -> Result<[u8; 32], SandboxAdmissionError> {
-    if required_features.is_empty()
-        || required_features.len() > 256
-        || required_features
-            .iter()
-            .any(|feature| !valid_identifier(feature))
+    if required_features.len() != REQUIRED_HOST_FEATURES.len()
         || !required_features
-            .windows(2)
-            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+            .iter()
+            .map(String::as_str)
+            .eq(REQUIRED_HOST_FEATURES)
     {
         return Err(SandboxAdmissionError::HostCapabilityMismatch);
     }

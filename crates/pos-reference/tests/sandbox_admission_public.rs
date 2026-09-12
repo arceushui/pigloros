@@ -22,6 +22,38 @@ const ROOT_VERITY_X86_64: [u8; 16] = [
 const ROOT_SIGNATURE_X86_64: [u8; 16] = [
     0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08, 0xb1, 0x76,
 ];
+const REQUIRED_FEATURES: [&str; 16] = [
+    "broker-lifecycle",
+    "cgroup-kill",
+    "cgroup-v2-cpu",
+    "cgroup-v2-memory",
+    "cgroup-v2-pids",
+    "ipc-namespace",
+    "limit-observation",
+    "managed-attempt-exec",
+    "mount-namespace",
+    "network-namespace",
+    "nftables-atomic",
+    "pid-namespace",
+    "process-isolation-controls",
+    "signed-root-image",
+    "user-namespace",
+    "uts-namespace",
+];
+
+fn required_features() -> Vec<String> {
+    REQUIRED_FEATURES
+        .iter()
+        .map(|feature| (*feature).to_owned())
+        .collect()
+}
+
+fn feature_proofs(passed: u64) -> Vec<(String, u64)> {
+    required_features()
+        .into_iter()
+        .map(|feature| (feature, passed))
+        .collect()
+}
 
 fn integer(value: u64) -> Value {
     Value::Integer(value.into())
@@ -293,8 +325,7 @@ fn syscall_set(architecture: u64) -> TestResult<Vec<u8>> {
 
 fn host_profile(
     authority: &SigningAuthority,
-    feature_id: &str,
-    passed: u64,
+    feature_proofs: &[(String, u64)],
     architecture: u64,
 ) -> TestResult<Vec<u8>> {
     sign_record(
@@ -304,11 +335,18 @@ fn host_profile(
             integer(1),
             integer(architecture),
             Value::Text("6.12.0".to_owned()),
-            Value::Array(vec![Value::Array(vec![
-                Value::Text(feature_id.to_owned()),
-                integer(passed),
-                bytes([18; 32]),
-            ])]),
+            Value::Array(ordered(
+                feature_proofs
+                    .iter()
+                    .map(|(feature_id, passed)| {
+                        Value::Array(vec![
+                            Value::Text(feature_id.clone()),
+                            integer(*passed),
+                            bytes([18; 32]),
+                        ])
+                    })
+                    .collect(),
+            )?),
             bytes([19; 32]),
             bytes([20; 32]),
             bytes([21; 32]),
@@ -727,14 +765,14 @@ impl Fixture {
         let authority = SigningAuthority::fixed();
         let trust = authority.trust()?;
         let revocation = revocation(&trust, &authority, vec![], vec![])?;
-        let required_features = vec!["cgroup-v2".to_owned()];
+        let required_features = required_features();
         let feature_digest = feature_set_digest(&required_features)?;
         let provider_binary = b"exact provider binary".to_vec();
         let broker_hard_caps = b"broker hard caps".to_vec();
         let binary_digest = *blake3::hash(&provider_binary).as_bytes();
         let provider_record = provider_manifest(&authority, binary_digest, feature_digest)?;
         let scs1 = syscall_set(0)?;
-        let hcp1 = host_profile(&authority, "cgroup-v2", 1, 0)?;
+        let hcp1 = host_profile(&authority, &feature_proofs(1), 0)?;
         let pcr1 = conformance_report(
             &authority,
             binary_digest,
@@ -837,6 +875,23 @@ impl Fixture {
             },
         )
     }
+
+    fn policy_and_report_for_host_profile(
+        &self,
+        hcp1: &[u8],
+    ) -> TestResult<(SandboxAdministratorPolicy, Vec<u8>)> {
+        let pcr1 = conformance_report(
+            &self.authority,
+            *blake3::hash(&self.provider_binary).as_bytes(),
+            feature_set_digest(&self.required_features)?,
+            wrapped_digest(hcp1)?,
+            0,
+        )?;
+        Ok((
+            self.policy_for_provider(&self.revocation, &self.spm1, &pcr1)?,
+            pcr1,
+        ))
+    }
 }
 
 #[test]
@@ -925,7 +980,7 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
         ),
         Err(SandboxAdmissionError::PolicyMismatch)
     );
-    let failed_hcp1 = host_profile(&fixture.authority, "cgroup-v2", 0, 0)?;
+    let failed_hcp1 = host_profile(&fixture.authority, &feature_proofs(0), 0)?;
     let failed_pcr1 = conformance_report(
         &fixture.authority,
         *blake3::hash(&fixture.provider_binary).as_bytes(),
@@ -967,7 +1022,7 @@ fn provider_admission_rejects_unselected_bytes_and_failed_features() -> TestResu
 #[test]
 fn provider_admission_rejects_cross_record_architecture_mismatch() -> TestResult {
     let fixture = Fixture::new()?;
-    let hcp1 = host_profile(&fixture.authority, "cgroup-v2", 1, 1)?;
+    let hcp1 = host_profile(&fixture.authority, &feature_proofs(1), 1)?;
     let pcr1 = conformance_report(
         &fixture.authority,
         *blake3::hash(&fixture.provider_binary).as_bytes(),
@@ -1278,7 +1333,7 @@ fn image_admission_rejects_each_selection_and_authority_substitution() -> TestRe
 fn image_admission_rejects_provider_architecture_substitution() -> TestResult {
     let fixture = Fixture::new()?;
     let syscall_set = syscall_set(1)?;
-    let host_profile = host_profile(&fixture.authority, "cgroup-v2", 1, 1)?;
+    let host_profile = host_profile(&fixture.authority, &feature_proofs(1), 1)?;
     let report = conformance_report(
         &fixture.authority,
         *blake3::hash(&fixture.provider_binary).as_bytes(),
@@ -1724,12 +1779,15 @@ fn admission_entry_points_reject_forged_signatures() -> TestResult {
 #[test]
 fn provider_admission_rejects_invalid_required_feature_sets() -> TestResult {
     let fixture = Fixture::new()?;
-    for required_features in [
-        Vec::new(),
-        vec![String::new()],
-        vec!["cgroup-v2".to_owned(), "cgroup-v2".to_owned()],
-        vec!["z-feature".to_owned(), "a-feature".to_owned()],
-    ] {
+    let mut omitted = fixture.required_features.clone();
+    omitted.pop();
+    let mut extra = fixture.required_features.clone();
+    extra.push("unexpected-feature".to_owned());
+    let mut substituted = fixture.required_features.clone();
+    substituted[15] = "unexpected-feature".to_owned();
+    let mut duplicate = fixture.required_features.clone();
+    duplicate[15] = duplicate[0].clone();
+    for required_features in [omitted, extra, substituted, duplicate] {
         let inputs = SandboxProviderAdmissionInputs {
             required_features: &required_features,
             ..fixture.inputs()
@@ -1742,6 +1800,34 @@ fn provider_admission_rejects_invalid_required_feature_sets() -> TestResult {
                 inputs,
             ),
             Err(SandboxAdmissionError::HostCapabilityMismatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn provider_admission_rejects_closed_host_feature_proof_variants() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut omitted = feature_proofs(1);
+    omitted.pop();
+    let mut extra = feature_proofs(1);
+    extra.push(("unexpected-feature".to_owned(), 1));
+    let mut substituted = feature_proofs(1);
+    substituted[15] = ("unexpected-feature".to_owned(), 1);
+    let mut duplicate = feature_proofs(1);
+    duplicate[15] = duplicate[0].clone();
+
+    for proofs in [omitted, extra, substituted, duplicate] {
+        let hcp1 = host_profile(&fixture.authority, &proofs, 0)?;
+        let (policy, pcr1) = fixture.policy_and_report_for_host_profile(&hcp1)?;
+        let inputs = SandboxProviderAdmissionInputs {
+            conformance_report: &pcr1,
+            host_profile: &hcp1,
+            ..fixture.inputs()
+        };
+        assert!(
+            AdmittedSandboxProvider::admit(&policy, &fixture.trust, &fixture.revocation, inputs)
+                .is_err()
         );
     }
     Ok(())
