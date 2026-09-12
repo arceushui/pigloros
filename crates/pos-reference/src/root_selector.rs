@@ -452,7 +452,7 @@ fn write_post_admission_provider_failure(
     write_local_error(stream, &error)
 }
 
-fn post_admission_provider_error(
+const fn post_admission_provider_error(
     request_id: [u8; 16],
     attempt_id: [u8; 16],
     agr1_digest: [u8; 32],

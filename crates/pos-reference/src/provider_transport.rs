@@ -312,21 +312,21 @@ impl ProviderTransport {
                 Ok(execution) => return Ok(execution),
                 Err(ReceiveFailure::Invalid) => {
                     return Err(classify_receive_failure(
-                        &retained_grant,
+                        retained_grant.as_ref(),
                         PostAdmissionProviderFailure::EvidenceInvalid,
                     ));
                 }
                 Err(ReceiveFailure::Incomplete) if recovery_attempt == 0 => {}
                 Err(ReceiveFailure::Incomplete) => {
                     return Err(classify_receive_failure(
-                        &retained_grant,
+                        retained_grant.as_ref(),
                         PostAdmissionProviderFailure::TerminalUnavailable,
                     ));
                 }
             }
         }
         Err(classify_receive_failure(
-            &retained_grant,
+            retained_grant.as_ref(),
             PostAdmissionProviderFailure::TerminalUnavailable,
         ))
     }
@@ -503,7 +503,7 @@ fn read_admitted_response(
     retained_grant: &mut Option<RetainedGrant>,
     grant_bytes: Vec<u8>,
 ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
-    verify_retained_grant(retained_grant, &grant_bytes)?;
+    verify_retained_grant(retained_grant.as_ref(), &grant_bytes)?;
     let grant = admitted
         .authenticate_selector_grant(&grant_bytes, request, commitment)
         .map_err(|_| ReceiveFailure::Invalid)?;
@@ -550,13 +550,10 @@ fn read_error_response(
 }
 
 fn verify_retained_grant(
-    retained_grant: &Option<RetainedGrant>,
+    retained_grant: Option<&RetainedGrant>,
     current: &[u8],
 ) -> Result<(), ReceiveFailure> {
-    if retained_grant
-        .as_ref()
-        .is_some_and(|previous| previous.bytes.as_slice() != current)
-    {
+    if retained_grant.is_some_and(|previous| previous.bytes.as_slice() != current) {
         return Err(ReceiveFailure::Invalid);
     }
     Ok(())
@@ -573,17 +570,15 @@ fn retain_authenticated_grant(
 }
 
 fn classify_receive_failure(
-    retained_grant: &Option<RetainedGrant>,
+    retained_grant: Option<&RetainedGrant>,
     failure: PostAdmissionProviderFailure,
 ) -> ProviderTransportError {
-    retained_grant
-        .as_ref()
-        .map_or(ProviderTransportError::BeforeAdmission, |grant| {
-            ProviderTransportError::AfterAdmission {
-                agr1_digest: grant.digest,
-                failure,
-            }
-        })
+    retained_grant.map_or(ProviderTransportError::BeforeAdmission, |grant| {
+        ProviderTransportError::AfterAdmission {
+            agr1_digest: grant.digest,
+            failure,
+        }
+    })
 }
 
 fn read_audit_and_receipt(
@@ -1024,7 +1019,7 @@ mod tests {
         )?;
         assert!(matches!(
             classify_receive_failure(
-                &retained_grant,
+                retained_grant.as_ref(),
                 PostAdmissionProviderFailure::TerminalUnavailable,
             ),
             ProviderTransportError::AfterAdmission {
@@ -1064,7 +1059,7 @@ mod tests {
         )?;
         assert!(matches!(
             classify_receive_failure(
-                &retained_grant,
+                retained_grant.as_ref(),
                 PostAdmissionProviderFailure::EvidenceInvalid,
             ),
             ProviderTransportError::AfterAdmission {

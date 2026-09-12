@@ -29,7 +29,7 @@ impl SandboxProviderOperation {
         }
     }
 
-    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
             0 => Ok(Self::Describe),
             1 => Ok(Self::Execute),
@@ -71,7 +71,7 @@ impl SandboxLocalErrorCode {
         }
     }
 
-    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         match code {
             0 => Ok(Self::ProviderUnavailable),
             1 => Ok(Self::ProviderIdentityInvalid),
