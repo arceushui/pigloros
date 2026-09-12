@@ -547,7 +547,6 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
     }
 
     fn obligation_is_configured(
-        &self,
         binding: &ErasureAuthorityRequestBindingV1,
         obligation: ErasureReferenceV1,
     ) -> Result<bool, ErasureErrorV1> {
@@ -910,7 +909,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             }
         }
         for obligation in admission.unresolved_obligations().iter().copied() {
-            if !self.obligation_is_configured(binding, obligation)? {
+            if !Self::obligation_is_configured(binding, obligation)? {
                 return Err(ErasureErrorV1::ScopeInvalid);
             }
         }
@@ -939,7 +938,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
-        if !self.obligation_is_configured(binding, acknowledgement.obligation())? {
+        if !Self::obligation_is_configured(binding, acknowledgement.obligation())? {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         let context = lifecycle_context(
