@@ -1182,6 +1182,26 @@ mod tests {
     }
 
     #[test]
+    fn admission_evidence_marker_rejects_incomplete_sly1_frames() -> Result<(), AdapterError> {
+        assert!(!reply_carries_admission_evidence(b"not-cbor"));
+        for value in [
+            Value::Null,
+            Value::Array(vec![Value::Null, Value::Null]),
+            Value::Array(vec![Value::Array(vec![Value::Null; 11]), Value::Null]),
+        ] {
+            let bytes = encode_with_limit(&value, CONTROL_LIMIT)
+                .map_err(|_| AdapterError::ProtocolFailure)?;
+            assert!(!reply_carries_admission_evidence(&bytes));
+        }
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let unavailable = unavailable_reply(&encoded, [14; 32], 2)?;
+        assert!(!reply_carries_admission_evidence(&unavailable));
+        let (control, _, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        assert!(reply_carries_admission_evidence(&control));
+        Ok(())
+    }
+
+    #[test]
     fn sle1_accepts_every_phase_operation_and_failure_code() -> Result<(), AdapterError> {
         use crate::sandbox_provider_protocol::{
             SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
@@ -1345,6 +1365,49 @@ mod tests {
         let (control, _) = protocol_record("SLY1", fields, false)?;
         assert_eq!(
             decode_reply(&control, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_result_closes_pre_and_post_admission_error_branches() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let unavailable = unavailable_reply(&encoded, [14; 32], 2)?;
+        let document = decode_canonical_with_limit(&unavailable, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array_values(&document).map_err(|_| AdapterError::ProtocolFailure)?;
+        let fields = array_values(&wrapper[0])
+            .map_err(|_| AdapterError::ProtocolFailure)?
+            .to_vec();
+
+        for result in [Value::Null, Value::Bytes(b"not-cbor".to_vec())] {
+            let mut changed = fields.clone();
+            changed[7] = result;
+            assert_eq!(
+                decode_provider_result(&changed, &[], &encoded, 1024),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        let mismatched = rewrite_provider_result(&fields, |result| {
+            result[2] = Value::Bytes(vec![99; 16]);
+        })?;
+        assert_eq!(
+            decode_provider_result(&mismatched, &[], &encoded, 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+        assert_eq!(
+            decode_provider_result(&fields, &[1], &encoded, 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+
+        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let evidence = admitted_evidence(&control)?;
+        let mismatched = rewrite_provider_result(&evidence.fields, |result| {
+            result[5] = Value::Array(vec![integer(1), Value::Bytes(vec![99; 32])]);
+        })?;
+        assert_eq!(
+            decode_provider_result(&mismatched, &trailing, &encoded, 1024),
             Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         Ok(())
@@ -1808,6 +1871,36 @@ mod tests {
             ),
             Err(AdapterError::ProtocolFailure)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_authority_accepts_ready_without_release_only() -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let (control, _, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        let evidence = admitted_evidence(&control)?;
+        let ready = evidence
+            .receipt
+            .ready1_digest
+            .ok_or(AdapterError::ProtocolFailure)?;
+        let (bytes, _) = audit_record(
+            &encoded,
+            0,
+            13,
+            vec![
+                evidence.receipt.authority.agr1_digest,
+                ready,
+                evidence.receipt.kernel_observation_evidence,
+            ],
+            None,
+        )?;
+        let record = SandboxAuditRecord::from_canonical_cbor(&bytes)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut receipt = evidence.receipt.clone();
+        receipt.release1_digest = None;
+        assert!(audit_authority_matches(&record, &receipt));
+        receipt.release1_digest = Some([62; 32]);
+        assert!(!audit_authority_matches(&record, &receipt));
         Ok(())
     }
 

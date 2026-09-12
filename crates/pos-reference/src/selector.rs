@@ -205,13 +205,8 @@ impl SelectorAdapter {
                     transport_error(&error)
                 }
             })?;
-        let trailing_length = u64::try_from(trailing.len()).map_err(|_| {
-            if has_admission_evidence {
-                AdapterError::AuthenticatedEvidenceFailure
-            } else {
-                AdapterError::ProtocolFailure
-            }
-        })?;
+        // Read::take bounds the accumulated length to less than 2^28 bytes.
+        let trailing_length = trailing.len() as u64;
         if trailing_length > MAX_SELECTOR_TRAILING_BYTES {
             return Err(if has_admission_evidence {
                 AdapterError::AuthenticatedEvidenceFailure
@@ -541,6 +536,81 @@ mod tests {
             assert_eq!(result.map(|_| ()), Err(expected));
             drop(listener);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn selector_adapter_rejects_an_overlong_socket_address(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        // The filesystem resolves these components to the existing socket,
+        // but the supplied address cannot fit in a sockaddr_un.
+        let overlong = PathBuf::from(format!(
+            "{}/{}selector.sock",
+            temporary.path().display(),
+            "./".repeat(128)
+        ));
+        assert!(std::fs::symlink_metadata(&overlong)?.file_type().is_socket());
+        let mut adapter = SelectorAdapter::new(selector_request()?)?;
+        adapter.set_case_ordinal(0);
+        assert_eq!(
+            adapter.invoke_with_selector(&selector_attempt(), &overlong, uid),
+            Err(AdapterError::Unavailable)
+        );
+        assert_eq!(adapter.take_execution_provenance_digest(), None);
+        drop(listener);
+        Ok(())
+    }
+
+    #[test]
+    fn selector_adapter_rejects_socket_descriptor_exhaustion(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD_ENV: &str = "PIGLOR_SELECTOR_FD_EXHAUSTION_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "selector::tests::selector_adapter_rejects_socket_descriptor_exhaustion",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()?;
+            assert!(status.success());
+            return Ok(());
+        }
+
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(
+            &socket,
+            std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        let uid = std::fs::metadata(&socket)?.uid();
+        let mut adapter = SelectorAdapter::new(selector_request()?)?;
+        adapter.set_case_ordinal(0);
+        let attempt = selector_attempt();
+        let original = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+        rustix::process::setrlimit(
+            rustix::process::Resource::Nofile,
+            rustix::process::Rlimit {
+                current: Some(0),
+                maximum: original.maximum,
+            },
+        )?;
+        let result = adapter.invoke_with_selector(&attempt, &socket, uid);
+        rustix::process::setrlimit(rustix::process::Resource::Nofile, original)?;
+        assert_eq!(result, Err(AdapterError::Unavailable));
+        assert_eq!(adapter.take_execution_provenance_digest(), None);
+        drop(listener);
         Ok(())
     }
 
@@ -893,13 +963,6 @@ mod tests {
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(
-            invoke_with_reply(
-                local_unavailable()?,
-                vec![0; usize::try_from(MAX_SELECTOR_TRAILING_BYTES + 1)?],
-            ),
-            Err(AdapterError::ProtocolFailure)
-        );
-        assert_eq!(
             invoke_with_framed_reply(1, Vec::new(), Vec::new()),
             Err(AdapterError::ProtocolFailure)
         );
@@ -907,6 +970,52 @@ mod tests {
             invoke_with_framed_reply(16 * 1024 * 1024 + 1, Vec::new(), Vec::new()),
             Err(AdapterError::ProtocolFailure)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn selector_transport_classifies_streamed_oversize_replies_by_admission(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (control, expected) in [
+            (local_unavailable()?, AdapterError::ProtocolFailure),
+            (
+                evidence_bearing_reply_marker()?,
+                AdapterError::AuthenticatedEvidenceFailure,
+            ),
+        ] {
+            let temporary = tempfile::tempdir()?;
+            let socket = temporary.path().join("selector.sock");
+            let listener = UnixListener::bind(&socket)?;
+            std::fs::set_permissions(
+                &socket,
+                std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+            )?;
+            let uid = std::fs::metadata(&socket)?.uid();
+            let control_length = u32::try_from(control.len())?;
+            let server = thread::spawn(move || -> std::io::Result<u64> {
+                let (mut stream, _) = listener.accept()?;
+                std::io::copy(&mut stream, &mut std::io::sink())?;
+                stream.write_all(&control_length.to_be_bytes())?;
+                stream.write_all(&control)?;
+                std::io::copy(
+                    &mut std::io::repeat(0).take(MAX_SELECTOR_TRAILING_BYTES + 1),
+                    &mut stream,
+                )
+            });
+            let mut attempt = selector_attempt();
+            attempt.watchdog_ms = 10_000;
+            let mut adapter = SelectorAdapter::new(selector_request()?)?;
+            adapter.set_case_ordinal(0);
+            assert_eq!(
+                adapter.invoke_with_selector(&attempt, &socket, uid),
+                Err(expected)
+            );
+            assert_eq!(adapter.take_execution_provenance_digest(), None);
+            assert_eq!(
+                server.join().map_err(|_| AdapterError::ProtocolFailure)??,
+                MAX_SELECTOR_TRAILING_BYTES + 1
+            );
+        }
         Ok(())
     }
 }
