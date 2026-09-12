@@ -8,9 +8,8 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1,
     ErasureForkAdmissionInputV1, ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
+    ErasureReceiptInputV1, ErasureReplayClaimV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_runtime::{
     ErasureAuthorityConfigurationV1, ErasureAuthorityEvidenceKindV1,
@@ -20,6 +19,7 @@ use pos_runtime::{
 };
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
+#[expect(dead_code, unreachable_pub)]
 mod erasure_support;
 
 use erasure_support::{persistence_request, persistence_target, reference, retry_admission};
@@ -134,13 +134,22 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
         admission.freeze_authorization_evidence(),
     )?;
 
+    admit_destruction_and_receipt(&authority, request_reference, &admission)?;
+    admit_resolution_and_fork(&authority, request_reference)?;
+    Ok(())
+}
+
+fn admit_destruction_and_receipt(
+    authority: &HostConfiguredErasureCoordinatorAuthorityV1,
+    request_reference: pos_core::ErasureReferenceV1,
+    admission: &pos_core::ErasureAtomicFreezeAdmissionV1,
+) -> Result<(), Box<dyn std::error::Error>> {
     let commands = admission
         .obligations()
         .iter()
         .map(|obligation| ErasureDestructionCommandV1::from_obligation(obligation, reference(7)))
         .collect::<Vec<_>>();
     authority.dispatch_destruction(request_reference, &commands)?;
-
     let retry = retry_admission(erasure_support::RetryAdmissionFixture {
         request: request_reference,
         attempt_ordinal: 0,
@@ -154,7 +163,6 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
     })?;
     let reservation = authority.admit_attempt(&retry)?;
     assert_eq!(reservation.admission(), retry.reference());
-
     let first = admission.obligations()[0];
     let acknowledgement =
         ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
@@ -170,8 +178,7 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
             trust: reference(8),
         })?;
     authority.admit_acknowledgement(&acknowledgement)?;
-
-    let receipt = ErasureReceiptInputV1 {
+    authority.admit_receipt(&ErasureReceiptInputV1 {
         request: request_reference,
         terminal_state: reference(54),
         coordinator: reference(55),
@@ -194,9 +201,14 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
         issue_position: 11,
         signature: reference(56),
         receipt_digest: reference(57),
-    };
-    authority.admit_receipt(&receipt)?;
+    })?;
+    Ok(())
+}
 
+fn admit_resolution_and_fork(
+    authority: &HostConfiguredErasureCoordinatorAuthorityV1,
+    request_reference: pos_core::ErasureReferenceV1,
+) -> Result<(), Box<dyn std::error::Error>> {
     let resolution =
         ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
             request: request_reference,
@@ -212,7 +224,6 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
             predecessor_resolution: None,
         })?;
     authority.admit_administrative_resolution(&resolution)?;
-
     let parent = TimelineId::new();
     let child = TimelineMeta::forked_from(parent, Seq::ZERO, "configured-child");
     let child_scope = authority.resolve_fork_child_scope(parent, &child)?;
