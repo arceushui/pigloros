@@ -1429,8 +1429,8 @@ mod tests {
         ]);
         fields[4] = Value::Bytes(evr1_digest.to_vec());
         fields[5] = Value::Bytes(vec![23; 32]);
-        fields[6] = Value::Bytes(vec![24; 32]);
-        fields[7] = Value::Bytes(vec![25; 32]);
+        fields[6] = Value::Bytes(vec![15; 32]);
+        fields[7] = Value::Bytes(vec![9; 32]);
         fields[8] = Value::Bytes(vec![26; 32]);
         fields[9] = Value::Bytes(vec![27; 32]);
         fields[10] = Value::Bytes(vec![12; 32]);
