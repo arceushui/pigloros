@@ -528,7 +528,7 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
                 })?);
                 applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
                     category,
-                    u64::try_from(target_index).map_err(|_| ErasureErrorV1::ScopeInvalid)?,
+                    target_index as u64,
                     ErasureApplicabilityDecisionV1::Applicable,
                     Some(owner),
                 )?);
