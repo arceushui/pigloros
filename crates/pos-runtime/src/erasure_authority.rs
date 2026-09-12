@@ -247,6 +247,7 @@ impl ErasureAuthorityFreezeProfileV1 {
     ) -> Result<Self, ErasureErrorV1> {
         if scope_members.is_empty()
             || scope_members.len() > pos_core::ERASURE_MAX_REFERENCES
+            || !references_present(&scope_members)
             || targets.is_empty()
             || targets.len() > pos_core::ERASURE_MAX_TARGETS
             || !references_present(&owners)
@@ -473,6 +474,19 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
             .ok_or(ErasureErrorV1::PolicyConflict)
     }
 
+    fn authenticated_binding(
+        &self,
+        request: &ErasureRequestV1,
+    ) -> Result<&ErasureAuthorityRequestBindingV1, ErasureErrorV1> {
+        let binding = self.binding_for(request.reference())?;
+        if &binding.request != request {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let context = request.to_canonical_cbor()?;
+        self.verify(ErasureAuthorityEvidenceKindV1::Request, binding, &context)?;
+        Ok(binding)
+    }
+
     fn check_lifecycle_provenance(
         &self,
         binding: &ErasureAuthorityRequestBindingV1,
@@ -608,7 +622,7 @@ impl ErasureFreezeAuthorizationVerifierV1 for HostConfiguredErasureCoordinatorAu
         }
         self.check_policy_trust(admission.policy(), admission.trust())?;
         self.check_policy_trust(authorization.policy(), authorization.trust())?;
-        let context = admission.authorization_body_digest()?.digest();
+        let context = authorization.admission_body_digest().digest();
         self.verify(ErasureAuthorityEvidenceKindV1::Freeze, binding, &context)
     }
 }
@@ -678,13 +692,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
     }
 
     fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
-        let binding = self.binding_for(request.reference())?;
-        if &binding.request != request {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.check_policy_trust(request.policy(), self.configuration.trust)?;
-        let context = request.to_canonical_cbor()?;
-        self.verify(ErasureAuthorityEvidenceKindV1::Request, binding, &context)
+        self.authenticated_binding(request).map(|_| ())
     }
 
     fn admit_authorization(
@@ -712,7 +720,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         request: &ErasureRequestV1,
         correction: &ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.authenticate(request)?;
+        let binding = self.authenticated_binding(request)?;
         if correction.rejected_request() == request.reference() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -726,7 +734,6 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
-        let binding = self.binding_for(request.reference())?;
         let context = lifecycle_context(
             b"corrected-submission",
             request.reference(),
@@ -788,15 +795,11 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         parent: TimelineId,
         child: &TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        let mut child_scopes = self
-            .configuration
-            .requests
+        let child_scope = self.configuration.requests[0].freeze.child_scope;
+        if self.configuration.requests[1..]
             .iter()
-            .map(|binding| binding.freeze.child_scope);
-        let child_scope = child_scopes
-            .next()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if child_scopes.any(|scope| scope != child_scope) {
+            .any(|binding| binding.freeze.child_scope != child_scope)
+        {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         match child.fork_point {
@@ -920,9 +923,6 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         self.check_policy_trust(admission.policy(), admission.trust())?;
         let context = lifecycle_context(b"attempt", admission.request(), admission.reference());
         self.check_lifecycle_provenance(binding, admission.authorization_provenance(), &context)?;
-        if admission.unresolved_obligations().len() != admission.command_identities().len() {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
         for reference in admission
             .unresolved_obligations()
             .iter()
