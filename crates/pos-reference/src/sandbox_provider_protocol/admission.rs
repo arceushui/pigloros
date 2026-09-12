@@ -636,12 +636,15 @@ impl AdmittedSandboxProvider {
         {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        if required_features.iter().any(|required| {
-            !host_profile
-                .feature_proofs
-                .iter()
-                .any(|proof| proof.feature_id == required.as_str() && proof.passed)
-        }) {
+        if host_profile.feature_proofs.len() != super::REQUIRED_HOST_FEATURES.len()
+            || !super::REQUIRED_HOST_FEATURES.iter().all(|required| {
+                host_profile
+                    .feature_proofs
+                    .iter()
+                    .any(|proof| proof.feature_id == *required)
+            })
+            || host_profile.feature_proofs.iter().any(|proof| !proof.passed)
+        {
             return Err(SandboxAdmissionError::HostCapabilityMismatch);
         }
         let architecture = syscall_set.architecture;
@@ -1412,14 +1415,10 @@ fn capability_set_digest(
 fn required_feature_set_digest(
     required_features: &[String],
 ) -> Result<[u8; 32], SandboxAdmissionError> {
-    if required_features.is_empty()
-        || required_features.len() > 256
-        || required_features
-            .iter()
-            .any(|feature| !valid_identifier(feature))
-        || !required_features
-            .windows(2)
-            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+    if !required_features
+        .iter()
+        .map(String::as_str)
+        .eq(super::REQUIRED_HOST_FEATURES)
     {
         return Err(SandboxAdmissionError::HostCapabilityMismatch);
     }

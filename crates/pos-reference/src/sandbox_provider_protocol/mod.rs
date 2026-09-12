@@ -14,6 +14,26 @@ mod revocation;
 mod revocation_update;
 mod trust;
 
+/// ADR-069's closed SIC1/HCP1 feature set in bytewise identifier order.
+pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
+    "broker-lifecycle",
+    "cgroup-kill",
+    "cgroup-v2-cpu",
+    "cgroup-v2-memory",
+    "cgroup-v2-pids",
+    "ipc-namespace",
+    "limit-observation",
+    "managed-attempt-exec",
+    "mount-namespace",
+    "network-namespace",
+    "nftables-atomic",
+    "pid-namespace",
+    "process-isolation-controls",
+    "signed-root-image",
+    "user-namespace",
+    "uts-namespace",
+];
+
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use revocation_update::{
