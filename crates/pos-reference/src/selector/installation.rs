@@ -699,14 +699,16 @@ mod tests {
     use ciborium::value::Value;
     use ed25519_dalek::{Signer, SigningKey};
 
-    use crate as pos_reference;
     use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
 
     use super::authority::AuthenticatedSelectorBootstrap;
     use super::*;
 
-    #[path = "../../../tests/support/mod.rs"]
-    mod installed_case_support;
+    mod installed_case_support {
+        use crate as pos_reference;
+
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
+    }
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
