@@ -47,16 +47,34 @@ struct HostedLedgerStore {
 
 impl HostedLedgerStore {
     fn open(config: pos_store::StoreConfig) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
+        Self::open_with_recovery(config, &composition)
+    }
+
+    fn open_with_recovery(
+        config: pos_store::StoreConfig,
+        composition: &pos_runtime::ErasureCoordinatorCompositionV1,
+    ) -> Result<Self, pos_core::ErasureHostErrorV1> {
+        pos_runtime::ErasureExecutionHostV1::open_with_authority(
             config,
+            composition,
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .map(Self::from_host)
     }
 
     fn open_read_only(path: &str) -> Result<Self, pos_core::ErasureHostErrorV1> {
-        pos_runtime::ErasureExecutionHostV1::open_read_only_verified_empty(
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
+        Self::open_read_only_with_recovery(path, &composition)
+    }
+
+    fn open_read_only_with_recovery(
+        path: &str,
+        composition: &pos_runtime::ErasureCoordinatorCompositionV1,
+    ) -> Result<Self, pos_core::ErasureHostErrorV1> {
+        pos_runtime::ErasureExecutionHostV1::open_read_only_with_authority(
             path,
+            composition,
             pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .map(Self::from_host)

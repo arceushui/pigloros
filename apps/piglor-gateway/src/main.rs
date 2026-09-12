@@ -25,7 +25,7 @@ use piglor_gateway::{
 };
 use piglor_ledger::LedgerView;
 use pos_core::{ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
-use pos_runtime::ErasureExecutionHostV1;
+use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
 use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
 
@@ -199,21 +199,35 @@ fn gateway_for_startup(
     config: StoreConfig,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
+    let composition = ErasureCoordinatorCompositionV1::closed();
+    gateway_for_startup_with_recovery(sqlite_path, config, owntracks_owner_key, &composition)
+}
+
+fn gateway_for_startup_with_recovery(
+    sqlite_path: Option<&str>,
+    config: StoreConfig,
+    owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+    composition: &ErasureCoordinatorCompositionV1,
+) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
     match (owntracks_owner_key, sqlite_path) {
         (Some(owner_key), Some(path)) => {
-            let host = ErasureExecutionHostV1::open_gateway_verified_empty(
+            let host = ErasureExecutionHostV1::open_gateway_with_authority(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
                 },
+                composition,
                 ERASURE_MAX_INVENTORY_REQUESTS,
             )
             .map_err(erasure_host_recovery_error)?;
             Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
         }
         (None, _) => {
-            let host =
-                ErasureExecutionHostV1::open_verified_empty(config, ERASURE_MAX_INVENTORY_REQUESTS)
-                    .map_err(erasure_host_recovery_error)?;
+            let host = ErasureExecutionHostV1::open_with_authority(
+                config,
+                composition,
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            )
+            .map_err(erasure_host_recovery_error)?;
             Gateway::new_with_erasure_host(host).map_err(Into::into)
         }
         (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),

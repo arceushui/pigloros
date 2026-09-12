@@ -26,6 +26,7 @@
 
 pub mod composition;
 pub mod driver;
+pub mod erasure_authority;
 pub mod erasure_host;
 pub mod error;
 pub mod recorder;
@@ -43,9 +44,17 @@ pub use driver::{
     Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey, RecoveryEvent,
     RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
 };
+pub use erasure_authority::{
+    Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
+    ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
+    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
+    ErasureAuthorityTopologyBindingV1, HostConfiguredErasureCoordinatorAuthorityV1,
+    MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES,
+};
 pub use erasure_host::{
-    ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1,
-    ErasureHostStatusV1, ErasureReadSenderV1,
+    ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
+    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
+    ErasureReadSenderV1,
 };
 pub use error::{ActionSubmissionError, RuntimeError};
 pub use recorder::{RecordedOutput, Recorder, RunMode};
