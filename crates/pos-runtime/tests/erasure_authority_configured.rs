@@ -19,7 +19,7 @@ use pos_runtime::{
     ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
     ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
     ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
-    HostConfiguredErasureCoordinatorAuthorityV1,
+    ErasureCoordinatorCompositionV1, HostConfiguredErasureCoordinatorAuthorityV1,
 };
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
@@ -133,6 +133,19 @@ fn authority_with(
         Arc::new(TestEvidenceVerifier),
         Arc::new(TestExecution),
     ))
+}
+
+#[test]
+fn configured_composition_constructs_from_host_material() -> Result<(), Box<dyn std::error::Error>>
+{
+    let authority = authority()?;
+    let _composition = ErasureCoordinatorCompositionV1::from_host_configuration(
+        authority.configuration().clone(),
+        Arc::new(TestEvidenceVerifier),
+        Arc::new(TestExecution),
+        reference(70),
+    );
+    Ok(())
 }
 
 #[test]
