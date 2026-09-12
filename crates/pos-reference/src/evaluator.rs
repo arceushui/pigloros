@@ -106,12 +106,26 @@ pub trait SubjectAdapter {
     /// Identify the immutable implementation artifact reached by the adapter.
     fn subject_artifact_digest(&self) -> [u8; 32];
 
+    /// Bind the next execution to its canonical selected-fixture ordinal.
+    ///
+    /// Only the root-selector adapter consumes this identity. Other adapters
+    /// have no ordinal-bearing transport field.
+    fn set_case_ordinal(&mut self, _ordinal: u16) {}
+
     /// Execute one independent, reset-budget fixture attempt.
     ///
     /// # Errors
     /// Returning an error means the subject operation was operationally
     /// unavailable; it is never converted into a deterministic typed failure.
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError>;
+
+    /// Return provenance authenticated for the immediately preceding attempt.
+    ///
+    /// Sandbox Provider adapters return the validated SPR1 self-digest. Other
+    /// adapters and attempts that ended before provider admission return none.
+    fn take_execution_provenance_digest(&mut self) -> Option<[u8; 32]> {
+        None
+    }
 }
 
 /// Operational adapter failure. Details are intentionally bounded and cannot
@@ -124,6 +138,8 @@ pub enum AdapterError {
     WatchdogExpired,
     #[error("subject adapter protocol failed")]
     ProtocolFailure,
+    #[error("authenticated sandbox evidence was lost or invalid")]
+    AuthenticatedEvidenceFailure,
 }
 
 /// Bytes emitted by a successful evaluator process invocation.
@@ -158,11 +174,14 @@ pub enum EvaluatorError {
 
 impl From<ProtocolError> for EvaluatorError {
     fn from(error: ProtocolError) -> Self {
-        if error == ProtocolError::UnsupportedVersion {
-            Self::UnsupportedVersion
-        } else {
-            Self::Request
-        }
+        map_protocol_error(error)
+    }
+}
+
+const fn map_protocol_error(error: ProtocolError) -> EvaluatorError {
+    match error {
+        ProtocolError::UnsupportedVersion => EvaluatorError::UnsupportedVersion,
+        _ => EvaluatorError::Request,
     }
 }
 
@@ -307,30 +326,129 @@ fn evaluate_cases(
     adapter: &mut impl SubjectAdapter,
 ) -> Result<Vec<CaseOutcome>, EvaluatorError> {
     let mut outcomes = Vec::new();
-    for fixture in profile.selected_fixtures(request) {
-        if !fixture.modes.contains(&bundle.mode) {
-            continue;
+    for (ordinal, fixture) in profile.selected_fixtures(request).into_iter().enumerate() {
+        if let Some(outcome) =
+            evaluate_selected_fixture(profile, bundle, request, fixture, ordinal, adapter)?
+        {
+            outcomes.push(outcome);
         }
-        outcomes.push(evaluate_case(profile, bundle, fixture, adapter)?);
     }
     (!outcomes.is_empty())
         .then_some(outcomes)
         .ok_or(EvaluatorError::Profile)
 }
 
+fn evaluate_selected_fixture(
+    profile: &Profile,
+    bundle: &VerifiedBundle,
+    request: &EvaluationRequest,
+    fixture: &Fixture,
+    ordinal: usize,
+    adapter: &mut impl SubjectAdapter,
+) -> Result<Option<CaseOutcome>, EvaluatorError> {
+    fixture
+        .modes
+        .contains(&bundle.mode)
+        .then(|| {
+            u16::try_from(ordinal)
+                .map_err(|_| EvaluatorError::Profile)
+                .map(|ordinal| adapter.set_case_ordinal(ordinal))
+                .and_then(|()| evaluate_case(profile, bundle, request, fixture, adapter))
+        })
+        .transpose()
+}
+
 fn evaluate_case(
     profile: &Profile,
     bundle: &VerifiedBundle,
+    request: &EvaluationRequest,
     fixture: &Fixture,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
-    let attempt = case_attempt(bundle, fixture, bundle.mode, profile.evaluator_hard_caps)?;
-    let observation = adapter.execute(&attempt);
-    enforce_observed_coordinate_limit(
-        &observation,
-        profile.evaluator_hard_caps.max_coordinate_bytes,
+    let mut hard_caps = profile.evaluator_hard_caps;
+    if request.sandbox_requirement.is_some() {
+        let ceiling = crate::selector_protocol::SELECTOR_INPUT_LIMIT as u64;
+        hard_caps.max_member_bytes = hard_caps.max_member_bytes.min(ceiling);
+        hard_caps.max_total_bundle_bytes = hard_caps.max_total_bundle_bytes.min(ceiling);
+    }
+    case_attempt(bundle, fixture, bundle.mode, hard_caps).and_then(|attempt| {
+        evaluate_attempt(
+            request,
+            fixture,
+            bundle.mode,
+            profile.evaluator_hard_caps.max_coordinate_bytes,
+            adapter,
+            &attempt,
+        )
+    })
+}
+
+fn evaluate_attempt(
+    request: &EvaluationRequest,
+    fixture: &Fixture,
+    mode: u8,
+    maximum_coordinate_bytes: u64,
+    adapter: &mut impl SubjectAdapter,
+    attempt: &CaseAttempt,
+) -> Result<CaseOutcome, EvaluatorError> {
+    let execution = execute_case(adapter, attempt)?;
+    enforce_observed_coordinate_limit(&execution.observation, maximum_coordinate_bytes)?;
+    let provenance_digest = case_provenance(
+        request,
+        fixture,
+        &execution.observation,
+        execution.provider_provenance,
     )?;
-    Ok(case_outcome(fixture, bundle.mode, observation))
+    Ok(case_outcome(
+        fixture,
+        mode,
+        execution.observation,
+        provenance_digest,
+    ))
+}
+
+struct CaseExecution {
+    observation: Result<SubjectObservation, AdapterError>,
+    provider_provenance: Option<[u8; 32]>,
+}
+
+fn execute_case(
+    adapter: &mut impl SubjectAdapter,
+    attempt: &CaseAttempt,
+) -> Result<CaseExecution, EvaluatorError> {
+    let observation = adapter.execute(attempt);
+    let provider_provenance = adapter.take_execution_provenance_digest();
+    if observation == Err(AdapterError::AuthenticatedEvidenceFailure) {
+        return Err(EvaluatorError::AdapterIdentity);
+    }
+    Ok(CaseExecution {
+        observation,
+        provider_provenance,
+    })
+}
+
+fn case_provenance(
+    request: &EvaluationRequest,
+    fixture: &Fixture,
+    observation: &Result<SubjectObservation, AdapterError>,
+    provider_provenance: Option<[u8; 32]>,
+) -> Result<[u8; 32], EvaluatorError> {
+    if request.sandbox_requirement.is_none() {
+        return Ok(fixture.provenance_digest);
+    }
+    if let Some(digest) = provider_provenance {
+        return (digest != [0; 32])
+            .then_some(digest)
+            .ok_or(EvaluatorError::AdapterIdentity);
+    }
+    match observation {
+        Err(_)
+        | Ok(SubjectObservation {
+            result: SubjectResult::Unavailable,
+            ..
+        }) => Ok(fixture.provenance_digest),
+        Ok(_) => Err(EvaluatorError::AdapterIdentity),
+    }
 }
 
 const fn enforce_observed_coordinate_limit(
@@ -358,6 +476,55 @@ fn case_attempt(
     mode: u8,
     hard_caps: EvaluatorHardCaps,
 ) -> Result<CaseAttempt, EvaluatorError> {
+    let artifacts = bounded_attempt_artifacts(bundle, fixture, hard_caps)?;
+    Ok(CaseAttempt {
+        case_id: fixture.case_id.clone(),
+        claim_layer: fixture.claim_layer,
+        family: fixture.family,
+        mode,
+        fixture_digest: fixture.fixture_digest,
+        schema: artifacts.schema,
+        payload: artifacts.payload,
+        auxiliary: artifacts.auxiliary,
+        budget: fixture.deterministic_budget,
+        watchdog_ms: fixture.watchdog_ms,
+        network_allowed: fixture.network_allowed,
+        capability_ids: fixture.capability_ids.clone(),
+        transport_caps: AttemptTransportCaps {
+            max_member_bytes: hard_caps.max_member_bytes,
+            max_attempt_bytes: hard_caps.max_total_bundle_bytes,
+        },
+    })
+}
+
+struct AttemptArtifacts {
+    schema: AttemptArtifact,
+    payload: AttemptArtifact,
+    auxiliary: Vec<AttemptArtifact>,
+}
+
+fn bounded_attempt_artifacts(
+    bundle: &VerifiedBundle,
+    fixture: &Fixture,
+    hard_caps: EvaluatorHardCaps,
+) -> Result<AttemptArtifacts, EvaluatorError> {
+    let mut total_bytes = 0_u64;
+    for descriptor in std::iter::once(&fixture.schema)
+        .chain(std::iter::once(&fixture.payload))
+        .chain(&fixture.auxiliary)
+    {
+        let length = bundle
+            .member(&descriptor.member_path)
+            .ok_or(EvaluatorError::Bundle)?
+            .bytes
+            .len() as u64;
+        total_bytes = total_bytes
+            .checked_add(length)
+            .ok_or(EvaluatorError::Profile)?;
+        if length > hard_caps.max_member_bytes || total_bytes > hard_caps.max_total_bundle_bytes {
+            return Err(EvaluatorError::Profile);
+        }
+    }
     let member = |descriptor: &crate::profile::ArtifactDescriptor| {
         bundle
             .member(&descriptor.member_path)
@@ -374,23 +541,10 @@ fn case_attempt(
         .iter()
         .map(member)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(CaseAttempt {
-        case_id: fixture.case_id.clone(),
-        claim_layer: fixture.claim_layer,
-        family: fixture.family,
-        mode,
-        fixture_digest: fixture.fixture_digest,
+    Ok(AttemptArtifacts {
         schema,
         payload,
         auxiliary,
-        budget: fixture.deterministic_budget,
-        watchdog_ms: fixture.watchdog_ms,
-        network_allowed: fixture.network_allowed,
-        capability_ids: fixture.capability_ids.clone(),
-        transport_caps: AttemptTransportCaps {
-            max_member_bytes: hard_caps.max_member_bytes,
-            max_attempt_bytes: hard_caps.max_total_bundle_bytes,
-        },
     })
 }
 
@@ -398,6 +552,7 @@ fn case_outcome(
     fixture: &Fixture,
     mode: u8,
     observation: Result<SubjectObservation, AdapterError>,
+    provenance_digest: [u8; 32],
 ) -> CaseOutcome {
     let mut outcome = CaseOutcome {
         case_id: fixture.case_id.clone(),
@@ -413,7 +568,7 @@ fn case_outcome(
         actual_error: None,
         replay_claim: fixture.replay_claim,
         redaction_state: fixture.redaction_state,
-        provenance_digest: fixture.provenance_digest,
+        provenance_digest,
     };
     if outcome.redaction_state >= 2 {
         return outcome;

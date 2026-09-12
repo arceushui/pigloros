@@ -24,6 +24,7 @@ const SLE1: &str = "SLE1";
 
 /// Closed Sandbox Provider operation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
 pub enum SandboxProviderOperationV1 {
     /// Report provider identity and active authority.
     Describe,
@@ -36,23 +37,18 @@ pub enum SandboxProviderOperationV1 {
 }
 
 impl SandboxProviderOperationV1 {
+    const ALL: [Self; 4] = [Self::Describe, Self::Execute, Self::Cancel, Self::Reconcile];
+
     const fn code(self) -> u64 {
-        match self {
-            Self::Describe => 0,
-            Self::Execute => 1,
-            Self::Cancel => 2,
-            Self::Reconcile => 3,
-        }
+        self as u64
     }
 
-    const fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
-        match code {
-            0 => Ok(Self::Describe),
-            1 => Ok(Self::Execute),
-            2 => Ok(Self::Cancel),
-            3 => Ok(Self::Reconcile),
-            _ => Err(SandboxContractErrorV1::FieldOutOfBounds),
-        }
+    fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxContractErrorV1::FieldOutOfBounds)
     }
 }
 
@@ -178,6 +174,7 @@ pub struct SandboxReconcileResponseV1 {
 
 /// Closed unsigned local selector failure code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
 pub enum SandboxLocalErrorCodeV1 {
     /// No selected provider could be reached.
     ProviderUnavailable,
@@ -187,24 +184,69 @@ pub enum SandboxLocalErrorCodeV1 {
     PolicyUnavailable,
     /// The authenticated control channel could not be established.
     ControlChannelUnavailable,
+    /// The selector request was malformed or incomplete.
+    InvalidSelectorRequest,
+    /// Evaluator-supplied authority differed from immutable authority.
+    RequestAuthorityMismatch,
+    /// A selector control or payload limit was exceeded.
+    PayloadLimitExceeded,
+    /// Recovery failed to obtain authenticated terminal evidence.
+    ProviderTerminalUnavailable,
+    /// Provider evidence was malformed, substituted, or incomplete.
+    ProviderEvidenceInvalid,
 }
 
 impl SandboxLocalErrorCodeV1 {
+    const ALL: [Self; 9] = [
+        Self::ProviderUnavailable,
+        Self::ProviderIdentityInvalid,
+        Self::PolicyUnavailable,
+        Self::ControlChannelUnavailable,
+        Self::InvalidSelectorRequest,
+        Self::RequestAuthorityMismatch,
+        Self::PayloadLimitExceeded,
+        Self::ProviderTerminalUnavailable,
+        Self::ProviderEvidenceInvalid,
+    ];
+
+    const fn code(self) -> u64 {
+        self as u64
+    }
+
+    fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxContractErrorV1::FieldOutOfBounds)
+    }
+}
+
+/// Closed point in selector processing at which a local failure occurred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxLocalErrorPhaseV1 {
+    /// SLX1/SPX1 construction or authority validation was not complete.
+    BeforeSpx1,
+    /// SPX1 was complete but AGR1 had not been authenticated.
+    AfterSpx1BeforeAdmission,
+    /// AGR1 had been authenticated.
+    AfterAdmission,
+}
+
+impl SandboxLocalErrorPhaseV1 {
     const fn code(self) -> u64 {
         match self {
-            Self::ProviderUnavailable => 0,
-            Self::ProviderIdentityInvalid => 1,
-            Self::PolicyUnavailable => 2,
-            Self::ControlChannelUnavailable => 3,
+            Self::BeforeSpx1 => 0,
+            Self::AfterSpx1BeforeAdmission => 1,
+            Self::AfterAdmission => 2,
         }
     }
 
     const fn from_code(code: u64) -> Result<Self, SandboxContractErrorV1> {
         match code {
-            0 => Ok(Self::ProviderUnavailable),
-            1 => Ok(Self::ProviderIdentityInvalid),
-            2 => Ok(Self::PolicyUnavailable),
-            3 => Ok(Self::ControlChannelUnavailable),
+            0 => Ok(Self::BeforeSpx1),
+            1 => Ok(Self::AfterSpx1BeforeAdmission),
+            2 => Ok(Self::AfterAdmission),
             _ => Err(SandboxContractErrorV1::FieldOutOfBounds),
         }
     }
@@ -213,10 +255,16 @@ impl SandboxLocalErrorCodeV1 {
 /// Exact bounded unsigned SLE1 local selector evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxLocalErrorV1 {
+    /// Point in selector processing at which the failure occurred.
+    pub phase: SandboxLocalErrorPhaseV1,
     /// Operation, absent only when framing prevents its identification.
     pub operation: Option<SandboxProviderOperationV1>,
     /// Request identity, absent only when no complete canonical nonzero ID was decoded.
     pub request_id: Option<[u8; 16]>,
+    /// Attempt identity, present after complete SPX1 construction when known.
+    pub attempt_id: Option<[u8; 16]>,
+    /// Authenticated AGR1 digest, present exactly after admission.
+    pub agr1_digest: Option<[u8; 32]>,
     /// Closed local failure code.
     pub code: SandboxLocalErrorCodeV1,
     /// Optional nonempty bounded diagnostic safe to disclose.
@@ -722,11 +770,18 @@ impl SandboxLocalErrorV1 {
         encode(&Value::Array(vec![
             value_text(SLE1),
             value_uint(1),
+            value_uint(self.phase.code()),
             self.operation
                 .map_or(Value::Null, |operation| value_uint(operation.code())),
             self.request_id
                 .as_ref()
                 .map_or(Value::Null, |request_id| value_bytes(request_id)),
+            self.attempt_id
+                .as_ref()
+                .map_or(Value::Null, |attempt_id| value_bytes(attempt_id)),
+            self.agr1_digest
+                .as_ref()
+                .map_or(Value::Null, |digest| value_bytes(digest)),
             value_uint(self.code.code()),
             self.safe_detail
                 .as_ref()
@@ -740,15 +795,9 @@ impl SandboxLocalErrorV1 {
     /// Returns a closed contract error for malformed or noncanonical input.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxContractErrorV1> {
         let value = decode(bytes)?;
-        let fields = array::<6>(&value)?;
+        let fields = array::<9>(&value)?;
         validate_magic(fields, SLE1)?;
-        let error = Self {
-            operation: decode_optional_operation(&fields[2])?,
-            request_id: decode_optional_request_id(&fields[3])?,
-            code: SandboxLocalErrorCodeV1::from_code(uint(&fields[4])?)?,
-            safe_detail: decode_optional_detail(&fields[5])?,
-        };
-        error.validate().map(|()| error)
+        decode_local_error(fields)
     }
 
     /// Validate closed values and bounded disclosed detail.
@@ -756,18 +805,108 @@ impl SandboxLocalErrorV1 {
     /// # Errors
     /// Returns a closed contract error for invalid local evidence.
     pub fn validate(&self) -> Result<(), SandboxContractErrorV1> {
-        if self.request_id == Some([0; 16])
-            || self.safe_detail.as_ref().is_some_and(|detail| {
-                detail.is_empty()
-                    || detail.len() > MAX_SANDBOX_SAFE_DETAIL_BYTES_V1
-                    || detail.contains('\0')
-            })
-        {
-            Err(SandboxContractErrorV1::FieldOutOfBounds)
-        } else {
-            Ok(())
-        }
+        validate_local_error_shape(self)
     }
+}
+
+fn decode_local_error(fields: &[Value; 9]) -> Result<SandboxLocalErrorV1, SandboxContractErrorV1> {
+    let error = SandboxLocalErrorV1 {
+        phase: SandboxLocalErrorPhaseV1::from_code(uint(&fields[2])?)?,
+        operation: decode_optional_operation(&fields[3])?,
+        request_id: decode_optional_request_id(&fields[4])?,
+        attempt_id: decode_optional_request_id(&fields[5])?,
+        agr1_digest: decode_optional_digest(&fields[6])?,
+        code: SandboxLocalErrorCodeV1::from_code(uint(&fields[7])?)?,
+        safe_detail: decode_optional_detail(&fields[8])?,
+    };
+    error.validate().map(|()| error)
+}
+
+fn validate_local_error_shape(error: &SandboxLocalErrorV1) -> Result<(), SandboxContractErrorV1> {
+    if !local_error_identifiers_are_nonzero(error)
+        || !local_error_phase_shape_is_valid(error)
+        || !local_error_detail_is_valid(error)
+    {
+        return Err(SandboxContractErrorV1::FieldOutOfBounds);
+    }
+    Ok(())
+}
+
+fn local_error_identifiers_are_nonzero(error: &SandboxLocalErrorV1) -> bool {
+    error.request_id != Some([0; 16])
+        && error.attempt_id != Some([0; 16])
+        && error.agr1_digest != Some([0; 32])
+}
+
+fn local_error_detail_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    !error.safe_detail.as_ref().is_some_and(|detail| {
+        detail.is_empty()
+            || detail.len() > MAX_SANDBOX_SAFE_DETAIL_BYTES_V1
+            || detail.contains('\0')
+    })
+}
+
+fn local_error_phase_shape_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    match error.phase {
+        SandboxLocalErrorPhaseV1::BeforeSpx1 => local_error_before_spx1_is_valid(error),
+        SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission => {
+            local_error_before_admission_is_valid(error)
+        }
+        SandboxLocalErrorPhaseV1::AfterAdmission => local_error_after_admission_is_valid(error),
+    }
+}
+
+fn local_error_before_spx1_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    let execute = error.operation == Some(SandboxProviderOperationV1::Execute);
+    let request = error.request_id.is_some();
+    let attempt = error.attempt_id.is_some();
+    let admission = error.agr1_digest.is_some();
+    !admission
+        && (error.operation.is_none() || execute)
+        && matches!(
+            error.code,
+            SandboxLocalErrorCodeV1::PolicyUnavailable
+                | SandboxLocalErrorCodeV1::InvalidSelectorRequest
+                | SandboxLocalErrorCodeV1::RequestAuthorityMismatch
+                | SandboxLocalErrorCodeV1::PayloadLimitExceeded
+        )
+        && if matches!(
+            error.code,
+            SandboxLocalErrorCodeV1::RequestAuthorityMismatch
+        ) {
+            execute && request && attempt
+        } else if error.code == SandboxLocalErrorCodeV1::PayloadLimitExceeded {
+            (!request && !attempt) || (execute && request && attempt)
+        } else {
+            (!request && !attempt) || (request && execute)
+        }
+}
+
+fn local_error_before_admission_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    error.operation == Some(SandboxProviderOperationV1::Execute)
+        && error.request_id.is_some()
+        && error.attempt_id.is_some()
+        && error.agr1_digest.is_none()
+        && matches!(
+            error.code,
+            SandboxLocalErrorCodeV1::ProviderUnavailable
+                | SandboxLocalErrorCodeV1::ProviderIdentityInvalid
+                | SandboxLocalErrorCodeV1::ControlChannelUnavailable
+                | SandboxLocalErrorCodeV1::ProviderEvidenceInvalid
+        )
+}
+
+fn local_error_after_admission_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    error.operation == Some(SandboxProviderOperationV1::Execute)
+        && error.request_id.is_some()
+        && error.attempt_id.is_some()
+        && error.agr1_digest.is_some()
+        && matches!(
+            error.code,
+            SandboxLocalErrorCodeV1::ControlChannelUnavailable
+                | SandboxLocalErrorCodeV1::ProviderTerminalUnavailable
+                | SandboxLocalErrorCodeV1::ProviderEvidenceInvalid
+        )
 }
 
 fn decode_optional_operation(
@@ -781,6 +920,14 @@ fn decode_optional_operation(
 }
 
 fn decode_optional_request_id(value: &Value) -> Result<Option<[u8; 16]>, SandboxContractErrorV1> {
+    if value == &Value::Null {
+        Ok(None)
+    } else {
+        fixed(value).map(Some)
+    }
+}
+
+fn decode_optional_digest(value: &Value) -> Result<Option<[u8; 32]>, SandboxContractErrorV1> {
     if value == &Value::Null {
         Ok(None)
     } else {
