@@ -889,7 +889,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
-        self.execution.dispatch_destruction(request, commands)
+        Ok(())
     }
 
     fn dispatch_destruction(
@@ -932,7 +932,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 .then_some(())
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         }
-        Ok(())
+        self.execution.dispatch_destruction(request, commands)
     }
 
     fn admit_attempt(
