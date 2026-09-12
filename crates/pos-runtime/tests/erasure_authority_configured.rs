@@ -848,8 +848,8 @@ fn configured_authority_rejects_alternate_request_for_bound_identity(
 }
 
 #[test]
-fn configured_authority_rejects_freeze_authorization_inputs() -> Result<(), Box<dyn std::error::Error>>
-{
+fn configured_authority_rejects_freeze_authorization_inputs(
+) -> Result<(), Box<dyn std::error::Error>> {
     let authority = authority()?;
     let request = persistence_request()?;
     let admission = frozen_admission(&authority, &request)?;

@@ -47,8 +47,7 @@ use erasure_support::{
 };
 
 #[test]
-fn coordinator_composition_rejects_zero_identity_at_every_public_entry(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn coordinator_composition_rejects_zero_identity_at_every_public_entry() {
     let zero = ErasureReferenceV1::from_digest([0; 32]);
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     assert!(matches!(
@@ -75,9 +74,11 @@ fn coordinator_composition_rejects_zero_identity_at_every_public_entry(
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     ] {
-        assert!(matches!(result, Err(ErasureHostErrorV1::RecoveryUnavailable)));
+        assert!(matches!(
+            result,
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
     }
-    Ok(())
 }
 
 #[derive(Default)]
