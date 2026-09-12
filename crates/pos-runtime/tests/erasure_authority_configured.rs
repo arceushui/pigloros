@@ -10,10 +10,10 @@ use pos_core::{
     ErasureAdministrativeResolutionV1, ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1,
     ErasureForkAdmissionInputV1, ErasureFreezeAdmissionEvidenceInputV1,
     ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureLifecycleV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
+    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_runtime::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
@@ -206,14 +206,12 @@ fn freeze_authorization_for(
     policy: ErasureReferenceV1,
     trust: ErasureReferenceV1,
 ) -> Result<pos_core::ErasureFreezeAuthorizationEvidenceV1, pos_core::ErasureErrorV1> {
-    pos_core::ErasureFreezeAuthorizationEvidenceV1::new(
-        ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: admission.authorization_body_digest()?,
-            policy,
-            trust,
-            evidence: b"host-proof".to_vec(),
-        },
-    )
+    pos_core::ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+        admission_body_digest: admission.authorization_body_digest()?,
+        policy,
+        trust,
+        evidence: b"host-proof".to_vec(),
+    })
 }
 
 const fn receipt_input(
@@ -818,11 +816,42 @@ fn configured_authority_rejects_profile_binding_and_configuration_duplicates(
 }
 
 #[test]
-fn configured_authority_rejects_lifecycle_boundary_inputs() -> Result<(), Box<dyn std::error::Error>>
+fn configured_authority_rejects_alternate_request_for_bound_identity(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let alternate = erasure_support::request(erasure_support::RequestFixtureInput {
+        request: request.reference(),
+        subject: reference(99),
+        scope: pos_core::ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(98)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 9,
+        horizon_position: 20,
+        provenance: reference(7),
+    })?;
+    let correction = pos_core::ErasureCorrectionProvenanceV1::new(
+        pos_core::ErasureCorrectionProvenanceInputV1 {
+            rejected_request: reference(97),
+            rejected_terminal_state: reference(51),
+            correction_reason: reference(52),
+            authorization_provenance: reference(7),
+        },
+    )?;
+    assert_eq!(
+        authority.admit_corrected_submission(&alternate, &correction),
+        Err(pos_core::ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_freeze_authorization_inputs() -> Result<(), Box<dyn std::error::Error>>
 {
     let authority = authority()?;
     let request = persistence_request()?;
-    let request_reference = request.reference();
     let admission = frozen_admission(&authority, &request)?;
     let wrong_authorization = pos_core::ErasureFreezeAuthorizationEvidenceV1::new(
         ErasureFreezeAuthorizationEvidenceInputV1 {
@@ -849,6 +878,16 @@ fn configured_authority_rejects_lifecycle_boundary_inputs() -> Result<(), Box<dy
         .validate_freeze_authorization(admission.freeze_admission_evidence(), &mismatched_body)
         .is_err());
 
+    Ok(())
+}
+
+#[test]
+fn configured_authority_rejects_lifecycle_boundary_inputs() -> Result<(), Box<dyn std::error::Error>>
+{
+    let authority = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    let admission = frozen_admission(&authority, &request)?;
     let malformed_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
         request: request_reference,
         scope_commitment: ErasureReferenceV1::from_digest([0; 32]),
@@ -1095,11 +1134,8 @@ fn configured_authority_rejects_unbound_and_policy_mismatched_freeze_evidence(
         );
     }
     for (policy, trust) in [(reference(99), reference(8)), (reference(6), reference(99))] {
-        let mismatched_authorization = freeze_authorization_for(
-            admission.freeze_admission_evidence(),
-            policy,
-            trust,
-        )?;
+        let mismatched_authorization =
+            freeze_authorization_for(admission.freeze_admission_evidence(), policy, trust)?;
         assert_eq!(
             authority.validate_freeze_authorization(
                 admission.freeze_admission_evidence(),

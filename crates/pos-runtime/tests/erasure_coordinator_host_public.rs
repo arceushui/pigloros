@@ -46,6 +46,40 @@ use erasure_support::{
     retry_admission, FreezeEvidenceFixtureInput, RetryAdmissionFixture,
 };
 
+#[test]
+fn coordinator_composition_rejects_zero_identity_at_every_public_entry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let zero = ErasureReferenceV1::from_digest([0; 32]);
+    let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
+    assert!(matches!(
+        ErasureCoordinatorCompositionV1::new(Arc::clone(&authority), zero),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    ));
+    for result in [
+        ErasureExecutionHostV1::open_with_coordinator_authority(
+            StoreConfig::Memory,
+            Arc::clone(&authority),
+            zero,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+        ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+            "unused.db",
+            Arc::clone(&authority),
+            zero,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+        ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
+            StoreConfig::Memory,
+            Arc::clone(&authority),
+            zero,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    ] {
+        assert!(matches!(result, Err(ErasureHostErrorV1::RecoveryUnavailable)));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
@@ -347,14 +381,16 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         if let Some(authority) = self.configured_fork_authority() {
             let child_scope = authority.resolve_fork_child_scope(parent, child)?;
-            return Ok(if self
-                .substitute_configured_child_scope
-                .load(Ordering::Acquire)
-            {
-                reference(101)
-            } else {
-                child_scope
-            });
+            return Ok(
+                if self
+                    .substitute_configured_child_scope
+                    .load(Ordering::Acquire)
+                {
+                    reference(101)
+                } else {
+                    child_scope
+                },
+            );
         }
         self.timelines
             .lock()
@@ -1275,10 +1311,7 @@ fn memory_host_rejects_configured_fork_with_unbound_requirement_request(
         parent,
         reference(100),
     )?);
-    let mut commands = test_stage(
-        "open unbound configured fork sender",
-        host.command_sender(),
-    )?;
+    let mut commands = test_stage("open unbound configured fork sender", host.command_sender())?;
     assert!(test_stage(
         "reject configured fork with unbound requirement request",
         commands.fork_timeline_identified(
