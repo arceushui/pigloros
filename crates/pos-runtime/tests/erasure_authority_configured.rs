@@ -4,14 +4,13 @@ use std::sync::Arc;
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    destruction_command_reference, ErasureAcknowledgementProvenanceInputV1,
-    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
-    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
-    ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1, ErasureForkAdmissionInputV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq,
-    TimelineId, TimelineMeta,
+    ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+    ErasureAdministrativeResolutionV1, ErasureAuthorizationDecisionV1, ErasureDestructionCommandV1,
+    ErasureForkAdmissionInputV1, ErasureFreezeAuthorizationVerifierV1, ErasureLifecycleV1,
+    ErasureReceiptInputV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_runtime::{
     ErasureAuthorityConfigurationV1, ErasureAuthorityEvidenceKindV1,
