@@ -67,6 +67,36 @@ pub trait ErasureAuthorityEvidenceVerifierV1: std::fmt::Debug + Send + Sync {
     ) -> Result<(), ErasureErrorV1>;
 }
 
+/// Host-owned executor for irreversible erasure lifecycle operations.
+///
+/// The authority verifies identity, policy, topology, and provenance; this
+/// second seam owns delivery, quota, owner acknowledgement, and receipt
+/// admission. Keeping it separate prevents a structural verifier from
+/// silently treating an unperformed side effect as successful work.
+pub trait ErasureAuthorityExecutionV1: std::fmt::Debug + Send + Sync {
+    /// Deliver the exact idempotent destruction commands to category owners.
+    fn dispatch_destruction(
+        &self,
+        request: ErasureReferenceV1,
+        commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Reserve quota for one exact attempt identity.
+    fn reserve_attempt(
+        &self,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1>;
+
+    /// Admit one owner acknowledgement after verifying its external evidence.
+    fn admit_acknowledgement(
+        &self,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Admit one terminal receipt after checking its signature/evidence.
+    fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1>;
+}
+
 /// Ed25519 verifier for host authority evidence bundles.
 ///
 /// Evidence is a concatenation of entries, each encoded as a big-endian
@@ -219,7 +249,9 @@ impl ErasureAuthorityFreezeProfileV1 {
         child_scope: ErasureReferenceV1,
     ) -> Result<Self, ErasureErrorV1> {
         if scope_members.is_empty()
+            || scope_members.len() > pos_core::ERASURE_MAX_REFERENCES
             || targets.is_empty()
+            || targets.len() > pos_core::ERASURE_MAX_TARGETS
             || !references_present(&owners)
             || targets
                 .iter()
@@ -296,6 +328,9 @@ impl ErasureAuthorityRequestBindingV1 {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         if authorization_evidence.len() > MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if topology.len() > pos_core::ERASURE_MAX_REFERENCES {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         topology.sort_unstable_by_key(|binding| {
@@ -381,25 +416,23 @@ impl ErasureAuthorityConfigurationV1 {
 pub struct HostConfiguredErasureCoordinatorAuthorityV1 {
     configuration: ErasureAuthorityConfigurationV1,
     verifier: Arc<dyn ErasureAuthorityEvidenceVerifierV1>,
+    execution: Arc<dyn ErasureAuthorityExecutionV1>,
 }
 
 impl HostConfiguredErasureCoordinatorAuthorityV1 {
     /// Construct an authority from independently authenticated host material.
     ///
-    /// # Errors
-    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when no request binding is
-    /// configured. The supplied verifier is invoked for every admission.
+    /// The supplied verifier and executor are invoked for every admission.
     pub fn new(
         configuration: ErasureAuthorityConfigurationV1,
         verifier: Arc<dyn ErasureAuthorityEvidenceVerifierV1>,
-    ) -> Result<Self, ErasureErrorV1> {
-        if configuration.requests.is_empty() {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        Ok(Self {
+        execution: Arc<dyn ErasureAuthorityExecutionV1>,
+    ) -> Self {
+        Self {
             configuration,
             verifier,
-        })
+            execution,
+        }
     }
 
     /// Return the immutable host configuration for composition diagnostics.
@@ -688,9 +721,9 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         correction: &ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
         self.authenticate(request)?;
-        (correction.rejected_request() == request.reference())
-            .then_some(())
-            .ok_or(ErasureErrorV1::PolicyConflict)?;
+        if correction.rejected_request() == request.reference() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         for reference in [
             correction.rejected_terminal_state(),
             correction.correction_reason(),
@@ -705,7 +738,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
         let context = lifecycle_context(
             b"corrected-submission",
             request.reference(),
-            correction.reference(),
+            correction.rejected_request(),
         );
         self.check_lifecycle_provenance(binding, correction.authorization_provenance(), &context)
     }
@@ -841,7 +874,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
-        Ok(())
+        self.execution.dispatch_destruction(request, commands)
     }
 
     fn dispatch_destruction(
@@ -913,10 +946,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 return Err(ErasureErrorV1::ScopeInvalid);
             }
         }
-        Ok(ErasureAttemptQuotaReservationV1::new(
-            admission.reference(),
-            binding.lifecycle_provenance,
-        ))
+        self.execution.reserve_attempt(admission)
     }
 
     fn admit_acknowledgement(
@@ -947,7 +977,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
             acknowledgement.reference(),
         );
         self.verify(ErasureAuthorityEvidenceKindV1::Lifecycle, binding, &context)?;
-        Ok(())
+        self.execution.admit_acknowledgement(acknowledgement)
     }
 
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
@@ -971,7 +1001,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
-        Ok(())
+        self.execution.admit_receipt(input)
     }
 }
 
