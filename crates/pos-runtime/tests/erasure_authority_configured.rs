@@ -465,6 +465,22 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
         reference(6),
     )
     .is_err());
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(1); pos_core::ERASURE_MAX_REFERENCES + 1],
+        vec![target],
+        [reference(2), reference(3), reference(4), reference(5)],
+        None,
+        reference(6),
+    )
+    .is_err());
+    assert!(ErasureAuthorityFreezeProfileV1::new(
+        vec![reference(1)],
+        vec![target; pos_core::ERASURE_MAX_TARGETS + 1],
+        [reference(2), reference(3), reference(4), reference(5)],
+        None,
+        reference(6),
+    )
+    .is_err());
     let request = persistence_request()?;
     assert!(ErasureAuthorityRequestBindingV1::new(
         request,
