@@ -155,8 +155,8 @@ def check_workflow(
     require(isinstance(coverage, dict), "missing required coverage job")
     require("continue-on-error" not in coverage, "coverage job must be blocking")
     require(
-        coverage.get("needs") == "ci_change_scope",
-        "coverage must depend on the trusted Rust scope result",
+        coverage.get("needs") == ["ci_change_scope", "clippy"],
+        "coverage must depend on the trusted scope result and Clippy",
     )
     require(
         coverage.get("if") == SCOPED_JOB_IF,
