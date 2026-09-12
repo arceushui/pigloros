@@ -132,9 +132,8 @@ impl RootSelectorService {
         stream
             .set_read_timeout(Some(Duration::from_millis(resolved.attempt().watchdog_ms)))
             .and_then(|()| {
-                stream.set_write_timeout(Some(Duration::from_millis(
-                    resolved.attempt().watchdog_ms,
-                )))
+                stream
+                    .set_write_timeout(Some(Duration::from_millis(resolved.attempt().watchdog_ms)))
             })
             .map_err(|_| SelectorBoundaryError::Io)?;
         let Ok((image, launch)) = selected_image_and_launch(&self.admitted, requirement) else {
@@ -313,20 +312,21 @@ fn prepare_authenticated_execution(
     spx1: &[u8],
     execution: &mut AuthenticatedProviderExecution,
 ) -> Result<EncodedSelectorReply, ()> {
-    let output = execution.with_verified_output(|descriptor, reader| {
-        let capacity = usize::try_from(descriptor.byte_length)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let mut bytes = Vec::with_capacity(capacity);
-        reader
-            .take(descriptor.byte_length.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        if bytes.len() != capacity {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        Ok(bytes)
-    })
-    .map_err(|_| ())?;
+    let output = execution
+        .with_verified_output(|descriptor, reader| {
+            let capacity = usize::try_from(descriptor.byte_length)
+                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+            let mut bytes = Vec::with_capacity(capacity);
+            reader
+                .take(descriptor.byte_length.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|_| SelectorBoundaryError::Io)?;
+            if bytes.len() != capacity {
+                return Err(SelectorBoundaryError::ArtifactInvalid);
+            }
+            Ok(bytes)
+        })
+        .map_err(|_| ())?;
     encode_authenticated_reply(
         decoded,
         AuthenticatedSelectorReply {

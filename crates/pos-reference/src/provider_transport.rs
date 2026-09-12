@@ -576,13 +576,14 @@ fn classify_receive_failure(
     retained_grant: &Option<RetainedGrant>,
     failure: PostAdmissionProviderFailure,
 ) -> ProviderTransportError {
-    retained_grant.as_ref().map_or(
-        ProviderTransportError::BeforeAdmission,
-        |grant| ProviderTransportError::AfterAdmission {
-            agr1_digest: grant.digest,
-            failure,
-        },
-    )
+    retained_grant
+        .as_ref()
+        .map_or(ProviderTransportError::BeforeAdmission, |grant| {
+            ProviderTransportError::AfterAdmission {
+                agr1_digest: grant.digest,
+                failure,
+            }
+        })
 }
 
 fn read_audit_and_receipt(
@@ -1016,9 +1017,11 @@ mod tests {
             ),
             Err(ReceiveFailure::Incomplete)
         ));
-        let grant = fixture
-            .provider
-            .authenticate_selector_grant(&fixture.agr1, &fixture.request, &fixture.commitment)?;
+        let grant = fixture.provider.authenticate_selector_grant(
+            &fixture.agr1,
+            &fixture.request,
+            &fixture.commitment,
+        )?;
         assert!(matches!(
             classify_receive_failure(
                 &retained_grant,
@@ -1054,9 +1057,11 @@ mod tests {
             ),
             Err(ReceiveFailure::Invalid)
         ));
-        let grant = fixture
-            .provider
-            .authenticate_selector_grant(&fixture.agr1, &fixture.request, &fixture.commitment)?;
+        let grant = fixture.provider.authenticate_selector_grant(
+            &fixture.agr1,
+            &fixture.request,
+            &fixture.commitment,
+        )?;
         assert!(matches!(
             classify_receive_failure(
                 &retained_grant,

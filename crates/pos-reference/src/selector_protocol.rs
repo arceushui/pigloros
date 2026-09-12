@@ -148,7 +148,7 @@ pub(crate) fn decode_request(
     control: &[u8],
     trailing: &[u8],
 ) -> Result<DecodedSelectorRequest, AdapterError> {
-    if !selector_input_within_limit(trailing.len()) {
+    if trailing.len() > SELECTOR_INPUT_LIMIT {
         return Err(AdapterError::ProtocolFailure);
     }
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
@@ -971,7 +971,9 @@ mod tests {
         request.output_capability.capability_digest = request
             .expected_output_capability_digest()
             .map_err(|_| AdapterError::ProtocolFailure)?;
-        request.request_digest = request.digest().map_err(|_| AdapterError::ProtocolFailure)?;
+        request.request_digest = request
+            .digest()
+            .map_err(|_| AdapterError::ProtocolFailure)?;
         Ok(request)
     }
 

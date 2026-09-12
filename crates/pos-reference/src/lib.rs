@@ -76,11 +76,9 @@ pub mod selector_transport_test_fixture {
             provider.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
         let launch = provider.admit_launch_policy(&fixture.lps1, &image)?;
         let spx1 = execute_request(&fixture, &launch, &["execute"])?;
-        let request = crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
-            &spx1,
-        )?;
-        let commitment =
-            fixture.selector_grant_commitment(&provider, &image, &launch, &request)?;
+        let request =
+            crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(&spx1)?;
+        let commitment = fixture.selector_grant_commitment(&provider, &image, &launch, &request)?;
         let agr1 = admission_grant(&fixture, &request, &launch, &commitment)?;
         provider.authenticate_selector_grant(&agr1, &request, &commitment)?;
         Ok(TransportAdmissionFixture {
