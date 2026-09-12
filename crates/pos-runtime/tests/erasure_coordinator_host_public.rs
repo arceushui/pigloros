@@ -1147,13 +1147,12 @@ fn memory_host_resolves_configured_fork_scope_through_public_sender(
         .ok_or("configured fork state missing")?
         .manifest_digest()
     };
-    authority
-        .install_configured_fork_authority(configured_fork_authority(
-            request,
-            manifest,
-            parent,
-            reference(100),
-        )?);
+    authority.install_configured_fork_authority(configured_fork_authority(
+        request,
+        manifest,
+        parent,
+        reference(100),
+    )?);
     let child = {
         let mut commands = test_stage("open configured fork sender", host.command_sender())?;
         test_stage(
@@ -1195,7 +1194,10 @@ fn memory_host_rejects_configured_fork_lineage_that_conflicts_with_inventory(
         submit_authorize_freeze(&mut host, request.clone()),
     )?;
     let manifest = {
-        let mut reads = test_stage("open conflicting configured fork reader", host.read_sender())?;
+        let mut reads = test_stage(
+            "open conflicting configured fork reader",
+            host.read_sender(),
+        )?;
         test_stage(
             "read conflicting configured fork state",
             reads.erasure_state(request_reference),
