@@ -17,8 +17,9 @@ use pos_core::{
 use pos_runtime::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
     ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
-    ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
-    ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
+    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1,
+    ErasureAuthorityRequestBindingV1, ErasureAuthorityTopologyBindingV1,
+    ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, HostConfiguredErasureCoordinatorAuthorityV1,
 };
 
@@ -29,8 +30,57 @@ mod erasure_support;
 #[path = "support/configured_authority.rs"]
 pub mod configured_authority_support;
 
-use configured_authority_support::{RejectingEvidenceVerifier, TestEvidenceVerifier, TestExecution};
+use configured_authority_support::{TestEvidenceVerifier, TestExecution};
 use erasure_support::{persistence_request, persistence_target, reference, retry_admission};
+
+#[derive(Debug)]
+struct RejectingEvidenceVerifier;
+
+impl ErasureAuthorityEvidenceVerifierV1 for RejectingEvidenceVerifier {
+    fn verify(
+        &self,
+        _kind: ErasureAuthorityEvidenceKindV1,
+        _request: &pos_core::ErasureRequestV1,
+        _context: &[u8],
+        _evidence: &[u8],
+    ) -> Result<(), pos_core::ErasureErrorV1> {
+        Err(pos_core::ErasureErrorV1::Unauthorized)
+    }
+}
+
+#[derive(Debug)]
+struct RejectingExecution;
+
+impl ErasureAuthorityExecutionV1 for RejectingExecution {
+    fn dispatch_destruction(
+        &self,
+        _request: ErasureReferenceV1,
+        _commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), pos_core::ErasureErrorV1> {
+        Err(pos_core::ErasureErrorV1::Unauthorized)
+    }
+
+    fn reserve_attempt(
+        &self,
+        _admission: &ErasureRetryAdmissionV1,
+    ) -> Result<pos_core::ErasureAttemptQuotaReservationV1, pos_core::ErasureErrorV1> {
+        Err(pos_core::ErasureErrorV1::Unauthorized)
+    }
+
+    fn admit_acknowledgement(
+        &self,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), pos_core::ErasureErrorV1> {
+        Err(pos_core::ErasureErrorV1::Unauthorized)
+    }
+
+    fn admit_receipt(
+        &self,
+        _input: &ErasureReceiptInputV1,
+    ) -> Result<(), pos_core::ErasureErrorV1> {
+        Err(pos_core::ErasureErrorV1::Unauthorized)
+    }
+}
 
 fn authority() -> Result<HostConfiguredErasureCoordinatorAuthorityV1, Box<dyn std::error::Error>> {
     authority_with(true)
@@ -1078,6 +1128,52 @@ fn configured_authority_propagates_rejected_evidence_at_each_public_admission(
             },
         )
         .is_err());
+    let command =
+        ErasureDestructionCommandV1::from_obligation(&admission.obligations()[0], reference(7));
+    assert!(authority
+        .dispatch_destruction(request_reference, &[command])
+        .is_err());
+    let retry = retry_admission(erasure_support::RetryAdmissionFixture {
+        request: request_reference,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        obligations: admission.obligations(),
+        policy: reference(6),
+        trust: reference(8),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })?;
+    assert!(authority.admit_attempt(&retry).is_err());
+    let acknowledgement = acknowledgement(
+        request_reference,
+        retry.reference(),
+        admission.obligations()[0].reference(),
+        admission.obligations()[0].command_identity(),
+    )?;
+    assert!(authority.admit_acknowledgement(&acknowledgement).is_err());
+    assert!(authority
+        .admit_receipt(&receipt_input(
+            request_reference,
+            ErasureLifecycleV1::Complete,
+            reference(54),
+        ))
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn configured_authority_propagates_rejected_host_execution_at_each_public_seam(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let accepting = authority()?;
+    let request = persistence_request()?;
+    let request_reference = request.reference();
+    let admission = frozen_admission(&accepting, &request)?;
+    let authority = HostConfiguredErasureCoordinatorAuthorityV1::new(
+        accepting.configuration().clone(),
+        Arc::new(TestEvidenceVerifier),
+        Arc::new(RejectingExecution),
+    );
     let command =
         ErasureDestructionCommandV1::from_obligation(&admission.obligations()[0], reference(7));
     assert!(authority
