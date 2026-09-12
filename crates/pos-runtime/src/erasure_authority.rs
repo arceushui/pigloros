@@ -75,6 +75,9 @@ pub trait ErasureAuthorityEvidenceVerifierV1: std::fmt::Debug + Send + Sync {
 /// silently treating an unperformed side effect as successful work.
 pub trait ErasureAuthorityExecutionV1: std::fmt::Debug + Send + Sync {
     /// Deliver the exact idempotent destruction commands to category owners.
+    ///
+    /// # Errors
+    /// Returns a closed delivery error when an owner rejects the command set.
     fn dispatch_destruction(
         &self,
         request: ErasureReferenceV1,
@@ -82,18 +85,30 @@ pub trait ErasureAuthorityExecutionV1: std::fmt::Debug + Send + Sync {
     ) -> Result<(), ErasureErrorV1>;
 
     /// Reserve quota for one exact attempt identity.
+    ///
+    /// # Errors
+    /// Returns a closed quota or authorization error when the attempt cannot
+    /// be admitted.
     fn reserve_attempt(
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1>;
 
     /// Admit one owner acknowledgement after verifying its external evidence.
+    ///
+    /// # Errors
+    /// Returns a closed evidence or owner error when the acknowledgement is
+    /// not accepted.
     fn admit_acknowledgement(
         &self,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1>;
 
     /// Admit one terminal receipt after checking its signature/evidence.
+    ///
+    /// # Errors
+    /// Returns a closed signature or evidence error when the receipt is not
+    /// accepted.
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1>;
 }
 
