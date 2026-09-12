@@ -205,6 +205,15 @@ fn ed25519_evidence_verifier_requires_exact_signed_context(
         Ed25519ErasureAuthorityEvidenceVerifierV1::new(pos_core::PublicKey::from_bytes([0; 32]),)
             .is_err()
     );
+    let oversized = vec![0; pos_runtime::MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES + 1];
+    assert!(verifier
+        .verify(
+            ErasureAuthorityEvidenceKindV1::Request,
+            &request,
+            context,
+            &oversized,
+        )
+        .is_err());
     Ok(())
 }
 

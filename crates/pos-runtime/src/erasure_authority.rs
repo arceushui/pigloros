@@ -29,6 +29,9 @@ use pos_core::{
 
 use super::erasure_host::ErasureCoordinatorAuthorityV1;
 
+/// Maximum encoded host evidence accepted for one request binding.
+pub const MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES: usize = 1_048_576;
+
 /// Operation whose host evidence is being checked by an authority provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErasureAuthorityEvidenceKindV1 {
@@ -97,6 +100,9 @@ impl ErasureAuthorityEvidenceVerifierV1 for Ed25519ErasureAuthorityEvidenceVerif
         context: &[u8],
         evidence: &[u8],
     ) -> Result<(), ErasureErrorV1> {
+        if evidence.len() > MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
         let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&self.public_key)
             .map_err(|_| ErasureErrorV1::TrustSnapshotInvalid)?;
         let mut cursor = 0;
@@ -288,6 +294,9 @@ impl ErasureAuthorityRequestBindingV1 {
             || authorization_evidence.is_empty()
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if authorization_evidence.len() > MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES {
+            return Err(ErasureErrorV1::ScopeInvalid);
         }
         topology.sort_unstable_by_key(|binding| {
             (binding.manifest_digest, binding.timeline, binding.scope)
