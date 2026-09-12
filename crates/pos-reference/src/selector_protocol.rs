@@ -1558,6 +1558,36 @@ mod tests {
     }
 
     #[test]
+    fn sly1_preserves_pre_admission_failure_and_closes_missing_bound_execute_request(
+    ) -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let unavailable = unavailable_reply(&encoded, [14; 32], 2)?;
+        let document = decode_canonical_with_limit(&unavailable, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array_values(&document).map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut fields = array_values(&wrapper[0])
+            .map_err(|_| AdapterError::ProtocolFailure)?
+            .to_vec();
+        fields[5] = Value::Null;
+        let (control, _) = protocol_record("SLY1", fields, false)?;
+        assert_eq!(
+            decode_reply(&control, &[], &encoded, [14; 32], 1024),
+            Err(AdapterError::ProtocolFailure)
+        );
+
+        let (admitted, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
+        for spx in [Value::Null, Value::Bytes(b"not-canonical-spx".to_vec())] {
+            let mut fields = admitted_evidence(&admitted)?.fields;
+            fields[5] = spx;
+            assert_eq!(
+                decode_provider_result(&fields, &trailing, &encoded, 1024),
+                Err(AdapterError::AuthenticatedEvidenceFailure)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn sly1_rejects_wrong_execute_authority_and_output_descriptor() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
         let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
