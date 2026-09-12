@@ -100,6 +100,8 @@ impl ErasureAuthorityEvidenceVerifierV1 for Ed25519ErasureAuthorityEvidenceVerif
         let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&self.public_key)
             .map_err(|_| ErasureErrorV1::TrustSnapshotInvalid)?;
         let mut cursor = 0;
+        let mut matched = false;
+        let mut matched_valid = false;
         while cursor < evidence.len() {
             let length_end = cursor
                 .checked_add(4)
@@ -128,17 +130,23 @@ impl ErasureAuthorityEvidenceVerifierV1 for Ed25519ErasureAuthorityEvidenceVerif
                 .ok_or(ErasureErrorV1::InvalidEncoding)?;
             cursor = signature_end;
             if signed_context == context {
+                if matched {
+                    return Err(ErasureErrorV1::Unauthorized);
+                }
+                matched = true;
                 let signature = Signature::from_bytes(
                     signature_bytes
                         .try_into()
                         .map_err(|_| ErasureErrorV1::InvalidEncoding)?,
                 );
                 let payload = CanonicalBytes::from_vec(context.to_vec());
-                return pos_crypto::signing::verify(&verifying_key, &payload, &signature)
-                    .map_err(|_| ErasureErrorV1::Unauthorized);
+                matched_valid =
+                    pos_crypto::signing::verify(&verifying_key, &payload, &signature).is_ok();
             }
         }
-        Err(ErasureErrorV1::Unauthorized)
+        matched_valid
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 }
 
