@@ -4508,8 +4508,10 @@ dependencies = [
 name = "pos-runtime"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "indexmap",
  "pos-core",
+ "pos-crypto",
  "pos-state",
  "pos-store",
  "serde_json",

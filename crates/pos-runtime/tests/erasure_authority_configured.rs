@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use ed25519_dalek::Signer;
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
@@ -12,10 +13,11 @@ use pos_core::{
     ErasureScopeExtensionV1, ErasureStateTransitionV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_runtime::{
-    ErasureAuthorityConfigurationV1, ErasureAuthorityEvidenceKindV1,
-    ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityFreezeProfileV1,
-    ErasureAuthorityRequestBindingV1, ErasureAuthorityTopologyBindingV1,
-    ErasureCoordinatorAuthorityV1, HostConfiguredErasureCoordinatorAuthorityV1,
+    Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
+    ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
+    ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
+    ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
+    HostConfiguredErasureCoordinatorAuthorityV1,
 };
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
@@ -142,6 +144,47 @@ fn configured_authority_admits_public_lifecycle_seams() -> Result<(), Box<dyn st
 
     admit_destruction_and_receipt(&authority, request_reference, &admission)?;
     admit_resolution_and_fork(&authority, request_reference)?;
+    Ok(())
+}
+
+#[test]
+fn ed25519_evidence_verifier_requires_exact_signed_context(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let public_key = pos_core::PublicKey::from_bytes(signing_key.verifying_key().to_bytes());
+    let verifier = Ed25519ErasureAuthorityEvidenceVerifierV1::new(public_key)?;
+    let request = persistence_request()?;
+    let context = b"request-context";
+    let signature = signing_key.sign(context);
+    let mut evidence = (u32::try_from(context.len())?).to_be_bytes().to_vec();
+    evidence.extend_from_slice(context);
+    evidence.extend_from_slice(&signature.to_bytes());
+    verifier.verify(
+        ErasureAuthorityEvidenceKindV1::Request,
+        &request,
+        context,
+        &evidence,
+    )?;
+    assert!(verifier
+        .verify(
+            ErasureAuthorityEvidenceKindV1::Request,
+            &request,
+            b"different-context",
+            &evidence,
+        )
+        .is_err());
+    assert!(verifier
+        .verify(
+            ErasureAuthorityEvidenceKindV1::Request,
+            &request,
+            context,
+            &[0, 0, 0],
+        )
+        .is_err());
+    assert!(
+        Ed25519ErasureAuthorityEvidenceVerifierV1::new(pos_core::PublicKey::from_bytes([0; 32]),)
+            .is_err()
+    );
     Ok(())
 }
 
