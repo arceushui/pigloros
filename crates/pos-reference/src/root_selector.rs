@@ -48,7 +48,7 @@ const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
 /// rejects it before any listener can be exposed, until #214 supplies the
 /// required lifecycle-backed recovery composition.
-pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
+pub fn run_fixed() -> Result<(), SelectorBoundaryError> {
     let admitted = InstalledSelectorState::open()?
         .authenticate_bootstrap()?
         .admit_provider()?;
@@ -84,9 +84,11 @@ impl RootSelectorService {
                 .map_err(|_| SelectorBoundaryError::Io)?;
             match self.handle_connection(stream) {
                 Ok(())
-                | Err(SelectorBoundaryError::ArtifactInvalid)
-                | Err(SelectorBoundaryError::SelectorUnavailable)
-                | Err(SelectorBoundaryError::Io) => {}
+                | Err(
+                    SelectorBoundaryError::ArtifactInvalid
+                    | SelectorBoundaryError::SelectorUnavailable
+                    | SelectorBoundaryError::Io,
+                ) => {}
             }
         }
     }
@@ -99,9 +101,8 @@ impl RootSelectorService {
             .set_read_timeout(Some(INITIAL_IO_TIMEOUT))
             .and_then(|()| stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT)))
             .map_err(|_| SelectorBoundaryError::Io)?;
-        let (decoded, input) = match read_selector_request(&mut stream) {
-            Ok(decoded) => decoded,
-            Err(()) => return write_unidentified_request_error(&mut stream),
+        let Ok((decoded, input)) = read_selector_request(&mut stream) else {
+            return write_unidentified_request_error(&mut stream);
         };
         stream
             .set_read_timeout(Some(Duration::from_millis(decoded.attempt.watchdog_ms)))
@@ -109,18 +110,17 @@ impl RootSelectorService {
                 stream.set_write_timeout(Some(Duration::from_millis(decoded.attempt.watchdog_ms)))
             })
             .map_err(|_| SelectorBoundaryError::Io)?;
-        self.handle_decoded_request(&mut stream, decoded, &input)
+        self.handle_decoded_request(&mut stream, &decoded, &input)
     }
 
     fn handle_decoded_request(
         &self,
         stream: &mut UnixStream,
-        decoded: DecodedSelectorRequest,
+        decoded: &DecodedSelectorRequest,
         input: &[u8],
     ) -> Result<(), SelectorBoundaryError> {
-        let requirement = match decoded.request.sandbox_requirement.as_ref() {
-            Some(requirement) => requirement,
-            None => return write_policy_error(stream, &decoded),
+        let Some(requirement) = decoded.request.sandbox_requirement.as_ref() else {
+            return write_policy_error(stream, decoded);
         };
         let ordinal = u16::from_be_bytes([
             decoded.provider_request_id[14],
@@ -132,42 +132,38 @@ impl RootSelectorService {
             .resolve_installed_case(&decoded.request, ordinal)
         {
             Ok(resolved) if resolved.attempt() == &decoded.attempt => resolved,
-            Ok(_) | Err(_) => return write_authority_mismatch(stream, &decoded),
+            Ok(_) | Err(_) => return write_authority_mismatch(stream, decoded),
         };
-        let (image, launch) = match selected_image_and_launch(&self.admitted, requirement) {
-            Ok(selection) => selection,
-            Err(_) => return write_policy_error(stream, &decoded),
+        let Ok((image, launch)) = selected_image_and_launch(&self.admitted, requirement) else {
+            return write_policy_error(stream, decoded);
         };
-        let commitment = match self.admitted.provider().derive_selector_grant_commitment(
+        let Ok(commitment) = self.admitted.provider().derive_selector_grant_commitment(
             &image,
             &launch,
             &decoded.request,
             resolved.attempt(),
             &[],
-        ) {
-            Ok(commitment) => commitment,
-            Err(_) => return write_authority_mismatch(stream, &decoded),
+        ) else {
+            return write_authority_mismatch(stream, decoded);
         };
-        let spx1 = match selector_execute_bytes(&self.admitted, &decoded, &resolved, requirement) {
-            Ok(bytes) => bytes,
-            Err(_) => return write_authority_mismatch(stream, &decoded),
+        let Ok(spx1) = selector_execute_bytes(&self.admitted, decoded, &resolved, requirement) else {
+            return write_authority_mismatch(stream, decoded);
         };
-        let terminal = match self.transport.execute(
+        let Ok(terminal) = self.transport.execute(
             &self.admitted,
             &commitment,
             &spx1,
             input,
             Duration::from_millis(decoded.attempt.watchdog_ms),
-        ) {
-            Ok(execution) => execution,
-            Err(_) => return write_provider_unavailable(stream, &decoded),
+        ) else {
+            return write_provider_unavailable(stream, decoded);
         };
         match terminal {
             AuthenticatedProviderTerminal::Execution(execution) => {
-                write_authenticated_execution(stream, &decoded, &spx1, execution)
+                write_authenticated_execution(stream, decoded, &spx1, execution)
             }
             AuthenticatedProviderTerminal::Error(error) => {
-                write_authenticated_error(stream, &decoded, &spx1, &error)
+                write_authenticated_error(stream, decoded, &spx1, &error)
             }
         }
     }
@@ -319,7 +315,7 @@ fn write_authenticated_execution(
         },
     )
     .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    write_reply(stream, reply)
+    write_reply(stream, &reply)
 }
 
 fn write_authenticated_error(
@@ -336,13 +332,13 @@ fn write_authenticated_error(
         },
     )
     .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    write_reply(stream, reply)
+    write_reply(stream, &reply)
 }
 
 fn write_unidentified_request_error(stream: &mut UnixStream) -> Result<(), SelectorBoundaryError> {
     write_local_error(
         stream,
-        SandboxLocalError {
+        &SandboxLocalError {
             phase: SandboxLocalErrorPhase::BeforeSpx1,
             operation: None,
             request_id: None,
@@ -360,7 +356,7 @@ fn write_policy_error(
 ) -> Result<(), SelectorBoundaryError> {
     write_local_error(
         stream,
-        SandboxLocalError {
+        &SandboxLocalError {
             phase: SandboxLocalErrorPhase::BeforeSpx1,
             operation: Some(SandboxProviderOperation::Execute),
             request_id: Some(decoded.provider_request_id),
@@ -378,7 +374,7 @@ fn write_authority_mismatch(
 ) -> Result<(), SelectorBoundaryError> {
     write_local_error(
         stream,
-        SandboxLocalError {
+        &SandboxLocalError {
             phase: SandboxLocalErrorPhase::BeforeSpx1,
             operation: Some(SandboxProviderOperation::Execute),
             request_id: Some(decoded.provider_request_id),
@@ -396,7 +392,7 @@ fn write_provider_unavailable(
 ) -> Result<(), SelectorBoundaryError> {
     write_local_error(
         stream,
-        SandboxLocalError {
+        &SandboxLocalError {
             phase: SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
             operation: Some(SandboxProviderOperation::Execute),
             request_id: Some(decoded.provider_request_id),
@@ -410,16 +406,16 @@ fn write_provider_unavailable(
 
 fn write_local_error(
     stream: &mut UnixStream,
-    error: SandboxLocalError,
+    error: &SandboxLocalError,
 ) -> Result<(), SelectorBoundaryError> {
-    encode_local_error_reply(&error)
+    encode_local_error_reply(error)
         .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
-        .and_then(|reply| write_reply(stream, reply))
+        .and_then(|reply| write_reply(stream, &reply))
 }
 
 fn write_reply(
     stream: &mut UnixStream,
-    reply: EncodedSelectorReply,
+    reply: &EncodedSelectorReply,
 ) -> Result<(), SelectorBoundaryError> {
     let length = u32::try_from(reply.control.len()).map_err(|_| SelectorBoundaryError::Io)?;
     stream
@@ -453,8 +449,7 @@ fn read_selector_request(stream: &mut UnixStream) -> Result<(DecodedSelectorRequ
 
 fn root_peer(stream: &UnixStream) -> bool {
     socket_peercred(stream.as_fd())
-        .map(|credentials| credentials.uid.as_raw() == ROOT_UID)
-        .unwrap_or(false)
+        .is_ok_and(|credentials| credentials.uid.as_raw() == ROOT_UID)
 }
 
 struct FixedListener {

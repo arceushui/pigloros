@@ -18,7 +18,7 @@ const TPS1_OBJECT: InstallationObjectKind = InstallationObjectKind(15);
 /// The root-selector composition retains this type inside the crate. It never
 /// accepts a caller-provided archive, artifact path, or compatibility fallback.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedInstalledCase {
+pub struct ResolvedInstalledCase {
     attempt: CaseAttempt,
     fixture_contract_digest: [u8; 32],
     profile_digest: [u8; 32],
@@ -32,7 +32,7 @@ impl ResolvedInstalledCase {
         &self.attempt
     }
 
-    /// Returns the CPF1 FixtureContract binding for this attempt.
+    /// Returns the CPF1 `FixtureContract` binding for this attempt.
     #[must_use]
     pub(crate) const fn fixture_contract_digest(&self) -> [u8; 32] {
         self.fixture_contract_digest

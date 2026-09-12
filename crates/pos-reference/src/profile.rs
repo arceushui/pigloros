@@ -435,7 +435,7 @@ impl Profile {
             .collect()
     }
 
-    /// Returns the verified FixtureContract binding selected by CPF1.
+    /// Returns the verified `FixtureContract` binding selected by CPF1.
     #[must_use]
     pub(crate) const fn fixture_contract_digest(&self) -> [u8; 32] {
         self.fixture_contract_digest

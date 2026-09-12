@@ -582,10 +582,12 @@ fn drain_exact<R: Read + ?Sized>(archive: &mut R, mut length: u64) -> Result<(),
     Ok(())
 }
 
+type VerifiedArchiveMembers = (BTreeMap<String, VerifiedMember>, [u8; 32], [u8; 64]);
+
 fn read_verified_members<R: Read + ?Sized>(
     archive: &mut R,
     archive_length: u64,
-) -> Result<(BTreeMap<String, VerifiedMember>, [u8; 32], [u8; 64]), BundleError> {
+) -> Result<VerifiedArchiveMembers, BundleError> {
     let mut decoder = Decoder::from(&mut *archive);
     expect_array(&mut decoder, 4)?;
     skip_cbor_value(&mut decoder, 0)?;

@@ -34,20 +34,20 @@ const ROOT_UID: u32 = 0;
 
 /// Root-owned execute transport bound to the single SIC1-selected endpoint.
 #[derive(Debug)]
-pub(crate) struct ProviderTransport {
+pub struct ProviderTransport {
     endpoint: SelectedProviderEndpoint,
 }
 
 /// Complete provider evidence authenticated against an admitted selector provider.
 #[derive(Debug)]
-pub(crate) struct AuthenticatedProviderExecution {
+pub struct AuthenticatedProviderExecution {
     frames: AuthenticatedProviderFrames,
     output: Option<StagedProviderOutput>,
 }
 
 /// One selected-provider terminal authenticated against the exact SPX1 request.
 #[derive(Debug)]
-pub(crate) enum AuthenticatedProviderTerminal {
+pub enum AuthenticatedProviderTerminal {
     /// AGR1, SPR1, SPY1, and SAU1 complete provider evidence.
     Execution(AuthenticatedProviderExecution),
     /// Exact selected-runtime-signed SPE1 bytes bound to the submitted SPX1.
@@ -108,12 +108,17 @@ struct AuthenticatedProviderFrames {
 }
 
 impl AuthenticatedProviderFrames {
-    fn new(agr1: Vec<u8>, spr1: Vec<u8>, spy1: Vec<u8>, sau1: Vec<Vec<u8>>) -> Self {
+    const fn new(
+        grant: Vec<u8>,
+        receipt: Vec<u8>,
+        result: Vec<u8>,
+        audit_records: Vec<Vec<u8>>,
+    ) -> Self {
         Self {
-            agr1,
-            spr1,
-            spy1,
-            sau1,
+            agr1: grant,
+            spr1: receipt,
+            spy1: result,
+            sau1: audit_records,
         }
     }
 
@@ -142,7 +147,7 @@ struct StagedProviderOutput {
 }
 
 impl StagedProviderOutput {
-    fn new(file: tempfile::NamedTempFile, descriptor: PayloadDescriptor) -> Self {
+    const fn new(file: tempfile::NamedTempFile, descriptor: PayloadDescriptor) -> Self {
         Self { file, descriptor }
     }
 
@@ -761,13 +766,16 @@ mod tests {
     fn frames_preserve_payload_and_require_a_bounded_nonempty_length() -> TestResult {
         let (mut writer, mut reader) = UnixStream::pair()?;
         let deadline = Deadline::new(Duration::from_secs(1))?;
-        write_frame(&mut writer, b"provider", &deadline)?;
+        write_frame(&mut writer, b"provider", &deadline).map_err(|error| format!("{error:?}"))?;
         writer.shutdown(std::net::Shutdown::Write)?;
         assert_eq!(
-            read_frame(&mut reader, &deadline)?,
+            read_frame(&mut reader, &deadline).map_err(|error| format!("{error:?}"))?,
             Some(b"provider".to_vec())
         );
-        assert_eq!(read_frame(&mut reader, &deadline)?, None);
+        assert_eq!(
+            read_frame(&mut reader, &deadline).map_err(|error| format!("{error:?}"))?,
+            None
+        );
         Ok(())
     }
 
@@ -798,11 +806,11 @@ mod tests {
         let second_audit = selector_record("SAU1")?;
         let receipt = selector_record("SPR1")?;
         for frame in [&first_audit, &second_audit, &receipt] {
-            write_frame(&mut writer, frame, &deadline)?;
+            write_frame(&mut writer, frame, &deadline).map_err(|error| format!("{error:?}"))?;
         }
         writer.shutdown(std::net::Shutdown::Write)?;
         assert_eq!(
-            read_audit_and_receipt(&mut reader, &deadline)?,
+            read_audit_and_receipt(&mut reader, &deadline).map_err(|error| format!("{error:?}"))?,
             (vec![first_audit, second_audit], receipt)
         );
         Ok(())
@@ -812,7 +820,8 @@ mod tests {
     fn audit_reader_rejects_a_non_audit_frame_before_spr1() -> TestResult {
         let (mut writer, mut reader) = UnixStream::pair()?;
         let deadline = Deadline::new(Duration::from_secs(1))?;
-        write_frame(&mut writer, &selector_record("SBC1")?, &deadline)?;
+        write_frame(&mut writer, &selector_record("SBC1")?, &deadline)
+            .map_err(|error| format!("{error:?}"))?;
         writer.shutdown(std::net::Shutdown::Write)?;
         assert_eq!(
             read_audit_and_receipt(&mut reader, &deadline),
@@ -826,9 +835,10 @@ mod tests {
         let (mut writer, mut reader) = UnixStream::pair()?;
         let deadline = Deadline::new(Duration::from_secs(1))?;
         let result = selector_record("SPY1")?;
-        write_frame(&mut writer, &result, &deadline)?;
+        write_frame(&mut writer, &result, &deadline).map_err(|error| format!("{error:?}"))?;
         writer.shutdown(std::net::Shutdown::Write)?;
-        let (_, chunks, terminal) = read_output_frames(&mut reader, &deadline)?;
+        let (_, chunks, terminal) =
+            read_output_frames(&mut reader, &deadline).map_err(|error| format!("{error:?}"))?;
         assert!(chunks.is_empty());
         assert_eq!(terminal, result);
         Ok(())
@@ -915,6 +925,6 @@ mod tests {
     fn selector_record(magic: &str) -> TestResult<Vec<u8>> {
         let unsigned = Value::Array(vec![Value::Text(magic.to_owned())]);
         encode_value(&Value::Array(vec![unsigned, Value::Bytes(vec![1])]))
-            .map_err(|error| error.to_string().into())
+            .map_err(|error| format!("{error:?}").into())
     }
 }

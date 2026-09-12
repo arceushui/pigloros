@@ -59,6 +59,7 @@ pub(crate) struct AuthenticatedSelectorReply<'a> {
 }
 
 /// Closed terminal alternatives for the root-owned selector reply.
+#[derive(Clone, Copy)]
 pub(crate) enum SelectorProviderTerminal<'a> {
     Result {
         result: &'a [u8],
@@ -330,7 +331,9 @@ fn encode_result_terminal<'a>(
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
     let result = SandboxProviderResult::from_canonical_cbor(result_bytes)
         .map_err(|_| AdapterError::ProtocolFailure)?;
-    if result.request_id != request.provider_request_id || result.attempt_id != request.attempt_id {
+    if (result.request_id, result.attempt_id)
+        != (request.provider_request_id, request.attempt_id)
+    {
         return Err(AdapterError::ProtocolFailure);
     }
     match result.outcome {
@@ -868,7 +871,8 @@ mod tests {
             .map_err(|_| AdapterError::ProtocolFailure)?;
         let wrapper = array_values(&document).map_err(|_| AdapterError::ProtocolFailure)?;
         let fields = array_values(&wrapper[0]).map_err(|_| AdapterError::ProtocolFailure)?;
-        let audit_records = array_values(&fields[10])?
+        let audit_records = array_values(&fields[10])
+            .map_err(|_| AdapterError::ProtocolFailure)?
             .iter()
             .map(|record| bytes(record).map(ToOwned::to_owned))
             .collect::<Result<Vec<_>, _>>()?;
