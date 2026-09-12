@@ -69,7 +69,26 @@ EXPECTED_STEP_ENV = {
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
-EXPECTED_SCOPE_JOB = "ci_change_scope"
+EXPECTED_SCOPE_JOB = [
+    "ci_change_scope",
+    "fmt",
+    "rustdoc",
+    "test",
+    "reference-evaluator-release",
+    "conformance-fixtures",
+    "materialize-conformance-bundles",
+    "conformance-non-linux",
+    "clippy",
+    "coverage",
+    "cargo-crap",
+    "audit",
+    "deny",
+    "cargo-shear",
+    "geiger",
+    "docker-build",
+    "world-client-wasm",
+    "world-client-browser-parity",
+]
 EXPECTED_SCOPE_IF = (
     "${{ needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request' }}"
