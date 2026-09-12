@@ -6,7 +6,7 @@
 //! and fixed administrative-listener binding complete.
 
 use std::fs::{self, File, Metadata};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -48,7 +48,7 @@ const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
 /// rejects it before any listener can be exposed, until #214 supplies the
 /// required lifecycle-backed recovery composition.
-pub(super) fn run_fixed() -> Result<(), SelectorBoundaryError> {
+pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
     let admitted = InstalledSelectorState::open()?
         .authenticate_bootstrap()?
         .admit_provider()?;
@@ -77,11 +77,11 @@ impl RootSelectorService {
         loop {
             self.admin_listener.verify_continuity()?;
             self.evaluator_listener.verify_continuity()?;
-            let (stream, _) = self
-                .evaluator_listener
-                .listener
-                .accept()
-                .map_err(|_| SelectorBoundaryError::Io)?;
+            let (stream, _) = match self.evaluator_listener.listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => return Err(SelectorBoundaryError::Io),
+            };
             match self.handle_connection(stream) {
                 Ok(())
                 | Err(
@@ -146,7 +146,8 @@ impl RootSelectorService {
         ) else {
             return write_authority_mismatch(stream, decoded);
         };
-        let Ok(spx1) = selector_execute_bytes(&self.admitted, decoded, &resolved, requirement) else {
+        let Ok(spx1) = selector_execute_bytes(&self.admitted, decoded, &resolved, requirement)
+        else {
             return write_authority_mismatch(stream, decoded);
         };
         let Ok(terminal) = self.transport.execute(

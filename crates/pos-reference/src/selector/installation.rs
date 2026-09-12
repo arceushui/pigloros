@@ -742,12 +742,6 @@ mod tests {
     use super::authority::AuthenticatedSelectorBootstrap;
     use super::*;
 
-    mod installed_case_support {
-        use crate as pos_reference;
-
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
-    }
-
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     fn integer(value: u64) -> Value {
@@ -1848,7 +1842,7 @@ mod tests {
     }
 
     fn installed_case_bootstrap(
-        corpus: &installed_case_support::Corpus,
+        corpus: &crate::selector_test_support::Corpus,
     ) -> TestResult<(EvaluationRequest, AuthenticatedSelectorBootstrap)> {
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let mut state = authenticated_state()?;
@@ -1879,7 +1873,7 @@ mod tests {
 
     #[test]
     fn retained_sic1_descriptors_reconstruct_the_evr1_selected_case() -> TestResult {
-        let corpus = installed_case_support::corpus()?;
+        let corpus = crate::selector_test_support::corpus()?;
         let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
         let resolved = bootstrap.resolve_installed_case(&request, 0)?;
         assert_eq!(resolved.bundle_digest(), request.fixture_bundle_digest);
@@ -1892,7 +1886,7 @@ mod tests {
 
     #[test]
     fn retained_sic1_case_resolution_rejects_foreign_identity_and_case_selection() -> TestResult {
-        let corpus = installed_case_support::corpus()?;
+        let corpus = crate::selector_test_support::corpus()?;
         let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
         assert!(bootstrap.resolve_installed_case(&request, 7).is_err());
         for request in [
@@ -1912,14 +1906,14 @@ mod tests {
 
     #[test]
     fn retained_sic1_case_resolution_enforces_preflight_and_verified_closure() -> TestResult {
-        let invalid_signature = installed_case_support::corpus_with_bundle_mutation(
-            installed_case_support::BundleMutation::Signature,
+        let invalid_signature = crate::selector_test_support::corpus_with_bundle_mutation(
+            crate::selector_test_support::BundleMutation::Signature,
         )?;
         let (request, bootstrap) = installed_case_bootstrap(&invalid_signature)?;
         assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
 
-        let cap_violation = installed_case_support::corpus_with_profile_mutation(
-            installed_case_support::ProfileMutation::SelectedClosureCapBoundary(0),
+        let cap_violation = crate::selector_test_support::corpus_with_profile_mutation(
+            crate::selector_test_support::ProfileMutation::SelectedClosureCapBoundary(0),
         )?;
         let (request, bootstrap) = installed_case_bootstrap(&cap_violation)?;
         assert!(bootstrap.resolve_installed_case(&request, 0).is_err());

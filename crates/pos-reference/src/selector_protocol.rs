@@ -53,6 +53,7 @@ pub(crate) struct EncodedSelectorReply {
 }
 
 /// Provider records which may be wrapped in an authenticated SLY1 reply.
+#[derive(Clone, Copy)]
 pub(crate) struct AuthenticatedSelectorReply<'a> {
     pub(crate) execute_request: &'a [u8],
     pub(crate) terminal: SelectorProviderTerminal<'a>,
@@ -331,8 +332,7 @@ fn encode_result_terminal<'a>(
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
     let result = SandboxProviderResult::from_canonical_cbor(result_bytes)
         .map_err(|_| AdapterError::ProtocolFailure)?;
-    if (result.request_id, result.attempt_id) != (request.provider_request_id, request.attempt_id)
-    {
+    if (result.request_id, result.attempt_id) != (request.provider_request_id, request.attempt_id) {
         return Err(AdapterError::ProtocolFailure);
     }
     match result.outcome {

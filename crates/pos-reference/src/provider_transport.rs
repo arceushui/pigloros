@@ -34,20 +34,20 @@ const ROOT_UID: u32 = 0;
 
 /// Root-owned execute transport bound to the single SIC1-selected endpoint.
 #[derive(Debug)]
-pub(super) struct ProviderTransport {
+pub(crate) struct ProviderTransport {
     endpoint: SelectedProviderEndpoint,
 }
 
 /// Complete provider evidence authenticated against an admitted selector provider.
 #[derive(Debug)]
-pub(super) struct AuthenticatedProviderExecution {
+pub(crate) struct AuthenticatedProviderExecution {
     frames: AuthenticatedProviderFrames,
     output: Option<StagedProviderOutput>,
 }
 
 /// One selected-provider terminal authenticated against the exact SPX1 request.
 #[derive(Debug)]
-pub(super) enum AuthenticatedProviderTerminal {
+pub(crate) enum AuthenticatedProviderTerminal {
     /// AGR1, SPR1, SPY1, and SAU1 complete provider evidence.
     Execution(AuthenticatedProviderExecution),
     /// Exact selected-runtime-signed SPE1 bytes bound to the submitted SPX1.

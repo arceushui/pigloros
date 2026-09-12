@@ -22,10 +22,14 @@ pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
 pub mod profile;
+// Public module reachability keeps crate-only sibling access compatible with
+// both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
 #[cfg(unix)]
-pub(crate) mod provider_transport;
+#[doc(hidden)]
+pub mod provider_transport;
 #[cfg(unix)]
-mod root_selector;
+#[doc(hidden)]
+pub mod root_selector;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
@@ -34,6 +38,17 @@ pub mod selector;
 #[doc(hidden)]
 pub mod selector_protocol;
 pub mod signed_bundle;
+
+// Unit tests reuse the public integration corpus. Keeping this test-only module
+// reachable at the crate boundary preserves the integration helper's ordinary
+// public visibility without suppressing unused-item or reachability lints.
+#[cfg(test)]
+#[doc(hidden)]
+pub mod selector_test_support {
+    use crate as pos_reference;
+
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
+}
 
 /// Run ADR-069's fixed root-owned selector executable.
 ///
