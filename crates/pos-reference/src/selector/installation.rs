@@ -1782,16 +1782,10 @@ mod tests {
         );
 
         let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
-        assert_eq!(
-            digest_reader(write_only, 1),
-            Err(SelectorBoundaryError::Io)
-        );
+        assert_eq!(digest_reader(write_only, 1), Err(SelectorBoundaryError::Io));
 
         let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
-        assert_eq!(
-            digest_reader(write_only, 0),
-            Err(SelectorBoundaryError::Io)
-        );
+        assert_eq!(digest_reader(write_only, 0), Err(SelectorBoundaryError::Io));
         Ok(())
     }
 

@@ -934,7 +934,7 @@ mod tests {
     fn staged_output_keeps_descriptor_bound_to_the_stream() -> TestResult {
         let bytes = b"verified output";
         let descriptor = PayloadDescriptor {
-            byte_length: u64::try_from(bytes.len()).expect("test length fits u64"),
+            byte_length: u64::try_from(bytes.len())?,
             digest: payload_digest(PayloadDirection::Output, bytes),
         };
         let mut file = tempfile::NamedTempFile::new()?;
@@ -955,10 +955,10 @@ mod tests {
     }
 
     #[test]
-    fn input_validation_binds_exact_directional_digest_and_length() {
+    fn input_validation_binds_exact_directional_digest_and_length() -> TestResult {
         let input = b"exact input";
         let descriptor = PayloadDescriptor {
-            byte_length: u64::try_from(input.len()).expect("test length fits u64"),
+            byte_length: u64::try_from(input.len())?,
             digest: payload_digest(PayloadDirection::Input, input),
         };
         assert!(validate_input(&descriptor, input).is_ok());
@@ -971,6 +971,7 @@ mod tests {
             input,
         )
         .is_err());
+        Ok(())
     }
 
     #[test]
