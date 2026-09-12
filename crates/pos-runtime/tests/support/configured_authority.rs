@@ -1,11 +1,10 @@
 use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAttemptQuotaReservationV1,
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureReceiptInputV1, ErasureReferenceV1,
-    ErasureRetryAdmissionV1, ErasureRequestV1,
+    ErasureRequestV1, ErasureRetryAdmissionV1,
 };
 use pos_runtime::{
-    ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
-    ErasureAuthorityExecutionV1,
+    ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityExecutionV1,
 };
 
 #[derive(Debug)]
