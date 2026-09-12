@@ -48,6 +48,12 @@ env:
   RUSTFLAGS: -D warnings
 
 # ── Quality gates ────────────────────────────────────────────────────────────
+#
+# Keep the high-signal quality path fail-fast and sequential:
+#   fmt → test → clippy → coverage → cargo-crap
+# The remaining Rust-dependent blocking checks start only after that path
+# succeeds. ASan is deliberately last because it is the most expensive CI
+# check; its shards still run in parallel once the final prerequisite is ready.
 
 jobs:
 
@@ -97,7 +103,9 @@ jobs:
 
   rustdoc:
     name: rustdoc
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -116,7 +124,9 @@ jobs:
 
   test:
     name: test
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - fmt
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -142,7 +152,9 @@ jobs:
 
   reference-evaluator-release:
     name: reference-evaluator-release
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -196,6 +208,7 @@ jobs:
     needs:
       - ci_change_scope
       - conformance-fixtures
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -292,7 +305,9 @@ jobs:
 
   clippy:
     name: clippy
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - test
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -316,7 +331,9 @@ jobs:
 
   coverage:
     name: coverage
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - clippy
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -348,13 +365,23 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: coverage
-      - name: cargo llvm-cov (lines ≥99%, regions ≥99%)
+      # Generate one complete report, then let covgate check the changed
+      # production diff before spending time on the repository-wide floor.
+      - name: Generate coverage report for changed-code gate
         run: >
-          cargo llvm-cov --workspace --all-features --locked --summary-only
-          --show-missing-lines
+          cargo llvm-cov --workspace --all-features --locked
+          --json --output-path "${{ runner.temp }}/coverage.json"
+          -- --include-ignored
+      - name: Enforce changed production Rust code coverage first
+        run: >
+          covgate check "${{ runner.temp }}/coverage.json"
+          --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
+          --no-github-summary
+      - name: Enforce workspace coverage floor
+        run: >
+          cargo llvm-cov report --json --summary-only --show-missing-lines
           --fail-under-lines 99
           --fail-under-regions 99
-          -- --include-ignored
       - name: Export LCOV for cargo-crap
         run: cargo llvm-cov report --lcov
           --output-path "${{ runner.temp }}/coverage.lcov"
@@ -365,15 +392,6 @@ jobs:
           path: ${{ runner.temp }}/coverage.lcov
           retention-days: 1
           if-no-files-found: error
-      - name: Export coverage details for new-code gate
-        run: cargo llvm-cov report --json
-          --output-path "${{ runner.temp }}/coverage.json"
-      - name: Enforce new production Rust code coverage (lines ≥99%, regions ≥99%)
-        run: >
-          covgate check "${{ runner.temp }}/coverage.json"
-          --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
-          --no-github-summary
-
   cargo-crap:
     name: cargo-crap
     needs:
@@ -464,7 +482,9 @@ jobs:
 
   audit:
     name: cargo-audit (security advisories)
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -480,7 +500,9 @@ jobs:
 
   deny:
     name: cargo-deny (licenses / bans / sources / deps)
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -496,7 +518,9 @@ jobs:
 
   cargo-shear:
     name: cargo-shear (dependencies and source layout)
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -513,7 +537,9 @@ jobs:
 
   geiger:
     name: cargo-geiger (unsafe code audit)
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -529,7 +555,25 @@ jobs:
 
   asan:
     name: asan shard (${{ matrix.shard }})
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - fmt
+      - rustdoc
+      - test
+      - reference-evaluator-release
+      - conformance-fixtures
+      - materialize-conformance-bundles
+      - conformance-non-linux
+      - clippy
+      - coverage
+      - cargo-crap
+      - audit
+      - deny
+      - cargo-shear
+      - geiger
+      - docker-build
+      - world-client-wasm
+      - world-client-browser-parity
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -651,7 +695,9 @@ jobs:
 
   docker-build:
     name: docker-build
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -685,7 +731,9 @@ jobs:
 
   world-client-wasm:
     name: world-client-wasm
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -706,7 +754,9 @@ jobs:
 
   world-client-browser-parity:
     name: world-client-browser-parity
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
