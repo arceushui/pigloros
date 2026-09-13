@@ -166,6 +166,7 @@ fn configured_fork_authority(
     parent: TimelineId,
     child: Option<TimelineId>,
     lineage_rule: ErasureReferenceV1,
+    lifecycle_provenance: ErasureReferenceV1,
 ) -> Result<HostConfiguredErasureCoordinatorAuthorityV1, ErasureErrorV1> {
     let request_reference = request.reference();
     let profile = ErasureAuthorityFreezeProfileV1::new(
@@ -195,7 +196,7 @@ fn configured_fork_authority(
         profile,
         reference(40),
         b"host-proof".to_vec(),
-        reference(11),
+        lifecycle_provenance,
         true,
     )?;
     ErasureAuthorityConfigurationV1::new(reference(6), reference(8), vec![binding]).map(
@@ -1252,6 +1253,7 @@ fn memory_host_resolves_configured_fork_scope_through_public_sender(
         parent,
         None,
         reference(100),
+        reference(11),
     )?);
     let child = {
         let mut commands = test_stage("open configured fork sender", host.command_sender())?;
@@ -1280,6 +1282,7 @@ fn memory_host_rejects_configured_fork_with_zero_public_operation(
         parent,
         None,
         reference(100),
+        reference(11),
     )?);
     let mut commands = test_stage(
         "open zero-operation configured fork sender",
@@ -1324,6 +1327,7 @@ fn memory_host_rejects_configured_fork_with_unbound_requirement_request(
         parent,
         None,
         reference(100),
+        reference(11),
     )?);
     let mut commands = test_stage("open unbound configured fork sender", host.command_sender())?;
     assert!(test_stage(
@@ -1350,6 +1354,7 @@ fn memory_host_rejects_configured_fork_with_substituted_child_scope(
         parent,
         None,
         reference(100),
+        reference(11),
     )?);
     authority
         .substitute_configured_child_scope
@@ -1413,6 +1418,7 @@ fn memory_host_rejects_configured_fork_lineage_that_conflicts_with_inventory(
         parent,
         None,
         reference(99),
+        reference(11),
     )?);
     let mut commands = test_stage(
         "open conflicting configured fork sender",
@@ -1500,7 +1506,14 @@ fn assert_configured_nonempty_recovery(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let configured_authority = test_stage(
         "construct configured recovery authority",
-        configured_fork_authority(request, manifest, parent, Some(child), reference(100)),
+        configured_fork_authority(
+            request,
+            manifest,
+            parent,
+            Some(child),
+            reference(100),
+            reference(20),
+        ),
     )?;
     let composition = test_stage(
         "construct configured recovery composition",
