@@ -764,7 +764,6 @@ jobs:
         env:
           SCOPE_JOB_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE_RESULT: ${{ needs.ci_change_scope.outputs.rust }}
-          EVENT_NAME: ${{ github.event_name }}
           ASAN_SHARDS_RESULT: ${{ needs.asan.result }}
         run: |
           set -euo pipefail
@@ -1047,6 +1046,7 @@ jobs:
         env:
           SCOPE_JOB_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE_RESULT: ${{ needs.ci_change_scope.outputs.rust }}
+          EVENT_NAME: ${{ github.event_name }}
           PREFLIGHT_RESULT: ${{ needs.preflight-gate.result }}
           CORE_RESULT: ${{ needs.core-gate.result }}
           STANDARD_RESULT: ${{ needs.standard-gate.result }}
