@@ -681,7 +681,7 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
     assert_eq!(
         test_stage(
             "submit erasure request",
-            commands.submit_erasure_request(request, request_provenance),
+            commands.submit_erasure_request(request.clone(), request_provenance),
         )?
         .lifecycle(),
         ErasureLifecycleV1::Submitted
