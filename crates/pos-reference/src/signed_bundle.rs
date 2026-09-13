@@ -598,8 +598,7 @@ fn canonical_argument<R: Read + ?Sized>(
 fn drain_exact<R: Read + ?Sized>(archive: &mut R, mut length: u64) -> Result<(), BundleError> {
     let mut buffer = [0_u8; 8192];
     while length != 0 {
-        let take = usize::try_from(length.min(buffer.len() as u64))
-            .map_err(|_| BundleError::FieldOutOfBounds)?;
+        let take = usize::try_from(length.min(buffer.len() as u64)).unwrap_or(buffer.len());
         archive
             .read_exact(&mut buffer[..take])
             .map_err(snapshot_unavailable)?;

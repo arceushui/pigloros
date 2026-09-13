@@ -38,7 +38,7 @@ use crate::selector_protocol::{
     SelectorProviderTerminal,
 };
 
-const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
+const CONTROL_LIMIT: u32 = 16 * 1024 * 1024;
 const SELECTOR_INPUT_LIMIT: u64 = 128 * 1024 * 1024;
 const CONTROL_ARTIFACT_LIMIT: u64 = 16 * 1024 * 1024;
 const IMAGE_ARTIFACT_LIMIT: u64 = 1024 * 1024 * 1024;
@@ -601,10 +601,11 @@ fn write_reply(
 fn read_selector_request<R: Read>(stream: &mut R) -> Result<(DecodedSelectorRequest, Vec<u8>), ()> {
     let mut prefix = [0_u8; 4];
     stream.read_exact(&mut prefix).map_err(unit_error)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(unit_error)?;
+    let length = u32::from_be_bytes(prefix);
     if length == 0 || length > CONTROL_LIMIT {
         return Err(());
     }
+    let length = usize::try_from(length).unwrap_or_default();
     let mut control = vec![0_u8; length];
     stream.read_exact(&mut control).map_err(unit_error)?;
     let mut input = Vec::new();
@@ -1397,7 +1398,7 @@ mod tests {
 
     #[test]
     fn selector_request_reader_rejects_invalid_frame_boundaries() -> TestResult {
-        for prefix in [0_u32, u32::try_from(CONTROL_LIMIT)? + 1] {
+        for prefix in [0_u32, CONTROL_LIMIT + 1] {
             let (mut client, mut server) = UnixStream::pair()?;
             client.write_all(&prefix.to_be_bytes())?;
             client.shutdown(std::net::Shutdown::Write)?;

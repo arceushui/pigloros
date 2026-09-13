@@ -1508,6 +1508,12 @@ mod tests {
             encode_local_error_reply(&oversized_error).map(|_| ()),
             Err(AdapterError::ProtocolFailure)
         );
+        let mut control_oversized_error = oversized_error;
+        control_oversized_error.safe_detail = Some("x".repeat(CONTROL_LIMIT));
+        assert_eq!(
+            encode_local_error_reply(&control_oversized_error).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
 
         let unavailable = unavailable_reply(&client_request, evaluation_request.request_digest, 2)?;
         let unavailable_document =
