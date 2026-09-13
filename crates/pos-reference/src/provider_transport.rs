@@ -265,9 +265,7 @@ impl SelectedProviderEndpoint {
             .installed()
             .manifest()
             .provider_sockets();
-        if !root_owned_ancestors(execute) {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
+        let execute = require_root_owned_endpoint(execute)?;
         Self::from_validated_path(execute, ROOT_UID)
     }
 
@@ -333,6 +331,12 @@ impl SelectedProviderEndpoint {
                 .map(|()| stream)
             })
     }
+}
+
+fn require_root_owned_endpoint(path: &Path) -> Result<&Path, SelectorBoundaryError> {
+    root_owned_ancestors(path)
+        .then_some(path)
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)
 }
 
 const fn provider_transport(endpoint: SelectedProviderEndpoint) -> ProviderTransport {
@@ -2125,6 +2129,10 @@ mod tests {
 
     #[test]
     fn framing_helpers_reject_closed_shapes_and_expired_deadlines() -> TestResult {
+        assert_eq!(
+            require_root_owned_endpoint(Path::new("relative.sock")),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
         assert_eq!(record_magic(&[0xff]), Err(ReceiveFailure::Invalid));
         for value in [
             Value::Null,

@@ -1473,7 +1473,9 @@ pub mod tests {
             assert!(InstallationManifest::from_canonical_cbor(&encode_manifest(fields)?).is_err());
         }
         let mut invalid_root_key = unsigned(valid_objects());
-        invalid_root_key[3] = Value::Bytes(vec![0xff; 32]);
+        let mut non_curve_point = vec![0; 32];
+        non_curve_point[0] = 2;
+        invalid_root_key[3] = Value::Bytes(non_curve_point);
         assert!(
             InstallationManifest::from_canonical_cbor(&encode_manifest(invalid_root_key)?).is_err()
         );
