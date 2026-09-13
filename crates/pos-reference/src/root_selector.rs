@@ -598,7 +598,7 @@ fn write_reply(
         })
 }
 
-fn read_selector_request(stream: &mut UnixStream) -> Result<(DecodedSelectorRequest, Vec<u8>), ()> {
+fn read_selector_request<R: Read>(stream: &mut R) -> Result<(DecodedSelectorRequest, Vec<u8>), ()> {
     let mut prefix = [0_u8; 4];
     stream.read_exact(&mut prefix).map_err(unit_error)?;
     let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(unit_error)?;
@@ -828,6 +828,11 @@ mod tests {
             FixedListener::bind("relative.sock").err(),
             Some(SelectorBoundaryError::ArtifactInvalid)
         );
+        if let Ok(listener) = bind_selector_listener() {
+            let path = listener.path.clone();
+            drop(listener);
+            fs::remove_file(path)?;
+        }
         Ok(())
     }
 
@@ -1409,7 +1414,22 @@ mod tests {
         client.write_all(&[0xff])?;
         client.shutdown(std::net::Shutdown::Write)?;
         assert!(read_selector_request(&mut server).is_err());
+
+        let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
+        let encoded = encoded_request(&request, resolved.attempt())?;
+        let mut framed = u32::try_from(encoded.control.len())?.to_be_bytes().to_vec();
+        framed.extend_from_slice(&encoded.control);
+        let mut failing_input = std::io::Cursor::new(framed).chain(FailingReader);
+        assert!(read_selector_request(&mut failing_input).is_err());
         Ok(())
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected input read failure"))
+        }
     }
 
     #[test]

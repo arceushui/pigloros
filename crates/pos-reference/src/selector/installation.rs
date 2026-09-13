@@ -1472,6 +1472,11 @@ pub mod tests {
             fields[field] = value;
             assert!(InstallationManifest::from_canonical_cbor(&encode_manifest(fields)?).is_err());
         }
+        let mut invalid_root_key = unsigned(valid_objects());
+        invalid_root_key[3] = Value::Bytes(vec![0xff; 32]);
+        assert!(
+            InstallationManifest::from_canonical_cbor(&encode_manifest(invalid_root_key)?).is_err()
+        );
         let mut duplicate = valid_objects();
         duplicate[1] = duplicate[0].clone();
         assert!(

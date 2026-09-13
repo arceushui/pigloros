@@ -1257,6 +1257,17 @@ mod tests {
             );
         }
 
+        let mut wrong_digest_descriptor = original.to_vec();
+        wrong_digest_descriptor[5] = Value::Array(vec![
+            integer(encoded.attempt_stream.len() as u64),
+            Value::Bytes(vec![99; 32]),
+        ]);
+        let (control, _) = protocol_record("SLX1", wrong_digest_descriptor, false)?;
+        assert_eq!(
+            decode_request(&control, &encoded.attempt_stream),
+            Err(AdapterError::ProtocolFailure)
+        );
+
         let malformed_controls = [
             vec![0xff],
             encode_with_limit(&Value::Array(vec![integer(1)]), CONTROL_LIMIT)
@@ -1456,6 +1467,9 @@ mod tests {
             .iter()
             .map(|record| bytes(record).map(ToOwned::to_owned))
             .collect::<Result<Vec<_>, _>>()?;
+        let (foreign_control, _, _) = admitted_reply(&client_request, [99; 32], 0)?;
+        let foreign_evidence = admitted_evidence(&foreign_control)?;
+        let foreign_grant = required_bytes(&foreign_evidence.fields[8])?;
 
         for (candidate_result, candidate_grant, candidate_receipt) in [
             (b"not cbor".as_slice(), Some(grant), Some(receipt)),
@@ -1463,6 +1477,7 @@ mod tests {
             (result, Some(grant), None),
             (result, Some(b"not cbor".as_slice()), Some(receipt)),
             (result, Some(grant), Some(b"not cbor".as_slice())),
+            (result, Some(foreign_grant), Some(receipt)),
         ] {
             let reply = AuthenticatedSelectorReply {
                 execute_request: execute,
@@ -1487,10 +1502,32 @@ mod tests {
             attempt_id: None,
             agr1_digest: None,
             code: SandboxLocalErrorCode::PolicyUnavailable,
-            safe_detail: Some("x".repeat(CONTROL_LIMIT)),
+            safe_detail: Some("x".repeat(257)),
         };
         assert_eq!(
             encode_local_error_reply(&oversized_error).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+
+        let unavailable = unavailable_reply(&client_request, evaluation_request.request_digest, 2)?;
+        let unavailable_document =
+            decode_canonical_with_limit(&unavailable, CONTROL_LIMIT).map_err(protocol_failure)?;
+        let unavailable_wrapper = array_values(&unavailable_document).map_err(protocol_failure)?;
+        let unavailable_fields = array_values(&unavailable_wrapper[0]).map_err(protocol_failure)?;
+        let unavailable_result =
+            SandboxProviderResult::from_canonical_cbor(bytes(&unavailable_fields[7])?)
+                .map_err(protocol_failure)?;
+        assert_eq!(
+            encode_admitted_result(
+                bytes(&unavailable_fields[5])?,
+                bytes(&unavailable_fields[7])?,
+                &unavailable_result,
+                None,
+                None,
+                &[],
+                None,
+            )
+            .map(|_| ()),
             Err(AdapterError::ProtocolFailure)
         );
         Ok(())

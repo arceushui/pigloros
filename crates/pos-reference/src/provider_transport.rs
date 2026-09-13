@@ -1268,6 +1268,15 @@ mod tests {
             read_output_frames(&mut reader, &deadline),
             Err(ReceiveFailure::Invalid)
         ));
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        write_frame(&mut writer, b"not cbor", &deadline)
+            .map_err(|error| format!("malformed frame write failed: {error:?}"))?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert!(matches!(
+            read_output_frames(&mut reader, &deadline),
+            Err(ReceiveFailure::Invalid)
+        ));
         Ok(())
     }
 
