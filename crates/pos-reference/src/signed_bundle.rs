@@ -1562,6 +1562,44 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+    fn archive_fields(
+        manifest: Value,
+        members: Value,
+        signer_key: Value,
+        signature: Value,
+        trailing: bool,
+    ) -> TestResult<Vec<u8>> {
+        let value = Value::Array(vec![manifest, members, signer_key, signature]);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes)?;
+        if trailing {
+            bytes.push(0);
+        }
+        Ok(bytes)
+    }
+
+    fn archive(members: Vec<Value>, trailing: bool) -> TestResult<Vec<u8>> {
+        archive_fields(
+            Value::Null,
+            Value::Array(members),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 64]),
+            trailing,
+        )
+    }
+
+    fn archive_member(path: Value, bytes: Value, role: Value) -> Value {
+        Value::Array(vec![path, bytes, role])
+    }
+
+    fn member(path: &str, role: u8) -> Value {
+        archive_member(
+            Value::Text(path.to_owned()),
+            Value::Bytes(vec![1]),
+            Value::Integer(role.into()),
+        )
+    }
+
     #[test]
     fn retained_reader_verifies_valid_archives_and_rejects_signed_attacks() -> TestResult {
         let corpus = crate::selector_test_support::corpus()?;
@@ -1674,42 +1712,6 @@ mod tests {
     #[test]
     fn verified_member_reader_rejects_cardinality_order_role_and_trailing_bytes(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        fn archive_fields(
-            manifest: Value,
-            members: Value,
-            signer_key: Value,
-            signature: Value,
-            trailing: bool,
-        ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-            let value = Value::Array(vec![manifest, members, signer_key, signature]);
-            let mut bytes = Vec::new();
-            ciborium::into_writer(&value, &mut bytes)?;
-            if trailing {
-                bytes.push(0);
-            }
-            Ok(bytes)
-        }
-
-        fn archive(
-            members: Vec<Value>,
-            trailing: bool,
-        ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-            archive_fields(
-                Value::Null,
-                Value::Array(members),
-                Value::Bytes(vec![1; 32]),
-                Value::Bytes(vec![2; 64]),
-                trailing,
-            )
-        }
-
-        let member = |path: &str, role: u8| {
-            Value::Array(vec![
-                Value::Text(path.to_owned()),
-                Value::Bytes(vec![1]),
-                Value::Integer(u64::from(role).into()),
-            ])
-        };
         let mut not_an_archive = Vec::new();
         ciborium::into_writer(&Value::Null, &mut not_an_archive)?;
         for bytes in [
@@ -1727,43 +1729,36 @@ mod tests {
             )?,
             archive(vec![Value::Null], false)?,
             archive(
-                vec![Value::Array(vec![
+                vec![archive_member(
                     Value::Integer(1_u8.into()),
                     Value::Bytes(vec![1]),
                     Value::Integer(1_u8.into()),
-                ])],
+                )],
                 false,
             )?,
+            archive(vec![member("/unsafe", 1)], false)?,
             archive(
-                vec![Value::Array(vec![
-                    Value::Text("/unsafe".to_owned()),
-                    Value::Bytes(vec![1]),
-                    Value::Integer(1_u8.into()),
-                ])],
-                false,
-            )?,
-            archive(
-                vec![Value::Array(vec![
+                vec![archive_member(
                     Value::Text("a".to_owned()),
                     Value::Integer(1_u8.into()),
                     Value::Integer(1_u8.into()),
-                ])],
+                )],
                 false,
             )?,
             archive(
-                vec![Value::Array(vec![
+                vec![archive_member(
                     Value::Text("a".to_owned()),
                     Value::Bytes(vec![1]),
                     Value::Integer((-1_i8).into()),
-                ])],
+                )],
                 false,
             )?,
             archive(
-                vec![Value::Array(vec![
+                vec![archive_member(
                     Value::Text("a".to_owned()),
                     Value::Bytes(vec![1]),
                     Value::Integer(256_u16.into()),
-                ])],
+                )],
                 false,
             )?,
             archive_fields(
