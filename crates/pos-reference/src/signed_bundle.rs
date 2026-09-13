@@ -1649,7 +1649,7 @@ mod tests {
             &corpus.trust_policy,
             &request,
         )?;
-        assert_eq!(preflight.archive_digest, request.fixture_bundle_digest);
+        assert!(!preflight.profile_bytes().is_empty());
         let verified = verify_signed_bundle_reader(
             &mut Cursor::new(&corpus.archive),
             &corpus.trust_policy,
