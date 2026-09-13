@@ -1485,7 +1485,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
     ));
     let path_text = path.to_string_lossy().into_owned();
     let authority = Arc::new(TestAuthority::default());
-    let (parent, child) = {
+    let (parent, child, request, manifest) = {
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
         let mut host = test_stage(
             "open persistent coordinator host",
@@ -1531,19 +1531,39 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
                 "restart-child",
             ),
         )?;
-        (parent.id(), child.id())
+        drop(commands);
+        let mut reads = test_stage("open persistent recovery reader", host.read_sender())?;
+        let manifest = test_stage(
+            "read persistent frozen state",
+            reads.erasure_state(request_reference),
+        )?
+        .ok_or("persistent frozen state missing")?
+        .manifest_digest();
+        (parent.id(), child.id(), request, manifest)
     };
     {
-        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-        let mut recovered = test_stage(
-            "reopen persistent coordinator host",
-            ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
-                &path_text,
-                authority_plugin,
+        let configured_authority = test_stage(
+            "construct configured recovery authority",
+            configured_fork_authority(request, manifest, parent, reference(100)),
+        )?;
+        let composition = test_stage(
+            "construct configured recovery composition",
+            ErasureCoordinatorCompositionV1::from_host_configuration(
+                configured_authority.configuration().clone(),
+                Arc::new(TestEvidenceVerifier),
+                Arc::new(TestExecution),
                 reference(30),
+            ),
+        )?;
+        let mut recovered = test_stage(
+            "reopen persistent configured coordinator host",
+            ErasureExecutionHostV1::open_read_only_with_authority(
+                &path_text,
+                &composition,
                 ERASURE_MAX_INVENTORY_REQUESTS,
             ),
         )?;
+        assert_eq!(recovered.status(), ErasureHostStatusV1::Ready);
         let mut reads = test_stage("open recovered read sender", recovered.read_sender())?;
         assert_eq!(
             reads.timeline(parent),
