@@ -83,7 +83,8 @@ jobs:
         run: printf 'rust=true\n' >> "$GITHUB_OUTPUT"
 
   trunk-pr:
-    name: Trunk Code Quality (changed files)
+    # Keep this display name stable: the main-branch ruleset requires it.
+    name: Trunk Code Quality
     needs: ci_change_scope
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
@@ -625,6 +626,28 @@ jobs:
       security-events: write
     uses: ./.github/workflows/codeql.yml
 
+  # Reusable-workflow checks are reported as "caller / callee". Preserve the
+  # stable status context required by the main-branch ruleset.
+  codeql-required:
+    name: CodeQL (Rust)
+    if: ${{ always() }}
+    needs:
+      - ci_change_scope
+      - codeql
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the required CodeQL status
+        env:
+          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+        run: |
+          expected=success
+          if [[ "${RUST_SCOPE}" = false ]]; then
+            expected=skipped
+          fi
+          test "${CODEQL_RESULT}" = "${expected}"
+
 # ── Platform verification ────────────────────────────────────────────────────
 
   asan:
@@ -924,6 +947,29 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/mutation.yml
+
+  # See codeql-required: retain the pre-existing ruleset context while the
+  # implementation runs as a staged reusable workflow.
+  mutation-required:
+    name: diff mutation testing
+    if: ${{ always() }}
+    needs:
+      - ci_change_scope
+      - mutation-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the required mutation status
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
+          MUTATION_RESULT: ${{ needs.mutation-checks.result }}
+        run: |
+          expected=skipped
+          if [[ "${EVENT_NAME}" = pull_request && "${RUST_SCOPE}" = true ]]; then
+            expected=success
+          fi
+          test "${MUTATION_RESULT}" = "${expected}"
 
 # ── Informational reports (non-blocking) ────────────────────────────────────
 
