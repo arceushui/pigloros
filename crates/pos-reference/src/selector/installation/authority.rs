@@ -216,3 +216,87 @@ impl AdmittedSelectorProvider {
         &self.provider
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::selector::installation::tests::{admitted_state, corrupt_artifact, remove_artifact};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn bootstrap() -> Result<AuthenticatedSelectorBootstrap, Box<dyn std::error::Error>> {
+        Ok(admitted_state()?.authenticate_bootstrap()?)
+    }
+
+    #[test]
+    fn admission_rejects_lost_retained_provider_artifacts() -> TestResult {
+        let mut missing_report = bootstrap()?;
+        let report = missing_report.policy.selection().conformance_report;
+        remove_artifact(
+            &mut missing_report.installed,
+            InstallationObjectKind(4),
+            report,
+        );
+        assert!(missing_report.admit_provider().is_err());
+
+        let mut missing_manifest = bootstrap()?;
+        let manifest = missing_manifest.policy.selection().provider_manifest;
+        remove_artifact(
+            &mut missing_manifest.installed,
+            InstallationObjectKind(3),
+            manifest,
+        );
+        assert!(missing_manifest.admit_provider().is_err());
+
+        let mut missing_caps = bootstrap()?;
+        let caps = missing_caps.policy.selection().broker_hard_caps;
+        remove_artifact(
+            &mut missing_caps.installed,
+            InstallationObjectKind(10),
+            caps,
+        );
+        assert!(missing_caps.admit_provider().is_err());
+
+        let mut missing_syscalls = bootstrap()?;
+        let syscalls = missing_syscalls.policy.selection().syscall_set;
+        remove_artifact(
+            &mut missing_syscalls.installed,
+            InstallationObjectKind(7),
+            syscalls,
+        );
+        assert!(missing_syscalls.admit_provider().is_err());
+
+        let mut missing_binary = bootstrap()?;
+        let binary = missing_binary.policy.selection().provider_binary;
+        remove_artifact(
+            &mut missing_binary.installed,
+            InstallationObjectKind(11),
+            binary,
+        );
+        assert!(missing_binary.admit_provider().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn admission_rejects_corrupt_report_and_lost_selected_host_profile() -> TestResult {
+        let mut corrupt_report = bootstrap()?;
+        let report = corrupt_report.policy.selection().conformance_report;
+        corrupt_artifact(
+            &mut corrupt_report.installed,
+            InstallationObjectKind(4),
+            report,
+        )?;
+        assert!(corrupt_report.admit_provider().is_err());
+
+        let mut missing_host = bootstrap()?;
+        let report = missing_host.policy.selection().conformance_report;
+        let report = missing_host
+            .installed
+            .control_record(InstallationObjectKind(4), report)?;
+        let host = ProviderConformanceReport::from_canonical_cbor(&report)?.tested_hcp1_digest;
+        remove_artifact(&mut missing_host.installed, InstallationObjectKind(6), host);
+        assert!(missing_host.admit_provider().is_err());
+        Ok(())
+    }
+}

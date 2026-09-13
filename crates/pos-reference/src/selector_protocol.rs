@@ -708,13 +708,15 @@ fn decode_provider_result(
             })
         }
     };
-    decoded.map_err(|error| {
-        if post_admission {
-            AdapterError::AuthenticatedEvidenceFailure
-        } else {
-            error
-        }
-    })
+    decoded.map_err(|error| close_reply_error(post_admission, error))
+}
+
+const fn close_reply_error(post_admission: bool, error: AdapterError) -> AdapterError {
+    if post_admission {
+        AdapterError::AuthenticatedEvidenceFailure
+    } else {
+        error
+    }
 }
 
 fn fields_indicate_post_admission(fields: &[Value]) -> bool {
@@ -984,6 +986,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn reply_error_closure_preserves_only_pre_admission_failures() {
+        assert_eq!(
+            close_reply_error(false, AdapterError::ProtocolFailure),
+            AdapterError::ProtocolFailure
+        );
+        assert_eq!(
+            close_reply_error(true, AdapterError::ProtocolFailure),
+            AdapterError::AuthenticatedEvidenceFailure
+        );
+    }
 
     fn request() -> EvaluationRequest {
         EvaluationRequest {
@@ -2560,7 +2574,6 @@ mod tests {
             Value::Null,
             Value::Array(vec![Value::Null]),
             Value::Array(vec![Value::Null, Value::Bytes(vec![1; 32])]),
-            Value::Array(vec![wrapper[0].clone(), Value::Null]),
         ] {
             let bytes = encode_with_limit(&malformed, CONTROL_LIMIT)
                 .map_err(|_| AdapterError::ProtocolFailure)?;
@@ -2569,6 +2582,13 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+        let malformed = Value::Array(vec![wrapper[0].clone(), Value::Null]);
+        let bytes = encode_with_limit(&malformed, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        assert_eq!(
+            decode_reply(&bytes, &trailing, &encoded, [14; 32], 1024),
+            Err(AdapterError::AuthenticatedEvidenceFailure)
+        );
         let malformed_local = local_error_with_fields(vec![Value::Text("SLE1".to_owned())])?;
         assert_eq!(
             decode_reply(&malformed_local, &[], &encoded, [14; 32], 1024),
@@ -2619,17 +2639,14 @@ mod tests {
     #[test]
     fn sly1_rejects_wrong_execute_authority_and_output_descriptor() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
-        let (control, trailing, receipt_digest) = admitted_reply(&encoded, [14; 32], 0)?;
+        let (control, trailing, _) = admitted_reply(&encoded, [14; 32], 0)?;
         assert_eq!(
             decode_reply(&control, &trailing, &encoded, [99; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         assert_eq!(
             decode_reply(&control, &trailing, &encoded, [14; 32], 0),
-            Ok(DecodedSelectorReply {
-                observation: Err(AdapterError::ProtocolFailure),
-                provenance: Some(receipt_digest),
-            })
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         let decoded = decode_canonical_with_limit(&control, CONTROL_LIMIT)
             .map_err(|_| AdapterError::ProtocolFailure)?;
@@ -2736,7 +2753,7 @@ mod tests {
         let (control, _) = protocol_record("SLY1", with_evidence, false)?;
         assert_eq!(
             decode_reply(&control, &[], &encoded, [14; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         Ok(())
     }
@@ -2788,7 +2805,7 @@ mod tests {
             .map_err(|_| AdapterError::ProtocolFailure)?;
         assert_eq!(
             decode_reply(&malformed, &trailing, &encoded, [14; 32], 1024),
-            Err(AdapterError::ProtocolFailure)
+            Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         Ok(())
     }

@@ -29,7 +29,7 @@ use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
 use crate::selector::installation::{
-    open_directory_chain, InstallationObjectKind, InstalledSelectorState,
+    open_directory_chain, InstallationObjectKind, InstalledSelectorState, SANDBOX_ADMIN_SOCKET,
 };
 use crate::selector::{SelectorBoundaryError, SANDBOX_SELECTOR_SOCKET};
 use crate::selector_protocol::{
@@ -69,9 +69,10 @@ pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
     run_composition(
         InstalledSelectorState::open,
         InstalledSelectorState::authenticate_bootstrap,
+        bind_admin_listener,
         AuthenticatedSelectorBootstrap::admit_provider,
-        ProviderTransport::from_admitted,
-        bind_selector_listener,
+        connect_fixed_provider,
+        bind_evaluator_listener,
         fixed_service,
         RootSelectorService::serve,
     )
@@ -80,33 +81,78 @@ pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
 fn run_composition<State, Bootstrap, Admitted, Transport, Listener, Service, Error>(
     open: impl FnOnce() -> Result<State, Error>,
     authenticate: impl FnOnce(State) -> Result<Bootstrap, Error>,
+    bind_admin: impl FnOnce() -> Result<Listener, Error>,
     admit: impl FnOnce(Bootstrap) -> Result<Admitted, Error>,
     connect: impl FnOnce(&Admitted) -> Result<Transport, Error>,
-    bind: impl FnOnce() -> Result<Listener, Error>,
-    compose: impl FnOnce(Admitted, Transport, Listener) -> Service,
+    bind_evaluator: impl FnOnce() -> Result<Listener, Error>,
+    compose: impl FnOnce(Admitted, Transport, Listener, Listener) -> Service,
     serve: impl FnOnce(&Service) -> Result<(), Error>,
 ) -> Result<(), Error> {
     let state = open()?;
     let bootstrap = authenticate(state)?;
+    let admin_listener = bind_admin()?;
     let admitted = admit(bootstrap)?;
     let transport = connect(&admitted)?;
-    let listener = bind()?;
-    let service = compose(admitted, transport, listener);
+    let evaluator_listener = bind_evaluator()?;
+    let service = compose(admitted, transport, admin_listener, evaluator_listener);
     serve(&service)
 }
 
-fn bind_selector_listener() -> Result<FixedListener, SelectorBoundaryError> {
-    FixedListener::bind(SANDBOX_SELECTOR_SOCKET)
+fn bind_listener(path: &Path, owner: u32) -> Result<FixedListener, SelectorBoundaryError> {
+    FixedListener::bind_owned(path, owner)
+}
+
+fn bind_admin_listener() -> Result<FixedListener, SelectorBoundaryError> {
+    bind_listener(Path::new(SANDBOX_ADMIN_SOCKET), ROOT_UID)
+}
+
+fn bind_evaluator_listener() -> Result<FixedListener, SelectorBoundaryError> {
+    bind_listener(Path::new(SANDBOX_SELECTOR_SOCKET), ROOT_UID)
+}
+
+fn connect_fixed_provider(
+    admitted: &AdmittedSelectorProvider,
+) -> Result<ProviderTransport, SelectorBoundaryError> {
+    connect_and_synchronize(
+        admitted,
+        ProviderTransport::from_admitted,
+        fresh_nonce,
+        synchronize_fixed_provider,
+    )
+}
+
+fn synchronize_fixed_provider(
+    transport: &ProviderTransport,
+    admitted: &AdmittedSelectorProvider,
+    request_id: [u8; 16],
+    nonce: [u8; 16],
+) -> Result<(), SelectorBoundaryError> {
+    transport.synchronize_revocation(admitted.provider(), request_id, nonce, INITIAL_IO_TIMEOUT)
+}
+
+fn connect_and_synchronize<Admitted, Transport, Error>(
+    admitted: &Admitted,
+    connect: impl FnOnce(&Admitted) -> Result<Transport, Error>,
+    mut nonce: impl FnMut() -> Result<[u8; 16], Error>,
+    synchronize: impl FnOnce(&Transport, &Admitted, [u8; 16], [u8; 16]) -> Result<(), Error>,
+) -> Result<Transport, Error> {
+    let transport = connect(admitted)?;
+    let request_id = nonce()?;
+    let challenge = nonce()?;
+    synchronize(&transport, admitted, request_id, challenge)?;
+    Ok(transport)
 }
 
 const fn fixed_service(
     admitted: AdmittedSelectorProvider,
     transport: ProviderTransport,
+    admin_listener: FixedListener,
     evaluator_listener: FixedListener,
 ) -> RootSelectorService {
     RootSelectorService {
         admitted,
         transport,
+        admin_listener,
         evaluator_listener,
         peer_uid: ROOT_UID,
     }
@@ -139,6 +185,7 @@ impl ProviderExecutor for ProviderTransport {
 struct RootSelectorService<T = ProviderTransport> {
     admitted: AdmittedSelectorProvider,
     transport: T,
+    admin_listener: FixedListener,
     evaluator_listener: FixedListener,
     peer_uid: u32,
 }
@@ -146,6 +193,7 @@ struct RootSelectorService<T = ProviderTransport> {
 impl<T: ProviderExecutor> RootSelectorService<T> {
     fn serve(&self) -> Result<(), SelectorBoundaryError> {
         loop {
+            self.admin_listener.verify_continuity()?;
             self.evaluator_listener.verify_continuity()?;
             let Some((stream, _)) = accepted_connection(self.evaluator_listener.listener.accept())?
             else {
@@ -676,10 +724,6 @@ struct FixedListener {
 }
 
 impl FixedListener {
-    fn bind(path: impl AsRef<Path>) -> Result<Self, SelectorBoundaryError> {
-        Self::bind_owned(path, ROOT_UID)
-    }
-
     fn bind_owned(path: impl AsRef<Path>, owner: u32) -> Result<Self, SelectorBoundaryError> {
         let path = path.as_ref();
         let parent_path = path
@@ -759,9 +803,11 @@ mod tests {
     enum CompositionStage {
         Open,
         Authenticate,
+        BindAdmin,
         Admit,
         Connect,
-        Bind,
+        Synchronize,
+        BindEvaluator,
         Serve,
     }
 
@@ -779,25 +825,83 @@ mod tests {
             None,
             Some(CompositionStage::Open),
             Some(CompositionStage::Authenticate),
+            Some(CompositionStage::BindAdmin),
             Some(CompositionStage::Admit),
             Some(CompositionStage::Connect),
-            Some(CompositionStage::Bind),
+            Some(CompositionStage::Synchronize),
+            Some(CompositionStage::BindEvaluator),
             Some(CompositionStage::Serve),
         ] {
             let result = run_composition(
                 || composition_step(failure, CompositionStage::Open, 1),
                 |_| composition_step(failure, CompositionStage::Authenticate, 2),
-                |_| composition_step(failure, CompositionStage::Admit, 3),
-                |_| composition_step(failure, CompositionStage::Connect, 4),
-                || composition_step(failure, CompositionStage::Bind, 5),
-                |admitted, transport, listener| admitted + transport + listener,
+                || composition_step(failure, CompositionStage::BindAdmin, 3),
+                |_| composition_step(failure, CompositionStage::Admit, 4),
+                |_| {
+                    let transport = composition_step(failure, CompositionStage::Connect, 5)?;
+                    composition_step(failure, CompositionStage::Synchronize, 0).map(|_| transport)
+                },
+                || composition_step(failure, CompositionStage::BindEvaluator, 6),
+                |admitted, transport, admin, evaluator| admitted + transport + admin + evaluator,
                 |service| {
-                    assert_eq!(*service, 12);
+                    assert_eq!(*service, 18);
                     composition_step(failure, CompositionStage::Serve, 0).map(drop)
                 },
             );
             assert_eq!(result, failure.map_or(Ok(()), |_| Err(())));
         }
+    }
+
+    #[test]
+    fn provider_connection_requires_two_nonces_and_completed_synchronization() {
+        let mut nonces = [[3; 16], [4; 16]].into_iter();
+        assert_eq!(
+            connect_and_synchronize(
+                &1,
+                |_| Ok::<_, ()>(2),
+                || nonces.next().ok_or(()),
+                |transport, admitted, request_id, challenge| {
+                    assert_eq!((*transport, *admitted), (2, 1));
+                    assert_eq!((request_id, challenge), ([3; 16], [4; 16]));
+                    Ok(())
+                },
+            ),
+            Ok(2)
+        );
+        assert_eq!(
+            connect_and_synchronize(
+                &1,
+                |_| Err::<u8, _>(()),
+                || Ok([1; 16]),
+                |_, _, _, _| { Ok(()) }
+            ),
+            Err(())
+        );
+
+        let mut missing_first = std::iter::empty();
+        assert_eq!(
+            connect_and_synchronize(
+                &1,
+                |_| Ok::<_, ()>(2),
+                || missing_first.next().ok_or(()),
+                |_, _, _, _| Ok(()),
+            ),
+            Err(())
+        );
+        let mut missing_second = std::iter::once([1; 16]);
+        assert_eq!(
+            connect_and_synchronize(
+                &1,
+                |_| Ok::<_, ()>(2),
+                || missing_second.next().ok_or(()),
+                |_, _, _, _| Ok(()),
+            ),
+            Err(())
+        );
+        assert_eq!(
+            connect_and_synchronize(&1, |_| Ok::<_, ()>(2), || Ok([1; 16]), |_, _, _, _| Err(()),),
+            Err(())
+        );
     }
 
     #[test]
@@ -826,10 +930,15 @@ mod tests {
             Err(())
         );
         assert_eq!(
-            FixedListener::bind("relative.sock").err(),
+            bind_listener(Path::new("relative.sock"), ROOT_UID).err(),
             Some(SelectorBoundaryError::ArtifactInvalid)
         );
-        if let Ok(listener) = bind_selector_listener() {
+        if let Ok(listener) = bind_admin_listener() {
+            let path = listener.path.clone();
+            drop(listener);
+            fs::remove_file(path)?;
+        }
+        if let Ok(listener) = bind_evaluator_listener() {
             let path = listener.path.clone();
             drop(listener);
             fs::remove_file(path)?;
@@ -889,7 +998,21 @@ mod tests {
         assert!(crate::run_fixed_root_selector().is_err());
 
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
-        assert!(ProviderTransport::from_admitted(&admitted).is_err());
+        assert!(connect_fixed_provider(&admitted).is_err());
+        let sync_directory = tempfile::tempdir()?;
+        let sync_path = sync_directory.path().join("provider-control.sock");
+        let sync_listener = UnixListener::bind(&sync_path)?;
+        fs::set_permissions(&sync_path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let sync_provider = std::thread::spawn(move || -> std::io::Result<()> {
+            let (stream, _) = sync_listener.accept()?;
+            drop(stream);
+            Ok(())
+        });
+        let sync_transport = ProviderTransport::from_path_for_test(&sync_path)?;
+        assert!(synchronize_fixed_provider(&sync_transport, &admitted, [1; 16], [2; 16]).is_err());
+        sync_provider
+            .join()
+            .map_err(|_| "provider synchronization thread panicked")??;
         let provider_directory = tempfile::tempdir()?;
         let provider_path = provider_directory.path().join("provider.sock");
         let _provider_listener = UnixListener::bind(&provider_path)?;
@@ -897,6 +1020,7 @@ mod tests {
         let mut service = fixed_service(
             admitted,
             ProviderTransport::from_path_for_test(&provider_path)?,
+            fixed_listener(&evaluator_directory, "admin.sock")?,
             fixed_listener(&evaluator_directory, "evaluator.sock")?,
         );
         service.peer_uid = fs::metadata(".")?.uid();
@@ -1059,6 +1183,7 @@ mod tests {
         let service = RootSelectorService {
             admitted,
             transport,
+            admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
             evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
@@ -1153,6 +1278,7 @@ mod tests {
             let service = RootSelectorService {
                 admitted,
                 transport: FixedProviderExecutor(RefCell::new(Some(result))),
+                admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
                 evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
                 peer_uid: fs::metadata(".")?.uid(),
             };
@@ -1179,6 +1305,7 @@ mod tests {
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Execution(execution),
             )))),
+            admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
             evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
@@ -1202,6 +1329,7 @@ mod tests {
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Error(fixture.spe1),
             )))),
+            admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
             evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
@@ -1231,6 +1359,7 @@ mod tests {
         let mut service = RootSelectorService {
             admitted,
             transport: ProviderTransport::from_path_for_test(&provider_path)?,
+            admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
             evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: owner ^ 1,
         };

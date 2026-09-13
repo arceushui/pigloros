@@ -1,10 +1,10 @@
 use ciborium::value::Value;
 
 use super::codec::{
-    array, bool_value, bytes_value, decode_document, digest32, id16, key_id, optional_digest,
-    optional_id16, optional_text, require_signature, self_digested, signed, text_value, uint,
-    uint_value, valid_key_id, validate_magic, verify_digest, verify_signature,
-    MAX_SAFE_DETAIL_BYTES,
+    array, bool_value, bytes_value, decode_document, digest32, encode, id16, key_id,
+    optional_digest, optional_id16, optional_text, record_digest, require_signature, self_digested,
+    signed, text_value, uint, uint_value, valid_key_id, validate_magic, verify_digest,
+    verify_signature, MAX_SAFE_DETAIL_BYTES,
 };
 use super::SandboxProviderProtocolError;
 
@@ -363,6 +363,25 @@ request_codec!(
 );
 
 impl SandboxDescribeRequest {
+    pub(crate) fn canonical(
+        request: RequestAuthority,
+    ) -> Result<(Self, Vec<u8>), SandboxProviderProtocolError> {
+        validate_request_authority(&request)?;
+        let unsigned = Value::Array(vec![
+            text_value("SDQ1"),
+            uint_value(1),
+            request_authority_value(&request),
+        ]);
+        let request_digest = record_digest("SDQ1", &unsigned)?;
+        let bytes = encode(&Value::Array(vec![unsigned, bytes_value(&request_digest)]))?;
+        let record = Self {
+            request,
+            request_digest,
+        };
+        record.validate()?;
+        Ok((record, bytes))
+    }
+
     fn validate(&self) -> Result<(), SandboxProviderProtocolError> {
         let unsigned = [
             text_value("SDQ1"),
@@ -695,6 +714,41 @@ fn validate_response_identity(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_request_constructor_round_trips_and_rejects_zero_authority(
+    ) -> Result<(), SandboxProviderProtocolError> {
+        let authority = RequestAuthority {
+            request_id: [1; 16],
+            apt1_digest: [2; 32],
+            policy_epoch: 3,
+            nonce: [4; 16],
+        };
+        let (request, bytes) = SandboxDescribeRequest::canonical(authority.clone())?;
+        assert_eq!(request.request, authority);
+        assert_eq!(
+            SandboxDescribeRequest::from_canonical_cbor(&bytes),
+            Ok(request)
+        );
+
+        for invalid in [
+            RequestAuthority {
+                request_id: [0; 16],
+                ..authority.clone()
+            },
+            RequestAuthority {
+                apt1_digest: [0; 32],
+                ..authority.clone()
+            },
+            RequestAuthority {
+                nonce: [0; 16],
+                ..authority
+            },
+        ] {
+            assert!(SandboxDescribeRequest::canonical(invalid).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn selector_wire_codes_cover_every_operation_and_local_failure() {

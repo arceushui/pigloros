@@ -739,7 +739,7 @@ fn hex_name(digest: [u8; 32]) -> String {
 pub mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::Write;
+    use std::io::{Seek, Write};
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use ciborium::value::Value;
@@ -1315,7 +1315,7 @@ pub mod tests {
         ]))
     }
 
-    fn admitted_state() -> TestResult<InstalledSelectorState> {
+    pub(crate) fn admitted_state() -> TestResult<InstalledSelectorState> {
         let authority = provider_authority();
         let trust = provider_trust(&authority)?;
         let trust_digest = signed_record_digest(&trust)?;
@@ -1413,6 +1413,29 @@ pub mod tests {
             },
             artifacts: installed,
         })
+    }
+
+    pub(crate) fn remove_artifact(
+        state: &mut InstalledSelectorState,
+        kind: InstallationObjectKind,
+        identity: [u8; 32],
+    ) {
+        state.artifacts.remove(&(kind, identity));
+    }
+
+    pub(crate) fn corrupt_artifact(
+        state: &mut InstalledSelectorState,
+        kind: InstallationObjectKind,
+        identity: [u8; 32],
+    ) -> TestResult {
+        let artifact = state
+            .artifacts
+            .get_mut(&(kind, identity))
+            .ok_or("artifact to corrupt is missing")?;
+        let mut file = artifact.file.try_clone()?;
+        file.rewind()?;
+        file.write_all(&vec![0; usize::try_from(artifact.object.byte_length)?])?;
+        Ok(())
     }
 
     #[test]

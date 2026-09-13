@@ -75,8 +75,43 @@ pub mod selector_transport_test_fixture {
         pub(crate) output_chunk: Vec<u8>,
         pub(crate) spy1: Vec<u8>,
         pub(crate) spe1: Vec<u8>,
+        pub(crate) describe_request_id: [u8; 16],
+        pub(crate) describe_nonce: [u8; 16],
+        pub(crate) sdy1: Vec<u8>,
+        runtime: SigningKey,
         pub(crate) non_output_result:
             crate::sandbox_provider_protocol::AuthenticatedSandboxProviderResult,
+    }
+
+    impl TransportAdmissionFixture {
+        pub(crate) fn resign_sdy1_field(
+            &self,
+            field: usize,
+            replacement: Value,
+        ) -> TestResult<Vec<u8>> {
+            resign_unsigned_field(&self.sdy1, "SDY1", field, replacement, &self.runtime)
+        }
+    }
+
+    fn describe_response(
+        fixture: &Fixture,
+        provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request_id: [u8; 16],
+    ) -> TestResult<Vec<u8>> {
+        sign_record(
+            "SDY1",
+            Value::Array(vec![
+                Value::Text("SDY1".to_owned()),
+                integer(1),
+                Value::Bytes(request_id.to_vec()),
+                bytes(provider.manifest().manifest_digest),
+                bytes(provider.manifest().binary_digest),
+                bytes(provider.host_profile().profile_digest),
+                bytes(fixture.policy.policy_digest()),
+                Value::Text(provider.manifest().runtime_attestation_key_id.clone()),
+            ]),
+            &fixture.authority.runtime,
+        )
     }
 
     pub(crate) fn authenticated_transport_fixture() -> TestResult<TransportAdmissionFixture> {
@@ -139,6 +174,9 @@ pub mod selector_transport_test_fixture {
             ]),
             &fixture.authority.runtime,
         )?;
+        let describe_request_id = [91; 16];
+        let describe_nonce = [92; 16];
+        let sdy1 = describe_response(&fixture, &provider, describe_request_id)?;
         let output = b"output";
         let output_chunk = self_digested_record(
             "SBC1",
@@ -165,6 +203,10 @@ pub mod selector_transport_test_fixture {
             output_chunk,
             spy1: terminal_result_bytes,
             spe1,
+            describe_request_id,
+            describe_nonce,
+            sdy1,
+            runtime: fixture.authority.runtime,
             non_output_result,
         })
     }

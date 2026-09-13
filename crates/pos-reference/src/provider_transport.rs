@@ -1,4 +1,4 @@
-//! Bounded root-to-provider execute transport for the SIC1-selected endpoint.
+//! Bounded root-to-provider transport for the SIC1-selected endpoints.
 //!
 //! The selector passes exact, already-constructed SPX1 bytes and input bytes.
 //! This module never accepts caller-owned endpoint, image, launch-policy, or
@@ -61,10 +61,11 @@ fn invalid_errno<T>(_: T) -> rustix::io::Errno {
     rustix::io::Errno::INVAL
 }
 
-/// Root-owned execute transport bound to the single SIC1-selected endpoint.
+/// Root-owned transport bound to the SIC1-selected execute and control endpoints.
 #[derive(Debug)]
 pub(crate) struct ProviderTransport {
-    endpoint: SelectedProviderEndpoint,
+    execute_endpoint: SelectedProviderEndpoint,
+    control_endpoint: SelectedProviderEndpoint,
 }
 
 /// Complete provider evidence authenticated against an admitted selector provider.
@@ -259,14 +260,36 @@ struct SelectedProviderEndpoint {
 }
 
 impl SelectedProviderEndpoint {
-    fn from_admitted(admitted: &AdmittedSelectorProvider) -> Result<Self, SelectorBoundaryError> {
-        let (execute, _) = admitted
+    fn from_admitted(
+        admitted: &AdmittedSelectorProvider,
+    ) -> Result<(Self, Self), SelectorBoundaryError> {
+        let (execute, control) = admitted
             .bootstrap()
             .installed()
             .manifest()
             .provider_sockets();
-        let execute = require_root_owned_endpoint(execute)?;
-        Self::from_validated_path(execute, ROOT_UID)
+        Self::from_paths_with_validation(execute, control, ROOT_UID, require_root_owned_endpoint)
+    }
+
+    fn from_paths_with_validation<'a>(
+        execute: &'a Path,
+        control: &'a Path,
+        owner: u32,
+        validate: impl Fn(&'a Path) -> Result<&'a Path, SelectorBoundaryError>,
+    ) -> Result<(Self, Self), SelectorBoundaryError> {
+        let execute = validate(execute)?;
+        let control = validate(control)?;
+        Self::from_paths(execute, control, owner)
+    }
+
+    fn from_paths(
+        execute: &Path,
+        control: &Path,
+        owner: u32,
+    ) -> Result<(Self, Self), SelectorBoundaryError> {
+        let execute = Self::from_validated_path(execute, owner)?;
+        let control = Self::from_validated_path(control, owner)?;
+        Ok((execute, control))
     }
 
     fn from_validated_path(path: &Path, owner: u32) -> Result<Self, SelectorBoundaryError> {
@@ -339,8 +362,14 @@ fn require_root_owned_endpoint(path: &Path) -> Result<&Path, SelectorBoundaryErr
         .ok_or(SelectorBoundaryError::ArtifactInvalid)
 }
 
-const fn provider_transport(endpoint: SelectedProviderEndpoint) -> ProviderTransport {
-    ProviderTransport { endpoint }
+const fn provider_transport(
+    execute_endpoint: SelectedProviderEndpoint,
+    control_endpoint: SelectedProviderEndpoint,
+) -> ProviderTransport {
+    ProviderTransport {
+        execute_endpoint,
+        control_endpoint,
+    }
 }
 
 fn complete_nonblocking_connect(
@@ -356,24 +385,66 @@ fn complete_nonblocking_connect(
 }
 
 impl ProviderTransport {
-    /// Retain the one SIC1-selected execute endpoint after root-owned validation.
+    /// Retain the SIC1-selected execute and control endpoints after validation.
     ///
     /// # Errors
-    /// Returns a closed error when the admitted installation's execute endpoint
-    /// is absent, replaced, insecure, or outside a root-owned descriptor chain.
+    /// Returns a closed error when either admitted endpoint is absent, replaced,
+    /// insecure, or outside a root-owned descriptor chain.
     pub(crate) fn from_admitted(
         admitted: &AdmittedSelectorProvider,
     ) -> Result<Self, SelectorBoundaryError> {
-        SelectedProviderEndpoint::from_admitted(admitted).map(provider_transport)
+        Self::from_selected_endpoints(SelectedProviderEndpoint::from_admitted(admitted))
+    }
+
+    fn from_selected_endpoints(
+        endpoints: Result<
+            (SelectedProviderEndpoint, SelectedProviderEndpoint),
+            SelectorBoundaryError,
+        >,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let (execute, control) = endpoints?;
+        Ok(provider_transport(execute, control))
     }
 
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn from_path_for_test(path: &Path) -> Result<Self, SelectorBoundaryError> {
         let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
+        let endpoint = SelectedProviderEndpoint::from_identity(path, &metadata, metadata.uid());
         Ok(Self {
-            endpoint: SelectedProviderEndpoint::from_identity(path, &metadata, metadata.uid()),
+            execute_endpoint: endpoint.clone(),
+            control_endpoint: endpoint,
         })
+    }
+
+    /// Prove that the selected provider has activated the exact admitted policy.
+    ///
+    /// The runtime-signed SDY1 binds the active APT1, whose authenticated fields
+    /// in turn bind the current RVS1 digest and epoch. Evaluator admission remains
+    /// closed until this control-channel exchange completes.
+    pub(crate) fn synchronize_revocation(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        request_id: [u8; 16],
+        nonce: [u8; 16],
+        timeout: Duration,
+    ) -> Result<(), SelectorBoundaryError> {
+        let (request, bytes) = admitted
+            .describe_request(request_id, nonce)
+            .map_err(artifact_invalid)?;
+        let deadline = Deadline::new(timeout)?;
+        let mut stream = self.control_endpoint.connect(timeout)?;
+        write_frame(&mut stream, &bytes, &deadline).map_err(selector_unavailable)?;
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(selector_unavailable)?;
+        let response = read_frame(&mut stream, &deadline)
+            .map_err(selector_unavailable)?
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
+        ensure_eof(&mut stream, &deadline).map_err(selector_unavailable)?;
+        admitted
+            .authenticate_describe_response(&response, &request)
+            .map_err(artifact_invalid)
     }
 
     /// Execute exact constructed SPX1/input bytes and authenticate the full reply.
@@ -448,7 +519,11 @@ impl ProviderTransport {
     ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
         deadline
             .remaining()
-            .and_then(|remaining| self.endpoint.connect(remaining).map_err(receive_incomplete))
+            .and_then(|remaining| {
+                self.execute_endpoint
+                    .connect(remaining)
+                    .map_err(receive_incomplete)
+            })
             .and_then(|mut stream| {
                 write_frame(&mut stream, spx1, deadline)
                     .and_then(|()| write_input(&mut stream, request, input, deadline))
@@ -1046,6 +1121,44 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+    fn synchronize_control_reply(
+        fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
+        response: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> TestResult<Result<(), SelectorBoundaryError>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let provider = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut prefix = [0; 4];
+            stream.read_exact(&mut prefix)?;
+            let request_length =
+                usize::try_from(u32::from_be_bytes(prefix)).map_err(std::io::Error::other)?;
+            let mut request = vec![0; request_length];
+            stream.read_exact(&mut request)?;
+            let mut trailing = Vec::new();
+            stream.read_to_end(&mut trailing)?;
+            if let Some((response, trailing)) = response {
+                let response_length =
+                    u32::try_from(response.len()).map_err(std::io::Error::other)?;
+                stream.write_all(&response_length.to_be_bytes())?;
+                stream.write_all(&response)?;
+                stream.write_all(&trailing)?;
+            }
+            stream.shutdown(std::net::Shutdown::Write)
+        });
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let result = transport.synchronize_revocation(
+            &fixture.provider,
+            fixture.describe_request_id,
+            fixture.describe_nonce,
+            Duration::from_secs(1),
+        );
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(result)
+    }
+
     #[test]
     fn closed_error_mappers_and_connect_completion_preserve_failure_classes() -> TestResult {
         assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
@@ -1066,12 +1179,10 @@ mod tests {
         let path = directory.path().join("constructor.sock");
         let _listener = UnixListener::bind(&path)?;
         let metadata = std::fs::symlink_metadata(&path)?;
-        let transport = provider_transport(SelectedProviderEndpoint::from_identity(
-            &path,
-            &metadata,
-            metadata.uid(),
-        ));
-        assert_eq!(transport.endpoint.path, path);
+        let endpoint = SelectedProviderEndpoint::from_identity(&path, &metadata, metadata.uid());
+        let transport = provider_transport(endpoint.clone(), endpoint);
+        assert_eq!(transport.execute_endpoint.path, path);
+        assert_eq!(transport.control_endpoint.path, path);
 
         let (descriptor, _peer) = UnixStream::pair()?;
         assert_eq!(
@@ -1103,6 +1214,50 @@ mod tests {
             Err(rustix::io::Errno::TIMEDOUT)
         );
         assert_eq!(ensure_connected_poll(1, Ok(())), Ok(()));
+        Ok(())
+    }
+
+    #[test]
+    fn control_transport_requires_the_runtime_signed_active_policy() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let (unrelated_request, _) = fixture
+            .provider
+            .describe_request([93; 16], fixture.describe_nonce)?;
+        assert!(fixture
+            .provider
+            .authenticate_describe_response(&fixture.sdy1, &unrelated_request)
+            .is_err());
+        assert_eq!(
+            synchronize_control_reply(&fixture, Some((fixture.sdy1.clone(), Vec::new())))?,
+            Ok(())
+        );
+        assert_eq!(
+            synchronize_control_reply(&fixture, Some((b"not cbor".to_vec(), Vec::new())))?,
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            synchronize_control_reply(&fixture, Some((fixture.sdy1.clone(), vec![1])))?,
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            synchronize_control_reply(&fixture, None)?,
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("unused-control.sock");
+        let _listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        assert_eq!(
+            transport.synchronize_revocation(
+                &fixture.provider,
+                [0; 16],
+                fixture.describe_nonce,
+                Duration::from_secs(1),
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
         Ok(())
     }
 
@@ -1376,6 +1531,47 @@ mod tests {
         assert_eq!(endpoint.device, metadata.dev());
         assert_eq!(endpoint.inode, metadata.ino());
         assert_eq!(endpoint.owner, metadata.uid());
+        let control_path = directory.path().join("control.sock");
+        let _control_listener = UnixListener::bind(&control_path)?;
+        std::fs::set_permissions(&control_path, std::fs::Permissions::from_mode(0o600))?;
+        let (execute, control) = SelectedProviderEndpoint::from_paths_with_validation(
+            &path,
+            &control_path,
+            metadata.uid(),
+            Ok,
+        )?;
+        assert_eq!(execute.path, path);
+        assert_eq!(control.path, control_path);
+        let transport = ProviderTransport::from_selected_endpoints(Ok((execute, control)))?;
+        assert_eq!(transport.execute_endpoint.path, path);
+        assert_eq!(transport.control_endpoint.path, control_path);
+        assert!(ProviderTransport::from_selected_endpoints(Err(
+            SelectorBoundaryError::ArtifactInvalid
+        ))
+        .is_err());
+        assert!(SelectedProviderEndpoint::from_paths_with_validation(
+            &path,
+            &control_path,
+            metadata.uid(),
+            |_| Err(SelectorBoundaryError::ArtifactInvalid),
+        )
+        .is_err());
+        assert!(SelectedProviderEndpoint::from_paths_with_validation(
+            &path,
+            &control_path,
+            metadata.uid(),
+            |candidate| {
+                (candidate != control_path)
+                    .then_some(candidate)
+                    .ok_or(SelectorBoundaryError::ArtifactInvalid)
+            },
+        )
+        .is_err());
+        let missing = directory.path().join("missing.sock");
+        assert!(
+            SelectedProviderEndpoint::from_paths(&missing, &control_path, metadata.uid()).is_err()
+        );
+        assert!(SelectedProviderEndpoint::from_paths(&path, &missing, metadata.uid()).is_err());
         assert!(validate_connected_endpoint(
             (metadata.dev(), metadata.ino()),
             (metadata.dev(), metadata.ino()),

@@ -14,11 +14,12 @@ use super::codec::{
 };
 use super::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, LaunchPolicy, ProviderCapability,
-    ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxExecuteRequest,
-    SandboxExecutionMode, SandboxLimit, SandboxProviderError, SandboxProviderManifest,
-    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult,
-    SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError,
-    SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
+    ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxDescribeRequest,
+    SandboxDescribeResponse, SandboxExecuteRequest, SandboxExecutionMode, SandboxLimit,
+    SandboxProviderError, SandboxProviderManifest, SandboxProviderProtocolError,
+    SandboxProviderReceipt, SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet,
+    SandboxTerminalOutcome, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
@@ -472,6 +473,38 @@ impl AdmittedSandboxImage {
 }
 
 impl AdmittedSandboxProvider {
+    pub(crate) fn authenticate_describe_response(
+        &self,
+        bytes: &[u8],
+        request: &SandboxDescribeRequest,
+    ) -> Result<(), SandboxAdmissionError> {
+        let response = SandboxDescribeResponse::from_canonical_cbor(bytes)?;
+        response.validate_for_request(request)?;
+        response.verify_signature(&self.runtime_key)?;
+        if response.spm1_digest != self.manifest.manifest_digest
+            || response.provider_binary_digest != self.manifest.binary_digest
+            || response.hcp1_digest != self.host_profile.profile_digest
+            || response.active_apt1_digest != self.policy.policy_digest()
+            || response.runtime_attestation_key_id != self.manifest.runtime_attestation_key_id
+        {
+            return Err(SandboxAdmissionError::ConformanceMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn describe_request(
+        &self,
+        request_id: [u8; 16],
+        nonce: [u8; 16],
+    ) -> Result<(SandboxDescribeRequest, Vec<u8>), SandboxProviderProtocolError> {
+        SandboxDescribeRequest::canonical(super::RequestAuthority {
+            request_id,
+            apt1_digest: self.policy.policy_digest(),
+            policy_epoch: self.policy.policy_epoch(),
+            nonce,
+        })
+    }
+
     /// Authenticate and cross-bind one complete provider admission set.
     ///
     /// `required_features` is the installed, canonically ordered feature-ID set
@@ -1554,6 +1587,70 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn describe_authentication_closes_every_signed_identity_substitution() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let (request, _) = fixture
+            .provider
+            .describe_request(fixture.describe_request_id, fixture.describe_nonce)?;
+        assert_eq!(
+            fixture
+                .provider
+                .authenticate_describe_response(&fixture.sdy1, &request),
+            Ok(())
+        );
+        assert!(fixture
+            .provider
+            .authenticate_describe_response(b"not cbor", &request)
+            .is_err());
+
+        let mut corrupted = fixture.sdy1.clone();
+        *corrupted.last_mut().ok_or("empty SDY1 fixture")? ^= 1;
+        assert!(fixture
+            .provider
+            .authenticate_describe_response(&corrupted, &request)
+            .is_err());
+
+        let foreign_request = fixture.resign_sdy1_field(2, Value::Bytes(vec![99; 16]))?;
+        assert!(fixture
+            .provider
+            .authenticate_describe_response(&foreign_request, &request)
+            .is_err());
+        for field in [3, 4, 5] {
+            let foreign_digest = fixture.resign_sdy1_field(field, Value::Bytes(vec![99; 32]))?;
+            assert_eq!(
+                fixture
+                    .provider
+                    .authenticate_describe_response(&foreign_digest, &request),
+                Err(SandboxAdmissionError::ConformanceMismatch)
+            );
+        }
+        let foreign_key =
+            fixture.resign_sdy1_field(7, Value::Text("foreign-runtime-key".to_owned()))?;
+        assert_eq!(
+            fixture
+                .provider
+                .authenticate_describe_response(&foreign_key, &request),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+
+        let foreign_policy_digest = [99; 32];
+        let (foreign_policy_request, _) =
+            SandboxDescribeRequest::canonical(super::super::RequestAuthority {
+                apt1_digest: foreign_policy_digest,
+                ..request.request
+            })?;
+        let foreign_policy =
+            fixture.resign_sdy1_field(6, Value::Bytes(foreign_policy_digest.to_vec()))?;
+        assert_eq!(
+            fixture
+                .provider
+                .authenticate_describe_response(&foreign_policy, &foreign_policy_request),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        );
+        Ok(())
+    }
 
     #[test]
     fn selector_private_authentication_rejects_each_authority_substitution() -> TestResult {
