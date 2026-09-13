@@ -681,7 +681,7 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
     assert_eq!(
         test_stage(
             "submit erasure request",
-            commands.submit_erasure_request(request.clone(), request_provenance),
+            commands.submit_erasure_request(request, request_provenance),
         )?
         .lifecycle(),
         ErasureLifecycleV1::Submitted
@@ -1512,7 +1512,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         let request_provenance = request.provenance();
         test_stage(
             "submit persistent request",
-            commands.submit_erasure_request(request, request_provenance),
+            commands.submit_erasure_request(request.clone(), request_provenance),
         )?;
         test_stage(
             "authorize persistent request",
