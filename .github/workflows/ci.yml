@@ -139,7 +139,10 @@ jobs:
   fmt:
     name: fmt
     needs: [ci_change_scope, preflight-gate]
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    # preflight-gate intentionally accepts the push-only skip of trunk-pr.
+    # always() prevents that optional ancestor from propagating a skip here;
+    # the explicit result check still stops the stage after a failed preflight.
+    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -177,7 +180,7 @@ jobs:
   test:
     name: test
     needs: [ci_change_scope, preflight-gate]
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -358,7 +361,7 @@ jobs:
   clippy:
     name: clippy
     needs: [ci_change_scope, preflight-gate]
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -382,7 +385,7 @@ jobs:
   coverage:
     name: coverage
     needs: [ci_change_scope, preflight-gate]
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

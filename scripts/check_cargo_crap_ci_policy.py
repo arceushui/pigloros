@@ -16,8 +16,9 @@ DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a54
 BOOTSTRAP_BASE_SHA = "45bdac85b29d273573583f846ba7acd2b3a12573"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
 SCOPED_JOB_IF = (
-    "${{ needs.ci_change_scope.outputs.rust == 'true' || "
-    "github.event_name != 'pull_request' }}"
+    "${{ always() && needs.preflight-gate.result == 'success' && "
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request') }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
     "${{ needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
