@@ -129,12 +129,17 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &mut self,
         recovery_error: Result<ErasureRecoveryErrorV1, ErasureErrorV1>,
     ) -> ErasureErrorV1 {
-        recovery_error
-            .and_then(|recovery_error| {
+        match recovery_error {
+            Ok(recovery_error) => {
                 let error = recovery_error.error();
-                self.retain_recovery_error(recovery_error).map(|()| error)
-            })
-            .unwrap_or_else(std::convert::identity)
+                // Read-only recovery cannot persist an audit record. That
+                // secondary failure must never replace the failure that kept
+                // the durable graph from being verified.
+                let _ = self.retain_recovery_error(recovery_error);
+                error
+            }
+            Err(error) => error,
+        }
     }
 
     fn recover_stored(
