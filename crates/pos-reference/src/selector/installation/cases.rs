@@ -16,6 +16,14 @@ use crate::signed_bundle::{preflight_signed_bundle_reader, verify_signed_bundle_
 const CFB1_OBJECT: InstallationObjectKind = InstallationObjectKind(14);
 const TPS1_OBJECT: InstallationObjectKind = InstallationObjectKind(15);
 
+fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::ArtifactInvalid
+}
+
+fn io_error<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::Io
+}
+
 impl AuthenticatedSelectorBootstrap {
     /// Resolves one EVR1-selected CFB1/TPS1 case from retained SIC1 descriptors.
     ///
@@ -32,33 +40,58 @@ impl AuthenticatedSelectorBootstrap {
         request: &EvaluationRequest,
         ordinal: u16,
     ) -> Result<ResolvedInstalledCase, SelectorBoundaryError> {
-        let (mut archive, policy_bytes) = self.retained_case_descriptors(request)?;
-        let preflight = preflight_signed_bundle_reader(&mut archive, &policy_bytes, request)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let hard_caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        preflight
-            .enforce_selected_caps(hard_caps.into())
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let verified = verify_signed_bundle_reader(&mut archive, &policy_bytes, request)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let profile = Profile::from_bundle(&verified, request)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let fixture = profile
-            .selected_fixtures(request)
-            .into_iter()
-            .nth(usize::from(ordinal))
-            .filter(|fixture| fixture.modes.contains(&verified.mode))
-            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
-        let hard_caps = selector_bounded_hard_caps(hard_caps, request);
-        let attempt = case_attempt(&verified, fixture, verified.mode, hard_caps)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        Ok(ResolvedInstalledCase {
-            attempt,
-            fixture_contract_digest: profile.fixture_contract_digest(),
-            profile_digest: profile.profile_digest,
-            bundle_digest: verified.archive_digest,
-        })
+        self.retained_case_descriptors(request)
+            .and_then(|(mut archive, policy_bytes)| {
+                preflight_signed_bundle_reader(&mut archive, &policy_bytes, request)
+                    .map_err(artifact_invalid)
+                    .map(|preflight| (archive, policy_bytes, preflight))
+            })
+            .and_then(|(archive, policy_bytes, preflight)| {
+                Profile::authenticated_hard_caps(preflight.profile_bytes(), request)
+                    .map_err(artifact_invalid)
+                    .map(|hard_caps| (archive, policy_bytes, preflight, hard_caps))
+            })
+            .and_then(|(archive, policy_bytes, preflight, hard_caps)| {
+                preflight
+                    .enforce_selected_caps(hard_caps.into())
+                    .map_err(artifact_invalid)
+                    .map(|()| (archive, policy_bytes, hard_caps))
+            })
+            .and_then(|(mut archive, policy_bytes, hard_caps)| {
+                verify_signed_bundle_reader(&mut archive, &policy_bytes, request)
+                    .map_err(artifact_invalid)
+                    .map(|verified| (verified, hard_caps))
+            })
+            .and_then(|(verified, hard_caps)| {
+                Profile::from_bundle(&verified, request)
+                    .map_err(artifact_invalid)
+                    .map(|profile| (verified, hard_caps, profile))
+            })
+            .and_then(|(verified, hard_caps, profile)| {
+                profile
+                    .selected_fixtures(request)
+                    .into_iter()
+                    .nth(usize::from(ordinal))
+                    .filter(|fixture| fixture.modes.contains(&verified.mode))
+                    .cloned()
+                    .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                    .map(|fixture| (verified, hard_caps, profile, fixture))
+            })
+            .and_then(|(verified, hard_caps, profile, fixture)| {
+                case_attempt(
+                    &verified,
+                    &fixture,
+                    verified.mode,
+                    selector_bounded_hard_caps(hard_caps, request),
+                )
+                .map_err(artifact_invalid)
+                .map(|attempt| ResolvedInstalledCase {
+                    attempt,
+                    fixture_contract_digest: profile.fixture_contract_digest(),
+                    profile_digest: profile.profile_digest,
+                    bundle_digest: verified.archive_digest,
+                })
+            })
     }
 
     fn retained_case_descriptors(
@@ -66,16 +99,30 @@ impl AuthenticatedSelectorBootstrap {
         request: &EvaluationRequest,
     ) -> Result<(File, Vec<u8>), SelectorBoundaryError> {
         let installed = self.installed();
-        let bundle = installed.artifact(CFB1_OBJECT, request.fixture_bundle_digest)?;
-        let policy = installed.artifact(TPS1_OBJECT, request.trust_policy_snapshot_digest)?;
-        let policy_bytes = policy.read_control(MANIFEST_LIMIT)?;
-        let mut archive = bundle
-            .file()
-            .try_clone()
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        archive
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        Ok((archive, policy_bytes))
+        installed
+            .artifact(CFB1_OBJECT, request.fixture_bundle_digest)
+            .and_then(|bundle| {
+                installed
+                    .artifact(TPS1_OBJECT, request.trust_policy_snapshot_digest)
+                    .map(|policy| (bundle, policy))
+            })
+            .and_then(|(bundle, policy)| {
+                policy
+                    .read_control(MANIFEST_LIMIT)
+                    .map(|policy_bytes| (bundle, policy_bytes))
+            })
+            .and_then(|(bundle, policy_bytes)| {
+                bundle
+                    .file()
+                    .try_clone()
+                    .map_err(io_error)
+                    .map(|archive| (archive, policy_bytes))
+            })
+            .and_then(|(mut archive, policy_bytes)| {
+                archive
+                    .seek(SeekFrom::Start(0))
+                    .map_err(io_error)
+                    .map(|_| (archive, policy_bytes))
+            })
     }
 }

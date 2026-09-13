@@ -43,6 +43,7 @@ pub mod signed_bundle;
 // reachable at the crate boundary preserves the integration helper's ordinary
 // public visibility without suppressing unused-item or reachability lints.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[doc(hidden)]
 pub mod selector_test_support {
     use crate as pos_reference;
@@ -51,6 +52,7 @@ pub mod selector_test_support {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[doc(hidden)]
 pub mod selector_transport_test_fixture {
     use crate as pos_reference;

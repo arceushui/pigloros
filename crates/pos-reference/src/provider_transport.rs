@@ -33,6 +33,34 @@ const CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_AUDIT_RECORDS: usize = 256;
 const ROOT_UID: u32 = 0;
 
+fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::ArtifactInvalid
+}
+
+fn selector_unavailable<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::SelectorUnavailable
+}
+
+fn io_error<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::Io
+}
+
+fn transport_before_admission<T>(_: T) -> ProviderTransportError {
+    ProviderTransportError::BeforeAdmission
+}
+
+fn receive_invalid<T>(_: T) -> ReceiveFailure {
+    ReceiveFailure::Invalid
+}
+
+fn receive_incomplete<T>(_: T) -> ReceiveFailure {
+    ReceiveFailure::Incomplete
+}
+
+fn invalid_errno<T>(_: T) -> rustix::io::Errno {
+    rustix::io::Errno::INVAL
+}
+
 /// Root-owned execute transport bound to the single SIC1-selected endpoint.
 #[derive(Debug)]
 pub(crate) struct ProviderTransport {
@@ -217,8 +245,8 @@ impl StagedProviderOutput {
     ) -> Result<T, SelectorBoundaryError> {
         let file = self.file.as_file_mut();
         file.seek(SeekFrom::Start(0))
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        compose(&self.descriptor, file)
+            .map_err(io_error)
+            .and_then(|_| compose(&self.descriptor, file))
     }
 }
 
@@ -240,49 +268,86 @@ impl SelectedProviderEndpoint {
         if !root_owned_ancestors(execute) {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        let metadata = endpoint_metadata(execute, None, ROOT_UID)?;
-        Ok(Self {
-            path: execute.to_path_buf(),
+        Self::from_validated_path(execute, ROOT_UID)
+    }
+
+    fn from_validated_path(path: &Path, owner: u32) -> Result<Self, SelectorBoundaryError> {
+        endpoint_metadata(path, None, owner)
+            .map(|metadata| Self::from_identity(path, &metadata, owner))
+    }
+
+    fn from_identity(path: &Path, metadata: &Metadata, owner: u32) -> Self {
+        Self {
+            path: path.to_path_buf(),
             device: metadata.dev(),
             inode: metadata.ino(),
-            owner: ROOT_UID,
-        })
+            owner,
+        }
     }
 
     fn connect(&self, timeout: Duration) -> Result<UnixStream, SelectorBoundaryError> {
-        let before = endpoint_metadata(&self.path, Some((self.device, self.inode)), self.owner)?;
-        let address =
-            SocketAddrUnix::new(&self.path).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let descriptor = socket_with(
-            AddressFamily::UNIX,
-            SocketType::STREAM,
-            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
-            None,
-        )
-        .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-        connect(&descriptor, &address)
-            .or_else(|error| {
-                if error == rustix::io::Errno::INPROGRESS {
-                    wait_for_connection(&descriptor, timeout)
-                } else {
-                    Err(error)
-                }
+        endpoint_metadata(&self.path, Some((self.device, self.inode)), self.owner)
+            .and_then(|before| {
+                SocketAddrUnix::new(&self.path)
+                    .map_err(artifact_invalid)
+                    .map(|address| (before, address))
             })
-            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-        let stream = UnixStream::from(descriptor);
-        stream
-            .set_nonblocking(false)
-            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-        let after = endpoint_metadata(&self.path, Some((self.device, self.inode)), self.owner)?;
-        if before.dev() != after.dev() || before.ino() != after.ino() {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        let peer =
-            socket_peercred(stream.as_fd()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        if peer.uid.as_raw() != self.owner {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        Ok(stream)
+            .and_then(|(before, address)| {
+                socket_with(
+                    AddressFamily::UNIX,
+                    SocketType::STREAM,
+                    SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+                    None,
+                )
+                .map_err(selector_unavailable)
+                .map(|descriptor| (before, address, descriptor))
+            })
+            .and_then(|(before, address, descriptor)| {
+                complete_nonblocking_connect(connect(&descriptor, &address), &descriptor, timeout)
+                    .map_err(selector_unavailable)
+                    .map(|()| (before, descriptor))
+            })
+            .and_then(|(before, descriptor)| {
+                let stream = UnixStream::from(descriptor);
+                stream
+                    .set_nonblocking(false)
+                    .map_err(selector_unavailable)
+                    .map(|()| (before, stream))
+            })
+            .and_then(|(before, stream)| {
+                endpoint_metadata(&self.path, Some((self.device, self.inode)), self.owner)
+                    .map(|after| (before, stream, after))
+            })
+            .and_then(|(before, stream, after)| {
+                socket_peercred(stream.as_fd())
+                    .map_err(artifact_invalid)
+                    .map(|peer| (before, stream, after, peer))
+            })
+            .and_then(|(before, stream, after, peer)| {
+                validate_connected_endpoint(
+                    (before.dev(), before.ino()),
+                    (after.dev(), after.ino()),
+                    peer.uid.as_raw(),
+                    self.owner,
+                )
+                .map(|()| stream)
+            })
+    }
+}
+
+const fn provider_transport(endpoint: SelectedProviderEndpoint) -> ProviderTransport {
+    ProviderTransport { endpoint }
+}
+
+fn complete_nonblocking_connect(
+    result: rustix::io::Result<()>,
+    descriptor: &impl AsFd,
+    timeout: Duration,
+) -> rustix::io::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::INPROGRESS) => wait_for_connection(descriptor, timeout),
+        Err(error) => Err(error),
     }
 }
 
@@ -295,20 +360,15 @@ impl ProviderTransport {
     pub(crate) fn from_admitted(
         admitted: &AdmittedSelectorProvider,
     ) -> Result<Self, SelectorBoundaryError> {
-        SelectedProviderEndpoint::from_admitted(admitted).map(|endpoint| Self { endpoint })
+        SelectedProviderEndpoint::from_admitted(admitted).map(provider_transport)
     }
 
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn from_path_for_test(path: &Path) -> Result<Self, SelectorBoundaryError> {
-        let metadata = std::fs::symlink_metadata(path).map_err(|_| SelectorBoundaryError::Io)?;
+        let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
         Ok(Self {
-            endpoint: SelectedProviderEndpoint {
-                path: path.to_path_buf(),
-                device: metadata.dev(),
-                inode: metadata.ino(),
-                owner: metadata.uid(),
-            },
+            endpoint: SelectedProviderEndpoint::from_identity(path, &metadata, metadata.uid()),
         })
     }
 
@@ -328,12 +388,10 @@ impl ProviderTransport {
         input: &[u8],
         watchdog: Duration,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
-        let request = SandboxExecuteRequest::from_canonical_cbor(spx1)
-            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
-        validate_input(&request.adapter_input, input)
-            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
-        let deadline =
-            Deadline::new(watchdog).map_err(|_| ProviderTransportError::BeforeAdmission)?;
+        let request =
+            SandboxExecuteRequest::from_canonical_cbor(spx1).map_err(transport_before_admission)?;
+        validate_input(&request.adapter_input, input).map_err(transport_before_admission)?;
+        let deadline = Deadline::new(watchdog).map_err(transport_before_admission)?;
         let mut retained_grant = None;
         match self.execute_once(
             admitted,
@@ -384,23 +442,41 @@ impl ProviderTransport {
         deadline: &Deadline,
         retained_grant: &mut Option<RetainedGrant>,
     ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
-        let mut stream = self
-            .endpoint
-            .connect(deadline.remaining()?)
-            .map_err(|_| ReceiveFailure::Incomplete)?;
-        write_frame(&mut stream, spx1, deadline)?;
-        write_input(&mut stream, request, input, deadline)?;
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(|_| ReceiveFailure::Incomplete)?;
-        read_response(
-            &mut stream,
-            admitted,
-            commitment,
-            request,
-            deadline,
-            retained_grant,
-        )
+        deadline
+            .remaining()
+            .and_then(|remaining| self.endpoint.connect(remaining).map_err(receive_incomplete))
+            .and_then(|mut stream| {
+                write_frame(&mut stream, spx1, deadline)
+                    .and_then(|()| write_input(&mut stream, request, input, deadline))
+                    .and_then(|()| {
+                        stream
+                            .shutdown(std::net::Shutdown::Write)
+                            .map_err(receive_incomplete)
+                    })
+                    .and_then(|()| {
+                        read_response(
+                            &mut stream,
+                            admitted,
+                            commitment,
+                            request,
+                            deadline,
+                            retained_grant,
+                        )
+                    })
+            })
+    }
+}
+
+fn validate_connected_endpoint(
+    before: (u64, u64),
+    after: (u64, u64),
+    peer_owner: u32,
+    expected_owner: u32,
+) -> Result<(), SelectorBoundaryError> {
+    if before != after || peer_owner != expected_owner {
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    } else {
+        Ok(())
     }
 }
 
@@ -430,26 +506,42 @@ impl Deadline {
     }
 
     fn set_read(&self, stream: &UnixStream) -> Result<(), ReceiveFailure> {
-        stream
-            .set_read_timeout(Some(self.remaining()?))
-            .map_err(|_| ReceiveFailure::Incomplete)
+        self.remaining().and_then(|remaining| {
+            stream
+                .set_read_timeout(Some(remaining))
+                .map_err(receive_incomplete)
+        })
     }
 
     fn set_write(&self, stream: &UnixStream) -> Result<(), ReceiveFailure> {
-        stream
-            .set_write_timeout(Some(self.remaining()?))
-            .map_err(|_| ReceiveFailure::Incomplete)
+        self.remaining().and_then(|remaining| {
+            stream
+                .set_write_timeout(Some(remaining))
+                .map_err(receive_incomplete)
+        })
     }
 }
 
 fn wait_for_connection(descriptor: &impl AsFd, timeout: Duration) -> rustix::io::Result<()> {
-    let seconds = i64::try_from(timeout.as_secs()).map_err(|_| rustix::io::Errno::INVAL)?;
-    let timeout = Timespec {
-        tv_sec: seconds,
-        tv_nsec: timeout.subsec_nanos().into(),
-    };
-    let mut descriptors = [PollFd::new(descriptor, PollFlags::OUT)];
-    if poll(&mut descriptors, Some(&timeout))? == 0 || socket_error(descriptor)?.is_err() {
+    i64::try_from(timeout.as_secs())
+        .map_err(invalid_errno)
+        .and_then(|seconds| {
+            let timeout = Timespec {
+                tv_sec: seconds,
+                tv_nsec: timeout.subsec_nanos().into(),
+            };
+            let mut descriptors = [PollFd::new(descriptor, PollFlags::OUT)];
+            poll(&mut descriptors, Some(&timeout))
+        })
+        .and_then(|ready| socket_error(descriptor).map(|error| (ready, error)))
+        .and_then(|(ready, error)| ensure_connected_poll(ready, error))
+}
+
+const fn ensure_connected_poll(
+    ready: usize,
+    error: rustix::io::Result<()>,
+) -> rustix::io::Result<()> {
+    if ready == 0 || error.is_err() {
         return Err(rustix::io::Errno::TIMEDOUT);
     }
     Ok(())
@@ -459,13 +551,17 @@ fn validate_input(
     descriptor: &PayloadDescriptor,
     input: &[u8],
 ) -> Result<(), SelectorBoundaryError> {
-    if u64::try_from(input.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?
-        != descriptor.byte_length
-        || payload_digest(PayloadDirection::Input, input) != descriptor.digest
-    {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(())
+    u64::try_from(input.len())
+        .map_err(artifact_invalid)
+        .and_then(|length| {
+            if length != descriptor.byte_length
+                || payload_digest(PayloadDirection::Input, input) != descriptor.digest
+            {
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            } else {
+                Ok(())
+            }
+        })
 }
 
 fn write_input(
@@ -474,13 +570,15 @@ fn write_input(
     input: &[u8],
     deadline: &Deadline,
 ) -> Result<(), ReceiveFailure> {
-    validate_input(&request.adapter_input, input).map_err(|_| ReceiveFailure::Invalid)?;
-    for (index, bytes) in input.chunks(CHUNK_BYTES).enumerate() {
-        let index = u64::try_from(index).map_err(|_| ReceiveFailure::Invalid)?;
-        let chunk = encode_input_chunk(request, index, bytes)?;
-        write_frame(stream, &chunk, deadline)?;
-    }
-    Ok(())
+    input
+        .chunks(CHUNK_BYTES)
+        .enumerate()
+        .try_for_each(|(index, bytes)| {
+            u64::try_from(index)
+                .map_err(receive_invalid)
+                .and_then(|index| encode_input_chunk(request, index, bytes))
+                .and_then(|chunk| write_frame(stream, &chunk, deadline))
+        })
 }
 
 fn encode_input_chunk(
@@ -488,23 +586,30 @@ fn encode_input_chunk(
     index: u64,
     bytes: &[u8],
 ) -> Result<Vec<u8>, ReceiveFailure> {
-    let offset = index
-        .checked_mul(u64::try_from(CHUNK_BYTES).map_err(|_| ReceiveFailure::Invalid)?)
-        .ok_or(ReceiveFailure::Invalid)?;
-    let unsigned = Value::Array(vec![
-        Value::Text("SBC1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Bytes(request.request_digest.to_vec()),
-        Value::Bytes(request.request.request_id.to_vec()),
-        Value::Bytes(request.attempt_id.to_vec()),
-        Value::Integer(0_u64.into()),
-        Value::Integer(index.into()),
-        Value::Integer(offset.into()),
-        Value::Bytes(bytes.to_vec()),
-    ]);
-    let encoded = encode_value(&unsigned)?;
-    let digest = record_digest("SBC1", &encoded);
-    encode_value(&Value::Array(vec![unsigned, Value::Bytes(digest.to_vec())]))
+    u64::try_from(CHUNK_BYTES)
+        .map_err(receive_invalid)
+        .and_then(|chunk_bytes| {
+            index
+                .checked_mul(chunk_bytes)
+                .ok_or(ReceiveFailure::Invalid)
+        })
+        .and_then(|offset| {
+            let unsigned = Value::Array(vec![
+                Value::Text("SBC1".to_owned()),
+                Value::Integer(1_u64.into()),
+                Value::Bytes(request.request_digest.to_vec()),
+                Value::Bytes(request.request.request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                Value::Integer(0_u64.into()),
+                Value::Integer(index.into()),
+                Value::Integer(offset.into()),
+                Value::Bytes(bytes.to_vec()),
+            ]);
+            encode_value(&unsigned).and_then(|encoded| {
+                let digest = record_digest("SBC1", &encoded);
+                encode_value(&Value::Array(vec![unsigned, Value::Bytes(digest.to_vec())]))
+            })
+        })
 }
 
 fn read_response(
@@ -515,26 +620,25 @@ fn read_response(
     deadline: &Deadline,
     retained_grant: &mut Option<RetainedGrant>,
 ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
-    let first = read_frame(stream, deadline)?.ok_or(ReceiveFailure::Incomplete)?;
-    match record_magic(&first)?.as_str() {
-        "AGR1" => read_admitted_response(
-            stream,
-            admitted,
-            commitment,
-            request,
-            deadline,
-            retained_grant,
-            first,
-        ),
-        "SPE1" if retained_grant.is_none() => {
-            read_error_response(stream, admitted, request, deadline, first)
-        }
-        "SPY1" => {
-            ensure_eof(stream, deadline)?;
-            Err(ReceiveFailure::Invalid)
-        }
-        _ => Err(ReceiveFailure::Invalid),
-    }
+    read_frame(stream, deadline)
+        .and_then(|first| first.ok_or(ReceiveFailure::Incomplete))
+        .and_then(|first| record_magic(&first).map(|magic| (first, magic)))
+        .and_then(|(first, magic)| match magic.as_str() {
+            "AGR1" => read_admitted_response(
+                stream,
+                admitted,
+                commitment,
+                request,
+                deadline,
+                retained_grant,
+                first,
+            ),
+            "SPE1" if retained_grant.is_none() => {
+                read_error_response(stream, admitted, request, deadline, first)
+            }
+            "SPY1" => ensure_eof(stream, deadline).and(Err(ReceiveFailure::Invalid)),
+            _ => Err(ReceiveFailure::Invalid),
+        })
 }
 
 fn read_admitted_response(
@@ -546,36 +650,80 @@ fn read_admitted_response(
     retained_grant: &mut Option<RetainedGrant>,
     grant_bytes: Vec<u8>,
 ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
-    verify_retained_grant(retained_grant.as_ref(), &grant_bytes)?;
-    let grant = admitted
-        .authenticate_selector_grant(&grant_bytes, request, commitment)
-        .map_err(|_| ReceiveFailure::Invalid)?;
-    retain_authenticated_grant(retained_grant, grant_bytes.clone(), grant.grant_digest);
-    let (audit_bytes, receipt_bytes) = read_audit_and_receipt(stream, deadline)?;
-    let receipt = admitted
-        .authenticate_receipt(&receipt_bytes, &grant)
-        .map_err(|_| ReceiveFailure::Invalid)?;
-    let (file, chunks, result_bytes) = read_output_frames(stream, deadline)?;
-    let result = admitted
-        .authenticate_terminal_result(&result_bytes, request, &grant, &receipt)
-        .map_err(|_| ReceiveFailure::Invalid)?;
-    ensure_eof(stream, deadline)?;
-    admitted
-        .authenticate_audit_chain(&audit_bytes, &receipt, &result)
-        .map_err(|_| ReceiveFailure::Invalid)?;
-    let output = stage_output(file, chunks, request, &result)?;
-    Ok(AuthenticatedProviderTerminal::Execution(
-        AuthenticatedProviderExecution {
-            frames: AuthenticatedProviderFrames::new(
-                grant_bytes,
-                receipt_bytes,
-                result_bytes,
-                audit_bytes,
-            ),
-            agr1_digest: grant.grant_digest,
-            output,
-        },
-    ))
+    verify_retained_grant(retained_grant.as_ref(), &grant_bytes)
+        .and_then(|()| {
+            admitted
+                .authenticate_selector_grant(&grant_bytes, request, commitment)
+                .map_err(receive_invalid)
+        })
+        .and_then(|grant| {
+            retain_authenticated_grant(retained_grant, grant_bytes.clone(), grant.grant_digest);
+            read_audit_and_receipt(stream, deadline).map(|(audit, receipt)| (grant, audit, receipt))
+        })
+        .and_then(|(grant, audit_bytes, receipt_bytes)| {
+            admitted
+                .authenticate_receipt(&receipt_bytes, &grant)
+                .map_err(receive_invalid)
+                .map(|receipt| (grant, audit_bytes, receipt_bytes, receipt))
+        })
+        .and_then(|state| {
+            read_output_frames(stream, deadline)
+                .map(|(file, chunks, result)| (state, file, chunks, result))
+        })
+        .and_then(
+            |((grant, audit_bytes, receipt_bytes, receipt), file, chunks, result_bytes)| {
+                admitted
+                    .authenticate_terminal_result(&result_bytes, request, &grant, &receipt)
+                    .map_err(receive_invalid)
+                    .map(|result| {
+                        (
+                            grant,
+                            audit_bytes,
+                            receipt_bytes,
+                            receipt,
+                            file,
+                            chunks,
+                            result_bytes,
+                            result,
+                        )
+                    })
+            },
+        )
+        .and_then(|state| ensure_eof(stream, deadline).map(|()| state))
+        .and_then(
+            |(grant, audit_bytes, receipt_bytes, receipt, file, chunks, result_bytes, result)| {
+                admitted
+                    .authenticate_audit_chain(&audit_bytes, &receipt, &result)
+                    .map_err(receive_invalid)
+                    .map(|_| {
+                        (
+                            grant,
+                            audit_bytes,
+                            receipt_bytes,
+                            file,
+                            chunks,
+                            result_bytes,
+                            result,
+                        )
+                    })
+            },
+        )
+        .and_then(
+            |(grant, audit_bytes, receipt_bytes, file, chunks, result_bytes, result)| {
+                stage_output(file, chunks, request, &result).map(|output| {
+                    AuthenticatedProviderTerminal::Execution(AuthenticatedProviderExecution {
+                        frames: AuthenticatedProviderFrames::new(
+                            grant_bytes,
+                            receipt_bytes,
+                            result_bytes,
+                            audit_bytes,
+                        ),
+                        agr1_digest: grant.grant_digest,
+                        output,
+                    })
+                })
+            },
+        )
 }
 
 fn read_error_response(
@@ -585,11 +733,13 @@ fn read_error_response(
     deadline: &Deadline,
     error_bytes: Vec<u8>,
 ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
-    ensure_eof(stream, deadline)?;
-    admitted
-        .authenticate_selector_error(&error_bytes, request)
-        .map_err(|_| ReceiveFailure::Invalid)?;
-    Ok(AuthenticatedProviderTerminal::Error(error_bytes))
+    ensure_eof(stream, deadline)
+        .and_then(|()| {
+            admitted
+                .authenticate_selector_error(&error_bytes, request)
+                .map_err(receive_invalid)
+        })
+        .map(|()| AuthenticatedProviderTerminal::Error(error_bytes))
 }
 
 fn verify_retained_grant(
@@ -643,16 +793,15 @@ fn read_output_frames(
     stream: &mut UnixStream,
     deadline: &Deadline,
 ) -> Result<(tempfile::NamedTempFile, Vec<ChunkMeta>, Vec<u8>), ReceiveFailure> {
-    let mut file = tempfile::NamedTempFile::new().map_err(|_| ReceiveFailure::Incomplete)?;
+    let mut file = tempfile::NamedTempFile::new().map_err(receive_incomplete)?;
     let mut chunks = Vec::new();
     loop {
         let frame = read_frame(stream, deadline)?.ok_or(ReceiveFailure::Incomplete)?;
         match record_magic(&frame)?.as_str() {
             "SBC1" if chunks.len() < 128 => {
-                let chunk = SandboxPayloadChunk::from_canonical_cbor(&frame)
-                    .map_err(|_| ReceiveFailure::Invalid)?;
-                file.write_all(&chunk.bytes)
-                    .map_err(|_| ReceiveFailure::Incomplete)?;
+                let chunk =
+                    SandboxPayloadChunk::from_canonical_cbor(&frame).map_err(receive_invalid)?;
+                file.write_all(&chunk.bytes).map_err(receive_incomplete)?;
                 chunks.push(ChunkMeta::from(&chunk));
             }
             "SPY1" => return Ok((file, chunks, frame)),
@@ -694,43 +843,46 @@ fn stage_output(
     request: &SandboxExecuteRequest,
     result: &AuthenticatedSandboxProviderResult,
 ) -> Result<Option<StagedProviderOutput>, ReceiveFailure> {
-    match (result.outcome, result.output.as_ref()) {
-        (crate::sandbox_provider_protocol::SandboxTerminalOutcome::Completed, Some(descriptor)) => {
-            let mut validator = PayloadStreamValidator::new(
+    match result.output.as_ref() {
+        Some(descriptor) => {
+            let validator = PayloadStreamValidator::new(
                 result.result_digest,
                 request.request.request_id,
                 request.attempt_id,
                 PayloadDirection::Output,
                 descriptor.clone(),
             )
-            .map_err(|_| ReceiveFailure::Invalid)?;
-            file.seek(SeekFrom::Start(0))
-                .map_err(|_| ReceiveFailure::Incomplete)?;
-            for chunk in chunks {
-                let mut bytes = vec![0; chunk.length];
-                file.read_exact(&mut bytes)
-                    .map_err(|_| ReceiveFailure::Incomplete)?;
-                validator
-                    .accept(&SandboxPayloadChunk {
-                        parent_digest: chunk.parent_digest,
-                        request_id: chunk.request_id,
-                        attempt_id: chunk.attempt_id,
-                        direction: chunk.direction,
-                        index: chunk.index,
-                        offset: chunk.offset,
-                        bytes,
-                        chunk_digest: chunk.chunk_digest,
+            .map_err(receive_invalid);
+            validator.and_then(|mut validator| {
+                file.seek(SeekFrom::Start(0))
+                    .map_err(receive_incomplete)
+                    .and_then(|_| {
+                        chunks.into_iter().try_for_each(|chunk| {
+                            let mut bytes = vec![0; chunk.length];
+                            file.read_exact(&mut bytes)
+                                .map_err(receive_incomplete)
+                                .and_then(|()| {
+                                    validator
+                                        .accept(&SandboxPayloadChunk {
+                                            parent_digest: chunk.parent_digest,
+                                            request_id: chunk.request_id,
+                                            attempt_id: chunk.attempt_id,
+                                            direction: chunk.direction,
+                                            index: chunk.index,
+                                            offset: chunk.offset,
+                                            bytes,
+                                            chunk_digest: chunk.chunk_digest,
+                                        })
+                                        .map_err(receive_invalid)
+                                })
+                        })
                     })
-                    .map_err(|_| ReceiveFailure::Invalid)?;
-            }
-            validator.finish().map_err(|_| ReceiveFailure::Invalid)?;
-            Ok(Some(StagedProviderOutput::new(file, descriptor.clone())))
+                    .and_then(|()| validator.finish().map_err(receive_invalid))
+                    .map(|()| Some(StagedProviderOutput::new(file, descriptor.clone())))
+            })
         }
-        (crate::sandbox_provider_protocol::SandboxTerminalOutcome::Completed, None) => {
-            Err(ReceiveFailure::Invalid)
-        }
-        (_, None) if chunks.is_empty() => Ok(None),
-        _ => Err(ReceiveFailure::Invalid),
+        None if chunks.is_empty() => Ok(None),
+        None => Err(ReceiveFailure::Invalid),
     }
 }
 
@@ -742,15 +894,16 @@ fn write_frame(
     if bytes.is_empty() || bytes.len() > CONTROL_LIMIT {
         return Err(ReceiveFailure::Invalid);
     }
-    deadline.set_write(stream)?;
-    let length = u32::try_from(bytes.len()).map_err(|_| ReceiveFailure::Invalid)?;
-    stream
-        .write_all(&length.to_be_bytes())
-        .map_err(|_| ReceiveFailure::Incomplete)?;
-    deadline.set_write(stream)?;
-    stream
-        .write_all(bytes)
-        .map_err(|_| ReceiveFailure::Incomplete)
+    deadline
+        .set_write(stream)
+        .and_then(|()| u32::try_from(bytes.len()).map_err(receive_invalid))
+        .and_then(|length| {
+            stream
+                .write_all(&length.to_be_bytes())
+                .map_err(receive_incomplete)
+        })
+        .and_then(|()| deadline.set_write(stream))
+        .and_then(|()| stream.write_all(bytes).map_err(receive_incomplete))
 }
 
 fn read_frame(
@@ -758,47 +911,58 @@ fn read_frame(
     deadline: &Deadline,
 ) -> Result<Option<Vec<u8>>, ReceiveFailure> {
     let mut prefix = [0_u8; 4];
-    deadline.set_read(stream)?;
-    if stream
-        .read(&mut prefix[..1])
-        .map_err(|_| ReceiveFailure::Incomplete)?
-        == 0
-    {
-        return Ok(None);
-    }
-    deadline.set_read(stream)?;
-    stream
-        .read_exact(&mut prefix[1..])
-        .map_err(|_| ReceiveFailure::Incomplete)?;
-    let length =
-        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| ReceiveFailure::Invalid)?;
-    if length == 0 || length > CONTROL_LIMIT {
-        return Err(ReceiveFailure::Invalid);
-    }
-    let mut bytes = vec![0; length];
-    deadline.set_read(stream)?;
-    stream
-        .read_exact(&mut bytes)
-        .map_err(|_| ReceiveFailure::Incomplete)?;
-    Ok(Some(bytes))
+    deadline.set_read(stream).and_then(|()| {
+        stream
+            .read(&mut prefix[..1])
+            .map_err(receive_incomplete)
+            .and_then(|read| {
+                if read == 0 {
+                    return Ok(None);
+                }
+                deadline
+                    .set_read(stream)
+                    .and_then(|()| {
+                        stream
+                            .read_exact(&mut prefix[1..])
+                            .map_err(receive_incomplete)
+                    })
+                    .and_then(|()| {
+                        usize::try_from(u32::from_be_bytes(prefix)).map_err(receive_invalid)
+                    })
+                    .and_then(|length| {
+                        if length == 0 || length > CONTROL_LIMIT {
+                            return Err(ReceiveFailure::Invalid);
+                        }
+                        let mut bytes = vec![0; length];
+                        deadline
+                            .set_read(stream)
+                            .and_then(|()| {
+                                stream.read_exact(&mut bytes).map_err(receive_incomplete)
+                            })
+                            .map(|()| Some(bytes))
+                    })
+            })
+    })
 }
 
 fn ensure_eof(stream: &mut UnixStream, deadline: &Deadline) -> Result<(), ReceiveFailure> {
     let mut byte = [0_u8; 1];
-    deadline.set_read(stream)?;
-    if stream
-        .read(&mut byte)
-        .map_err(|_| ReceiveFailure::Incomplete)?
-        == 0
-    {
-        Ok(())
-    } else {
-        Err(ReceiveFailure::Invalid)
-    }
+    deadline.set_read(stream).and_then(|()| {
+        stream
+            .read(&mut byte)
+            .map_err(receive_incomplete)
+            .and_then(|read| {
+                if read == 0 {
+                    Ok(())
+                } else {
+                    Err(ReceiveFailure::Invalid)
+                }
+            })
+    })
 }
 
 fn record_magic(bytes: &[u8]) -> Result<String, ReceiveFailure> {
-    let value: Value = ciborium::from_reader(bytes).map_err(|_| ReceiveFailure::Invalid)?;
+    let value: Value = ciborium::from_reader(bytes).map_err(receive_invalid)?;
     let Value::Array(wrapper) = value else {
         return Err(ReceiveFailure::Invalid);
     };
@@ -813,8 +977,9 @@ fn record_magic(bytes: &[u8]) -> Result<String, ReceiveFailure> {
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ReceiveFailure> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).map_err(|_| ReceiveFailure::Invalid)?;
-    Ok(bytes)
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(receive_invalid)
+        .map(|()| bytes)
 }
 
 fn record_digest(magic: &str, unsigned: &[u8]) -> [u8; 32] {
@@ -842,8 +1007,7 @@ fn endpoint_metadata(
     expected_identity: Option<(u64, u64)>,
     expected_owner: u32,
 ) -> Result<Metadata, SelectorBoundaryError> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(selector_unavailable)?;
     let identity_matches = expected_identity
         .is_none_or(|(device, inode)| metadata.dev() == device && metadata.ino() == inode);
     if !metadata.file_type().is_socket()
@@ -875,6 +1039,55 @@ mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn closed_error_mappers_and_connect_completion_preserve_failure_classes() -> TestResult {
+        assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
+        assert_eq!(
+            selector_unavailable(()),
+            SelectorBoundaryError::SelectorUnavailable
+        );
+        assert_eq!(io_error(()), SelectorBoundaryError::Io);
+        assert_eq!(
+            transport_before_admission(()),
+            ProviderTransportError::BeforeAdmission
+        );
+        assert_eq!(receive_invalid(()), ReceiveFailure::Invalid);
+        assert_eq!(receive_incomplete(()), ReceiveFailure::Incomplete);
+        assert_eq!(invalid_errno(()), rustix::io::Errno::INVAL);
+
+        let (descriptor, _peer) = UnixStream::pair()?;
+        assert_eq!(
+            complete_nonblocking_connect(Ok(()), &descriptor, Duration::from_secs(1)),
+            Ok(())
+        );
+        assert_eq!(
+            complete_nonblocking_connect(
+                Err(rustix::io::Errno::CONNREFUSED),
+                &descriptor,
+                Duration::from_secs(1),
+            ),
+            Err(rustix::io::Errno::CONNREFUSED)
+        );
+        assert_eq!(
+            complete_nonblocking_connect(
+                Err(rustix::io::Errno::INPROGRESS),
+                &descriptor,
+                Duration::from_secs(1),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            ensure_connected_poll(0, Ok(())),
+            Err(rustix::io::Errno::TIMEDOUT)
+        );
+        assert_eq!(
+            ensure_connected_poll(1, Err(rustix::io::Errno::CONNREFUSED)),
+            Err(rustix::io::Errno::TIMEDOUT)
+        );
+        assert_eq!(ensure_connected_poll(1, Ok(())), Ok(()));
+        Ok(())
+    }
 
     #[test]
     fn frames_preserve_payload_and_require_a_bounded_nonempty_length() -> TestResult {
@@ -1116,6 +1329,32 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let metadata = std::fs::symlink_metadata(&path)?;
         assert!(endpoint_metadata(&path, None, metadata.uid()).is_ok());
+        let endpoint = SelectedProviderEndpoint::from_validated_path(&path, metadata.uid())?;
+        assert_eq!(endpoint.path, path);
+        assert_eq!(endpoint.device, metadata.dev());
+        assert_eq!(endpoint.inode, metadata.ino());
+        assert_eq!(endpoint.owner, metadata.uid());
+        assert!(validate_connected_endpoint(
+            (metadata.dev(), metadata.ino()),
+            (metadata.dev(), metadata.ino()),
+            metadata.uid(),
+            metadata.uid(),
+        )
+        .is_ok());
+        assert!(validate_connected_endpoint(
+            (metadata.dev(), metadata.ino()),
+            (metadata.dev(), metadata.ino() ^ 1),
+            metadata.uid(),
+            metadata.uid(),
+        )
+        .is_err());
+        assert!(validate_connected_endpoint(
+            (metadata.dev(), metadata.ino()),
+            (metadata.dev(), metadata.ino()),
+            metadata.uid() ^ 1,
+            metadata.uid(),
+        )
+        .is_err());
         assert!(endpoint_metadata(&path, None, metadata.uid() ^ 1).is_err());
         assert!(endpoint_metadata(
             &path,
@@ -1375,6 +1614,16 @@ mod tests {
         )
         .map_err(|failure| format!("non-output staging failed: {failure:?}"))?
         .is_none());
+        let chunk = SandboxPayloadChunk::from_canonical_cbor(&fixture.output_chunk)?;
+        assert!(matches!(
+            stage_output(
+                tempfile::NamedTempFile::new()?,
+                vec![ChunkMeta::from(&chunk)],
+                &fixture.request,
+                &fixture.non_output_result,
+            ),
+            Err(ReceiveFailure::Invalid)
+        ));
         Ok(())
     }
 
@@ -1648,6 +1897,53 @@ mod tests {
     }
 
     #[test]
+    fn selected_endpoint_rejects_invalid_evidence_on_the_recovery_attempt() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let expected_spx1 = fixture.spx1.clone();
+        let provider = std::thread::spawn(move || -> Result<(), String> {
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("provider deadline failed: {error}"))?;
+            let (mut first, _) = listener
+                .accept()
+                .map_err(|error| format!("first provider accept failed: {error}"))?;
+            read_expected_attempt(&mut first, &expected_spx1, &deadline)?;
+            drop(first);
+
+            let (mut recovery, _) = listener
+                .accept()
+                .map_err(|error| format!("recovery provider accept failed: {error}"))?;
+            read_expected_attempt(&mut recovery, &expected_spx1, &deadline)?;
+            write_frame(
+                &mut recovery,
+                &selector_record("AGR1").map_err(|error| error.to_string())?,
+                &deadline,
+            )
+            .map_err(|error| format!("invalid recovery AGR1 write failed: {error:?}"))?;
+            recovery
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| format!("provider shutdown failed: {error}"))
+        });
+
+        assert!(matches!(
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(5),
+            ),
+            Err(ProviderTransportError::BeforeAdmission)
+        ));
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
     fn execute_rejects_invalid_requests_inputs_and_deadlines_before_connecting() -> TestResult {
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let directory = tempfile::tempdir()?;
@@ -1819,6 +2115,7 @@ mod tests {
             wait_for_connection(&UnixStream::pair()?.0, Duration::MAX),
             Err(rustix::io::Errno::INVAL)
         );
+        assert!(wait_for_connection(&UnixStream::pair()?.0, Duration::from_secs(1)).is_ok());
         Ok(())
     }
 

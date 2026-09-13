@@ -25,9 +25,11 @@ use crate::sandbox_provider_protocol::{
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
     SignedImageManifest,
 };
-use crate::selector::installation::authority::AdmittedSelectorProvider;
+use crate::selector::installation::authority::{
+    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
+};
 use crate::selector::installation::{
-    open_directory_chain, InstallationObjectKind, InstalledSelectorState, SANDBOX_ADMIN_SOCKET,
+    open_directory_chain, InstallationObjectKind, InstalledSelectorState,
 };
 use crate::selector::{SelectorBoundaryError, SANDBOX_SELECTOR_SOCKET};
 use crate::selector_protocol::{
@@ -44,26 +46,50 @@ const ROOT_UID: u32 = 0;
 const SOCKET_MODE: u32 = 0o600;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::ArtifactInvalid
+}
+
+fn selector_unavailable<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::SelectorUnavailable
+}
+
+fn io_error<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::Io
+}
+
+fn unit_error<T>(_: T) {}
+
 /// Run the normal (no pending SIR1) selector composition.
 ///
 /// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
 /// rejects it before any listener can be exposed, until #214 supplies the
 /// required lifecycle-backed recovery composition.
 pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
-    let admitted = InstalledSelectorState::open()?
-        .authenticate_bootstrap()?
-        .admit_provider()?;
-    let admin_listener = FixedListener::bind(SANDBOX_ADMIN_SOCKET)?;
-    let transport = ProviderTransport::from_admitted(&admitted)?;
-    let evaluator_listener = FixedListener::bind(SANDBOX_SELECTOR_SOCKET)?;
+    InstalledSelectorState::open()
+        .and_then(InstalledSelectorState::authenticate_bootstrap)
+        .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+        .and_then(|admitted| {
+            ProviderTransport::from_admitted(&admitted).map(|transport| (admitted, transport))
+        })
+        .and_then(|(admitted, transport)| {
+            FixedListener::bind(SANDBOX_SELECTOR_SOCKET)
+                .map(|evaluator_listener| fixed_service(admitted, transport, evaluator_listener))
+        })
+        .and_then(|service| service.serve())
+}
+
+const fn fixed_service(
+    admitted: AdmittedSelectorProvider,
+    transport: ProviderTransport,
+    evaluator_listener: FixedListener,
+) -> RootSelectorService {
     RootSelectorService {
         admitted,
         transport,
-        admin_listener,
         evaluator_listener,
         peer_uid: ROOT_UID,
     }
-    .serve()
 }
 
 trait ProviderExecutor {
@@ -93,21 +119,24 @@ impl ProviderExecutor for ProviderTransport {
 struct RootSelectorService<T = ProviderTransport> {
     admitted: AdmittedSelectorProvider,
     transport: T,
-    admin_listener: FixedListener,
     evaluator_listener: FixedListener,
     peer_uid: u32,
 }
 
 impl<T: ProviderExecutor> RootSelectorService<T> {
     fn serve(&self) -> Result<(), SelectorBoundaryError> {
-        self.admin_listener.verify_continuity()?;
         loop {
-            self.admin_listener.verify_continuity()?;
             self.evaluator_listener.verify_continuity()?;
             let (stream, _) = match self.evaluator_listener.listener.accept() {
                 Ok(connection) => connection,
-                Err(error) if should_retry_listener_accept(&error) => continue,
-                Err(_) => return Err(SelectorBoundaryError::Io),
+                Err(error) => match listener_accept_action(&error) {
+                    ListenerAcceptAction::Retry => continue,
+                    ListenerAcceptAction::Backoff => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    ListenerAcceptAction::Fail => return Err(SelectorBoundaryError::Io),
+                },
             };
             match self.handle_connection(stream) {
                 Ok(())
@@ -127,7 +156,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         stream
             .set_read_timeout(Some(INITIAL_IO_TIMEOUT))
             .and_then(|()| stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT)))
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .map_err(io_error)?;
         let Ok((decoded, input)) = read_selector_request(&mut stream) else {
             return write_unidentified_request_error(&mut stream);
         };
@@ -161,7 +190,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
                 stream
                     .set_write_timeout(Some(Duration::from_millis(resolved.attempt().watchdog_ms)))
             })
-            .map_err(|_| SelectorBoundaryError::Io)?;
+            .map_err(io_error)?;
         let Ok((image, launch)) = selected_image_and_launch(&self.admitted, requirement) else {
             return write_policy_error(stream, decoded);
         };
@@ -225,41 +254,57 @@ fn selected_image_and_launch(
     requirement: &crate::evaluator_protocol::SandboxRequirement,
 ) -> Result<(AdmittedSandboxImage, LaunchPolicy), SelectorBoundaryError> {
     let installed = admitted.bootstrap().installed();
-    let sim1 = read_installed(
+    read_installed(
         installed,
         9,
         requirement.sim1_digest,
         CONTROL_ARTIFACT_LIMIT,
-    )?;
-    let image_manifest = SignedImageManifest::from_canonical_cbor(&sim1)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let root_image = read_installed(
-        installed,
-        12,
-        image_manifest.root_image_blake3_digest,
-        IMAGE_ARTIFACT_LIMIT,
-    )?;
-    let executable = read_installed(
-        installed,
-        13,
-        image_manifest.executable_blake3_digest,
-        IMAGE_ARTIFACT_LIMIT,
-    )?;
-    let image = admitted
-        .provider()
-        .admit_image(&sim1, &root_image, &executable)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let lps1 = read_installed(
-        installed,
-        8,
-        requirement.lps1_digest,
-        CONTROL_ARTIFACT_LIMIT,
-    )?;
-    admitted
-        .provider()
-        .admit_launch_policy(&lps1, &image)
-        .map(|launch| (image, launch))
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    )
+    .and_then(|sim1| {
+        SignedImageManifest::from_canonical_cbor(&sim1)
+            .map_err(artifact_invalid)
+            .map(|manifest| (sim1, manifest))
+    })
+    .and_then(|(sim1, manifest)| {
+        read_installed(
+            installed,
+            12,
+            manifest.root_image_blake3_digest,
+            IMAGE_ARTIFACT_LIMIT,
+        )
+        .map(|root_image| (sim1, manifest, root_image))
+    })
+    .and_then(|(sim1, manifest, root_image)| {
+        read_installed(
+            installed,
+            13,
+            manifest.executable_blake3_digest,
+            IMAGE_ARTIFACT_LIMIT,
+        )
+        .map(|executable| (sim1, root_image, executable))
+    })
+    .and_then(|(sim1, root_image, executable)| {
+        admitted
+            .provider()
+            .admit_image(&sim1, &root_image, &executable)
+            .map_err(artifact_invalid)
+    })
+    .and_then(|image| {
+        read_installed(
+            installed,
+            8,
+            requirement.lps1_digest,
+            CONTROL_ARTIFACT_LIMIT,
+        )
+        .map(|lps1| (image, lps1))
+    })
+    .and_then(|(image, lps1)| {
+        admitted
+            .provider()
+            .admit_launch_policy(&lps1, &image)
+            .map(|launch| (image, launch))
+            .map_err(artifact_invalid)
+    })
 }
 
 fn read_installed(
@@ -268,8 +313,7 @@ fn read_installed(
     identity: [u8; 32],
     limit: u64,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let kind = InstallationObjectKind::from_code(kind)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let kind = InstallationObjectKind::from_code(kind).map_err(artifact_invalid)?;
     installed.artifact(kind, identity)?.read_control(limit)
 }
 
@@ -312,25 +356,31 @@ fn selector_execute_bytes(
         Vec::new(),
     )
     .and_then(|request| request.to_canonical_cbor())
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    .map_err(artifact_invalid)
 }
 
 fn fresh_nonce() -> Result<[u8; 16], SelectorBoundaryError> {
-    let mut nonce = [0_u8; 16];
+    let mut nonce = <[u8; 16]>::default();
     let mut remaining = nonce.as_mut_slice();
     while !remaining.is_empty() {
         let received = getrandom(&mut *remaining, GetRandomFlags::empty())
-            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-        if received == 0 {
-            return Err(SelectorBoundaryError::SelectorUnavailable);
-        }
+            .map_err(selector_unavailable)
+            .and_then(nonzero_random_count)?;
         remaining = &mut remaining[received..];
     }
-    if nonce == [0; 16] {
-        Err(SelectorBoundaryError::SelectorUnavailable)
-    } else {
-        Ok(nonce)
-    }
+    validate_nonce(nonce)
+}
+
+fn nonzero_random_count(received: usize) -> Result<usize, SelectorBoundaryError> {
+    (received != 0)
+        .then_some(received)
+        .ok_or(SelectorBoundaryError::SelectorUnavailable)
+}
+
+fn validate_nonce(nonce: [u8; 16]) -> Result<[u8; 16], SelectorBoundaryError> {
+    (nonce != [0; 16])
+        .then_some(nonce)
+        .ok_or(SelectorBoundaryError::SelectorUnavailable)
 }
 
 fn prepare_authenticated_execution(
@@ -340,33 +390,40 @@ fn prepare_authenticated_execution(
 ) -> Result<EncodedSelectorReply, ()> {
     let output = execution
         .with_verified_output(|descriptor, reader| {
-            let capacity = usize::try_from(descriptor.byte_length)
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-            let mut bytes = Vec::with_capacity(capacity);
-            reader
-                .take(descriptor.byte_length.saturating_add(1))
-                .read_to_end(&mut bytes)
-                .map_err(|_| SelectorBoundaryError::Io)?;
-            if bytes.len() != capacity {
-                return Err(SelectorBoundaryError::ArtifactInvalid);
-            }
-            Ok(bytes)
+            usize::try_from(descriptor.byte_length)
+                .map_err(artifact_invalid)
+                .and_then(|capacity| {
+                    let mut bytes = Vec::with_capacity(capacity);
+                    reader
+                        .take(descriptor.byte_length.saturating_add(1))
+                        .read_to_end(&mut bytes)
+                        .map_err(io_error)
+                        .and({
+                            if bytes.len() == capacity {
+                                Ok(bytes)
+                            } else {
+                                Err(SelectorBoundaryError::ArtifactInvalid)
+                            }
+                        })
+                })
         })
-        .map_err(|_| ())?;
-    encode_authenticated_reply(
-        decoded,
-        AuthenticatedSelectorReply {
-            execute_request: spx1,
-            terminal: SelectorProviderTerminal::Result {
-                result: execution.spy1_bytes(),
-                grant: Some(execution.agr1_bytes()),
-                receipt: Some(execution.spr1_bytes()),
-                audit_records: execution.sau1_frames(),
-                output: output.as_deref(),
+        .map_err(unit_error);
+    output.and_then(|output| {
+        encode_authenticated_reply(
+            decoded,
+            AuthenticatedSelectorReply {
+                execute_request: spx1,
+                terminal: SelectorProviderTerminal::Result {
+                    result: execution.spy1_bytes(),
+                    grant: Some(execution.agr1_bytes()),
+                    receipt: Some(execution.spr1_bytes()),
+                    audit_records: execution.sau1_frames(),
+                    output: output.as_deref(),
+                },
             },
-        },
-    )
-    .map_err(|_| ())
+        )
+        .map_err(unit_error)
+    })
 }
 
 fn write_authenticated_error(
@@ -375,15 +432,15 @@ fn write_authenticated_error(
     spx1: &[u8],
     error: &[u8],
 ) -> Result<(), SelectorBoundaryError> {
-    let reply = encode_authenticated_reply(
+    encode_authenticated_reply(
         decoded,
         AuthenticatedSelectorReply {
             execute_request: spx1,
             terminal: SelectorProviderTerminal::Error { error },
         },
     )
-    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    write_reply(stream, &reply)
+    .map_err(artifact_invalid)
+    .and_then(|reply| write_reply(stream, &reply))
 }
 
 fn write_unidentified_request_error(stream: &mut UnixStream) -> Result<(), SelectorBoundaryError> {
@@ -500,7 +557,7 @@ fn write_local_error(
     error: &SandboxLocalError,
 ) -> Result<(), SelectorBoundaryError> {
     encode_local_error_reply(error)
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+        .map_err(artifact_invalid)
         .and_then(|reply| write_reply(stream, &reply))
 }
 
@@ -508,41 +565,61 @@ fn write_reply(
     stream: &mut UnixStream,
     reply: &EncodedSelectorReply,
 ) -> Result<(), SelectorBoundaryError> {
-    let length = u32::try_from(reply.control.len()).map_err(|_| SelectorBoundaryError::Io)?;
-    stream
-        .write_all(&length.to_be_bytes())
-        .and_then(|()| stream.write_all(&reply.control))
-        .and_then(|()| stream.write_all(&reply.trailing))
-        .map_err(|_| SelectorBoundaryError::Io)
+    u32::try_from(reply.control.len())
+        .map_err(io_error)
+        .and_then(|length| {
+            stream
+                .write_all(&length.to_be_bytes())
+                .and_then(|()| stream.write_all(&reply.control))
+                .and_then(|()| stream.write_all(&reply.trailing))
+                .map_err(io_error)
+        })
 }
 
 fn read_selector_request(stream: &mut UnixStream) -> Result<(DecodedSelectorRequest, Vec<u8>), ()> {
     let mut prefix = [0_u8; 4];
-    stream.read_exact(&mut prefix).map_err(|_| ())?;
-    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| ())?;
+    stream.read_exact(&mut prefix).map_err(unit_error)?;
+    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(unit_error)?;
     if length == 0 || length > CONTROL_LIMIT {
         return Err(());
     }
     let mut control = vec![0_u8; length];
-    stream.read_exact(&mut control).map_err(|_| ())?;
+    stream.read_exact(&mut control).map_err(unit_error)?;
     let mut input = Vec::new();
     (&mut *stream)
         .take(SELECTOR_INPUT_LIMIT.saturating_add(1))
         .read_to_end(&mut input)
-        .map_err(|_| ())?;
-    if u64::try_from(input.len()).map_err(|_| ())? > SELECTOR_INPUT_LIMIT {
-        return Err(());
-    }
+        .map_err(unit_error)?;
+    validate_selector_input_length(input.len())?;
     decode_request(&control, &input)
         .map(|decoded| (decoded, input))
-        .map_err(|_| ())
+        .map_err(unit_error)
 }
 
-fn should_retry_listener_accept(error: &std::io::Error) -> bool {
-    matches!(
+fn validate_selector_input_length(length: usize) -> Result<(), ()> {
+    u64::try_from(length)
+        .map_err(unit_error)
+        .and_then(|length| (length <= SELECTOR_INPUT_LIMIT).then_some(()).ok_or(()))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ListenerAcceptAction {
+    Retry,
+    Backoff,
+    Fail,
+}
+
+fn listener_accept_action(error: &std::io::Error) -> ListenerAcceptAction {
+    if matches!(
         error.kind(),
         ErrorKind::Interrupted | ErrorKind::ConnectionAborted
-    )
+    ) {
+        ListenerAcceptAction::Retry
+    } else if [Some(libc::EMFILE), Some(libc::ENFILE)].contains(&error.raw_os_error()) {
+        ListenerAcceptAction::Backoff
+    } else {
+        ListenerAcceptAction::Fail
+    }
 }
 
 fn root_peer(stream: &UnixStream, expected_uid: u32) -> bool {
@@ -571,10 +648,8 @@ impl FixedListener {
         let parent_path = path
             .parent()
             .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
-        let relative = parent_path
-            .strip_prefix("/")
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let root = File::open("/").map_err(|_| SelectorBoundaryError::Io)?;
+        let relative = parent_path.strip_prefix("/").map_err(artifact_invalid)?;
+        let root = File::open("/").map_err(io_error)?;
         Self::bind_beneath(path, root, relative, owner)
     }
 
@@ -585,12 +660,10 @@ impl FixedListener {
         owner: u32,
     ) -> Result<Self, SelectorBoundaryError> {
         let parent = open_directory_chain(root, relative_parent, owner)?;
-        let parent_metadata = parent.metadata().map_err(|_| SelectorBoundaryError::Io)?;
-        let listener =
-            UnixListener::bind(path).map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))
-            .map_err(|_| SelectorBoundaryError::Io)?;
-        let socket_metadata = fs::symlink_metadata(path).map_err(|_| SelectorBoundaryError::Io)?;
+        let parent_metadata = parent.metadata().map_err(io_error)?;
+        let listener = UnixListener::bind(path).map_err(selector_unavailable)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE)).map_err(io_error)?;
+        let socket_metadata = fs::symlink_metadata(path).map_err(io_error)?;
         validate_listener_leaf(&socket_metadata, owner)?;
         Ok(Self {
             listener,
@@ -605,10 +678,7 @@ impl FixedListener {
     }
 
     fn verify_continuity(&self) -> Result<(), SelectorBoundaryError> {
-        let parent = self
-            .parent
-            .metadata()
-            .map_err(|_| SelectorBoundaryError::Io)?;
+        let parent = self.parent.metadata().map_err(io_error)?;
         if parent.dev() != self.parent_device
             || parent.ino() != self.parent_inode
             || !parent.is_dir()
@@ -617,7 +687,7 @@ impl FixedListener {
         {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        let leaf = fs::symlink_metadata(&self.path).map_err(|_| SelectorBoundaryError::Io)?;
+        let leaf = fs::symlink_metadata(&self.path).map_err(io_error)?;
         validate_listener_leaf(&leaf, self.owner)?;
         if leaf.dev() != self.socket_device || leaf.ino() != self.socket_inode {
             return Err(SelectorBoundaryError::ArtifactInvalid);
@@ -648,6 +718,38 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+    #[test]
+    fn closed_helpers_cover_error_mapping_randomness_and_input_bounds() -> TestResult {
+        assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
+        assert_eq!(
+            selector_unavailable(()),
+            SelectorBoundaryError::SelectorUnavailable
+        );
+        assert_eq!(io_error(()), SelectorBoundaryError::Io);
+        unit_error(());
+        assert_eq!(
+            nonzero_random_count(0),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(nonzero_random_count(1), Ok(1));
+        assert_eq!(
+            validate_nonce(<[u8; 16]>::default()),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        let nonzero = std::array::from_fn(|_| 1);
+        assert_eq!(validate_nonce(nonzero), Ok(nonzero));
+        assert_eq!(validate_selector_input_length(0), Ok(()));
+        assert_eq!(
+            validate_selector_input_length(usize::try_from(SELECTOR_INPUT_LIMIT)? + 1),
+            Err(())
+        );
+        assert_eq!(
+            FixedListener::bind("relative.sock").err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
     struct FixedProviderExecutor(
         RefCell<Option<Result<AuthenticatedProviderTerminal, ProviderTransportError>>>,
     );
@@ -671,15 +773,24 @@ mod tests {
     #[test]
     fn listener_accept_retries_only_transient_connection_errors() {
         for kind in [ErrorKind::Interrupted, ErrorKind::ConnectionAborted] {
-            assert!(should_retry_listener_accept(&std::io::Error::from(kind)));
+            assert_eq!(
+                listener_accept_action(&std::io::Error::from(kind)),
+                ListenerAcceptAction::Retry
+            );
         }
         for error in [
             std::io::Error::from_raw_os_error(rustix::io::Errno::MFILE.raw_os_error()),
             std::io::Error::from_raw_os_error(rustix::io::Errno::NFILE.raw_os_error()),
-            std::io::Error::from(ErrorKind::ConnectionReset),
         ] {
-            assert!(!should_retry_listener_accept(&error));
+            assert_eq!(
+                listener_accept_action(&error),
+                ListenerAcceptAction::Backoff
+            );
         }
+        assert_eq!(
+            listener_accept_action(&std::io::Error::from(ErrorKind::ConnectionReset)),
+            ListenerAcceptAction::Fail
+        );
     }
 
     #[test]
@@ -692,15 +803,13 @@ mod tests {
         let provider_directory = tempfile::tempdir()?;
         let provider_path = provider_directory.path().join("provider.sock");
         let _provider_listener = UnixListener::bind(&provider_path)?;
-        let admin_directory = tempfile::tempdir()?;
         let evaluator_directory = tempfile::tempdir()?;
-        let service = RootSelectorService {
+        let mut service = fixed_service(
             admitted,
-            transport: ProviderTransport::from_path_for_test(&provider_path)?,
-            admin_listener: fixed_listener(&admin_directory, "admin.sock")?,
-            evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
-            peer_uid: fs::metadata(".")?.uid(),
-        };
+            ProviderTransport::from_path_for_test(&provider_path)?,
+            fixed_listener(&evaluator_directory, "evaluator.sock")?,
+        );
+        service.peer_uid = fs::metadata(".")?.uid();
         let mut client = UnixStream::connect(&service.evaluator_listener.path)?;
         client.shutdown(std::net::Shutdown::Write)?;
         service.evaluator_listener.listener.set_nonblocking(true)?;
@@ -850,12 +959,10 @@ mod tests {
         let provider_path = provider_directory.path().join("provider.sock");
         let provider_listener = UnixListener::bind(&provider_path)?;
         let transport = ProviderTransport::from_path_for_test(&provider_path)?;
-        let admin_directory = tempfile::tempdir()?;
         let evaluator_directory = tempfile::tempdir()?;
         let service = RootSelectorService {
             admitted,
             transport,
-            admin_listener: fixed_listener(&admin_directory, "admin.sock")?,
             evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
@@ -946,12 +1053,10 @@ mod tests {
         for (result, expected) in cases {
             let (request, admitted, resolved) =
                 crate::selector::installation::tests::root_selector_fixture()?;
-            let admin_directory = tempfile::tempdir()?;
             let evaluator_directory = tempfile::tempdir()?;
             let service = RootSelectorService {
                 admitted,
                 transport: FixedProviderExecutor(RefCell::new(Some(result))),
-                admin_listener: fixed_listener(&admin_directory, "admin.sock")?,
                 evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
                 peer_uid: fs::metadata(".")?.uid(),
             };
@@ -972,14 +1077,12 @@ mod tests {
             fixture.sau1,
             None,
         );
-        let admin_directory = tempfile::tempdir()?;
         let evaluator_directory = tempfile::tempdir()?;
         let service = RootSelectorService {
             admitted,
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Execution(execution),
             )))),
-            admin_listener: fixed_listener(&admin_directory, "admin.sock")?,
             evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
@@ -997,14 +1100,12 @@ mod tests {
         let (request, admitted, resolved) =
             crate::selector::installation::tests::root_selector_fixture()?;
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let admin_directory = tempfile::tempdir()?;
         let evaluator_directory = tempfile::tempdir()?;
         let service = RootSelectorService {
             admitted,
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Error(fixture.spe1),
             )))),
-            admin_listener: fixed_listener(&admin_directory, "admin.sock")?,
             evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
@@ -1029,13 +1130,11 @@ mod tests {
         let provider_directory = tempfile::tempdir()?;
         let provider_path = provider_directory.path().join("provider.sock");
         let _provider_listener = UnixListener::bind(&provider_path)?;
-        let admin_directory = tempfile::tempdir()?;
         let evaluator_directory = tempfile::tempdir()?;
         let owner = fs::metadata(".")?.uid();
         let mut service = RootSelectorService {
             admitted,
             transport: ProviderTransport::from_path_for_test(&provider_path)?,
-            admin_listener: fixed_listener(&admin_directory, "admin.sock")?,
             evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: owner ^ 1,
         };

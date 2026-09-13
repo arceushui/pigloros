@@ -296,18 +296,21 @@ impl SandboxExecuteRequest {
             request_digest: [0; 32],
         };
         let unsigned = execute.unsigned_value();
-        execute.request_digest = record_digest("SPX1", &Value::Array(unsigned.to_vec()))?;
-        execute.validate(&unsigned).map(|()| execute)
+        record_digest("SPX1", &Value::Array(unsigned.to_vec())).and_then(|digest| {
+            execute.request_digest = digest;
+            execute.validate(&unsigned).map(|()| execute)
+        })
     }
 
     /// Encode exact canonical SPX1 bytes after revalidating every binding.
     pub(crate) fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
-        self.validate(&unsigned)?;
-        encode(&Value::Array(vec![
-            Value::Array(unsigned.to_vec()),
-            bytes_value(&self.request_digest),
-        ]))
+        self.validate(&unsigned).and_then(|()| {
+            encode(&Value::Array(vec![
+                Value::Array(unsigned.to_vec()),
+                bytes_value(&self.request_digest),
+            ]))
+        })
     }
 
     /// Decode and fully validate exact canonical SPX1 bytes.

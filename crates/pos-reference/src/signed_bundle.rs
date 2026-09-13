@@ -333,57 +333,85 @@ pub(crate) fn verify_signed_bundle_reader<R: Read + Seek>(
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
 ) -> Result<VerifiedBundle, BundleError> {
-    let archive_length = authenticate_reader(archive, request.fixture_bundle_digest)?;
-    let scanned = scan_archive(archive, archive_length)?;
-    let manifest = read_range(archive, scanned.manifest_range.clone())
-        .and_then(|bytes| decode_manifest_bytes(bytes, request))?;
-    let trust_policy = verified_trust_policy(trust_policy_bytes, request)?;
-    verify_signature(
-        &manifest.manifest_bytes,
-        scanned.signer_key,
-        scanned.signature,
-        &trust_policy,
-    )?;
-    archive
-        .seek(SeekFrom::Start(0))
-        .map_err(snapshot_unavailable)?;
-    let (members, signer_key, signature) = read_verified_members(archive, archive_length)?;
-    if signer_key != scanned.signer_key || signature != scanned.signature {
-        return Err(BundleError::InvalidEncoding);
-    }
-    let decoded = DecodedArchive {
-        mode: manifest.mode,
-        profile_digest: manifest.profile_digest,
-        descriptors: manifest.descriptors,
-        expected: manifest.expected,
-        members,
-        signer_key,
-        signature,
-        manifest_bytes: manifest.manifest_bytes,
-    };
-    validate_archive_closure(&decoded, &trust_policy)?;
-    let (authority, authority_verifying_key) = verify_archive_signature(&decoded, &trust_policy)?;
-    if decoded
-        .members
-        .values()
-        .any(|member| prohibited_secret_material(&member.bytes))
-    {
-        return Err(BundleError::ProhibitedMaterial);
-    }
-    let expected_results = decoded
-        .expected
-        .into_iter()
-        .map(|result| (result.key, result.path))
-        .collect();
-    Ok(VerifiedBundle {
-        mode: decoded.mode,
-        profile_digest: decoded.profile_digest,
-        archive_digest: request.fixture_bundle_digest,
-        members: decoded.members,
-        expected_results,
-        authority_key_id: authority.key_id,
-        authority_verifying_key,
-    })
+    authenticate_reader(archive, request.fixture_bundle_digest)
+        .and_then(|archive_length| {
+            scan_archive(archive, archive_length).map(|scanned| (archive_length, scanned))
+        })
+        .and_then(|(archive_length, scanned)| {
+            read_range(archive, scanned.manifest_range.clone())
+                .and_then(|bytes| decode_manifest_bytes(bytes, request))
+                .map(|manifest| (archive_length, scanned, manifest))
+        })
+        .and_then(|(archive_length, scanned, manifest)| {
+            verified_trust_policy(trust_policy_bytes, request)
+                .map(|trust_policy| (archive_length, scanned, manifest, trust_policy))
+        })
+        .and_then(|(archive_length, scanned, manifest, trust_policy)| {
+            verify_signature(
+                &manifest.manifest_bytes,
+                scanned.signer_key,
+                scanned.signature,
+                &trust_policy,
+            )
+            .map(|_| (archive_length, scanned, manifest, trust_policy))
+        })
+        .and_then(|state| {
+            archive
+                .seek(SeekFrom::Start(0))
+                .map_err(snapshot_unavailable)
+                .map(|_| state)
+        })
+        .and_then(|(archive_length, scanned, manifest, trust_policy)| {
+            read_verified_members(archive, archive_length).and_then(
+                |(members, signer_key, signature)| {
+                    if signer_key != scanned.signer_key || signature != scanned.signature {
+                        return Err(BundleError::InvalidEncoding);
+                    }
+                    Ok((
+                        DecodedArchive {
+                            mode: manifest.mode,
+                            profile_digest: manifest.profile_digest,
+                            descriptors: manifest.descriptors,
+                            expected: manifest.expected,
+                            members,
+                            signer_key,
+                            signature,
+                            manifest_bytes: manifest.manifest_bytes,
+                        },
+                        trust_policy,
+                    ))
+                },
+            )
+        })
+        .and_then(|(decoded, trust_policy)| {
+            validate_archive_closure(&decoded, &trust_policy).map(|()| (decoded, trust_policy))
+        })
+        .and_then(|(decoded, trust_policy)| {
+            verify_archive_signature(&decoded, &trust_policy).map(|authority| (decoded, authority))
+        })
+        .and_then(|(decoded, (authority, authority_verifying_key))| {
+            if decoded
+                .members
+                .values()
+                .any(|member| prohibited_secret_material(&member.bytes))
+            {
+                return Err(BundleError::ProhibitedMaterial);
+            }
+            let expected_results = decoded
+                .expected
+                .into_iter()
+                .map(|result| (result.key, result.path))
+                .collect();
+            Ok(VerifiedBundle {
+                mode: decoded.mode,
+                profile_digest: decoded.profile_digest,
+                archive_digest: request.fixture_bundle_digest,
+                members: decoded.members,
+                expected_results,
+                authority_key_id: authority.key_id,
+                authority_verifying_key,
+            })
+        })
 }
 
 pub(crate) fn preflight_signed_bundle_bytes(
@@ -1526,6 +1554,45 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn retained_reader_verifies_valid_archives_and_rejects_signed_attacks() -> TestResult {
+        let corpus = crate::selector_test_support::corpus()?;
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let verified = verify_signed_bundle_reader(
+            &mut Cursor::new(&corpus.archive),
+            &corpus.trust_policy,
+            &request,
+        )?;
+        assert_eq!(verified.archive_digest, request.fixture_bundle_digest);
+
+        let secret = crate::selector_test_support::corpus_with_secret(
+            b"-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----",
+        )?;
+        let request = EvaluationRequest::from_canonical_cbor(&secret.request)?;
+        assert_eq!(
+            verify_signed_bundle_reader(
+                &mut Cursor::new(&secret.archive),
+                &secret.trust_policy,
+                &request,
+            ),
+            Err(BundleError::ProhibitedMaterial)
+        );
+
+        let invalid = crate::selector_test_support::corpus_with_bundle_mutation(
+            crate::selector_test_support::BundleMutation::Signature,
+        )?;
+        let request = EvaluationRequest::from_canonical_cbor(&invalid.request)?;
+        assert!(verify_signed_bundle_reader(
+            &mut Cursor::new(&invalid.archive),
+            &invalid.trust_policy,
+            &request,
+        )
+        .is_err());
+        Ok(())
+    }
 
     #[test]
     fn canonical_archive_reader_covers_each_supported_major_type_and_width() {

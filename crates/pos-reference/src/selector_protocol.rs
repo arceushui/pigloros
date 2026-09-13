@@ -22,6 +22,10 @@ const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const SELECTOR_INPUT_LIMIT: usize = 128 * 1024 * 1024;
 const INPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxInputBytes.v1\0";
 const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
+
+fn protocol_failure<T>(_: T) -> AdapterError {
+    AdapterError::ProtocolFailure
+}
 const SLX1_DOMAIN: &[u8] = b"PiglorOS.SLX1.v1\0";
 const SLY1_DOMAIN: &[u8] = b"PiglorOS.SLY1.v1\0";
 
@@ -134,7 +138,7 @@ pub(crate) fn encode_request(
         bytes: Vec::new(),
         maximum: SELECTOR_INPUT_LIMIT,
     };
-    write_attempt(&mut writer, attempt).map_err(|_| AdapterError::ProtocolFailure)?;
+    write_attempt(&mut writer, attempt).map_err(protocol_failure)?;
     let attempt_stream = writer.bytes;
     let provider_request_id = derived_id(request.request_id, ordinal);
     let attempt_id = derived_id(request.request_id, ordinal ^ 0x8000);
@@ -147,14 +151,13 @@ pub(crate) fn encode_request(
         Value::Bytes(request_bytes.to_vec()),
         descriptor(&attempt_stream, input_digest),
     ]);
-    let unsigned_bytes =
-        encode_with_limit(&unsigned, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
+    let unsigned_bytes = encode_with_limit(&unsigned, CONTROL_LIMIT).map_err(protocol_failure)?;
     let digest = domain_digest(SLX1_DOMAIN, &unsigned_bytes);
     let control = encode_with_limit(
         &Value::Array(vec![unsigned, Value::Bytes(digest.to_vec())]),
         CONTROL_LIMIT,
     )
-    .map_err(|_| AdapterError::ProtocolFailure)?;
+    .map_err(protocol_failure)?;
     Ok(EncodedSelectorRequest {
         control,
         attempt_stream,
@@ -172,45 +175,39 @@ pub(crate) fn decode_request(
     control: &[u8],
     trailing: &[u8],
 ) -> Result<DecodedSelectorRequest, AdapterError> {
-    if trailing.len() > SELECTOR_INPUT_LIMIT {
-        return Err(AdapterError::ProtocolFailure);
-    }
-    let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
-    let wrapper = array(&value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
-    let fields = array(&wrapper[0], 6).map_err(|_| AdapterError::ProtocolFailure)?;
-    if text(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != "SLX1"
-        || uint(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)? != 1
+    validate_selector_input_size(trailing.len())?;
+    let value = decode_canonical_with_limit(control, CONTROL_LIMIT).map_err(protocol_failure)?;
+    let wrapper = array(&value, 2).map_err(protocol_failure)?;
+    let fields = array(&wrapper[0], 6).map_err(protocol_failure)?;
+    if text(&fields[0]).map_err(protocol_failure)? != "SLX1"
+        || uint(&fields[1]).map_err(protocol_failure)? != 1
     {
         return Err(AdapterError::ProtocolFailure);
     }
-    let unsigned =
-        encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
-    let slx1_digest = fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?;
+    let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(protocol_failure)?;
+    let slx1_digest = fixed_bytes::<32>(&wrapper[1]).map_err(protocol_failure)?;
     if slx1_digest != domain_digest(SLX1_DOMAIN, &unsigned) {
         return Err(AdapterError::ProtocolFailure);
     }
-    let provider_request_id =
-        fixed_bytes::<16>(&fields[2]).map_err(|_| AdapterError::ProtocolFailure)?;
-    let attempt_id = fixed_bytes::<16>(&fields[3]).map_err(|_| AdapterError::ProtocolFailure)?;
-    let request = EvaluationRequest::from_canonical_cbor(bytes(&fields[4])?)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let provider_request_id = fixed_bytes::<16>(&fields[2]).map_err(protocol_failure)?;
+    let attempt_id = fixed_bytes::<16>(&fields[3]).map_err(protocol_failure)?;
+    let request =
+        EvaluationRequest::from_canonical_cbor(bytes(&fields[4])?).map_err(protocol_failure)?;
     let ordinal = u16::from_be_bytes([provider_request_id[14], provider_request_id[15]]);
     if provider_request_id != derived_id(request.request_id, ordinal)
         || attempt_id != derived_id(request.request_id, ordinal ^ 0x8000)
     {
         return Err(AdapterError::ProtocolFailure);
     }
-    let input_length = u64::try_from(trailing.len()).map_err(|_| AdapterError::ProtocolFailure)?;
+    let input_length = u64::try_from(trailing.len()).map_err(protocol_failure)?;
     let input_digest = domain_digest(INPUT_DOMAIN, trailing);
-    let descriptor_fields = array(&fields[5], 2).map_err(|_| AdapterError::ProtocolFailure)?;
-    if uint(&descriptor_fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != input_length
-        || fixed_bytes::<32>(&descriptor_fields[1]).map_err(|_| AdapterError::ProtocolFailure)?
-            != input_digest
+    let descriptor_fields = array(&fields[5], 2).map_err(protocol_failure)?;
+    if uint(&descriptor_fields[0]).map_err(protocol_failure)? != input_length
+        || fixed_bytes::<32>(&descriptor_fields[1]).map_err(protocol_failure)? != input_digest
     {
         return Err(AdapterError::ProtocolFailure);
     }
-    let attempt = read_attempt(trailing).map_err(|_| AdapterError::ProtocolFailure)?;
+    let attempt = read_attempt(trailing).map_err(protocol_failure)?;
     Ok(DecodedSelectorRequest {
         provider_request_id,
         attempt_id,
@@ -222,13 +219,19 @@ pub(crate) fn decode_request(
     })
 }
 
+fn validate_selector_input_size(length: usize) -> Result<(), AdapterError> {
+    (length <= SELECTOR_INPUT_LIMIT)
+        .then_some(())
+        .ok_or(AdapterError::ProtocolFailure)
+}
+
 /// Encode a canonical SLY1 reply after validating all provider records.
 pub(crate) fn encode_authenticated_reply(
     request: &DecodedSelectorRequest,
     reply: AuthenticatedSelectorReply<'_>,
 ) -> Result<EncodedSelectorReply, AdapterError> {
     let execute = SandboxExecuteRequest::from_canonical_cbor(reply.execute_request)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
+        .map_err(protocol_failure)?;
     validate_execute_request(request, &execute)?;
     let (terminal_type, terminal, grant, receipt, audit_records, trailing, output_descriptor) =
         encode_terminal(request, reply.execute_request, reply.terminal)?;
@@ -247,8 +250,7 @@ pub(crate) fn encode_authenticated_reply(
         output_descriptor,
     ];
     let unsigned = Value::Array(fields);
-    let unsigned_bytes =
-        encode_with_limit(&unsigned, CONTROL_LIMIT).map_err(|_| AdapterError::ProtocolFailure)?;
+    let unsigned_bytes = encode_with_limit(&unsigned, CONTROL_LIMIT).map_err(protocol_failure)?;
     let control = encode_with_limit(
         &Value::Array(vec![
             unsigned,
@@ -256,7 +258,7 @@ pub(crate) fn encode_authenticated_reply(
         ]),
         CONTROL_LIMIT,
     )
-    .map_err(|_| AdapterError::ProtocolFailure)?;
+    .map_err(protocol_failure)?;
     Ok(EncodedSelectorReply { control, trailing })
 }
 
@@ -290,8 +292,8 @@ pub(crate) fn encode_local_error_reply(
         ]),
         CONTROL_LIMIT,
     )
-    .map_err(|_| AdapterError::ProtocolFailure)?;
-    SandboxLocalError::from_canonical_cbor(&control).map_err(|_| AdapterError::ProtocolFailure)?;
+    .map_err(protocol_failure)?;
+    SandboxLocalError::from_canonical_cbor(&control).map_err(protocol_failure)?;
     Ok(EncodedSelectorReply {
         control,
         trailing: Vec::new(),
@@ -328,6 +330,26 @@ type EncodedTerminal<'a> = (
     Vec<u8>,
     Value,
 );
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdmittedOutputKind {
+    Completed,
+    Empty,
+}
+
+const fn admitted_output_kind(
+    outcome: SandboxTerminalOutcome,
+) -> Result<AdmittedOutputKind, AdapterError> {
+    match outcome {
+        SandboxTerminalOutcome::Completed => Ok(AdmittedOutputKind::Completed),
+        SandboxTerminalOutcome::Cancelled | SandboxTerminalOutcome::UnavailableAfterAdmission => {
+            Ok(AdmittedOutputKind::Empty)
+        }
+        SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected => {
+            Err(AdapterError::ProtocolFailure)
+        }
+    }
+}
 
 fn encode_terminal<'a>(
     request: &DecodedSelectorRequest,
@@ -375,8 +397,8 @@ fn encode_result_terminal<'a>(
     audit_records: &'a [Vec<u8>],
     output: Option<&'a [u8]>,
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
-    let result = SandboxProviderResult::from_canonical_cbor(result_bytes)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let result =
+        SandboxProviderResult::from_canonical_cbor(result_bytes).map_err(protocol_failure)?;
     if (result.request_id, result.attempt_id) != (request.provider_request_id, request.attempt_id) {
         return Err(AdapterError::ProtocolFailure);
     }
@@ -422,22 +444,22 @@ fn encode_admitted_result<'a>(
     audit_records: &'a [Vec<u8>],
     output: Option<&'a [u8]>,
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
+    let output_kind = admitted_output_kind(result.outcome)?;
     let grant_bytes = grant_bytes.ok_or(AdapterError::ProtocolFailure)?;
     let receipt_bytes = receipt_bytes.ok_or(AdapterError::ProtocolFailure)?;
-    let grant = AdmissionGrant::from_canonical_cbor(grant_bytes)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
-    let receipt = SandboxProviderReceipt::from_canonical_cbor(receipt_bytes)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let grant = AdmissionGrant::from_canonical_cbor(grant_bytes).map_err(protocol_failure)?;
+    let receipt =
+        SandboxProviderReceipt::from_canonical_cbor(receipt_bytes).map_err(protocol_failure)?;
     let audit_values = audit_records
         .iter()
         .cloned()
         .map(Value::Bytes)
         .collect::<Vec<_>>();
     validate_encoded_evidence(execute_request, &audit_values, result, &grant, &receipt)?;
-    let (trailing, output_descriptor) = match result.outcome {
-        SandboxTerminalOutcome::Completed => {
+    let (trailing, output_descriptor) = match output_kind {
+        AdmittedOutputKind::Completed => {
             let output = output.ok_or(AdapterError::ProtocolFailure)?;
-            let length = u64::try_from(output.len()).map_err(|_| AdapterError::ProtocolFailure)?;
+            let length = u64::try_from(output.len()).map_err(protocol_failure)?;
             let digest = domain_digest(OUTPUT_DOMAIN, output);
             if result.output.as_ref().is_none_or(|descriptor| {
                 descriptor.byte_length != length || descriptor.digest != digest
@@ -446,14 +468,11 @@ fn encode_admitted_result<'a>(
             }
             (output.to_vec(), descriptor(output, digest))
         }
-        SandboxTerminalOutcome::Cancelled | SandboxTerminalOutcome::UnavailableAfterAdmission => {
+        AdmittedOutputKind::Empty => {
             if result.output.is_some() || output.is_some() {
                 return Err(AdapterError::ProtocolFailure);
             }
             (Vec::new(), Value::Null)
-        }
-        SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected => {
-            return Err(AdapterError::ProtocolFailure);
         }
     };
     Ok((
@@ -1054,6 +1073,29 @@ mod tests {
     }
 
     #[test]
+    fn admitted_output_kind_rejects_pre_admission_outcomes() {
+        assert_eq!(
+            admitted_output_kind(SandboxTerminalOutcome::Completed),
+            Ok(AdmittedOutputKind::Completed)
+        );
+        for outcome in [
+            SandboxTerminalOutcome::Cancelled,
+            SandboxTerminalOutcome::UnavailableAfterAdmission,
+        ] {
+            assert_eq!(admitted_output_kind(outcome), Ok(AdmittedOutputKind::Empty));
+        }
+        for outcome in [
+            SandboxTerminalOutcome::UnavailableBeforeAdmission,
+            SandboxTerminalOutcome::Rejected,
+        ] {
+            assert_eq!(
+                admitted_output_kind(outcome),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+    }
+
+    #[test]
     fn selector_input_ceiling_rejects_untranslated_caps_before_encoding() {
         let mut attempt = attempt();
         attempt.transport_caps.max_attempt_bytes = SELECTOR_INPUT_LIMIT as u64;
@@ -1109,6 +1151,12 @@ mod tests {
 
     #[test]
     fn server_decodes_only_the_exact_bound_slx1_request() -> Result<(), AdapterError> {
+        assert_eq!(protocol_failure(()), AdapterError::ProtocolFailure);
+        assert_eq!(validate_selector_input_size(SELECTOR_INPUT_LIMIT), Ok(()));
+        assert_eq!(
+            validate_selector_input_size(SELECTOR_INPUT_LIMIT + 1),
+            Err(AdapterError::ProtocolFailure)
+        );
         let original_request = canonical_request()?;
         let original_attempt = attempt();
         let request_bytes = original_request
@@ -1155,6 +1203,93 @@ mod tests {
         let (wrong_identity, _) = protocol_record("SLX1", unsigned, false)?;
         assert_eq!(
             decode_request(&wrong_identity, &encoded.attempt_stream),
+            Err(AdapterError::ProtocolFailure)
+        );
+        for (index, invalid) in [(0, Value::Text("not-slx1".to_owned())), (1, integer(2))] {
+            let mut unsigned = array_values(&fields[0])
+                .map_err(|_| AdapterError::ProtocolFailure)?
+                .to_vec();
+            unsigned[index] = invalid;
+            let (malformed, _) = protocol_record("SLX1", unsigned, false)?;
+            assert_eq!(
+                decode_request(&malformed, &encoded.attempt_stream),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn server_rejects_every_malformed_slx1_field_boundary() -> Result<(), AdapterError> {
+        let evaluation_request = canonical_request()?;
+        let request_bytes = evaluation_request
+            .to_canonical_cbor()
+            .map_err(protocol_failure)?;
+        let encoded = encode_request(&evaluation_request, &request_bytes, &attempt(), 7)?;
+        let document = decode_canonical_with_limit(&encoded.control, CONTROL_LIMIT)
+            .map_err(protocol_failure)?;
+        let wrapper = array_values(&document).map_err(protocol_failure)?;
+        let original = array_values(&wrapper[0]).map_err(protocol_failure)?;
+
+        for (index, invalid) in [
+            (0, integer(1)),
+            (1, Value::Text("one".to_owned())),
+            (2, Value::Bytes(vec![0; 15])),
+            (3, Value::Bytes(vec![0; 15])),
+            (4, integer(1)),
+            (4, Value::Bytes(vec![0xff])),
+            (5, Value::Array(vec![integer(1)])),
+            (
+                5,
+                Value::Array(vec![
+                    Value::Text("length".to_owned()),
+                    Value::Bytes(vec![0; 32]),
+                ]),
+            ),
+            (5, Value::Array(vec![integer(1), Value::Bytes(vec![0; 31])])),
+        ] {
+            let mut fields = original.to_vec();
+            fields[index] = invalid;
+            let (control, _) = protocol_record("SLX1", fields, false)?;
+            assert_eq!(
+                decode_request(&control, &encoded.attempt_stream),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+
+        let malformed_controls = [
+            vec![0xff],
+            encode_with_limit(&Value::Array(vec![integer(1)]), CONTROL_LIMIT)
+                .map_err(protocol_failure)?,
+            encode_with_limit(
+                &Value::Array(vec![
+                    Value::Array(vec![integer(1)]),
+                    Value::Bytes(vec![0; 32]),
+                ]),
+                CONTROL_LIMIT,
+            )
+            .map_err(protocol_failure)?,
+            encode_with_limit(
+                &Value::Array(vec![wrapper[0].clone(), Value::Bytes(vec![0; 31])]),
+                CONTROL_LIMIT,
+            )
+            .map_err(protocol_failure)?,
+        ];
+        for control in malformed_controls {
+            assert_eq!(
+                decode_request(&control, &encoded.attempt_stream),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        let malformed_attempt = [0xff];
+        let mut fields = original.to_vec();
+        fields[5] = descriptor(
+            &malformed_attempt,
+            domain_digest(INPUT_DOMAIN, &malformed_attempt),
+        );
+        let (control, _) = protocol_record("SLX1", fields, false)?;
+        assert_eq!(
+            decode_request(&control, &malformed_attempt),
             Err(AdapterError::ProtocolFailure)
         );
         Ok(())
