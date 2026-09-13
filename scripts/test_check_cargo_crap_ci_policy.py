@@ -17,7 +17,6 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_cargo_crap_ci_policy.py"
 RESOLVER_PATH = ROOT / "scripts" / "resolve_cargo_crap_baseline.sh"
-BOOTSTRAP_BASE_SHA = "45bdac85b29d273573583f846ba7acd2b3a12573"
 EXAMPLE_BASE_SHA = "a" * 40
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -148,7 +147,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         )
         self.assertEqual(logs["gh_calls"], "call\n")
         self.assertEqual(logs["sleep_calls"], "")
-        self.assertEqual(logs["git_calls"], f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n")
+        self.assertEqual(
+            logs["git_calls"],
+            f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n",
+        )
         expected_query = (
             ".artifacts[] |\n"
             "      select(.expired == false) |\n"
@@ -182,7 +184,13 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertEqual(logs["output"], "")
         self.assertEqual(logs["gh_calls"].count("call\n"), 30)
         self.assertEqual(logs["sleep_calls"].count("10\n"), 29)
-        self.assertEqual(logs["git_calls"], f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n")
+        self.assertEqual(
+            logs["git_calls"],
+            f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n"
+            f"diff\n--quiet\n{EXAMPLE_BASE_SHA}...HEAD\n--\n"
+            "*.rs\n**/Cargo.toml\nCargo.toml\nCargo.lock\n"
+            "rust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
+        )
 
     def test_resolver_uses_the_trusted_main_merge_base_for_stacked_pull_requests(self) -> None:
         stacked_base = "b" * 40
@@ -196,7 +204,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             f"run-id=4242\nbaseline-sha={EXAMPLE_BASE_SHA}\nbootstrap=false\n",
         )
         self.assertIn(f"name=cargo-crap-baseline-{EXAMPLE_BASE_SHA}", logs["gh_args"])
-        self.assertEqual(logs["git_calls"], f"merge-base\n{stacked_base}\norigin/main\n")
+        self.assertEqual(
+            logs["git_calls"],
+            f"merge-base\n{stacked_base}\norigin/main\n",
+        )
 
     def test_resolver_fails_closed_when_the_stacked_main_baseline_is_missing(self) -> None:
         stacked_base = "b" * 40
@@ -208,31 +219,37 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertEqual(logs["output"], "")
         self.assertEqual(logs["gh_calls"].count("call\n"), 30)
         self.assertIn(f"name=cargo-crap-baseline-{EXAMPLE_BASE_SHA}", logs["gh_args"])
-        self.assertEqual(logs["git_calls"], f"merge-base\n{stacked_base}\norigin/main\n")
+        self.assertEqual(
+            logs["git_calls"],
+            f"merge-base\n{stacked_base}\norigin/main\n"
+            f"diff\n--quiet\n{stacked_base}...HEAD\n--\n"
+            "*.rs\n**/Cargo.toml\nCargo.toml\nCargo.lock\n"
+            "rust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
+        )
 
-    def test_resolver_executes_only_the_approved_bootstrap(self) -> None:
+    def test_resolver_bootstraps_when_only_the_trusted_artifact_is_missing(self) -> None:
         result, logs = self.run_resolver(
             "",
-            base_sha=BOOTSTRAP_BASE_SHA,
-            trusted_base_sha=BOOTSTRAP_BASE_SHA,
+            base_sha=EXAMPLE_BASE_SHA,
+            trusted_base_sha=EXAMPLE_BASE_SHA,
             git_status=0,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(logs["output"], "bootstrap=true\n")
-        self.assertIn(f"{BOOTSTRAP_BASE_SHA}...HEAD", logs["git_calls"])
+        self.assertIn(f"{EXAMPLE_BASE_SHA}...HEAD", logs["git_calls"])
 
     def test_resolver_rejects_bootstrap_when_policy_inputs_changed(self) -> None:
         result, logs = self.run_resolver(
             "",
-            base_sha=BOOTSTRAP_BASE_SHA,
-            trusted_base_sha=BOOTSTRAP_BASE_SHA,
+            base_sha=EXAMPLE_BASE_SHA,
+            trusted_base_sha=EXAMPLE_BASE_SHA,
             git_status=1,
         )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(logs["output"], "")
-        self.assertIn(f"{BOOTSTRAP_BASE_SHA}...HEAD", logs["git_calls"])
+        self.assertIn(f"{EXAMPLE_BASE_SHA}...HEAD", logs["git_calls"])
 
     def test_rejects_unpinned_cargo_crap(self) -> None:
         self.assert_rejected(
@@ -297,11 +314,11 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             ).update({"run": "true"})
         )
 
-    def test_rejects_unpinned_bootstrap_base(self) -> None:
+    def test_rejects_unrestricted_bootstrap(self) -> None:
         self.assert_resolver_rejected(
             lambda resolver: resolver.replace(
-                'test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"',
-                "true",
+                'git diff --quiet "${BASE_SHA}...HEAD" --',
+                "true # unrestricted bootstrap",
             )
         )
 
