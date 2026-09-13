@@ -1506,7 +1506,10 @@ fn assert_configured_nonempty_recovery(
     )?;
     assert_eq!(recovered.status(), ErasureHostStatusV1::Ready);
     let mut reads = test_stage("open recovered read sender", recovered.read_sender())?;
-    assert_eq!(reads.timeline(parent), Err(ErasureHostErrorV1::AccessFrozen));
+    assert_eq!(
+        reads.timeline(parent),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
     assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
     Ok(())
 }
@@ -1534,8 +1537,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
             ),
         )?;
         let (parent, child, request, request_reference) = {
-            let mut commands =
-                test_stage("open persistent command sender", host.command_sender())?;
+            let mut commands = test_stage("open persistent command sender", host.command_sender())?;
             let parent = test_stage(
                 "create persistent parent",
                 commands.create_timeline("restart-parent"),
