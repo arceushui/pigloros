@@ -5,6 +5,7 @@
 //! selector composition must authenticate before exposing its evaluator socket.
 
 pub mod authority;
+mod cases;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -30,6 +31,44 @@ const MANIFEST_NAME: &str = "installation.cbor";
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.SelectorInstallation.v1\0";
+
+/// A canonical case reconstructed only from authenticated SIC1 descriptors.
+///
+/// The root-selector composition retains this type inside the crate. It never
+/// accepts a caller-provided archive, artifact path, or compatibility fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedInstalledCase {
+    attempt: crate::evaluator::CaseAttempt,
+    fixture_contract_digest: [u8; 32],
+    profile_digest: [u8; 32],
+    bundle_digest: [u8; 32],
+}
+
+impl ResolvedInstalledCase {
+    /// Returns the exact ordinal attempt rebuilt from the verified CFB1 closure.
+    #[must_use]
+    pub(crate) const fn attempt(&self) -> &crate::evaluator::CaseAttempt {
+        &self.attempt
+    }
+
+    /// Returns the CPF1 `FixtureContract` binding for this attempt.
+    #[must_use]
+    pub(crate) const fn fixture_contract_digest(&self) -> [u8; 32] {
+        self.fixture_contract_digest
+    }
+
+    /// Returns the verified CPF1 identity.
+    #[must_use]
+    pub(crate) const fn profile_digest(&self) -> [u8; 32] {
+        self.profile_digest
+    }
+
+    /// Returns the complete verified CFB1 identity.
+    #[must_use]
+    pub(crate) const fn bundle_digest(&self) -> [u8; 32] {
+        self.bundle_digest
+    }
+}
 
 /// A closed SIC1 artifact role.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -160,12 +199,7 @@ impl InstallationManifest {
         if text(&fields[0])? != "SIC1" || uint(&fields[1])? != 1 {
             return Err(ProtocolError::UnsupportedVersion);
         }
-        let root_key_id = text(&fields[2])?;
-        if root_key_id.is_empty() || root_key_id.len() > 128 {
-            return Err(ProtocolError::FieldOutOfBounds);
-        }
-        let root_public_key = fixed_bytes(&fields[3])?;
-        VerifyingKey::from_bytes(&root_public_key).map_err(|_| ProtocolError::InvalidEncoding)?;
+        let (root_key_id, root_public_key) = root_identity(fields)?;
         let digest = nonzero_digest(&wrapper[1])?;
         if manifest_digest(&wrapper[0])? != digest {
             return Err(ProtocolError::DigestMismatch);
@@ -258,6 +292,20 @@ impl InstallationManifest {
             .map(|index| &self.objects[index])
             .map_err(|_| ProtocolError::InvalidEncoding)
     }
+}
+
+fn root_identity(fields: &[Value]) -> Result<(&str, [u8; 32]), ProtocolError> {
+    let root_key_id = text(&fields[2])?;
+    if root_key_id.is_empty() || root_key_id.len() > 128 {
+        return Err(ProtocolError::FieldOutOfBounds);
+    }
+    let root_public_key = fixed_bytes(&fields[3])?;
+    let root_verifying_key =
+        VerifyingKey::from_bytes(&root_public_key).map_err(|_| ProtocolError::InvalidEncoding)?;
+    if root_verifying_key.is_weak() {
+        return Err(ProtocolError::InvalidEncoding);
+    }
+    Ok((root_key_id, root_public_key))
 }
 
 /// A held descriptor for an immutable SIC1 artifact.
@@ -518,7 +566,11 @@ fn ordered_objects(value: &Value) -> Result<Vec<InstallationObject>, ProtocolErr
     Ok(objects)
 }
 
-fn open_directory_chain(
+/// Open one root-owned relative directory chain without following links.
+///
+/// This is crate-private because selector composition alone may validate the
+/// fixed SIC1-owned provider endpoint beneath the retained installation root.
+pub(crate) fn open_directory_chain(
     mut directory: File,
     relative: &Path,
     expected_owner: u32,
@@ -683,7 +735,8 @@ fn hex_name(digest: [u8; 32]) -> String {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+#[doc(hidden)]
+pub mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::Write;
@@ -691,10 +744,18 @@ mod tests {
 
     use ciborium::value::Value;
     use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
 
+    use crate::evaluator_protocol::{
+        EvaluationRequest, RequiredProviderCapability, SandboxRequirement, SubjectAdapterKind,
+    };
+
+    use super::authority::{AdmittedSelectorProvider, AuthenticatedSelectorBootstrap};
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const ROOT_SELECTOR_CAPABILITY: &str = "read-public-bundle";
 
     fn integer(value: u64) -> Value {
         Value::Integer(value.into())
@@ -905,6 +966,7 @@ mod tests {
         release: SigningKey,
         runtime: SigningKey,
         reviewer: SigningKey,
+        image: SigningKey,
     }
 
     fn provider_authority() -> ProviderAuthority {
@@ -914,6 +976,7 @@ mod tests {
             release: SigningKey::from_bytes(&[3; 32]),
             runtime: SigningKey::from_bytes(&[4; 32]),
             reviewer: SigningKey::from_bytes(&[5; 32]),
+            image: SigningKey::from_bytes(&[6; 32]),
         }
     }
 
@@ -941,6 +1004,7 @@ mod tests {
             trust_key("release", 2, &authority.release),
             trust_key("runtime", 3, &authority.runtime),
             trust_key("reviewer", 4, &authority.reviewer),
+            trust_key("image", 5, &authority.image),
         ])?;
         sign_record(
             "TRS1",
@@ -949,7 +1013,11 @@ mod tests {
                 integer(1),
                 integer(2),
                 Value::Array(keys),
-                Value::Array(Vec::new()),
+                Value::Array(vec![Value::Array(vec![
+                    digest([9; 32]),
+                    integer(77),
+                    integer(2),
+                ])]),
                 Value::Text("root".to_owned()),
             ]),
             &authority.root,
@@ -1005,7 +1073,7 @@ mod tests {
                 digest([12; 32]),
                 Value::Text("runtime".to_owned()),
                 Value::Array(vec![Value::Array(vec![
-                    Value::Text("execute".to_owned()),
+                    Value::Text(ROOT_SELECTOR_CAPABILITY.to_owned()),
                     integer(1),
                     integer(1),
                 ])]),
@@ -1077,7 +1145,7 @@ mod tests {
         host_profile_digest: [u8; 32],
     ) -> TestResult<Vec<u8>> {
         let capability = Value::Array(vec![
-            Value::Text("execute".to_owned()),
+            Value::Text(ROOT_SELECTOR_CAPABILITY.to_owned()),
             integer(1),
             integer(1),
         ]);
@@ -1103,15 +1171,21 @@ mod tests {
         )
     }
 
-    fn provider_policy(
-        authority: &ProviderAuthority,
-        trust_digest: [u8; 32],
-        revocation_digest: [u8; 32],
+    struct ProviderPolicySelection {
         provider_manifest: [u8; 32],
         provider_binary: [u8; 32],
         hard_caps: [u8; 32],
         conformance_report: [u8; 32],
         syscall_set: [u8; 32],
+        launch_policy: [u8; 32],
+        image_manifest: [u8; 32],
+    }
+
+    fn provider_policy(
+        authority: &ProviderAuthority,
+        trust_digest: [u8; 32],
+        revocation_digest: [u8; 32],
+        selection: &ProviderPolicySelection,
     ) -> TestResult<Vec<u8>> {
         sign_record(
             "APT1",
@@ -1119,22 +1193,126 @@ mod tests {
                 Value::Text("APT1".to_owned()),
                 integer(1),
                 integer(4),
-                digest(provider_manifest),
-                digest(provider_binary),
-                Value::Array(Vec::new()),
-                Value::Array(Vec::new()),
-                digest(hard_caps),
+                digest(selection.provider_manifest),
+                digest(selection.provider_binary),
+                Value::Array(vec![digest(selection.launch_policy)]),
+                Value::Array(vec![digest(selection.image_manifest)]),
+                digest(selection.hard_caps),
                 digest([17; 32]),
-                digest(conformance_report),
+                digest(selection.conformance_report),
                 digest(trust_digest),
                 digest(revocation_digest),
                 integer(2),
                 integer(3),
-                digest(syscall_set),
+                digest(selection.syscall_set),
                 Value::Text("policy".to_owned()),
             ]),
             &authority.policy,
         )
+    }
+
+    fn image_manifest(
+        authority: &ProviderAuthority,
+        root_image: &[u8],
+        executable: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        const PARTITION_TYPES: [[u8; 16]; 3] = [
+            [
+                0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84,
+                0xb7, 0x09,
+            ],
+            [
+                0x2c, 0x73, 0x57, 0xed, 0xeb, 0xd2, 0x46, 0xd9, 0xae, 0xc1, 0x23, 0xd4, 0x37, 0xec,
+                0x2b, 0xf5,
+            ],
+            [
+                0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08,
+                0xb1, 0x76,
+            ],
+        ];
+        let partitions = PARTITION_TYPES
+            .into_iter()
+            .enumerate()
+            .map(|(index, partition_type)| {
+                let ordinal = u8::try_from(index + 1)?;
+                Ok(Value::Array(vec![
+                    integer(u64::try_from(index)?),
+                    Value::Bytes(partition_type.to_vec()),
+                    Value::Bytes(vec![ordinal; 16]),
+                    integer(u64::try_from(index)?),
+                    integer(1),
+                    digest([ordinal; 32]),
+                ]))
+            })
+            .collect::<TestResult<Vec<_>>>()?;
+        let der = b"pkcs7";
+        sign_record(
+            "SIM1",
+            Value::Array(vec![
+                Value::Text("SIM1".to_owned()),
+                integer(1),
+                Value::Text("image".to_owned()),
+                integer(0),
+                integer(u64::try_from(root_image.len())?),
+                digest(*blake3::hash(root_image).as_bytes()),
+                Value::Array(partitions),
+                digest([22; 32]),
+                integer(4096),
+                integer(4096),
+                integer(1),
+                Value::Bytes(Vec::new()),
+                Value::Array(vec![
+                    integer(u64::try_from(der.len())?),
+                    Value::Bytes(Sha256::digest(der).to_vec()),
+                    Value::Bytes(der.to_vec()),
+                ]),
+                digest([9; 32]),
+                integer(77),
+                Value::Text("/adapter".to_owned()),
+                digest(*blake3::hash(executable).as_bytes()),
+                Value::Array(Vec::new()),
+                integer(2),
+                Value::Text("image".to_owned()),
+            ]),
+            &authority.image,
+        )
+    }
+
+    fn launch_policy(image_manifest: [u8; 32]) -> TestResult<Vec<u8>> {
+        let unsigned = Value::Array(vec![
+            Value::Text("LPS1".to_owned()),
+            integer(1),
+            Value::Text("air-gapped".to_owned()),
+            integer(1),
+            digest(image_manifest),
+            Value::Array(selector_limit_values()),
+            Value::Array(Vec::new()),
+        ]);
+        let encoded = encode(&unsigned)?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.LPS1.v1\0");
+        hasher.update(&encoded);
+        Ok(encode(&Value::Array(vec![
+            unsigned,
+            digest(*hasher.finalize().as_bytes()),
+        ]))?)
+    }
+
+    fn selector_limit_values() -> Vec<Value> {
+        (0..17)
+            .map(|limit_id| {
+                let value = if limit_id == 13 { 256 } else { 2_000 };
+                Value::Array(vec![integer(limit_id), integer(value)])
+            })
+            .collect()
+    }
+
+    fn broker_hard_caps() -> Result<Vec<u8>, ProtocolError> {
+        encode(&Value::Array(vec![
+            Value::Text("BHC1".to_owned()),
+            integer(1),
+            Value::Array(selector_limit_values()),
+        ]))
     }
 
     fn admitted_state() -> TestResult<InstalledSelectorState> {
@@ -1149,15 +1327,7 @@ mod tests {
         let features_digest = feature_digest(&features)?;
         let provider_binary = b"exact provider binary";
         let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
-        let hard_caps = encode(&Value::Array(vec![
-            Value::Text("BHC1".to_owned()),
-            integer(1),
-            Value::Array(
-                (0..17)
-                    .map(|limit_id| Value::Array(vec![integer(limit_id), integer(2_000)]))
-                    .collect(),
-            ),
-        ]))?;
+        let hard_caps = broker_hard_caps()?;
         let hard_caps_digest = *blake3::hash(&hard_caps).as_bytes();
         let manifest = provider_manifest(&authority, provider_binary_digest, features_digest)?;
         let manifest_digest = signed_record_digest(&manifest)?;
@@ -1172,15 +1342,25 @@ mod tests {
             host_digest,
         )?;
         let report_digest = signed_record_digest(&report)?;
+        let root_image = b"root-image";
+        let executable = b"adapter";
+        let image = image_manifest(&authority, root_image, executable)?;
+        let image_digest = signed_record_digest(&image)?;
+        let launch = launch_policy(image_digest)?;
+        let launch_digest = signed_record_digest(&launch)?;
         let policy = provider_policy(
             &authority,
             trust_digest,
             revocation_digest,
-            manifest_digest,
-            provider_binary_digest,
-            hard_caps_digest,
-            report_digest,
-            syscall_digest,
+            &ProviderPolicySelection {
+                provider_manifest: manifest_digest,
+                provider_binary: provider_binary_digest,
+                hard_caps: hard_caps_digest,
+                conformance_report: report_digest,
+                syscall_set: syscall_digest,
+                launch_policy: launch_digest,
+                image_manifest: image_digest,
+            },
         )?;
         let policy_digest = signed_record_digest(&policy)?;
         let artifacts = [
@@ -1192,8 +1372,20 @@ mod tests {
             (5, [17; 32], b"conformance-profile".as_slice()),
             (6, host_digest, host.as_slice()),
             (7, syscall_digest, syscall.as_slice()),
+            (8, launch_digest, launch.as_slice()),
+            (9, image_digest, image.as_slice()),
             (10, hard_caps_digest, hard_caps.as_slice()),
             (11, provider_binary_digest, provider_binary.as_slice()),
+            (
+                12,
+                *blake3::hash(root_image).as_bytes(),
+                root_image.as_slice(),
+            ),
+            (
+                13,
+                *blake3::hash(executable).as_bytes(),
+                executable.as_slice(),
+            ),
         ];
         let mut installed = BTreeMap::new();
         for (kind, identity, bytes) in artifacts {
@@ -1285,6 +1477,13 @@ mod tests {
             fields[field] = value;
             assert!(InstallationManifest::from_canonical_cbor(&encode_manifest(fields)?).is_err());
         }
+        let mut invalid_root_key = unsigned(valid_objects());
+        let mut non_curve_point = vec![0; 32];
+        non_curve_point[0] = 2;
+        invalid_root_key[3] = Value::Bytes(non_curve_point);
+        assert!(
+            InstallationManifest::from_canonical_cbor(&encode_manifest(invalid_root_key)?).is_err()
+        );
         let mut duplicate = valid_objects();
         duplicate[1] = duplicate[0].clone();
         assert!(
@@ -1730,6 +1929,11 @@ mod tests {
             digest_complete_file(&file, 4)?,
             *blake3::hash(&[9; 4]).as_bytes()
         );
+        let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
+        assert_eq!(digest_reader(write_only, 1), Err(SelectorBoundaryError::Io));
+
+        let write_only = fs::OpenOptions::new().write(true).open(temporary.path())?;
+        assert_eq!(digest_reader(write_only, 0), Err(SelectorBoundaryError::Io));
         Ok(())
     }
 
@@ -1794,6 +1998,154 @@ mod tests {
         assert_eq!(admitted.bootstrap().policy().policy_epoch(), 4);
         assert_eq!(admitted.provider().manifest().provider_id, "provider");
         assert_eq!(admitted.provider().host_profile().kernel_release, "6.12.0");
+        Ok(())
+    }
+
+    fn retain_case_artifact(
+        state: &mut InstalledSelectorState,
+        kind: u8,
+        identity: [u8; 32],
+        bytes: &[u8],
+    ) -> TestResult {
+        let artifact = held_artifact(kind, identity, bytes)?;
+        let key = (artifact.object.kind, artifact.object.identity);
+        state.manifest.objects.push(artifact.object.clone());
+        state
+            .manifest
+            .objects
+            .sort_by_key(|object| (object.kind, object.identity));
+        state.artifacts.insert(key, artifact);
+        Ok(())
+    }
+
+    fn installed_case_bootstrap(
+        corpus: &crate::selector_test_support::Corpus,
+    ) -> TestResult<(EvaluationRequest, AuthenticatedSelectorBootstrap)> {
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut state = authenticated_state()?;
+        retain_case_artifact(
+            &mut state,
+            14,
+            request.fixture_bundle_digest,
+            &corpus.archive,
+        )?;
+        retain_case_artifact(
+            &mut state,
+            15,
+            request.trust_policy_snapshot_digest,
+            &corpus.trust_policy,
+        )?;
+        state
+            .authenticate_bootstrap()
+            .map(|bootstrap| (request, bootstrap))
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn root_selector_fixture() -> Result<
+        (
+            EvaluationRequest,
+            AdmittedSelectorProvider,
+            ResolvedInstalledCase,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let corpus = crate::selector_test_support::air_gapped_corpus()?;
+        let mut request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut state = admitted_state()?;
+        let object_identity = |kind| {
+            state
+                .manifest
+                .objects()
+                .iter()
+                .find(|object| object.kind().code() == kind)
+                .map(InstallationObject::identity)
+                .ok_or("root selector fixture object missing")
+        };
+        request.sandbox_requirement = Some(SandboxRequirement {
+            lps1_digest: object_identity(8)?,
+            sim1_digest: object_identity(9)?,
+            required_provider_capability: RequiredProviderCapability {
+                capability_id: ROOT_SELECTOR_CAPABILITY.to_owned(),
+                capability_version: 1,
+                minimum_strength: 1,
+            },
+            apt1_digest: state.manifest.policy_digest,
+            policy_epoch: 4,
+        });
+        request.request_id[14..].copy_from_slice(&0_u16.to_be_bytes());
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        retain_case_artifact(
+            &mut state,
+            14,
+            request.fixture_bundle_digest,
+            &corpus.archive,
+        )?;
+        retain_case_artifact(
+            &mut state,
+            15,
+            request.trust_policy_snapshot_digest,
+            &corpus.trust_policy,
+        )?;
+        let admitted = state.authenticate_bootstrap()?.admit_provider()?;
+        let resolved = admitted.bootstrap().resolve_installed_case(&request, 0)?;
+        Ok((request, admitted, resolved))
+    }
+
+    fn rebound(mut request: EvaluationRequest) -> TestResult<EvaluationRequest> {
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        Ok(request)
+    }
+
+    #[test]
+    fn retained_sic1_descriptors_reconstruct_the_evr1_selected_case() -> TestResult {
+        let corpus = crate::selector_test_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        let resolved = bootstrap.resolve_installed_case(&request, 0)?;
+        assert_eq!(resolved.bundle_digest(), request.fixture_bundle_digest);
+        assert_eq!(resolved.profile_digest(), request.profile_digest);
+        assert_ne!(resolved.fixture_contract_digest(), [0; 32]);
+        assert_eq!(resolved.attempt().case_id, "case-0");
+        assert_eq!(resolved.attempt().mode, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn retained_sic1_case_resolution_rejects_foreign_identity_and_case_selection() -> TestResult {
+        let corpus = crate::selector_test_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        assert!(bootstrap.resolve_installed_case(&request, 7).is_err());
+        for request in [
+            rebound(EvaluationRequest {
+                subject_adapter: SubjectAdapterKind::PublicGatewayProtocol,
+                ..request.clone()
+            })?,
+            rebound(EvaluationRequest {
+                fixture_bundle_digest: [99; 32],
+                ..request
+            })?,
+        ] {
+            assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_sic1_case_resolution_enforces_preflight_and_verified_closure() -> TestResult {
+        let invalid_signature = crate::selector_test_support::corpus_with_bundle_mutation(
+            crate::selector_test_support::BundleMutation::Signature,
+        )?;
+        let (request, bootstrap) = installed_case_bootstrap(&invalid_signature)?;
+        assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
+
+        let cap_violation = crate::selector_test_support::corpus_with_profile_mutation(
+            crate::selector_test_support::ProfileMutation::SelectedClosureCapBoundary(0),
+        )?;
+        let (request, bootstrap) = installed_case_bootstrap(&cap_violation)?;
+        assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
         Ok(())
     }
 }

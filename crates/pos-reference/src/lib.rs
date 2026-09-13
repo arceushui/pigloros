@@ -22,6 +22,14 @@ pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
 pub mod profile;
+// Public module reachability keeps crate-only sibling access compatible with
+// both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod provider_transport;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod root_selector;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
@@ -30,6 +38,151 @@ pub mod selector;
 #[doc(hidden)]
 pub mod selector_protocol;
 pub mod signed_bundle;
+
+// Unit tests reuse the public integration corpus. Keeping this test-only module
+// reachable at the crate boundary preserves the integration helper's ordinary
+// public visibility without suppressing unused-item or reachability lints.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod selector_test_support {
+    use crate as pos_reference;
+
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod selector_transport_test_fixture {
+    use crate as pos_reference;
+
+    // The integration corpus is included only to reuse its independently
+    // signed provider fixture from crate-private transport tests.
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/sandbox_admission_public.rs"
+    ));
+
+    pub(crate) struct TransportAdmissionFixture {
+        pub(crate) provider: crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        pub(crate) request: crate::sandbox_provider_protocol::SandboxExecuteRequest,
+        pub(crate) commitment: crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        pub(crate) spx1: Vec<u8>,
+        pub(crate) agr1: Vec<u8>,
+        pub(crate) sau1: Vec<Vec<u8>>,
+        pub(crate) spr1: Vec<u8>,
+        pub(crate) output_chunk: Vec<u8>,
+        pub(crate) spy1: Vec<u8>,
+        pub(crate) spe1: Vec<u8>,
+        pub(crate) non_output_result:
+            crate::sandbox_provider_protocol::AuthenticatedSandboxProviderResult,
+    }
+
+    pub(crate) fn authenticated_transport_fixture() -> TestResult<TransportAdmissionFixture> {
+        let fixture = Fixture::new()?;
+        let provider = fixture.admit()?;
+        let image =
+            provider.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+        let launch = provider.admit_launch_policy(&fixture.lps1, &image)?;
+        let execute_request_bytes = execute_request(&fixture, &launch, &["execute"])?;
+        let request = crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
+            &execute_request_bytes,
+        )?;
+        let commitment = fixture.selector_grant_commitment(&provider, &image, &launch, &request)?;
+        let agr1 = admission_grant(&fixture, &request, &launch, &commitment)?;
+        let authenticated_grant =
+            provider.authenticate_selector_grant(&agr1, &request, &commitment)?;
+        let grant = AdmissionGrant::from_canonical_cbor(&agr1)?;
+        let sau1 = audit_chain(&fixture, &grant)?;
+        let audit_digest = wrapped_digest(sau1.last().ok_or("audit chain is empty")?)?;
+        let receipt_bytes = provider_receipt(&fixture, &grant, audit_digest)?;
+        let receipt = SandboxProviderReceipt::from_canonical_cbor(&receipt_bytes)?;
+        let terminal_result_bytes = terminal_result(&fixture, &request, &grant, &receipt)?;
+        let denied_events = vec![0];
+        let denied_audit = audit_chain_for_events(&fixture, &authenticated_grant, &denied_events)?;
+        let denied_receipt = provider.authenticate_receipt(
+            &provider_receipt_for_lifecycle(
+                &fixture,
+                &authenticated_grant,
+                wrapped_digest(denied_audit.last().ok_or("denied audit missing")?)?,
+                None,
+                None,
+            )?,
+            &authenticated_grant,
+        )?;
+        let non_output_result = provider.authenticate_terminal_result(
+            &terminal_result_for_outcome(
+                &fixture,
+                &request,
+                &authenticated_grant,
+                &denied_receipt,
+                4,
+                &denied_events,
+            )?,
+            &request,
+            &authenticated_grant,
+            &denied_receipt,
+        )?;
+        let spe1 = sign_record(
+            "SPE1",
+            Value::Array(vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                integer(1),
+                Value::Bytes(request.request.request_id.to_vec()),
+                Value::Bytes(request.request_digest.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(17),
+                Value::Null,
+                Value::Text("runtime".to_owned()),
+            ]),
+            &fixture.authority.runtime,
+        )?;
+        let output = b"output";
+        let output_chunk = self_digested_record(
+            "SBC1",
+            Value::Array(vec![
+                Value::Text("SBC1".to_owned()),
+                integer(1),
+                bytes(wrapped_digest(&terminal_result_bytes)?),
+                Value::Bytes(request.request.request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(1),
+                integer(0),
+                integer(0),
+                Value::Bytes(output.to_vec()),
+            ]),
+        )?;
+        Ok(TransportAdmissionFixture {
+            provider,
+            request,
+            commitment,
+            spx1: execute_request_bytes,
+            agr1,
+            sau1,
+            spr1: receipt_bytes,
+            output_chunk,
+            spy1: terminal_result_bytes,
+            spe1,
+            non_output_result,
+        })
+    }
+}
+
+/// Run ADR-069's fixed root-owned selector executable.
+///
+/// This is the sole public binary entry point. It accepts no configuration,
+/// authority, endpoint, artifact path, or compatibility input; all authority
+/// is opened by the crate-private composition from fixed root-owned locations.
+///
+/// # Errors
+/// Returns a closed failure when normal selector composition cannot establish
+/// the required immutable installation, listener, provider, or peer boundary.
+#[cfg(unix)]
+pub fn run_fixed_root_selector() -> Result<(), selector::SelectorBoundaryError> {
+    root_selector::run_fixed()
+}
 
 /// Divergence classes emitted by the independent JSON evaluator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

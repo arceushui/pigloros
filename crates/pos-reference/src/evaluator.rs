@@ -365,12 +365,7 @@ fn evaluate_case(
     fixture: &Fixture,
     adapter: &mut impl SubjectAdapter,
 ) -> Result<CaseOutcome, EvaluatorError> {
-    let mut hard_caps = profile.evaluator_hard_caps;
-    if request.sandbox_requirement.is_some() {
-        let ceiling = crate::selector_protocol::SELECTOR_INPUT_LIMIT as u64;
-        hard_caps.max_member_bytes = hard_caps.max_member_bytes.min(ceiling);
-        hard_caps.max_total_bundle_bytes = hard_caps.max_total_bundle_bytes.min(ceiling);
-    }
+    let hard_caps = selector_bounded_hard_caps(profile.evaluator_hard_caps, request);
     case_attempt(bundle, fixture, bundle.mode, hard_caps).and_then(|attempt| {
         evaluate_attempt(
             request,
@@ -381,6 +376,18 @@ fn evaluate_case(
             &attempt,
         )
     })
+}
+
+pub(crate) fn selector_bounded_hard_caps(
+    mut hard_caps: EvaluatorHardCaps,
+    request: &EvaluationRequest,
+) -> EvaluatorHardCaps {
+    if request.sandbox_requirement.is_some() {
+        let ceiling = crate::selector_protocol::SELECTOR_INPUT_LIMIT as u64;
+        hard_caps.max_member_bytes = hard_caps.max_member_bytes.min(ceiling);
+        hard_caps.max_total_bundle_bytes = hard_caps.max_total_bundle_bytes.min(ceiling);
+    }
+    hard_caps
 }
 
 fn evaluate_attempt(
@@ -470,7 +477,7 @@ const fn enforce_observed_coordinate_limit(
     Ok(())
 }
 
-fn case_attempt(
+pub(crate) fn case_attempt(
     bundle: &VerifiedBundle,
     fixture: &Fixture,
     mode: u8,

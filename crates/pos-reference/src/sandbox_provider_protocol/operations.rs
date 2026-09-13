@@ -10,7 +10,6 @@ use super::SandboxProviderProtocolError;
 
 /// Closed Sandbox Provider operation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u64)]
 pub enum SandboxProviderOperation {
     Describe,
     Execute,
@@ -19,20 +18,30 @@ pub enum SandboxProviderOperation {
 }
 
 impl SandboxProviderOperation {
-    const ALL: [Self; 4] = [Self::Describe, Self::Execute, Self::Cancel, Self::Reconcile];
+    /// Returns this operation's fixed SLE1 wire code.
+    #[must_use]
+    pub(crate) const fn wire_code(self) -> u64 {
+        match self {
+            Self::Describe => 0,
+            Self::Execute => 1,
+            Self::Cancel => 2,
+            Self::Reconcile => 3,
+        }
+    }
 
-    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
-        usize::try_from(code)
-            .ok()
-            .and_then(|index| Self::ALL.get(index))
-            .copied()
-            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        match code {
+            0 => Ok(Self::Describe),
+            1 => Ok(Self::Execute),
+            2 => Ok(Self::Cancel),
+            3 => Ok(Self::Reconcile),
+            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
+        }
     }
 }
 
 /// Closed unsigned local selector failure code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u64)]
 pub enum SandboxLocalErrorCode {
     ProviderUnavailable,
     ProviderIdentityInvalid,
@@ -57,6 +66,22 @@ impl SandboxLocalErrorCode {
         Self::ProviderTerminalUnavailable,
         Self::ProviderEvidenceInvalid,
     ];
+
+    /// Returns this local error's fixed SLE1 wire code.
+    #[must_use]
+    pub(crate) const fn wire_code(self) -> u64 {
+        match self {
+            Self::ProviderUnavailable => 0,
+            Self::ProviderIdentityInvalid => 1,
+            Self::PolicyUnavailable => 2,
+            Self::ControlChannelUnavailable => 3,
+            Self::InvalidSelectorRequest => 4,
+            Self::RequestAuthorityMismatch => 5,
+            Self::PayloadLimitExceeded => 6,
+            Self::ProviderTerminalUnavailable => 7,
+            Self::ProviderEvidenceInvalid => 8,
+        }
+    }
 
     fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
         usize::try_from(code)
@@ -663,5 +688,38 @@ fn validate_response_identity(
         Ok(())
     } else {
         Err(SandboxProviderProtocolError::InconsistentFields)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selector_wire_codes_cover_every_operation_and_local_failure() {
+        for (operation, code) in [
+            (SandboxProviderOperation::Describe, 0),
+            (SandboxProviderOperation::Execute, 1),
+            (SandboxProviderOperation::Cancel, 2),
+            (SandboxProviderOperation::Reconcile, 3),
+        ] {
+            assert_eq!(operation.wire_code(), code);
+            assert_eq!(SandboxProviderOperation::decode(code), Ok(operation));
+        }
+        for (error, code) in [
+            (SandboxLocalErrorCode::ProviderUnavailable, 0),
+            (SandboxLocalErrorCode::ProviderIdentityInvalid, 1),
+            (SandboxLocalErrorCode::PolicyUnavailable, 2),
+            (SandboxLocalErrorCode::ControlChannelUnavailable, 3),
+            (SandboxLocalErrorCode::InvalidSelectorRequest, 4),
+            (SandboxLocalErrorCode::RequestAuthorityMismatch, 5),
+            (SandboxLocalErrorCode::PayloadLimitExceeded, 6),
+            (SandboxLocalErrorCode::ProviderTerminalUnavailable, 7),
+            (SandboxLocalErrorCode::ProviderEvidenceInvalid, 8),
+        ] {
+            assert_eq!(error.wire_code(), code);
+            assert_eq!(SandboxLocalErrorCode::decode(code), Ok(error));
+        }
     }
 }

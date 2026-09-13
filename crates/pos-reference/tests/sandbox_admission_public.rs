@@ -1,4 +1,4 @@
-//! Public selector-owned provider and image admission tests.
+// Public selector-owned provider and image admission tests.
 
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
