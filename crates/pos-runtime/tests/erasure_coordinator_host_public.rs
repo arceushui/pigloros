@@ -164,6 +164,7 @@ fn configured_fork_authority(
     request: ErasureRequestV1,
     manifest: ErasureReferenceV1,
     parent: TimelineId,
+    child: Option<TimelineId>,
     lineage_rule: ErasureReferenceV1,
 ) -> Result<HostConfiguredErasureCoordinatorAuthorityV1, ErasureErrorV1> {
     let request_reference = request.reference();
@@ -174,14 +175,23 @@ fn configured_fork_authority(
         Some(lineage_rule),
         reference(19),
     )?;
-    let binding = ErasureAuthorityRequestBindingV1::new(
-        request,
-        vec![ErasureAuthorityTopologyBindingV1::new(
+    let mut topology = vec![ErasureAuthorityTopologyBindingV1::new(
+        request_reference,
+        manifest,
+        parent,
+        Some(reference(9)),
+    )];
+    if let Some(child) = child {
+        topology.push(ErasureAuthorityTopologyBindingV1::new(
             request_reference,
             manifest,
-            parent,
-            Some(reference(9)),
-        )],
+            child,
+            Some(reference(19)),
+        ));
+    }
+    let binding = ErasureAuthorityRequestBindingV1::new(
+        request,
+        topology,
         profile,
         reference(40),
         b"host-proof".to_vec(),
@@ -1240,6 +1250,7 @@ fn memory_host_resolves_configured_fork_scope_through_public_sender(
         request,
         manifest,
         parent,
+        None,
         reference(100),
     )?);
     let child = {
@@ -1267,6 +1278,7 @@ fn memory_host_rejects_configured_fork_with_zero_public_operation(
         request,
         manifest,
         parent,
+        None,
         reference(100),
     )?);
     let mut commands = test_stage(
@@ -1310,6 +1322,7 @@ fn memory_host_rejects_configured_fork_with_unbound_requirement_request(
         alternate,
         reference(96),
         parent,
+        None,
         reference(100),
     )?);
     let mut commands = test_stage("open unbound configured fork sender", host.command_sender())?;
@@ -1335,6 +1348,7 @@ fn memory_host_rejects_configured_fork_with_substituted_child_scope(
         request,
         manifest,
         parent,
+        None,
         reference(100),
     )?);
     authority
@@ -1397,6 +1411,7 @@ fn memory_host_rejects_configured_fork_lineage_that_conflicts_with_inventory(
         request,
         manifest,
         parent,
+        None,
         reference(99),
     )?);
     let mut commands = test_stage(
@@ -1485,7 +1500,7 @@ fn assert_configured_nonempty_recovery(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let configured_authority = test_stage(
         "construct configured recovery authority",
-        configured_fork_authority(request, manifest, parent, reference(100)),
+        configured_fork_authority(request, manifest, parent, Some(child), reference(100)),
     )?;
     let composition = test_stage(
         "construct configured recovery composition",
@@ -1581,10 +1596,6 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         .manifest_digest();
         (parent.id(), child.id(), request, manifest)
     };
-    drop(test_stage(
-        "open persistent SQLite store read-only before host recovery",
-        pos_store::sqlite::SqliteStore::open_read_only(&path_text),
-    )?);
     assert_configured_nonempty_recovery(&path_text, request, manifest, parent, child)?;
     authority.deny_topology.store(true, Ordering::Release);
     let denied_recovery = ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
