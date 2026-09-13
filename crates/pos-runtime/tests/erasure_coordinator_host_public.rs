@@ -1476,6 +1476,41 @@ fn sqlite_host_freezes_access_at_the_coordinator_cas_boundary(
     assert_atomic_freeze_parity(StoreConfig::SqliteInMemory)
 }
 
+fn assert_configured_nonempty_recovery(
+    path: &str,
+    request: ErasureRequestV1,
+    manifest: ErasureReferenceV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let configured_authority = test_stage(
+        "construct configured recovery authority",
+        configured_fork_authority(request, manifest, parent, reference(100)),
+    )?;
+    let composition = test_stage(
+        "construct configured recovery composition",
+        ErasureCoordinatorCompositionV1::from_host_configuration(
+            configured_authority.configuration().clone(),
+            Arc::new(TestEvidenceVerifier),
+            Arc::new(TestExecution),
+            reference(30),
+        ),
+    )?;
+    let mut recovered = test_stage(
+        "reopen persistent configured coordinator host",
+        ErasureExecutionHostV1::open_read_only_with_authority(
+            path,
+            &composition,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(recovered.status(), ErasureHostStatusV1::Ready);
+    let mut reads = test_stage("open recovered read sender", recovered.read_sender())?;
+    assert_eq!(reads.timeline(parent), Err(ErasureHostErrorV1::AccessFrozen));
+    assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
+    Ok(())
+}
+
 #[test]
 fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1498,40 +1533,43 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
                 ERASURE_MAX_INVENTORY_REQUESTS,
             ),
         )?;
-        let mut commands = test_stage("open persistent command sender", host.command_sender())?;
-        let parent = test_stage(
-            "create persistent parent",
-            commands.create_timeline("restart-parent"),
-        )?;
-        test_stage(
-            "publish persistent authority topology",
-            authority.set_timeline(parent.id()),
-        )?;
-        let request = test_stage("construct persistent request", persistence_request())?;
-        let request_reference = request.reference();
-        let request_provenance = request.provenance();
-        test_stage(
-            "submit persistent request",
-            commands.submit_erasure_request(request.clone(), request_provenance),
-        )?;
-        test_stage(
-            "authorize persistent request",
-            commands.authorize_erasure_request(request_reference, reference(32)),
-        )?;
-        test_stage(
-            "freeze persistent request",
-            commands.freeze_access(request_reference, &freeze_transition()),
-        )?;
-        let child = test_stage(
-            "fork persistent frozen timeline",
-            commands.fork_timeline_identified(
-                reference(41),
-                parent.id(),
-                pos_core::Seq::ZERO,
-                "restart-child",
-            ),
-        )?;
-        drop(commands);
+        let (parent, child, request, request_reference) = {
+            let mut commands =
+                test_stage("open persistent command sender", host.command_sender())?;
+            let parent = test_stage(
+                "create persistent parent",
+                commands.create_timeline("restart-parent"),
+            )?;
+            test_stage(
+                "publish persistent authority topology",
+                authority.set_timeline(parent.id()),
+            )?;
+            let request = test_stage("construct persistent request", persistence_request())?;
+            let request_reference = request.reference();
+            let request_provenance = request.provenance();
+            test_stage(
+                "submit persistent request",
+                commands.submit_erasure_request(request.clone(), request_provenance),
+            )?;
+            test_stage(
+                "authorize persistent request",
+                commands.authorize_erasure_request(request_reference, reference(32)),
+            )?;
+            test_stage(
+                "freeze persistent request",
+                commands.freeze_access(request_reference, &freeze_transition()),
+            )?;
+            let child = test_stage(
+                "fork persistent frozen timeline",
+                commands.fork_timeline_identified(
+                    reference(41),
+                    parent.id(),
+                    pos_core::Seq::ZERO,
+                    "restart-child",
+                ),
+            )?;
+            (parent, child, request, request_reference)
+        };
         let mut reads = test_stage("open persistent recovery reader", host.read_sender())?;
         let manifest = test_stage(
             "read persistent frozen state",
@@ -1541,36 +1579,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         .manifest_digest();
         (parent.id(), child.id(), request, manifest)
     };
-    {
-        let configured_authority = test_stage(
-            "construct configured recovery authority",
-            configured_fork_authority(request, manifest, parent, reference(100)),
-        )?;
-        let composition = test_stage(
-            "construct configured recovery composition",
-            ErasureCoordinatorCompositionV1::from_host_configuration(
-                configured_authority.configuration().clone(),
-                Arc::new(TestEvidenceVerifier),
-                Arc::new(TestExecution),
-                reference(30),
-            ),
-        )?;
-        let mut recovered = test_stage(
-            "reopen persistent configured coordinator host",
-            ErasureExecutionHostV1::open_read_only_with_authority(
-                &path_text,
-                &composition,
-                ERASURE_MAX_INVENTORY_REQUESTS,
-            ),
-        )?;
-        assert_eq!(recovered.status(), ErasureHostStatusV1::Ready);
-        let mut reads = test_stage("open recovered read sender", recovered.read_sender())?;
-        assert_eq!(
-            reads.timeline(parent),
-            Err(ErasureHostErrorV1::AccessFrozen)
-        );
-        assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
-    }
+    assert_configured_nonempty_recovery(&path_text, request, manifest, parent, child)?;
     authority.deny_topology.store(true, Ordering::Release);
     let denied_recovery = ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
         &path_text,
