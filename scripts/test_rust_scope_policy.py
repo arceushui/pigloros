@@ -24,29 +24,6 @@ EXPECTED_EXCLUDES = {
     "!.agents/**",
     "!docs/**",
 }
-EXPECTED_SCOPE_SCOPED_CI_RESULTS = (
-    "FMT_RESULT",
-    "RUSTDOC_RESULT",
-    "TEST_RESULT",
-    "CLIPPY_RESULT",
-    "AUDIT_RESULT",
-    "DENY_RESULT",
-    "CARGO_SHEAR_RESULT",
-    "GEIGER_RESULT",
-    "ASAN_RESULT",
-    "DOCKER_BUILD_RESULT",
-    "WORLD_CLIENT_WASM_RESULT",
-    "WORLD_CLIENT_BROWSER_PARITY_RESULT",
-    "COVERAGE_RESULT",
-    "CARGO_CRAP_RESULT",
-    "MATERIALIZE_CONFORMANCE_BUNDLES_RESULT",
-)
-EXPECTED_UNCONDITIONAL_CI_RESULTS = (
-    "CONFORMANCE_FIXTURES_RESULT",
-    "CONFORMANCE_NON_LINUX_RESULT",
-)
-
-
 def load_patterns() -> list[str]:
     with FILTER_PATH.open(encoding="utf-8") as stream:
         filters = yaml.safe_load(stream)
@@ -142,15 +119,12 @@ class RustScopePolicyTests(unittest.TestCase):
         run = gate["steps"][0]["run"]
         normalized_run = " ".join(run.replace("\\\n", " ").split())
         self.assertIn(
-            "check_results true " + " ".join(EXPECTED_SCOPE_SCOPED_CI_RESULTS),
+            "for result_name in PREFLIGHT_RESULT CORE_RESULT STANDARD_RESULT ASAN_RESULT",
             normalized_run,
         )
-        self.assertIn(
-            "check_results false " + " ".join(EXPECTED_UNCONDITIONAL_CI_RESULTS),
-            normalized_run,
-        )
-        self.assertIn('"${RUST_SCOPE_RESULT}" == "false"', run)
-        self.assertIn('"${result}" == "skipped"', run)
+        self.assertIn('expected_mutation=skipped', run)
+        self.assertIn('expected_mutation=success', run)
+        self.assertIn('"${RUST_SCOPE_RESULT}" = true', run)
         self.assertIn('"${SCOPE_JOB_RESULT}" != "success"', run)
 
     def test_conformance_materialization_honors_rust_scope(self) -> None:

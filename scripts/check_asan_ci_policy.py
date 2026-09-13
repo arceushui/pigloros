@@ -21,19 +21,34 @@ cargo_args=(
   +nightly-2026-07-01 test --all-features --locked -Z build-std
   --target x86_64-unknown-linux-gnu
 )
+nextest_args=(
+  +nightly-2026-07-01 nextest run --all-features --locked -Z build-std
+  --target x86_64-unknown-linux-gnu
+)
 run_asan_tests() {
   ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
     RUSTFLAGS="-Z sanitizer=address" \\
     cargo "${cargo_args[@]}" "$@"
+}
+run_asan_partition() {
+  ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
+    RUSTFLAGS="-Z sanitizer=address" \\
+    cargo "${nextest_args[@]}" "$@"
 }
 case "${ASAN_SHARD}" in
   bundle-coverage)
     run_asan_tests -p pos-conformance \\
       --test bundle_contract_coverage_public
     ;;
-  bundle-public)
-    run_asan_tests -p pos-conformance \\
-      --test bundle_contract_public
+  bundle-public-1)
+    run_asan_partition -p pos-conformance \\
+      --test bundle_contract_public \\
+      --partition slice:1/2 --run-ignored all --test-threads 2
+    ;;
+  bundle-public-2)
+    run_asan_partition -p pos-conformance \\
+      --test bundle_contract_public \\
+      --partition slice:2/2 --run-ignored all --test-threads 2
     ;;
   moat-proof)
     run_asan_tests -p pos-conformance \\
@@ -69,29 +84,11 @@ EXPECTED_STEP_ENV = {
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
-EXPECTED_SCOPE_JOB = [
-    "ci_change_scope",
-    "fmt",
-    "rustdoc",
-    "test",
-    "reference-evaluator-release",
-    "conformance-fixtures",
-    "materialize-conformance-bundles",
-    "conformance-non-linux",
-    "clippy",
-    "coverage",
-    "cargo-crap",
-    "audit",
-    "deny",
-    "cargo-shear",
-    "geiger",
-    "docker-build",
-    "world-client-wasm",
-    "world-client-browser-parity",
-]
+EXPECTED_SCOPE_JOB = ["ci_change_scope", "standard-gate", "mutation-checks"]
 EXPECTED_SCOPE_IF = (
-    "${{ needs.ci_change_scope.outputs.rust == 'true' || "
-    "github.event_name != 'pull_request' }}"
+    "${{ always() && needs.standard-gate.result == 'success' && "
+    "(needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && "
+    "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
 )
 EXPECTED_JOB_KEYS = {
     "name",
@@ -104,8 +101,15 @@ EXPECTED_JOB_KEYS = {
 }
 EXPECTED_STRATEGY = {
     "fail-fast": False,
+    "max-parallel": 5,
     "matrix": {
-        "shard": ["bundle-coverage", "bundle-public", "moat-proof", "remainder"]
+        "shard": [
+            "bundle-coverage",
+            "bundle-public-1",
+            "bundle-public-2",
+            "moat-proof",
+            "remainder",
+        ]
     },
 }
 EXPECTED_GATE_JOB = {
@@ -140,6 +144,12 @@ EXPECTED_SETUP_STEPS = [
     {
         "uses": "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772",
         "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
+    },
+    {
+        "name": "Install cargo-nextest for partitioned public bundle tests",
+        "if": "${{ startsWith(matrix.shard, 'bundle-public-') }}",
+        "uses": "taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b",
+        "with": {"tool": "cargo-nextest"},
     },
     {
         "name": "Verify ASan symbolizer",
@@ -236,13 +246,13 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
 
     steps = job.get("steps")
     require(isinstance(steps, list), "ASan job steps must be a list")
-    require(len(steps) == 7, "ASan job must contain the exact trusted step sequence")
+    require(len(steps) == 8, "ASan job must contain the exact trusted step sequence")
     require(
-        steps[:5] == EXPECTED_SETUP_STEPS,
+        steps[:6] == EXPECTED_SETUP_STEPS,
         "ASan setup steps must match the exact pinned trusted sequence",
     )
     require(
-        steps[5] == EXPECTED_NEGATIVE_CONTROL_STEP,
+        steps[6] == EXPECTED_NEGATIVE_CONTROL_STEP,
         "ASan negative control must match the exact trusted step",
     )
     test_steps = [
@@ -252,7 +262,7 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     ]
     require(len(test_steps) == 1, "ASan job must contain exactly one named test step")
     step = test_steps[0]
-    require(step is steps[6], "ASan test must be the final trusted step")
+    require(step is steps[7], "ASan test must be the final trusted step")
     require(
         set(step) == {"name", "env", "run"},
         "ASan test step must contain exactly name, env, and run",

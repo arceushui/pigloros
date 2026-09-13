@@ -136,24 +136,64 @@ stateDiagram-v2
 
 ## Required CI sequence
 
-For a Rust-affecting pull request, the first four high-signal quality gates
-start in parallel after scope detection. `cargo-crap` waits for coverage, the
-remaining Rust-dependent checks wait for that quality set, and ASan is last.
-This keeps the gates independent while still preventing expensive downstream
-work after a required prerequisite fails.
+CI is deliberately staged. A broken pull request receives useful feedback
+before it can occupy the expensive runners, and the main staged workflow uses
+no more than eight heavy runners at once.
 
 ```mermaid
 flowchart TD
-    S["Rust scope"] --> F["fmt"]
-    S --> T["test"]
-    S --> C["clippy"]
-    S --> V["coverage report"]
-    V --> N["covgate: changed production Rust first"]
-    N --> W["workspace floor: 99% lines and 99% regions"]
-    W --> CR["cargo-crap"]
+    S["ci_change_scope"] --> P["Fast preflight"]
+    P --> C["Core: four parallel jobs"]
+    C --> R["cargo-crap"]
+    R --> N["Normal checks: at most eight runners"]
+    N --> M["Mutation: at most eight shards"]
+    M --> A["ASan: five shards"]
+    A --> G["ci-gate"]
+    P -. "failure" .-> X["Stop downstream work"]
+    C -. "failure" .-> X
+    N -. "failure" .-> X
+    M -. "failure" .-> X
 ```
 
-The gates mean:
+### Stage 1: fast preflight
+
+Pull requests run Trunk in its native diff mode before Cargo-heavy work. The
+same stage validates pinned workflow dependencies and the Linux/non-Linux
+conformance boundaries.
+
+```mermaid
+flowchart LR
+    S["Trusted scope"] --> T["Trunk changed-file check"]
+    S --> P["Pinned workflow policy"]
+    S --> F["Conformance fixtures"]
+    S --> N["Non-Linux boundary"]
+    T --> G["preflight-gate"]
+    P --> G
+    F --> G
+    N --> G
+```
+
+The standalone `trunk-check.yml` workflow performs the full-repository Trunk
+audit on `main` and on schedule. It does not duplicate the pull-request diff
+check.
+
+### Stage 2: core quality gates
+
+After preflight, the four core jobs start together:
+
+```mermaid
+flowchart TD
+    P["preflight-gate"] --> F["fmt"]
+    P --> T["full workspace test"]
+    P --> C["clippy"]
+    P --> V["one coverage execution"]
+    F --> G["core-gate"]
+    T --> G
+    C --> G
+    V --> G
+```
+
+The core checks and their immediate cargo-crap consumer mean:
 
 1. `fmt` runs `cargo fmt --all -- --check`.
 2. `test` checks the workspace with default features disabled and all
@@ -168,42 +208,88 @@ The gates mean:
 5. `cargo-crap` consumes that LCOV and a trusted baseline. Existing function
    scores may not regress, and new functions must score at most 30.
 
-This ordering makes independent failures visible together while preserving the
-full workspace evidence. It does not lower any threshold or remove any test.
+There is no custom changed-test mapper. Cargo and nextest do not provide a
+reliable affected-test mapping for this workspace, so the complete test suite
+runs once. Coverage still checks changed production code first without a
+second instrumented execution:
 
-After `cargo-crap`, the remaining blocking checks can run:
+```mermaid
+flowchart LR
+    R["One llvm-cov report"] --> D["Changed production Rust: 99/99"]
+    D --> W["Workspace: 99/99"]
+    W --> L["Export LCOV"]
+    L --> C["cargo-crap"]
+```
+
+### Stage 3: normal checks
+
+`cargo-crap` starts only after every core job passes. Its success releases the
+normal checks. Audit, deny, and shear share one runner; browser parity replaces
+the completed WASM packaging job rather than adding another concurrent runner.
+CodeQL is called from this stage instead of starting independently on every PR.
 
 ```mermaid
 flowchart TD
-    CR["cargo-crap passed"] --> D["rustdoc"]
-    CR --> E["reference evaluator release"]
-    CR --> CF["conformance fixture validation"]
-    CF --> CB["conformance bundle materialization"]
-    CR --> P["platform checks"]
-    CR --> A["cargo-audit"]
-    CR --> Y["cargo-deny"]
-    CR --> H["cargo-shear"]
+    CR["cargo-crap"] --> D["rustdoc"]
+    CR --> E["reference evaluator"]
+    CR --> B["conformance bundles"]
+    CR --> P["audit → deny → shear"]
     CR --> U["cargo-geiger"]
-    CR --> X["Docker build and smoke test"]
-    CR --> W["WASM and browser parity"]
-    D --> AS["ASan shards"]
-    E --> AS
-    CB --> AS
-    P --> AS
-    A --> AS
-    Y --> AS
-    H --> AS
-    U --> AS
-    X --> AS
-    W --> AS
-    AS --> AG["asan-gate"]
+    CR --> X["Docker"]
+    CR --> W["WASM package"]
+    CR --> Q["CodeQL"]
+    W --> BP["browser parity"]
+    D --> G["standard-gate"]
+    E --> G
+    B --> G
+    P --> G
+    U --> G
+    X --> G
+    Q --> G
+    BP --> G
 ```
 
-ASan is intentionally the final expensive gate in `ci.yml`. It uses four
-parallel shards after every blocking prerequisite succeeds, then `asan-gate`
-requires all shards to pass. The sharding changes wall-clock time, not test
-scope: all features, test targets, sanitizer instrumentation, and leak checks
-remain required.
+`modules-structure` and `depgraph` are reporting-only jobs. They run after a
+successful normal stage on `main`, not on pull requests.
+
+### Stages 4 and 5: mutation, then ASan
+
+Mutation and ASan cannot begin until every cheaper blocking gate passes.
+Mutation is changed-line scoped and uses at most eight shards. It skips its own
+workspace baseline because the identical stable full-workspace test command has
+already passed in the core stage.
+
+```mermaid
+flowchart TD
+    G["standard-gate"] --> R{"Mutation-relevant PR?"}
+    R -->|"no"| S["Successful skip"]
+    R -->|"yes"| M["Eight changed-line shards"]
+    M --> MG["diff mutation testing"]
+    S --> A["ASan"]
+    MG --> A
+```
+
+ASan remains final. The previously dominant `bundle_contract_public` target is
+split through nextest's native `slice:1/2` partitioning; the other test groups
+remain unchanged.
+
+```mermaid
+flowchart LR
+    M["Mutation passed or skipped"] --> P1["bundle-public 1/2"]
+    M --> P2["bundle-public 2/2"]
+    M --> C["bundle coverage"]
+    M --> O["moat proof"]
+    M --> R["remainder"]
+    P1 --> G["asan-gate"]
+    P2 --> G
+    C --> G
+    O --> G
+    R --> G
+```
+
+All features, ignored tests, sanitizer instrumentation, leak detection, and the
+negative leak control remain required. Partitioning changes wall-clock time,
+not scope.
 
 The `ci-gate` job is the single blocking fan-in for the main CI workflow.
 Individual jobs are implementation details; branch protection should require
@@ -211,53 +297,15 @@ the aggregate check.
 
 ```mermaid
 flowchart TD
-    B1["fmt"] --> G["ci-gate"]
-    B2["test"] --> G
-    B3["clippy"] --> G
-    B4["coverage"] --> G
-    B5["cargo-crap"] --> G
-    B6["security and dependency checks"] --> G
-    B7["conformance checks"] --> G
-    B8["Docker and WASM checks"] --> G
-    B9["asan-gate"] --> G
+    B1["preflight-gate"] --> G["ci-gate"]
+    B2["core-gate"] --> G
+    B3["standard-gate"] --> G
+    B4["diff mutation testing"] --> G
+    B5["asan-gate"] --> G
     G --> M{"All required results are success?"}
     M -->|"yes"| P["CI may be merged when other repository rules pass"]
     M -->|"no"| F["Pull request remains blocked"]
 ```
-
-`pinned-dependencies`, `modules-structure`, and `depgraph` are informational
-reports in the main workflow. They are useful review artifacts but are not
-substitutes for the blocking `ci-gate` result.
-
-## Mutation testing is a separate expensive gate
-
-The `mutation.yml` workflow is diff-scoped. It first classifies whether the
-pull request contains mutation-relevant paths. Relevant changes get a complete
-workspace test baseline, followed by eight changed-line mutation shards. The
-separate `diff mutation testing` fan-in validates the baseline and every shard.
-
-```mermaid
-flowchart TD
-    C["Classify changed paths"] --> R{"Mutation-relevant?"}
-    R -->|"no"| S["Skip baseline and shards"]
-    S --> G0["diff mutation testing: successful no-op"]
-    R -->|"yes"| B["Full workspace baseline with ignored tests"]
-    B --> M1["Mutation shard 1"]
-    B --> M2["Mutation shard 2"]
-    B --> M3["Mutation shard 3"]
-    B --> M4["Mutation shards 4 through 8"]
-    M1 --> G["diff mutation testing"]
-    M2 --> G
-    M3 --> G
-    M4 --> G
-    B --> G
-    G --> O["Required mutation result"]
-```
-
-Mutation testing is not a replacement for coverage. A passing baseline proves
-that the unmutated workspace is healthy; the shards then test whether changed
-logic is observable through the existing test seams. Inspect the uploaded
-shard report when a mutant survives or a watchdog times out.
 
 ## Other workflows
 
@@ -266,19 +314,17 @@ every pull request wait for a full stable-CI run:
 
 ```mermaid
 flowchart LR
-    PR["Pull request"] --> TC["Trunk Check"]
-    PR --> CQ["CodeQL when Rust scope applies"]
+    PR["Pull request"] --> CI["Staged CI: Trunk, CodeQL, mutation, ASan"]
     PR --> FU["Targeted fuzzing when fuzz scope applies"]
-    PR --> MU["Diff mutation testing"]
-    MAIN["main or schedule"] --> TS["ThreadSanitizer"]
-    MAIN --> FU
+    MAIN["main"] --> TC["Full Trunk audit"]
+    MAIN --> RP["Module and dependency reports"]
+    PERIODIC["main or schedule"] --> TS["ThreadSanitizer"]
+    PERIODIC --> FU
     MANUAL["Manual dispatch"] --> DP["Deploy after explicit environment choice"]
 ```
 
-Trunk Check uses diff mode for pull requests and all-repository mode on the
-scheduled and main-branch runs. CodeQL, fuzzing, ThreadSanitizer, and deploy
-have their own triggers and policies; inspect their workflow files when a
-change touches those boundaries.
+Fuzzing, ThreadSanitizer, and deploy retain their own triggers and policies;
+inspect their workflow files when a change touches those boundaries.
 
 ## Pull request checklist
 

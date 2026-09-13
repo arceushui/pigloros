@@ -3,7 +3,7 @@
 name: mutation
 
 on:
-  pull_request:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -46,33 +46,10 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 
-  mutation-baseline:
-    name: mutation baseline
-    needs: mutation-changes
-    if: needs.mutation-changes.outputs.relevant == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-        with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: mutation-baseline
-      - name: Run baseline tests
-        run: |
-          set -euo pipefail
-          cargo test --workspace --all-features --locked -- --include-ignored 2>&1 \
-            | tee "${RUNNER_TEMP}/cargo-test.log"
-          bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/cargo-test.log"
-
   mutation:
     name: diff mutation testing (shard ${{ matrix.shard }})
-    needs: [mutation-changes, mutation-baseline]
-    if: >-
-      needs.mutation-changes.outputs.relevant == 'true' &&
-      needs.mutation-baseline.result == 'success'
+    needs: mutation-changes
+    if: needs.mutation-changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     # The shell watchdog below exits with diagnostics before this outer limit.
     timeout-minutes: 70
@@ -88,7 +65,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           # A pinned nightly enables libtest's per-test fail-fast mode. The
-          # stable workspace baseline above remains the compatibility gate.
+          # caller's core stage has already proved the stable workspace suite.
           toolchain: nightly-2026-08-28
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
@@ -103,9 +80,9 @@ jobs:
           git diff --relative --unified=0 \
             "origin/${base_ref}...HEAD" \
             > "${RUNNER_TEMP}/changes.diff"
-      # The baseline proves the whole workspace first. Each mutant retains the
-      # owning-package test selection used on main, while two harness threads
-      # limit four workers from multiplying test-thread concurrency.
+      # The caller's core test gate proves the whole workspace first. Each
+      # mutant retains the owning-package test selection used on main, while
+      # two harness threads limit four workers from multiplying concurrency.
       - name: Run mutants in changed lines
         run: |
           set -euo pipefail
@@ -154,20 +131,18 @@ jobs:
           if-no-files-found: ignore
 
   mutation-gate:
-    # Branch protection requires this fan-in together with `ci-gate`; shards
-    # and the baseline must never be configured as independent merge approvals.
+    # The caller waits on this fan-in before starting ASan. Individual shards
+    # must never be configured as independent merge approvals.
     name: diff mutation testing
     if: always()
-    needs: [mutation-changes, mutation-baseline, mutation]
+    needs: [mutation-changes, mutation]
     runs-on: ubuntu-latest
     steps:
-      - name: Require baseline and every mutation shard to pass
+      - name: Require every relevant mutation shard to pass
         run: |
           test "${{ needs.mutation-changes.result }}" = success
           if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
-            test "${{ needs.mutation-baseline.result }}" = success
             test "${{ needs.mutation.result }}" = success
           else
-            test "${{ needs.mutation-baseline.result }}" = skipped
             test "${{ needs.mutation.result }}" = skipped
           fi
