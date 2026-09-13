@@ -49,11 +49,11 @@ env:
 
 # ── Quality gates ────────────────────────────────────────────────────────────
 #
-# Keep the high-signal quality path fail-fast and sequential:
-#   fmt → test → clippy → coverage → cargo-crap
-# The remaining Rust-dependent blocking checks start only after that path
-# succeeds. ASan is deliberately last because it is the most expensive CI
-# check; its shards still run in parallel once the final prerequisite is ready.
+# Start the independent high-signal quality gates together:
+#   fmt, test, clippy, coverage → cargo-crap
+# The remaining Rust-dependent blocking checks start after cargo-crap succeeds.
+# ASan is deliberately last because it is the most expensive CI check; its
+# shards still run in parallel once every final prerequisite is ready.
 
 jobs:
 
@@ -124,9 +124,7 @@ jobs:
 
   test:
     name: test
-    needs:
-      - ci_change_scope
-      - fmt
+    needs: ci_change_scope
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -305,9 +303,7 @@ jobs:
 
   clippy:
     name: clippy
-    needs:
-      - ci_change_scope
-      - test
+    needs: ci_change_scope
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -331,9 +327,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs:
-      - ci_change_scope
-      - clippy
+    needs: ci_change_scope
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
