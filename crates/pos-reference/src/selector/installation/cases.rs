@@ -126,3 +126,15 @@ impl AuthenticatedSelectorBootstrap {
             })
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_mappers_preserve_the_closed_failure_class() {
+        assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
+        assert_eq!(io_error(()), SelectorBoundaryError::Io);
+    }
+}

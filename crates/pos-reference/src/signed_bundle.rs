@@ -534,11 +534,17 @@ fn authenticate_reader<R: Read + Seek>(
 }
 
 fn verify_canonical_archive<R: Read + ?Sized>(archive: &mut R) -> Result<(), BundleError> {
-    verify_canonical_item(archive, 0)?;
-    let mut trailing = [0_u8; 1];
-    (archive.read(&mut trailing).map_err(snapshot_unavailable)? == 0)
-        .then_some(())
-        .ok_or(BundleError::InvalidEncoding)
+    verify_canonical_item(archive, 0).and_then(|()| {
+        let mut trailing = [0_u8; 1];
+        archive
+            .read(&mut trailing)
+            .map_err(snapshot_unavailable)
+            .and_then(|read| {
+                (read == 0)
+                    .then_some(())
+                    .ok_or(BundleError::InvalidEncoding)
+            })
+    })
 }
 
 fn verify_canonical_item<R: Read + ?Sized>(
@@ -551,21 +557,18 @@ fn verify_canonical_item<R: Read + ?Sized>(
     let mut initial = [0_u8; 1];
     archive
         .read_exact(&mut initial)
-        .map_err(snapshot_unavailable)?;
-    let argument = canonical_argument(archive, initial[0] & 0x1f)?;
-    match initial[0] >> 5 {
-        0 => Ok(()),
-        2 | 3 => drain_exact(archive, argument),
-        4 if argument <= MAX_MEMBERS as u64 => {
-            for _ in 0..argument {
-                verify_canonical_item(archive, depth + 1)?;
+        .map_err(snapshot_unavailable)
+        .and_then(|()| canonical_argument(archive, initial[0] & 0x1f))
+        .and_then(|argument| match initial[0] >> 5 {
+            0 => Ok(()),
+            2 | 3 => drain_exact(archive, argument),
+            4 if argument <= MAX_MEMBERS as u64 => {
+                (0..argument).try_for_each(|_| verify_canonical_item(archive, depth + 1))
             }
-            Ok(())
-        }
-        4 => Err(BundleError::FieldOutOfBounds),
-        7 if matches!(argument, 20..=22) => Ok(()),
-        _ => Err(BundleError::InvalidEncoding),
-    }
+            4 => Err(BundleError::FieldOutOfBounds),
+            7 if matches!(argument, 20..=22) => Ok(()),
+            _ => Err(BundleError::InvalidEncoding),
+        })
 }
 
 fn canonical_argument<R: Read + ?Sized>(
@@ -583,11 +586,13 @@ fn canonical_argument<R: Read + ?Sized>(
     let mut encoded = [0_u8; 8];
     archive
         .read_exact(&mut encoded[8 - width..])
-        .map_err(snapshot_unavailable)?;
-    let value = u64::from_be_bytes(encoded);
-    (value >= minimum)
-        .then_some(value)
-        .ok_or(BundleError::InvalidEncoding)
+        .map_err(snapshot_unavailable)
+        .and_then(|()| {
+            let value = u64::from_be_bytes(encoded);
+            (value >= minimum)
+                .then_some(value)
+                .ok_or(BundleError::InvalidEncoding)
+        })
 }
 
 fn drain_exact<R: Read + ?Sized>(archive: &mut R, mut length: u64) -> Result<(), BundleError> {

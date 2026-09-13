@@ -1056,6 +1056,17 @@ mod tests {
         assert_eq!(receive_incomplete(()), ReceiveFailure::Incomplete);
         assert_eq!(invalid_errno(()), rustix::io::Errno::INVAL);
 
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("constructor.sock");
+        let _listener = UnixListener::bind(&path)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let transport = provider_transport(SelectedProviderEndpoint::from_identity(
+            &path,
+            &metadata,
+            metadata.uid(),
+        ));
+        assert_eq!(transport.endpoint.path, path);
+
         let (descriptor, _peer) = UnixStream::pair()?;
         assert_eq!(
             complete_nonblocking_connect(Ok(()), &descriptor, Duration::from_secs(1)),
