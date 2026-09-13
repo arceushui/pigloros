@@ -1034,6 +1034,8 @@ fn root_owned_ancestors(path: &Path) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::os::unix::net::UnixListener;
+
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
