@@ -199,16 +199,7 @@ impl InstallationManifest {
         if text(&fields[0])? != "SIC1" || uint(&fields[1])? != 1 {
             return Err(ProtocolError::UnsupportedVersion);
         }
-        let root_key_id = text(&fields[2])?;
-        if root_key_id.is_empty() || root_key_id.len() > 128 {
-            return Err(ProtocolError::FieldOutOfBounds);
-        }
-        let root_public_key = fixed_bytes(&fields[3])?;
-        let root_verifying_key = VerifyingKey::from_bytes(&root_public_key)
-            .map_err(|_| ProtocolError::InvalidEncoding)?;
-        if root_verifying_key.is_weak() {
-            return Err(ProtocolError::InvalidEncoding);
-        }
+        let (root_key_id, root_public_key) = root_identity(fields)?;
         let digest = nonzero_digest(&wrapper[1])?;
         if manifest_digest(&wrapper[0])? != digest {
             return Err(ProtocolError::DigestMismatch);
@@ -301,6 +292,20 @@ impl InstallationManifest {
             .map(|index| &self.objects[index])
             .map_err(|_| ProtocolError::InvalidEncoding)
     }
+}
+
+fn root_identity(fields: &[Value]) -> Result<(&str, [u8; 32]), ProtocolError> {
+    let root_key_id = text(&fields[2])?;
+    if root_key_id.is_empty() || root_key_id.len() > 128 {
+        return Err(ProtocolError::FieldOutOfBounds);
+    }
+    let root_public_key = fixed_bytes(&fields[3])?;
+    let root_verifying_key =
+        VerifyingKey::from_bytes(&root_public_key).map_err(|_| ProtocolError::InvalidEncoding)?;
+    if root_verifying_key.is_weak() {
+        return Err(ProtocolError::InvalidEncoding);
+    }
+    Ok((root_key_id, root_public_key))
 }
 
 /// A held descriptor for an immutable SIC1 artifact.

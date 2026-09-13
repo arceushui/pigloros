@@ -55,6 +55,18 @@ pub enum SandboxLocalErrorCode {
 }
 
 impl SandboxLocalErrorCode {
+    const ALL: [Self; 9] = [
+        Self::ProviderUnavailable,
+        Self::ProviderIdentityInvalid,
+        Self::PolicyUnavailable,
+        Self::ControlChannelUnavailable,
+        Self::InvalidSelectorRequest,
+        Self::RequestAuthorityMismatch,
+        Self::PayloadLimitExceeded,
+        Self::ProviderTerminalUnavailable,
+        Self::ProviderEvidenceInvalid,
+    ];
+
     /// Returns this local error's fixed SLE1 wire code.
     #[must_use]
     pub(crate) const fn wire_code(self) -> u64 {
@@ -71,19 +83,12 @@ impl SandboxLocalErrorCode {
         }
     }
 
-    const fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
-        match code {
-            0 => Ok(Self::ProviderUnavailable),
-            1 => Ok(Self::ProviderIdentityInvalid),
-            2 => Ok(Self::PolicyUnavailable),
-            3 => Ok(Self::ControlChannelUnavailable),
-            4 => Ok(Self::InvalidSelectorRequest),
-            5 => Ok(Self::RequestAuthorityMismatch),
-            6 => Ok(Self::PayloadLimitExceeded),
-            7 => Ok(Self::ProviderTerminalUnavailable),
-            8 => Ok(Self::ProviderEvidenceInvalid),
-            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
-        }
+    fn decode(code: u64) -> Result<Self, SandboxProviderProtocolError> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+            .copied()
+            .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
     }
 }
 
