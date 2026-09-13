@@ -1644,12 +1644,27 @@ mod tests {
     fn retained_reader_verifies_valid_archives_and_rejects_signed_attacks() -> TestResult {
         let corpus = crate::selector_test_support::corpus()?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let preflight = preflight_signed_bundle_reader(
+            &mut Cursor::new(&corpus.archive),
+            &corpus.trust_policy,
+            &request,
+        )?;
+        assert_eq!(preflight.archive_digest, request.fixture_bundle_digest);
         let verified = verify_signed_bundle_reader(
             &mut Cursor::new(&corpus.archive),
             &corpus.trust_policy,
             &request,
         )?;
         assert_eq!(verified.archive_digest, request.fixture_bundle_digest);
+
+        let mut foreign_request = request.clone();
+        foreign_request.fixture_bundle_digest = [99; 32];
+        assert!(preflight_signed_bundle_reader(
+            &mut Cursor::new(&corpus.archive),
+            &corpus.trust_policy,
+            &foreign_request,
+        )
+        .is_err());
 
         let secret = crate::selector_test_support::corpus_with_secret(
             b"-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----",

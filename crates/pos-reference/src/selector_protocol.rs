@@ -1425,6 +1425,78 @@ mod tests {
     }
 
     #[test]
+    fn server_encoder_rejects_malformed_terminal_material_at_each_boundary(
+    ) -> Result<(), AdapterError> {
+        let evaluation_request = canonical_request()?;
+        let request_bytes = evaluation_request
+            .to_canonical_cbor()
+            .map_err(protocol_failure)?;
+        let client_request = encode_request(&evaluation_request, &request_bytes, &attempt(), 0)?;
+        let server_request =
+            decode_request(&client_request.control, &client_request.attempt_stream)?;
+
+        let malformed_execute = AuthenticatedSelectorReply {
+            execute_request: b"not cbor",
+            terminal: SelectorProviderTerminal::Error { error: b"not cbor" },
+        };
+        assert_eq!(
+            encode_authenticated_reply(&server_request, malformed_execute).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+
+        let (control, trailing, _) =
+            admitted_reply(&client_request, evaluation_request.request_digest, 0)?;
+        let evidence = admitted_evidence(&control)?;
+        let execute = bytes(&evidence.fields[5])?;
+        let result = bytes(&evidence.fields[7])?;
+        let grant = required_bytes(&evidence.fields[8])?;
+        let receipt = required_bytes(&evidence.fields[9])?;
+        let audit_records = array_values(&evidence.fields[10])
+            .map_err(protocol_failure)?
+            .iter()
+            .map(|record| bytes(record).map(ToOwned::to_owned))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (candidate_result, candidate_grant, candidate_receipt) in [
+            (b"not cbor".as_slice(), Some(grant), Some(receipt)),
+            (result, None, Some(receipt)),
+            (result, Some(grant), None),
+            (result, Some(b"not cbor".as_slice()), Some(receipt)),
+            (result, Some(grant), Some(b"not cbor".as_slice())),
+        ] {
+            let reply = AuthenticatedSelectorReply {
+                execute_request: execute,
+                terminal: SelectorProviderTerminal::Result {
+                    result: candidate_result,
+                    grant: candidate_grant,
+                    receipt: candidate_receipt,
+                    audit_records: &audit_records,
+                    output: Some(&trailing),
+                },
+            };
+            assert_eq!(
+                encode_authenticated_reply(&server_request, reply).map(|_| ()),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+
+        let oversized_error = SandboxLocalError {
+            phase: SandboxLocalErrorPhase::BeforeSpx1,
+            operation: None,
+            request_id: None,
+            attempt_id: None,
+            agr1_digest: None,
+            code: SandboxLocalErrorCode::PolicyUnavailable,
+            safe_detail: Some("x".repeat(CONTROL_LIMIT)),
+        };
+        assert_eq!(
+            encode_local_error_reply(&oversized_error).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn server_encoder_covers_admitted_non_output_results() -> Result<(), AdapterError> {
         let evaluation_request = canonical_request()?;
         let request_bytes = evaluation_request

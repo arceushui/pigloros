@@ -2116,6 +2116,7 @@ mod tests {
 
     #[test]
     fn framing_helpers_reject_closed_shapes_and_expired_deadlines() -> TestResult {
+        assert_eq!(record_magic(&[0xff]), Err(ReceiveFailure::Invalid));
         for value in [
             Value::Null,
             Value::Array(Vec::new()),

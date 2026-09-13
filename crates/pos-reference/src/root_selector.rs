@@ -1496,6 +1496,14 @@ mod tests {
             FixedListener::bind_owned("relative/selector.sock", owner).err(),
             Some(SelectorBoundaryError::ArtifactInvalid)
         );
+        assert_eq!(
+            FixedListener::bind_owned(
+                "/__pigloros_missing_listener_parent__/selector.sock",
+                ROOT_UID,
+            )
+            .err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
 
         let unavailable_path = directory.path().join("unavailable.sock");
         File::create(&unavailable_path)?;

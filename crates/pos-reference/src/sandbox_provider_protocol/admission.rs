@@ -1571,6 +1571,24 @@ mod tests {
             .authenticate_selector_error(&corrupted_error, &fixture.request)
             .is_err());
 
+        let mut foreign_key_error = decode_document(&fixture.spe1)?;
+        let Value::Array(wrapper) = &mut foreign_key_error else {
+            return Err("SPE1 wrapper is not an array".into());
+        };
+        let Value::Array(unsigned) = &mut wrapper[0] else {
+            return Err("SPE1 unsigned record is not an array".into());
+        };
+        unsigned[8] = Value::Text("foreign-runtime-key".to_owned());
+        let digest = record_digest("SPE1", &Value::Array(unsigned.clone()))?;
+        wrapper[1] = Value::Bytes(digest.to_vec());
+        let foreign_key_error = encode(&foreign_key_error)?;
+        assert!(matches!(
+            fixture
+                .provider
+                .authenticate_selector_error(&foreign_key_error, &fixture.request),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        ));
+
         let mut foreign_provider = fixture.commitment.clone();
         foreign_provider.authority.provider_manifest = [91; 32];
         assert!(matches!(
