@@ -1375,7 +1375,10 @@ mod tests {
             plan_digest: [0; 32],
         };
         let fields = network_plan_value(&plan);
-        plan.plan_digest = record_digest("NXP1", &Value::Array(fields[..10].to_vec()))?;
+        let encoded = encode(&Value::Array(fields[..10].to_vec()))?;
+        let mut preimage = b"PiglorOS.NetworkExchangePlan.v1\0".to_vec();
+        preimage.extend_from_slice(&encoded);
+        plan.plan_digest = *blake3::hash(&preimage).as_bytes();
         Ok(plan)
     }
 
