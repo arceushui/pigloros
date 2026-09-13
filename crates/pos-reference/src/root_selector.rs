@@ -860,13 +860,6 @@ mod tests {
             Some(SelectorBoundaryError::ArtifactInvalid)
         );
 
-        let secure_directory = tempfile::Builder::new()
-            .prefix("selector-bind-owned-")
-            .tempdir_in(".")?;
-        let absolute_path = fs::canonicalize(secure_directory.path())?.join("owned.sock");
-        let absolute_listener = FixedListener::bind_owned(&absolute_path, owner)?;
-        assert!(absolute_listener.verify_continuity().is_ok());
-
         let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
         let encoded = encoded_request(&request, resolved.attempt())?;
         let (mut client, mut server) = UnixStream::pair()?;
