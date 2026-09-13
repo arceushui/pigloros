@@ -1581,6 +1581,10 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         .manifest_digest();
         (parent.id(), child.id(), request, manifest)
     };
+    drop(test_stage(
+        "open persistent SQLite store read-only before host recovery",
+        pos_store::sqlite::SqliteStore::open_read_only(&path_text),
+    )?);
     assert_configured_nonempty_recovery(&path_text, request, manifest, parent, child)?;
     authority.deny_topology.store(true, Ordering::Release);
     let denied_recovery = ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
