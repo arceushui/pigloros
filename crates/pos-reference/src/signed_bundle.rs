@@ -1658,27 +1658,49 @@ mod tests {
             drain_exact(&mut bytes, 1),
             Err(BundleError::SnapshotUnavailable)
         );
+
+        let valid = vec![0];
+        let digest = *blake3::hash(&valid).as_bytes();
+        assert_eq!(authenticate_reader(&mut Cursor::new(valid), digest), Ok(1));
+
+        let invalid = vec![0xa0];
+        let digest = *blake3::hash(&invalid).as_bytes();
+        assert_eq!(
+            authenticate_reader(&mut Cursor::new(invalid), digest),
+            Err(BundleError::InvalidEncoding)
+        );
     }
 
     #[test]
     fn verified_member_reader_rejects_cardinality_order_role_and_trailing_bytes(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        fn archive(
-            members: Vec<Value>,
+        fn archive_fields(
+            manifest: Value,
+            members: Value,
+            signer_key: Value,
+            signature: Value,
             trailing: bool,
         ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-            let value = Value::Array(vec![
-                Value::Null,
-                Value::Array(members),
-                Value::Bytes(vec![1; 32]),
-                Value::Bytes(vec![2; 64]),
-            ]);
+            let value = Value::Array(vec![manifest, members, signer_key, signature]);
             let mut bytes = Vec::new();
             ciborium::into_writer(&value, &mut bytes)?;
             if trailing {
                 bytes.push(0);
             }
             Ok(bytes)
+        }
+
+        fn archive(
+            members: Vec<Value>,
+            trailing: bool,
+        ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            archive_fields(
+                Value::Null,
+                Value::Array(members),
+                Value::Bytes(vec![1; 32]),
+                Value::Bytes(vec![2; 64]),
+                trailing,
+            )
         }
 
         let member = |path: &str, role: u8| {
@@ -1688,11 +1710,76 @@ mod tests {
                 Value::Integer(u64::from(role).into()),
             ])
         };
+        let mut not_an_archive = Vec::new();
+        ciborium::into_writer(&Value::Null, &mut not_an_archive)?;
         for bytes in [
+            not_an_archive,
             archive(Vec::new(), false)?,
             archive(vec![member("a", 20)], false)?,
             archive(vec![member("b", 1), member("a", 1)], false)?,
             archive(vec![member("a", 1)], true)?,
+            archive_fields(
+                Value::Null,
+                Value::Null,
+                Value::Bytes(vec![1; 32]),
+                Value::Bytes(vec![2; 64]),
+                false,
+            )?,
+            archive(vec![Value::Null], false)?,
+            archive(
+                vec![Value::Array(vec![
+                    Value::Integer(1_u8.into()),
+                    Value::Bytes(vec![1]),
+                    Value::Integer(1_u8.into()),
+                ])],
+                false,
+            )?,
+            archive(
+                vec![Value::Array(vec![
+                    Value::Text("/unsafe".to_owned()),
+                    Value::Bytes(vec![1]),
+                    Value::Integer(1_u8.into()),
+                ])],
+                false,
+            )?,
+            archive(
+                vec![Value::Array(vec![
+                    Value::Text("a".to_owned()),
+                    Value::Integer(1_u8.into()),
+                    Value::Integer(1_u8.into()),
+                ])],
+                false,
+            )?,
+            archive(
+                vec![Value::Array(vec![
+                    Value::Text("a".to_owned()),
+                    Value::Bytes(vec![1]),
+                    Value::Integer((-1_i8).into()),
+                ])],
+                false,
+            )?,
+            archive(
+                vec![Value::Array(vec![
+                    Value::Text("a".to_owned()),
+                    Value::Bytes(vec![1]),
+                    Value::Integer(256_u16.into()),
+                ])],
+                false,
+            )?,
+            archive_fields(
+                Value::Null,
+                Value::Array(vec![member("a", 1)]),
+                Value::Null,
+                Value::Bytes(vec![2; 64]),
+                false,
+            )?,
+            archive_fields(
+                Value::Null,
+                Value::Array(vec![member("a", 1)]),
+                Value::Bytes(vec![1; 32]),
+                Value::Bytes(vec![2; 63]),
+                false,
+            )?,
         ] {
             let length = bytes.len() as u64;
             assert!(read_verified_members(&mut Cursor::new(bytes), length).is_err());

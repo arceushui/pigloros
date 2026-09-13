@@ -2006,6 +2006,25 @@ mod tests {
         })
     }
 
+    #[test]
+    fn pre_admission_result_errors_remain_unauthenticated_protocol_failures(
+    ) -> Result<(), AdapterError> {
+        let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
+        let control = unavailable_reply(&encoded, [14; 32], 2)?;
+        let document = decode_canonical_with_limit(&control, CONTROL_LIMIT)
+            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrapper = array_values(&document).map_err(|_| AdapterError::ProtocolFailure)?;
+        let mut fields = array_values(&wrapper[0])
+            .map_err(|_| AdapterError::ProtocolFailure)?
+            .to_vec();
+        fields[11] = Value::Array(Vec::new());
+        assert_eq!(
+            decode_provider_result(&fields, &[], &encoded, 1),
+            Err(AdapterError::ProtocolFailure)
+        );
+        Ok(())
+    }
+
     fn rewrite_spx(
         fields: &[Value],
         mutate: impl FnOnce(&mut Vec<Value>) -> Result<(), AdapterError>,
@@ -2825,12 +2844,14 @@ mod tests {
             ],
             None,
         )?;
-        let record = SandboxAuditRecord::from_canonical_cbor(&bytes)
+        let mut record = SandboxAuditRecord::from_canonical_cbor(&bytes)
             .map_err(|_| AdapterError::ProtocolFailure)?;
         let mut receipt = evidence.receipt;
         receipt.release1_digest = None;
         assert!(audit_authority_matches(&record, &receipt));
         receipt.release1_digest = Some([62; 32]);
+        assert!(!audit_authority_matches(&record, &receipt));
+        record.event_code = u8::MAX;
         assert!(!audit_authority_matches(&record, &receipt));
         Ok(())
     }

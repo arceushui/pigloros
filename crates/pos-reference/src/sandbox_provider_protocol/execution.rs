@@ -1337,6 +1337,13 @@ mod tests {
     fn selector_request(
         authority: ExecuteAuthority,
     ) -> Result<SandboxExecuteRequest, SandboxProviderProtocolError> {
+        selector_request_with_plans(authority, Vec::new())
+    }
+
+    fn selector_request_with_plans(
+        authority: ExecuteAuthority,
+        network_plans: Vec<NetworkExchangePlan>,
+    ) -> Result<SandboxExecuteRequest, SandboxProviderProtocolError> {
         SandboxExecuteRequest::for_selector(
             RequestAuthority {
                 request_id: [16; 16],
@@ -1351,14 +1358,35 @@ mod tests {
                 byte_length: 1,
                 digest: [19; 32],
             },
-            Vec::new(),
+            network_plans,
         )
+    }
+
+    fn network_plan() -> Result<NetworkExchangePlan, SandboxProviderProtocolError> {
+        let mut plan = NetworkExchangePlan {
+            exchange_id: [20; 16],
+            occurrence: 0,
+            capability_id: "network".to_owned(),
+            request_length: 1,
+            request_digest: [21; 32],
+            response_maximum: 1,
+            expected_response_digest: [22; 32],
+            retention_policy_digest: [23; 32],
+            plan_digest: [0; 32],
+        };
+        let fields = network_plan_value(&plan);
+        plan.plan_digest = record_digest("NXP1", &Value::Array(fields[..10].to_vec()))?;
+        Ok(plan)
     }
 
     #[test]
     fn selector_constructor_emits_round_trippable_canonical_spx1(
     ) -> Result<(), SandboxProviderProtocolError> {
         let request = selector_request(selector_authority())?;
+        let bytes = request.to_canonical_cbor()?;
+        assert_eq!(SandboxExecuteRequest::from_canonical_cbor(&bytes)?, request);
+
+        let request = selector_request_with_plans(selector_authority(), vec![network_plan()?])?;
         let bytes = request.to_canonical_cbor()?;
         assert_eq!(SandboxExecuteRequest::from_canonical_cbor(&bytes)?, request);
         Ok(())

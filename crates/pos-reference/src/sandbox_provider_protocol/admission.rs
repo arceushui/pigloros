@@ -1548,3 +1548,52 @@ fn digest_value(domain: &[u8], value: &Value) -> Result<[u8; 32], SandboxProvide
 fn digest_bytes(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn selector_private_authentication_rejects_each_authority_substitution() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+
+        let mut foreign_provider = fixture.commitment.clone();
+        foreign_provider.authority.provider_manifest = [91; 32];
+        assert!(matches!(
+            fixture.provider.authenticate_selector_grant(
+                &fixture.agr1,
+                &fixture.request,
+                &foreign_provider,
+            ),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        ));
+
+        let mut foreign_request_authority = fixture.request.clone();
+        foreign_request_authority.authority.spm1_digest = [92; 32];
+        assert!(matches!(
+            fixture.provider.authenticate_selector_grant(
+                &fixture.agr1,
+                &foreign_request_authority,
+                &fixture.commitment,
+            ),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        ));
+
+        assert!(fixture
+            .provider
+            .authenticate_selector_error(&fixture.spe1, &fixture.request)
+            .is_ok());
+        let mut foreign_error_request = fixture.request;
+        foreign_error_request.request.request_id = [93; 16];
+        assert!(matches!(
+            fixture
+                .provider
+                .authenticate_selector_error(&fixture.spe1, &foreign_error_request),
+            Err(SandboxAdmissionError::ConformanceMismatch)
+        ));
+        Ok(())
+    }
+}

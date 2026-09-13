@@ -127,16 +127,9 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
     fn serve(&self) -> Result<(), SelectorBoundaryError> {
         loop {
             self.evaluator_listener.verify_continuity()?;
-            let (stream, _) = match self.evaluator_listener.listener.accept() {
-                Ok(connection) => connection,
-                Err(error) => match listener_accept_action(&error) {
-                    ListenerAcceptAction::Retry => continue,
-                    ListenerAcceptAction::Backoff => {
-                        std::thread::sleep(Duration::from_millis(100));
-                        continue;
-                    }
-                    ListenerAcceptAction::Fail => return Err(SelectorBoundaryError::Io),
-                },
+            let Some((stream, _)) = accepted_connection(self.evaluator_listener.listener.accept())?
+            else {
+                continue;
             };
             match self.handle_connection(stream) {
                 Ok(())
@@ -230,21 +223,30 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
                 );
             }
         };
-        match terminal {
-            AuthenticatedProviderTerminal::Execution(mut execution) => {
-                match prepare_authenticated_execution(decoded, &spx1, &mut execution) {
-                    Ok(reply) => write_reply(stream, &reply),
-                    Err(()) => write_post_admission_provider_failure(
-                        stream,
-                        decoded,
-                        execution.agr1_digest(),
-                        PostAdmissionProviderFailure::EvidenceInvalid,
-                    ),
-                }
+        write_provider_terminal(stream, decoded, &spx1, terminal)
+    }
+}
+
+fn write_provider_terminal(
+    stream: &mut UnixStream,
+    decoded: &DecodedSelectorRequest,
+    spx1: &[u8],
+    terminal: AuthenticatedProviderTerminal,
+) -> Result<(), SelectorBoundaryError> {
+    match terminal {
+        AuthenticatedProviderTerminal::Execution(mut execution) => {
+            match prepare_authenticated_execution(decoded, spx1, &mut execution) {
+                Ok(reply) => write_reply(stream, &reply),
+                Err(()) => write_post_admission_provider_failure(
+                    stream,
+                    decoded,
+                    execution.agr1_digest(),
+                    PostAdmissionProviderFailure::EvidenceInvalid,
+                ),
             }
-            AuthenticatedProviderTerminal::Error(error) => {
-                write_authenticated_error(stream, decoded, &spx1, &error)
-            }
+        }
+        AuthenticatedProviderTerminal::Error(error) => {
+            write_authenticated_error(stream, decoded, spx1, &error)
         }
     }
 }
@@ -622,6 +624,20 @@ fn listener_accept_action(error: &std::io::Error) -> ListenerAcceptAction {
     }
 }
 
+fn accepted_connection<T>(result: std::io::Result<T>) -> Result<Option<T>, SelectorBoundaryError> {
+    match result {
+        Ok(connection) => Ok(Some(connection)),
+        Err(error) => match listener_accept_action(&error) {
+            ListenerAcceptAction::Retry => Ok(None),
+            ListenerAcceptAction::Backoff => {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(None)
+            }
+            ListenerAcceptAction::Fail => Err(SelectorBoundaryError::Io),
+        },
+    }
+}
+
 fn root_peer(stream: &UnixStream, expected_uid: u32) -> bool {
     socket_peercred(stream.as_fd())
         .is_ok_and(|credentials| credentials.uid.as_raw() == expected_uid)
@@ -773,10 +789,9 @@ mod tests {
     #[test]
     fn listener_accept_retries_only_transient_connection_errors() {
         for kind in [ErrorKind::Interrupted, ErrorKind::ConnectionAborted] {
-            assert_eq!(
-                listener_accept_action(&std::io::Error::from(kind)),
-                ListenerAcceptAction::Retry
-            );
+            let error = std::io::Error::from(kind);
+            assert_eq!(listener_accept_action(&error), ListenerAcceptAction::Retry);
+            assert_eq!(accepted_connection::<()>(Err(error)), Ok(None));
         }
         for error in [
             std::io::Error::from_raw_os_error(rustix::io::Errno::MFILE.raw_os_error()),
@@ -786,11 +801,15 @@ mod tests {
                 listener_accept_action(&error),
                 ListenerAcceptAction::Backoff
             );
+            assert_eq!(accepted_connection::<()>(Err(error)), Ok(None));
         }
+        let fatal = std::io::Error::from(ErrorKind::ConnectionReset);
+        assert_eq!(listener_accept_action(&fatal), ListenerAcceptAction::Fail);
         assert_eq!(
-            listener_accept_action(&std::io::Error::from(ErrorKind::ConnectionReset)),
-            ListenerAcceptAction::Fail
+            accepted_connection::<()>(Err(fatal)),
+            Err(SelectorBoundaryError::Io)
         );
+        assert_eq!(accepted_connection(Ok(7)), Ok(Some(7)));
     }
 
     #[test]
@@ -1181,6 +1200,42 @@ mod tests {
             .map_err(|()| "authenticated result composition failed")?;
         assert!(!reply.control.is_empty());
         assert_eq!(reply.trailing, b"output");
+
+        let mut staged = tempfile::NamedTempFile::new()?;
+        staged.write_all(b"output")?;
+        let complete = AuthenticatedProviderExecution::from_test_frames(
+            fixture.agr1.clone(),
+            fixture.spr1.clone(),
+            fixture.spy1.clone(),
+            fixture.sau1.clone(),
+            Some((
+                staged,
+                crate::sandbox_provider_protocol::PayloadDescriptor {
+                    byte_length: 6,
+                    digest: [0; 32],
+                },
+            )),
+        );
+        let (mut reply_reader, mut reply_writer) = UnixStream::pair()?;
+        write_provider_terminal(
+            &mut reply_writer,
+            &decoded,
+            &fixture.spx1,
+            AuthenticatedProviderTerminal::Execution(complete),
+        )?;
+        let mut length = [0; 4];
+        reply_reader.read_exact(&mut length)?;
+        assert_ne!(u32::from_be_bytes(length), 0);
+
+        let (mut reply_reader, mut reply_writer) = UnixStream::pair()?;
+        write_provider_terminal(
+            &mut reply_writer,
+            &decoded,
+            &fixture.spx1,
+            AuthenticatedProviderTerminal::Error(fixture.spe1.clone()),
+        )?;
+        reply_reader.read_exact(&mut length)?;
+        assert_ne!(u32::from_be_bytes(length), 0);
 
         let mut short_execution = AuthenticatedProviderExecution::from_test_frames(
             fixture.agr1.clone(),
