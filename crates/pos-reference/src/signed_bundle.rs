@@ -1556,11 +1556,51 @@ fn validated_path(path: &str) -> Result<String, BundleError> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{Cursor, Error, Read, Seek, SeekFrom};
 
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    struct FailingArchive {
+        inner: Cursor<Vec<u8>>,
+        seek_calls: usize,
+        fail_seek_at: Option<usize>,
+        fail_read: bool,
+    }
+
+    impl FailingArchive {
+        fn new(bytes: Vec<u8>, fail_seek_at: Option<usize>, fail_read: bool) -> Self {
+            Self {
+                inner: Cursor::new(bytes),
+                seek_calls: 0,
+                fail_seek_at,
+                fail_read,
+            }
+        }
+    }
+
+    impl Read for FailingArchive {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.fail_read {
+                Err(Error::other("injected read failure"))
+            } else {
+                self.inner.read(buffer)
+            }
+        }
+    }
+
+    impl Seek for FailingArchive {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            let call = self.seek_calls;
+            self.seek_calls += 1;
+            if self.fail_seek_at == Some(call) {
+                Err(Error::other("injected seek failure"))
+            } else {
+                self.inner.seek(position)
+            }
+        }
+    }
 
     fn archive_fields(
         manifest: Value,
@@ -1707,6 +1747,18 @@ mod tests {
             authenticate_reader(&mut Cursor::new(invalid), digest),
             Err(BundleError::InvalidEncoding)
         );
+
+        let digest = *blake3::hash(&[0]).as_bytes();
+        for seek in 0..=3 {
+            assert_eq!(
+                authenticate_reader(&mut FailingArchive::new(vec![0], Some(seek), false), digest,),
+                Err(BundleError::SnapshotUnavailable)
+            );
+        }
+        assert_eq!(
+            authenticate_reader(&mut FailingArchive::new(vec![0], None, true), digest),
+            Err(BundleError::SnapshotUnavailable)
+        );
     }
 
     #[test]
@@ -1723,6 +1775,13 @@ mod tests {
             archive_fields(
                 Value::Null,
                 Value::Null,
+                Value::Bytes(vec![1; 32]),
+                Value::Bytes(vec![2; 64]),
+                false,
+            )?,
+            archive_fields(
+                Value::Map(Vec::new()),
+                Value::Array(vec![member("a", 1)]),
                 Value::Bytes(vec![1; 32]),
                 Value::Bytes(vec![2; 64]),
                 false,

@@ -1560,6 +1560,17 @@ mod tests {
     fn selector_private_authentication_rejects_each_authority_substitution() -> TestResult {
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
 
+        assert!(fixture
+            .provider
+            .authenticate_selector_error(b"not cbor", &fixture.request)
+            .is_err());
+        let mut corrupted_error = fixture.spe1.clone();
+        *corrupted_error.last_mut().ok_or("empty SPE1 fixture")? ^= 1;
+        assert!(fixture
+            .provider
+            .authenticate_selector_error(&corrupted_error, &fixture.request)
+            .is_err());
+
         let mut foreign_provider = fixture.commitment.clone();
         foreign_provider.authority.provider_manifest = [91; 32];
         assert!(matches!(

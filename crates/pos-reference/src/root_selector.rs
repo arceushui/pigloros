@@ -25,9 +25,7 @@ use crate::sandbox_provider_protocol::{
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
     SignedImageManifest,
 };
-use crate::selector::installation::authority::{
-    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
-};
+use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::{
     open_directory_chain, InstallationObjectKind, InstalledSelectorState,
 };
@@ -66,17 +64,12 @@ fn unit_error<T>(_: T) {}
 /// rejects it before any listener can be exposed, until #214 supplies the
 /// required lifecycle-backed recovery composition.
 pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
-    InstalledSelectorState::open()
-        .and_then(InstalledSelectorState::authenticate_bootstrap)
-        .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-        .and_then(|admitted| {
-            ProviderTransport::from_admitted(&admitted).map(|transport| (admitted, transport))
-        })
-        .and_then(|(admitted, transport)| {
-            FixedListener::bind(SANDBOX_SELECTOR_SOCKET)
-                .map(|evaluator_listener| fixed_service(admitted, transport, evaluator_listener))
-        })
-        .and_then(|service| service.serve())
+    let installed = InstalledSelectorState::open()?;
+    let bootstrap = installed.authenticate_bootstrap()?;
+    let admitted = bootstrap.admit_provider()?;
+    let transport = ProviderTransport::from_admitted(&admitted)?;
+    let evaluator_listener = FixedListener::bind(SANDBOX_SELECTOR_SOCKET)?;
+    fixed_service(admitted, transport, evaluator_listener).serve()
 }
 
 const fn fixed_service(
@@ -878,6 +871,7 @@ mod tests {
             FixedListener::bind_owned("relative.sock", owner).err(),
             Some(SelectorBoundaryError::ArtifactInvalid)
         );
+        assert_listener_bind_failures(&directory, owner)?;
 
         let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
         let encoded = encoded_request(&request, resolved.attempt())?;
@@ -1369,6 +1363,7 @@ mod tests {
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         fs::remove_file(&listener.path)?;
+        assert_eq!(listener.verify_continuity(), Err(SelectorBoundaryError::Io));
         let _replacement = UnixListener::bind(&listener.path)?;
         fs::set_permissions(&listener.path, fs::Permissions::from_mode(SOCKET_MODE))?;
         assert_eq!(
@@ -1413,6 +1408,41 @@ mod tests {
             path,
             owner: socket_metadata.uid(),
         })
+    }
+
+    fn assert_listener_bind_failures(directory: &tempfile::TempDir, owner: u32) -> TestResult {
+        assert_eq!(
+            FixedListener::bind_owned(Path::new("/"), owner).err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            FixedListener::bind_owned("relative/selector.sock", owner).err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        let unavailable_path = directory.path().join("unavailable.sock");
+        File::create(&unavailable_path)?;
+        assert_eq!(
+            FixedListener::bind_beneath(
+                &unavailable_path,
+                File::open(directory.path())?,
+                Path::new(""),
+                owner,
+            )
+            .err(),
+            Some(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            FixedListener::bind_beneath(
+                &directory.path().join("missing/selector.sock"),
+                File::open(directory.path())?,
+                Path::new("missing"),
+                owner,
+            )
+            .err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
     }
 
     fn assert_service_error<T: ProviderExecutor>(

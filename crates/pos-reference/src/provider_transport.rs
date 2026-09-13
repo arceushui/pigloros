@@ -1252,6 +1252,22 @@ mod tests {
             read_output_frames(&mut reader, &deadline),
             Err(ReceiveFailure::Invalid)
         ));
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        writer.write_all(&[0; 4])?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert_eq!(
+            read_audit_and_receipt(&mut reader, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        writer.write_all(&[0; 4])?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert!(matches!(
+            read_output_frames(&mut reader, &deadline),
+            Err(ReceiveFailure::Invalid)
+        ));
         Ok(())
     }
 
