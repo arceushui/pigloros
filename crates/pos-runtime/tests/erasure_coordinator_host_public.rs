@@ -1636,6 +1636,20 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         .manifest_digest();
         (parent.id(), child.id(), request, manifest)
     };
+    let mut original_authority_recovery = test_stage(
+        "reopen persistent coordinator host with the original authority",
+        ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+            &path_text,
+            authority.clone(),
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(
+        original_authority_recovery.status(),
+        ErasureHostStatusV1::Ready
+    );
+    drop(original_authority_recovery);
     assert_configured_nonempty_recovery(&path_text, request, manifest, parent, child)?;
     authority.deny_topology.store(true, Ordering::Release);
     let denied_recovery = ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
