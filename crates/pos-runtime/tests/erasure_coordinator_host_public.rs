@@ -1636,7 +1636,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         .manifest_digest();
         (parent.id(), child.id(), request, manifest)
     };
-    let mut original_authority_recovery = test_stage(
+    let original_authority_recovery = test_stage(
         "reopen persistent coordinator host with the original authority",
         ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
             &path_text,
