@@ -1657,7 +1657,7 @@ mod tests {
         )?;
         assert_eq!(verified.archive_digest, request.fixture_bundle_digest);
 
-        let mut foreign_request = request.clone();
+        let mut foreign_request = request;
         foreign_request.fixture_bundle_digest = [99; 32];
         assert!(preflight_signed_bundle_reader(
             &mut Cursor::new(&corpus.archive),
