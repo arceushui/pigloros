@@ -25,7 +25,9 @@ use crate::sandbox_provider_protocol::{
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
     SignedImageManifest,
 };
-use crate::selector::installation::authority::AdmittedSelectorProvider;
+use crate::selector::installation::authority::{
+    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
+};
 use crate::selector::installation::{
     open_directory_chain, InstallationObjectKind, InstalledSelectorState,
 };
@@ -64,12 +66,37 @@ fn unit_error<T>(_: T) {}
 /// rejects it before any listener can be exposed, until #214 supplies the
 /// required lifecycle-backed recovery composition.
 pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
-    let installed = InstalledSelectorState::open()?;
-    let bootstrap = installed.authenticate_bootstrap()?;
-    let admitted = bootstrap.admit_provider()?;
-    let transport = ProviderTransport::from_admitted(&admitted)?;
-    let evaluator_listener = FixedListener::bind(SANDBOX_SELECTOR_SOCKET)?;
-    fixed_service(admitted, transport, evaluator_listener).serve()
+    run_composition(
+        InstalledSelectorState::open,
+        InstalledSelectorState::authenticate_bootstrap,
+        AuthenticatedSelectorBootstrap::admit_provider,
+        ProviderTransport::from_admitted,
+        bind_selector_listener,
+        fixed_service,
+        RootSelectorService::serve,
+    )
+}
+
+fn run_composition<State, Bootstrap, Admitted, Transport, Listener, Service, Error>(
+    open: impl FnOnce() -> Result<State, Error>,
+    authenticate: impl FnOnce(State) -> Result<Bootstrap, Error>,
+    admit: impl FnOnce(Bootstrap) -> Result<Admitted, Error>,
+    connect: impl FnOnce(&Admitted) -> Result<Transport, Error>,
+    bind: impl FnOnce() -> Result<Listener, Error>,
+    compose: impl FnOnce(Admitted, Transport, Listener) -> Service,
+    serve: impl FnOnce(&Service) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let state = open()?;
+    let bootstrap = authenticate(state)?;
+    let admitted = admit(bootstrap)?;
+    let transport = connect(&admitted)?;
+    let listener = bind()?;
+    let service = compose(admitted, transport, listener);
+    serve(&service)
+}
+
+fn bind_selector_listener() -> Result<FixedListener, SelectorBoundaryError> {
+    FixedListener::bind(SANDBOX_SELECTOR_SOCKET)
 }
 
 const fn fixed_service(
@@ -727,6 +754,51 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CompositionStage {
+        Open,
+        Authenticate,
+        Admit,
+        Connect,
+        Bind,
+        Serve,
+    }
+
+    fn composition_step(
+        failure: Option<CompositionStage>,
+        stage: CompositionStage,
+        value: u8,
+    ) -> Result<u8, ()> {
+        (failure != Some(stage)).then_some(value).ok_or(())
+    }
+
+    #[test]
+    fn composition_propagates_every_stage_failure_and_serves_success() {
+        for failure in [
+            None,
+            Some(CompositionStage::Open),
+            Some(CompositionStage::Authenticate),
+            Some(CompositionStage::Admit),
+            Some(CompositionStage::Connect),
+            Some(CompositionStage::Bind),
+            Some(CompositionStage::Serve),
+        ] {
+            let result = run_composition(
+                || composition_step(failure, CompositionStage::Open, 1),
+                |_| composition_step(failure, CompositionStage::Authenticate, 2),
+                |_| composition_step(failure, CompositionStage::Admit, 3),
+                |_| composition_step(failure, CompositionStage::Connect, 4),
+                || composition_step(failure, CompositionStage::Bind, 5),
+                |admitted, transport, listener| admitted + transport + listener,
+                |service| {
+                    assert_eq!(*service, 12);
+                    composition_step(failure, CompositionStage::Serve, 0).map(drop)
+                },
+            );
+            assert_eq!(result, failure.map_or(Ok(()), |_| Err(())));
+        }
+    }
+
     #[test]
     fn closed_helpers_cover_error_mapping_randomness_and_input_bounds() -> TestResult {
         assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
@@ -830,6 +902,11 @@ mod tests {
             read_local_error(&mut client)?.code,
             SandboxLocalErrorCode::InvalidSelectorRequest
         );
+        fs::set_permissions(
+            evaluator_directory.path(),
+            fs::Permissions::from_mode(0o722),
+        )?;
+        assert_eq!(service.serve(), Err(SelectorBoundaryError::ArtifactInvalid));
         Ok(())
     }
 
