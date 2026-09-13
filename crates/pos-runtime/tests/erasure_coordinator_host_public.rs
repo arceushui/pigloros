@@ -167,6 +167,7 @@ fn configured_fork_authority(
     child: Option<TimelineId>,
     lineage_rule: ErasureReferenceV1,
     lifecycle_provenance: ErasureReferenceV1,
+    authorization_evidence: Vec<u8>,
 ) -> Result<HostConfiguredErasureCoordinatorAuthorityV1, ErasureErrorV1> {
     let request_reference = request.reference();
     let profile = ErasureAuthorityFreezeProfileV1::new(
@@ -195,7 +196,7 @@ fn configured_fork_authority(
         topology,
         profile,
         reference(40),
-        b"host-proof".to_vec(),
+        authorization_evidence,
         lifecycle_provenance,
         true,
     )?;
@@ -208,6 +209,25 @@ fn configured_fork_authority(
             )
         },
     )
+}
+
+#[derive(Debug)]
+struct ExactRecoveryEvidenceVerifier {
+    expected: Vec<u8>,
+}
+
+impl pos_runtime::ErasureAuthorityEvidenceVerifierV1 for ExactRecoveryEvidenceVerifier {
+    fn verify(
+        &self,
+        _kind: pos_runtime::ErasureAuthorityEvidenceKindV1,
+        _request: &ErasureRequestV1,
+        context: &[u8],
+        evidence: &[u8],
+    ) -> Result<(), ErasureErrorV1> {
+        (!context.is_empty() && evidence == self.expected)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
+    }
 }
 
 fn configured_fork_fixture(
@@ -1254,6 +1274,7 @@ fn memory_host_resolves_configured_fork_scope_through_public_sender(
         None,
         reference(100),
         reference(11),
+        b"host-proof".to_vec(),
     )?);
     let child = {
         let mut commands = test_stage("open configured fork sender", host.command_sender())?;
@@ -1283,6 +1304,7 @@ fn memory_host_rejects_configured_fork_with_zero_public_operation(
         None,
         reference(100),
         reference(11),
+        b"host-proof".to_vec(),
     )?);
     let mut commands = test_stage(
         "open zero-operation configured fork sender",
@@ -1328,6 +1350,7 @@ fn memory_host_rejects_configured_fork_with_unbound_requirement_request(
         None,
         reference(100),
         reference(11),
+        b"host-proof".to_vec(),
     )?);
     let mut commands = test_stage("open unbound configured fork sender", host.command_sender())?;
     assert!(test_stage(
@@ -1355,6 +1378,7 @@ fn memory_host_rejects_configured_fork_with_substituted_child_scope(
         None,
         reference(100),
         reference(11),
+        b"host-proof".to_vec(),
     )?);
     authority
         .substitute_configured_child_scope
@@ -1419,6 +1443,7 @@ fn memory_host_rejects_configured_fork_lineage_that_conflicts_with_inventory(
         None,
         reference(99),
         reference(11),
+        b"host-proof".to_vec(),
     )?);
     let mut commands = test_stage(
         "open conflicting configured fork sender",
@@ -1504,6 +1529,7 @@ fn assert_configured_nonempty_recovery(
     parent: TimelineId,
     child: TimelineId,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let evidence = request.provenance().digest().to_vec();
     let configured_authority = test_stage(
         "construct configured recovery authority",
         configured_fork_authority(
@@ -1513,13 +1539,14 @@ fn assert_configured_nonempty_recovery(
             Some(child),
             reference(100),
             reference(20),
+            evidence.clone(),
         ),
     )?;
     let composition = test_stage(
         "construct configured recovery composition",
         ErasureCoordinatorCompositionV1::from_host_configuration(
             configured_authority.configuration().clone(),
-            Arc::new(TestEvidenceVerifier),
+            Arc::new(ExactRecoveryEvidenceVerifier { expected: evidence }),
             Arc::new(TestExecution),
             reference(30),
         ),
