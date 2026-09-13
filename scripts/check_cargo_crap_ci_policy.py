@@ -20,7 +20,7 @@ SCOPED_JOB_IF = (
     "github.event_name != 'pull_request' }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
-    "${{ needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "${{ needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
 GENERATE_BASELINE_COMMAND = (
@@ -155,8 +155,8 @@ def check_workflow(
     require(isinstance(coverage, dict), "missing required coverage job")
     require("continue-on-error" not in coverage, "coverage job must be blocking")
     require(
-        coverage.get("needs") == "ci_change_scope",
-        "coverage must depend on the trusted Rust scope result",
+        coverage.get("needs") == ["ci_change_scope", "preflight-gate"],
+        "coverage must wait for the trusted scope and fast preflight",
     )
     require(
         coverage.get("if") == SCOPED_JOB_IF,
@@ -196,8 +196,8 @@ def check_workflow(
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
     require(
-        job.get("needs") == ["ci_change_scope", "coverage"],
-        "cargo-crap must depend on the trusted scope result and coverage",
+        job.get("needs") == ["ci_change_scope", "coverage", "core-gate"],
+        "cargo-crap must wait for every core gate and hosted coverage",
     )
     require(
         job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
@@ -326,20 +326,20 @@ def check_workflow(
         "green main must publish the next trusted baseline",
     )
 
-    aggregate = jobs.get("ci-gate")
-    require(isinstance(aggregate, dict), "missing aggregate ci-gate")
-    require("cargo-crap" in aggregate.get("needs", []), "ci-gate must need cargo-crap")
+    aggregate = jobs.get("standard-gate")
+    require(isinstance(aggregate, dict), "missing aggregate standard-gate")
+    require("cargo-crap" in aggregate.get("needs", []), "standard-gate must need cargo-crap")
     aggregate_steps = aggregate.get("steps")
-    require(isinstance(aggregate_steps, list), "ci-gate steps must be an array")
-    verdict = named_step(aggregate_steps, "Require every blocking CI job to pass")
+    require(isinstance(aggregate_steps, list), "standard-gate steps must be an array")
+    verdict = named_step(aggregate_steps, "Require normal blocking checks")
     require(
         verdict.get("env", {}).get("CARGO_CRAP_RESULT")
         == "${{ needs.cargo-crap.result }}",
-        "ci-gate must read the cargo-crap result",
+        "standard-gate must read the cargo-crap result",
     )
     require(
         "CARGO_CRAP_RESULT" in verdict.get("run", ""),
-        "ci-gate must reject a non-success cargo-crap result",
+        "standard-gate must reject a non-success cargo-crap result",
     )
 
 

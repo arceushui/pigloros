@@ -48,6 +48,10 @@ env:
   RUSTFLAGS: -D warnings
 
 # ── Quality gates ────────────────────────────────────────────────────────────
+#
+# Fail fast in bounded stages. Pull-request diff and policy checks run before
+# any Cargo-heavy work. The four core gates then run together, followed by at
+# most eight standard jobs. Mutation and ASan are the final expensive stages.
 
 jobs:
 
@@ -78,9 +82,63 @@ jobs:
         if: github.event_name != 'pull_request' || hashFiles('.github/rust-scope.yml') == ''
         run: printf 'rust=true\n' >> "$GITHUB_OUTPUT"
 
+  trunk-pr:
+    # Keep this display name stable: the main-branch ruleset requires it.
+    name: Trunk Code Quality
+    needs: ci_change_scope
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Trunk Check (pull-request diff)
+        uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
+
+  preflight-gate:
+    name: preflight-gate
+    if: ${{ always() }}
+    needs:
+      - ci_change_scope
+      - trunk-pr
+      - pinned-dependencies
+      - conformance-fixtures
+      - conformance-non-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require fast preflight checks
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCOPE_RESULT: ${{ needs.ci_change_scope.result }}
+          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
+          TRUNK_RESULT: ${{ needs.trunk-pr.result }}
+          POLICY_RESULT: ${{ needs.pinned-dependencies.result }}
+          FIXTURES_RESULT: ${{ needs.conformance-fixtures.result }}
+          NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
+        run: |
+          set -euo pipefail
+          test "${SCOPE_RESULT}" = success
+          test "${FIXTURES_RESULT}" = success
+          test "${NON_LINUX_RESULT}" = success
+          if [[ "${EVENT_NAME}" = pull_request ]]; then
+            test "${TRUNK_RESULT}" = success
+          else
+            test "${TRUNK_RESULT}" = skipped
+          fi
+          if [[ "${RUST_SCOPE}" = true ]]; then
+            test "${POLICY_RESULT}" = success
+          else
+            test "${POLICY_RESULT}" = skipped
+          fi
+
   fmt:
     name: fmt
-    needs: ci_change_scope
+    needs: [ci_change_scope, preflight-gate]
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -97,7 +155,9 @@ jobs:
 
   rustdoc:
     name: rustdoc
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -116,7 +176,7 @@ jobs:
 
   test:
     name: test
-    needs: ci_change_scope
+    needs: [ci_change_scope, preflight-gate]
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -142,7 +202,9 @@ jobs:
 
   reference-evaluator-release:
     name: reference-evaluator-release
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -178,6 +240,7 @@ jobs:
 
   conformance-fixtures:
     name: conformance-fixtures
+    needs: ci_change_scope
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -196,6 +259,7 @@ jobs:
     needs:
       - ci_change_scope
       - conformance-fixtures
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -266,6 +330,7 @@ jobs:
 
   conformance-non-linux:
     name: conformance-non-linux
+    needs: ci_change_scope
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -292,7 +357,7 @@ jobs:
 
   clippy:
     name: clippy
-    needs: ci_change_scope
+    needs: [ci_change_scope, preflight-gate]
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -316,7 +381,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs: ci_change_scope
+    needs: [ci_change_scope, preflight-gate]
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -348,13 +413,23 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: coverage
-      - name: cargo llvm-cov (lines ≥99%, regions ≥99%)
+      # Generate one complete report, then let covgate check the changed
+      # production diff before spending time on the repository-wide floor.
+      - name: Generate coverage report for changed-code gate
         run: >
-          cargo llvm-cov --workspace --all-features --locked --summary-only
-          --show-missing-lines
+          cargo llvm-cov --workspace --all-features --locked
+          --json --output-path "${{ runner.temp }}/coverage.json"
+          -- --include-ignored
+      - name: Enforce changed production Rust code coverage first
+        run: >
+          covgate check "${{ runner.temp }}/coverage.json"
+          --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
+          --no-github-summary
+      - name: Enforce workspace coverage floor
+        run: >
+          cargo llvm-cov report --json --summary-only --show-missing-lines
           --fail-under-lines 99
           --fail-under-regions 99
-          -- --include-ignored
       - name: Export LCOV for cargo-crap
         run: cargo llvm-cov report --lcov
           --output-path "${{ runner.temp }}/coverage.lcov"
@@ -365,21 +440,49 @@ jobs:
           path: ${{ runner.temp }}/coverage.lcov
           retention-days: 1
           if-no-files-found: error
-      - name: Export coverage details for new-code gate
-        run: cargo llvm-cov report --json
-          --output-path "${{ runner.temp }}/coverage.json"
-      - name: Enforce new production Rust code coverage (lines ≥99%, regions ≥99%)
-        run: >
-          covgate check "${{ runner.temp }}/coverage.json"
-          --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
-          --no-github-summary
+
+  core-gate:
+    name: core-gate
+    if: ${{ always() }}
+    needs:
+      - ci_change_scope
+      - preflight-gate
+      - fmt
+      - test
+      - clippy
+      - coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require fmt, test, clippy, and coverage
+        env:
+          SCOPE_RESULT: ${{ needs.ci_change_scope.result }}
+          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
+          PREFLIGHT_RESULT: ${{ needs.preflight-gate.result }}
+          FMT_RESULT: ${{ needs.fmt.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+        run: |
+          set -euo pipefail
+          test "${SCOPE_RESULT}" = success
+          test "${PREFLIGHT_RESULT}" = success
+          expected=success
+          if [[ "${RUST_SCOPE}" = false ]]; then
+            expected=skipped
+          fi
+          test "${FMT_RESULT}" = "${expected}"
+          test "${TEST_RESULT}" = "${expected}"
+          test "${CLIPPY_RESULT}" = "${expected}"
+          test "${COVERAGE_RESULT}" = "${expected}"
 
   cargo-crap:
     name: cargo-crap
     needs:
       - ci_change_scope
       - coverage
-    if: ${{ needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+      - core-gate
+    if: ${{ needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -463,8 +566,10 @@ jobs:
 # ── Security & compliance ────────────────────────────────────────────────────
 
   audit:
-    name: cargo-audit (security advisories)
-    needs: ci_change_scope
+    name: dependency-policy (audit / deny / shear)
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -477,31 +582,12 @@ jobs:
           tool: cargo-audit
       - name: cargo audit
         run: cargo audit
-
-  deny:
-    name: cargo-deny (licenses / bans / sources / deps)
-    needs: ci_change_scope
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - name: Install cargo-deny
         uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
         with:
           tool: cargo-deny
       - name: cargo deny check
         run: cargo deny --locked check
-
-  cargo-shear:
-    name: cargo-shear (dependencies and source layout)
-    needs: ci_change_scope
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -513,7 +599,9 @@ jobs:
 
   geiger:
     name: cargo-geiger (unsafe code audit)
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -525,20 +613,60 @@ jobs:
       - name: cargo geiger (assert no unsafe in own crates)
         run: bash scripts/check-geiger.sh
 
+  codeql:
+    name: CodeQL (Rust)
+    needs:
+      - ci_change_scope
+      - cargo-crap
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      security-events: write
+    uses: ./.github/workflows/codeql.yml
+
+  # Reusable-workflow checks are reported as "caller / callee". Preserve the
+  # stable status context required by the main-branch ruleset.
+  codeql-required:
+    name: CodeQL (Rust)
+    if: ${{ always() }}
+    needs:
+      - ci_change_scope
+      - codeql
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the required CodeQL status
+        env:
+          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+        run: |
+          expected=success
+          if [[ "${RUST_SCOPE}" = false ]]; then
+            expected=skipped
+          fi
+          test "${CODEQL_RESULT}" = "${expected}"
+
 # ── Platform verification ────────────────────────────────────────────────────
 
   asan:
     name: asan shard (${{ matrix.shard }})
-    needs: ci_change_scope
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    needs:
+      - ci_change_scope
+      - standard-gate
+      - mutation-checks
+    if: ${{ always() && needs.standard-gate.result == 'success' && (needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 5
       matrix:
         shard:
           - bundle-coverage
-          - bundle-public
+          - bundle-public-1
+          - bundle-public-2
           - moat-proof
           - remainder
     steps:
@@ -548,6 +676,11 @@ jobs:
         with:
           toolchain: nightly-2026-07-01
           components: rust-src
+      - name: Install cargo-nextest for partitioned public bundle tests
+        if: ${{ startsWith(matrix.shard, 'bundle-public-') }}
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
+        with:
+          tool: cargo-nextest
       - name: Verify ASan symbolizer
         run: |
           symbolizer="/usr/bin/llvm-symbolizer-18"
@@ -595,19 +728,34 @@ jobs:
             +nightly-2026-07-01 test --all-features --locked -Z build-std
             --target x86_64-unknown-linux-gnu
           )
+          nextest_args=(
+            +nightly-2026-07-01 nextest run --all-features --locked -Z build-std
+            --target x86_64-unknown-linux-gnu
+          )
           run_asan_tests() {
             ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
               RUSTFLAGS="-Z sanitizer=address" \
               cargo "${cargo_args[@]}" "$@"
+          }
+          run_asan_partition() {
+            ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
+              RUSTFLAGS="-Z sanitizer=address" \
+              cargo "${nextest_args[@]}" "$@"
           }
           case "${ASAN_SHARD}" in
             bundle-coverage)
               run_asan_tests -p pos-conformance \
                 --test bundle_contract_coverage_public
               ;;
-            bundle-public)
-              run_asan_tests -p pos-conformance \
-                --test bundle_contract_public
+            bundle-public-1)
+              run_asan_partition -p pos-conformance \
+                --test bundle_contract_public \
+                --partition slice:1/2 --run-ignored all --test-threads 2
+              ;;
+            bundle-public-2)
+              run_asan_partition -p pos-conformance \
+                --test bundle_contract_public \
+                --partition slice:2/2 --run-ignored all --test-threads 2
               ;;
             moat-proof)
               run_asan_tests -p pos-conformance \
@@ -651,7 +799,9 @@ jobs:
 
   docker-build:
     name: docker-build
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -685,7 +835,9 @@ jobs:
 
   world-client-wasm:
     name: world-client-wasm
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - cargo-crap
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -706,7 +858,9 @@ jobs:
 
   world-client-browser-parity:
     name: world-client-browser-parity
-    needs: ci_change_scope
+    needs:
+      - ci_change_scope
+      - world-client-wasm
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -736,6 +890,86 @@ jobs:
         env:
           WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ runner.temp }}/world-client-webdriver.json
         run: bash scripts/check-world-client-wasm.sh browser
+
+  standard-gate:
+    name: standard-gate
+    if: ${{ always() }}
+    needs:
+      - ci_change_scope
+      - core-gate
+      - cargo-crap
+      - rustdoc
+      - reference-evaluator-release
+      - materialize-conformance-bundles
+      - audit
+      - geiger
+      - codeql
+      - docker-build
+      - world-client-wasm
+      - world-client-browser-parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require normal blocking checks
+        env:
+          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
+          CORE_RESULT: ${{ needs.core-gate.result }}
+          CARGO_CRAP_RESULT: ${{ needs.cargo-crap.result }}
+          RUSTDOC_RESULT: ${{ needs.rustdoc.result }}
+          REFERENCE_RESULT: ${{ needs.reference-evaluator-release.result }}
+          MATERIALIZE_RESULT: ${{ needs.materialize-conformance-bundles.result }}
+          DEPENDENCY_RESULT: ${{ needs.audit.result }}
+          GEIGER_RESULT: ${{ needs.geiger.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          DOCKER_RESULT: ${{ needs.docker-build.result }}
+          WASM_RESULT: ${{ needs.world-client-wasm.result }}
+          BROWSER_RESULT: ${{ needs.world-client-browser-parity.result }}
+        run: |
+          set -euo pipefail
+          test "${CORE_RESULT}" = success
+          expected=success
+          if [[ "${RUST_SCOPE}" = false ]]; then
+            expected=skipped
+          fi
+          for result in \
+            "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
+            "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" "${GEIGER_RESULT}" \
+            "${CODEQL_RESULT}" "${DOCKER_RESULT}" "${WASM_RESULT}" "${BROWSER_RESULT}"; do
+            test "${result}" = "${expected}"
+          done
+
+  mutation-checks:
+    name: diff mutation testing
+    needs:
+      - ci_change_scope
+      - standard-gate
+    if: ${{ github.event_name == 'pull_request' && needs.ci_change_scope.outputs.rust == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/mutation.yml
+
+  # See codeql-required: retain the pre-existing ruleset context while the
+  # implementation runs as a staged reusable workflow.
+  mutation-required:
+    name: diff mutation testing
+    if: ${{ always() }}
+    needs:
+      - ci_change_scope
+      - mutation-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the required mutation status
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
+          MUTATION_RESULT: ${{ needs.mutation-checks.result }}
+        run: |
+          expected=skipped
+          if [[ "${EVENT_NAME}" = pull_request && "${RUST_SCOPE}" = true ]]; then
+            expected=success
+          fi
+          test "${MUTATION_RESULT}" = "${expected}"
 
 # ── Informational reports (non-blocking) ────────────────────────────────────
 
@@ -775,8 +1009,8 @@ jobs:
 
   modules-structure:
     name: modules-structure (reports only)
-    needs: ci_change_scope
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    needs: standard-gate
+    if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -812,8 +1046,8 @@ jobs:
 
   depgraph:
     name: depgraph
-    needs: ci_change_scope
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    needs: standard-gate
+    if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -839,32 +1073,18 @@ jobs:
           name: depgraph
           path: artifacts/depgraph.svg
 
-  # Branch protection requires this CI fan-in together with the separate
-  # `diff mutation testing` fan-in emitted by mutation.yml. Individual CI jobs
-  # and mutation shards are implementation details, not merge approvals. The
-  # informational report jobs above are intentionally excluded.
+  # One stable fan-in covers every staged blocking check. Individual jobs and
+  # shards are implementation details, not independent merge approvals.
   ci-gate:
     name: ci-gate
     if: ${{ always() }}
     needs:
       - ci_change_scope
-      - fmt
-      - rustdoc
-      - test
-      - conformance-fixtures
-      - materialize-conformance-bundles
-      - conformance-non-linux
-      - clippy
-      - coverage
-      - cargo-crap
-      - audit
-      - deny
-      - cargo-shear
-      - geiger
-      - asan
-      - docker-build
-      - world-client-wasm
-      - world-client-browser-parity
+      - preflight-gate
+      - core-gate
+      - standard-gate
+      - mutation-checks
+      - asan-gate
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -872,23 +1092,12 @@ jobs:
         env:
           SCOPE_JOB_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE_RESULT: ${{ needs.ci_change_scope.outputs.rust }}
-          FMT_RESULT: ${{ needs.fmt.result }}
-          RUSTDOC_RESULT: ${{ needs.rustdoc.result }}
-          TEST_RESULT: ${{ needs.test.result }}
-          CONFORMANCE_FIXTURES_RESULT: ${{ needs.conformance-fixtures.result }}
-          MATERIALIZE_CONFORMANCE_BUNDLES_RESULT: ${{ needs.materialize-conformance-bundles.result }}
-          CONFORMANCE_NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
-          CLIPPY_RESULT: ${{ needs.clippy.result }}
-          COVERAGE_RESULT: ${{ needs.coverage.result }}
-          CARGO_CRAP_RESULT: ${{ needs.cargo-crap.result }}
-          AUDIT_RESULT: ${{ needs.audit.result }}
-          DENY_RESULT: ${{ needs.deny.result }}
-          CARGO_SHEAR_RESULT: ${{ needs.cargo-shear.result }}
-          GEIGER_RESULT: ${{ needs.geiger.result }}
-          ASAN_RESULT: ${{ needs.asan.result }}
-          DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
-          WORLD_CLIENT_WASM_RESULT: ${{ needs.world-client-wasm.result }}
-          WORLD_CLIENT_BROWSER_PARITY_RESULT: ${{ needs.world-client-browser-parity.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          PREFLIGHT_RESULT: ${{ needs.preflight-gate.result }}
+          CORE_RESULT: ${{ needs.core-gate.result }}
+          STANDARD_RESULT: ${{ needs.standard-gate.result }}
+          MUTATION_RESULT: ${{ needs.mutation-checks.result }}
+          ASAN_RESULT: ${{ needs.asan-gate.result }}
         run: |
           set -euo pipefail
           failed=0
@@ -897,30 +1106,21 @@ jobs:
             failed=1
           fi
 
-          check_results() {
-            local allow_scope_skip="$1"
-            shift
-            for result_name in "$@"; do
-              result="${!result_name}"
-              if [[ "${result}" == "success" ]]; then
-                continue
-              fi
-              if [[ "${allow_scope_skip}" == "true" \
-                && "${RUST_SCOPE_RESULT}" == "false" \
-                && "${result}" == "skipped" ]]; then
-                continue
-              fi
+          for result_name in PREFLIGHT_RESULT CORE_RESULT STANDARD_RESULT ASAN_RESULT; do
+            result="${!result_name}"
+            if [[ "${result}" != success ]]; then
               echo "${result_name}=${result}" >&2
               failed=1
-            done
-          }
+            fi
+          done
 
-          check_results true \
-            FMT_RESULT RUSTDOC_RESULT TEST_RESULT CLIPPY_RESULT \
-            AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
-            DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT \
-            COVERAGE_RESULT CARGO_CRAP_RESULT MATERIALIZE_CONFORMANCE_BUNDLES_RESULT
-          check_results false \
-            CONFORMANCE_FIXTURES_RESULT CONFORMANCE_NON_LINUX_RESULT
+          expected_mutation=skipped
+          if [[ "${EVENT_NAME}" = pull_request && "${RUST_SCOPE_RESULT}" = true ]]; then
+            expected_mutation=success
+          fi
+          if [[ "${MUTATION_RESULT}" != "${expected_mutation}" ]]; then
+            echo "MUTATION_RESULT=${MUTATION_RESULT}" >&2
+            failed=1
+          fi
 
           exit "${failed}"

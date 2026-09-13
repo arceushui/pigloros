@@ -391,14 +391,14 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_requires_cargo_crap_in_aggregate_gate(self) -> None:
         self.assert_rejected(
-            lambda workflow: workflow["jobs"]["ci-gate"]["needs"].remove(
+            lambda workflow: workflow["jobs"]["standard-gate"]["needs"].remove(
                 "cargo-crap"
             )
         )
 
     def test_requires_aggregate_verdict_to_read_cargo_crap(self) -> None:
         def remove_result(workflow: dict) -> None:
-            step = workflow["jobs"]["ci-gate"]["steps"][0]
+            step = workflow["jobs"]["standard-gate"]["steps"][0]
             step["env"].pop("CARGO_CRAP_RESULT")
 
         self.assert_rejected(remove_result)

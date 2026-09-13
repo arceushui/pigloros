@@ -101,9 +101,11 @@ class AsanCiPolicyTests(unittest.TestCase):
         self.assert_rejected(remove_pipefail)
 
     def test_requires_intentional_leak_negative_control(self) -> None:
-        self.assert_rejected(
-            lambda workflow: workflow["jobs"]["asan"]["steps"].pop(5)
-        )
+        def remove_negative_control(workflow: dict) -> None:
+            steps = workflow["jobs"]["asan"]["steps"]
+            steps.remove(self.negative_control_step(workflow))
+
+        self.assert_rejected(remove_negative_control)
 
     def test_negative_control_must_use_the_same_lsan_options(self) -> None:
         self.assert_rejected(
@@ -288,7 +290,11 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_rejects_floating_installer_toolchain(self) -> None:
         def float_installer(workflow: dict) -> None:
-            toolchain_step = workflow["jobs"]["asan"]["steps"][2]
+            toolchain_step = next(
+                step
+                for step in workflow["jobs"]["asan"]["steps"]
+                if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain@")
+            )
             toolchain_step["with"]["toolchain"] = "nightly"
 
         self.assert_rejected(float_installer)
@@ -304,7 +310,7 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_requires_setup_symbolizer_executable_check(self) -> None:
         def remove_symbolizer_executable_check(workflow: dict) -> None:
-            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step = self.symbolizer_step(workflow)
             symbolizer_step["run"] = symbolizer_step["run"].replace(
                 'test -x "${symbolizer}"\n',
                 "",
@@ -314,7 +320,7 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_requires_setup_symbolizer_execution(self) -> None:
         def remove_symbolizer_execution(workflow: dict) -> None:
-            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step = self.symbolizer_step(workflow)
             symbolizer_step["run"] = symbolizer_step["run"].replace(
                 'symbolizer_version="$("${symbolizer}" --version)"\n',
                 "",
@@ -324,7 +330,7 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_requires_exact_symbolizer_version(self) -> None:
         def change_symbolizer_version(workflow: dict) -> None:
-            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step = self.symbolizer_step(workflow)
             symbolizer_step["run"] = symbolizer_step["run"].replace(
                 "Ubuntu LLVM version 18.1.3",
                 "Ubuntu LLVM version 18",
@@ -334,7 +340,7 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_requires_exact_setup_symbolizer_path(self) -> None:
         def change_setup_symbolizer_path(workflow: dict) -> None:
-            symbolizer_step = workflow["jobs"]["asan"]["steps"][3]
+            symbolizer_step = self.symbolizer_step(workflow)
             symbolizer_step["run"] = symbolizer_step["run"].replace(
                 "/usr/bin/llvm-symbolizer-18",
                 "/usr/bin/llvm-symbolizer",
@@ -364,7 +370,11 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_rejects_undated_cache_key(self) -> None:
         def remove_cache_date(workflow: dict) -> None:
-            cache_step = workflow["jobs"]["asan"]["steps"][4]
+            cache_step = next(
+                step
+                for step in workflow["jobs"]["asan"]["steps"]
+                if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
+            )
             cache_step["with"]["shared-key"] = "asan"
 
         self.assert_rejected(remove_cache_date)
@@ -412,6 +422,14 @@ class AsanCiPolicyTests(unittest.TestCase):
             step
             for step in workflow["jobs"]["asan"]["steps"]
             if step.get("name") == "Prove unrelated leaks still fail LSan"
+        )
+
+    @staticmethod
+    def symbolizer_step(workflow: dict) -> dict:
+        return next(
+            step
+            for step in workflow["jobs"]["asan"]["steps"]
+            if step.get("name") == "Verify ASan symbolizer"
         )
 
     @classmethod
