@@ -754,6 +754,8 @@ mod tests {
     fn serve_execution_response(
         listener: &UnixListener,
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
+        commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        epochs: [u64; 3],
     ) -> TestResult {
         let (mut stream, _) = listener.accept()?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -764,7 +766,7 @@ mod tests {
         if input_frames.is_empty() {
             return Err("provider input frames missing".into());
         }
-        for response in fixture.execution_response_for(&spx1)? {
+        for response in fixture.execution_response_for(&spx1, commitment, epochs)? {
             write_frame(&mut stream, &response)?;
         }
         stream.shutdown(std::net::Shutdown::Write)?;
@@ -794,6 +796,23 @@ mod tests {
             crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let execute_fixture =
             crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let requirement = request
+            .sandbox_requirement
+            .as_ref()
+            .ok_or("sandbox requirement missing")?;
+        let (image, launch) = selected_image_and_launch(&admitted, requirement)?;
+        let commitment = admitted.provider().derive_selector_grant_commitment(
+            &image,
+            &launch,
+            &request,
+            resolved.attempt(),
+            &[],
+        )?;
+        let epochs = [
+            admitted.bootstrap().trust().trust_epoch(),
+            admitted.bootstrap().revocation().revocation_epoch(),
+            admitted.bootstrap().policy().policy_epoch(),
+        ];
 
         let execute_listener = UnixListener::bind("/run/pigloros/provider-execute.sock")?;
         fs::set_permissions(
@@ -810,7 +829,7 @@ mod tests {
                 .map_err(|error| error.to_string())
         });
         let execute_provider = std::thread::spawn(move || {
-            serve_execution_response(&execute_listener, &execute_fixture)
+            serve_execution_response(&execute_listener, &execute_fixture, &commitment, epochs)
                 .map_err(|error| error.to_string())
         });
         let composition = RootSelectorComposition::open()?;

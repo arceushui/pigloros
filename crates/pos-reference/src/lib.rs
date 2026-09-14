@@ -122,6 +122,8 @@ pub mod selector_transport_test_fixture {
         pub(crate) fn execution_response_for(
             &self,
             execute_request_bytes: &[u8],
+            commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            epochs: [u64; 3],
         ) -> TestResult<Vec<Vec<u8>>> {
             let request =
                 crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
@@ -135,13 +137,18 @@ pub mod selector_transport_test_fixture {
             let launch = self
                 .provider
                 .admit_launch_policy(&self.fixture.lps1, &image)?;
-            let commitment = self.fixture.selector_grant_commitment(
-                &self.provider,
-                &image,
-                &launch,
-                &request,
+            let agr1 = admission_grant(&self.fixture, &request, &launch, commitment)?;
+            let agr1 = resign_unsigned_fields(
+                &agr1,
+                "AGR1",
+                &[
+                    (17, integer(epochs[0])),
+                    (18, integer(epochs[1])),
+                    (19, integer(epochs[2])),
+                    (23, bytes(request.authority.lps1_digest)),
+                ],
+                &self.fixture.authority.runtime,
             )?;
-            let agr1 = admission_grant(&self.fixture, &request, &launch, &commitment)?;
             let grant = AdmissionGrant::from_canonical_cbor(&agr1)?;
             let audit = audit_chain_for_events(&self.fixture, &grant, &[0])?;
             let audit_digest = wrapped_digest(audit.last().ok_or("audit chain is empty")?)?;
