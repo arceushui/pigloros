@@ -4288,6 +4288,15 @@ mod tests {
             &composition,
             limits,
         )?;
+        assert_eq!(
+            ErasureExecutionHostV1::open_gateway_with_authority(
+                StoreConfig::Memory,
+                &composition,
+                0,
+            )
+            .map(|_| ()),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
 
         Ok(())
     }
@@ -4306,8 +4315,17 @@ mod tests {
         let limits = ErasureRecoveryLimitsV1::new(1, 1, 1)?;
         let composition = ErasureCoordinatorCompositionV1::closed();
         ErasureExecutionHostV1::open_read_only_verified_empty(&path, 1)?;
+        assert_eq!(
+            ErasureExecutionHostV1::open_read_only_verified_empty(&path, 0).map(|_| ()),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
         ErasureExecutionHostV1::open_read_only_verified_empty_with_limits(&path, limits)?;
         ErasureExecutionHostV1::open_read_only_with_authority(&path, &composition, 1)?;
+        assert_eq!(
+            ErasureExecutionHostV1::open_read_only_with_authority(&path, &composition, 0)
+                .map(|_| ()),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
         ErasureExecutionHostV1::open_read_only_with_authority_and_limits(
             &path,
             &composition,
@@ -4321,10 +4339,44 @@ mod tests {
     #[test]
     fn verified_query_recovery_helpers_fail_closed_when_the_query_fails() {
         assert_eq!(
+            ErasureExecutionHostV1::recover_verified_empty(
+                Box::new(MemoryStore::new().without_erasure_gate()),
+                0,
+            )
+            .map(|_| ()),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            ErasureExecutionHostV1::recover_verified_empty_gateway(
+                Box::new(MemoryStore::new().without_erasure_gate()),
+                0,
+            )
+            .map(|_| ()),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            ErasureExecutionHostV1::recover_from_verified_query(
+                Box::new(MemoryStore::new().without_erasure_gate()),
+                &mut FailingInventoryV1,
+                0,
+            )
+            .map(|_| ()),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
             ErasureExecutionHostV1::recover_from_verified_query(
                 Box::new(MemoryStore::new().without_erasure_gate()),
                 &mut FailingInventoryV1,
                 4,
+            )
+            .map(|_| ()),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            ErasureExecutionHostV1::recover_gateway_from_verified_query(
+                Box::new(MemoryStore::new().without_erasure_gate()),
+                &mut FailingInventoryV1,
+                0,
             )
             .map(|_| ()),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
@@ -4342,9 +4394,20 @@ mod tests {
 
     #[test]
     fn coordinator_install_requires_both_authority_and_coordinator() {
+        let mut inventory_host =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            inventory_host.install_inventory(&mut FailingInventoryV1, 0),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
         let mut host =
             ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.install_inventory_from_coordinator(0),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
         assert_eq!(
             host.install_inventory_from_coordinator(4),
             Err(ErasureHostErrorV1::AuthorizationDenied)

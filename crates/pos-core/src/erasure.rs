@@ -66,6 +66,10 @@ const fn target_count_is_bounded(count: usize) -> bool {
     count <= ERASURE_MAX_TARGETS
 }
 
+const fn allocation_failure(_: std::collections::TryReserveError) -> ErasureErrorV1 {
+    ErasureErrorV1::ScopeInvalid
+}
+
 const fn applicability_matrix_cardinality_is_valid(count: usize) -> bool {
     count != 0
         && count <= ERASURE_MAX_OBLIGATIONS
@@ -4393,16 +4397,16 @@ impl ErasureVerifiedInventoryV1 {
         let mut request_heads = Vec::new();
         request_heads
             .try_reserve(recovered.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+            .map_err(allocation_failure)?;
         let mut classifications = Vec::new();
         classifications
             .try_reserve(topology.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+            .map_err(allocation_failure)?;
         for timeline in &topology {
             let mut timeline_classifications = Vec::new();
             timeline_classifications
                 .try_reserve(recovered.len())
-                .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+                .map_err(allocation_failure)?;
             classifications.push((*timeline, timeline_classifications));
         }
         for (state, proof) in &recovered {
@@ -4451,7 +4455,7 @@ impl ErasureVerifiedInventoryV1 {
         let mut observed = Vec::new();
         observed
             .try_reserve(topology.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+            .map_err(allocation_failure)?;
         observed.extend(proof.bindings.iter().map(|(timeline, _)| *timeline));
         observed.extend(proof.unaffected.iter().copied());
         observed.sort_unstable();
@@ -4572,7 +4576,7 @@ impl ErasureVerifiedInventoryV1 {
         let mut successor_members = Vec::new();
         successor_members
             .try_reserve(members.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+            .map_err(allocation_failure)?;
         let mut admission_index = 0;
         for ((mut state, mut proof), classification) in
             members.into_iter().zip(parent_classifications.iter())
@@ -4598,11 +4602,8 @@ impl ErasureVerifiedInventoryV1 {
                     state
                         .scope_extensions
                         .try_reserve(1)
-                        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-                    proof
-                        .bindings
-                        .try_reserve(1)
-                        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+                        .map_err(allocation_failure)?;
+                    proof.bindings.try_reserve(1).map_err(allocation_failure)?;
                     state.scope_extensions.push(admission.extension);
                     proof.manifest_digest = state.manifest_digest();
                     proof
@@ -4614,7 +4615,7 @@ impl ErasureVerifiedInventoryV1 {
                     proof
                         .unaffected
                         .try_reserve(1)
-                        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+                        .map_err(allocation_failure)?;
                     proof.unaffected.push(input.child.id);
                 }
                 (true, None | Some(_)) | (false, Some(_)) => {
@@ -4626,7 +4627,7 @@ impl ErasureVerifiedInventoryV1 {
         let mut topology = Vec::new();
         topology
             .try_reserve(successor_timelines)
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+            .map_err(allocation_failure)?;
         topology.extend(classifications.into_iter().map(|(timeline, _)| timeline));
         topology.push(parent_timeline);
         topology.push(input.child.id);
@@ -6787,6 +6788,13 @@ mod coverage_paths {
         ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
             self.0.take().ok_or(ErasureErrorV1::ProvenanceMissing)
         }
+
+        fn verified_inventory_with_limits(
+            &mut self,
+            limits: ErasureRecoveryLimitsV1,
+        ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+            self.verified_inventory(limits.maximum_requests())
+        }
     }
 
     struct PoisoningInventoryQuery {
@@ -6969,13 +6977,20 @@ mod coverage_paths {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let generation = inventory.generation();
         let transition_inventory = inventory.clone();
-        let mut query = InventoryQuery(Some(inventory));
+        let mut query = InventoryQuery(Some(inventory.clone()));
         assert_eq!(
             gate.install_from_verified_inventory_query(&mut query, 4),
             Ok(generation)
         );
         assert_eq!(
             gate.install_from_verified_inventory_query(&mut InventoryQuery(None), 4),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            ErasureContainmentGateV1::new_fail_closed().install_from_verified_inventory_query(
+                &mut InventoryQuery(Some(inventory.clone())),
+                0,
+            ),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         assert_eq!(gate.inventory_generation(), Ok(generation));
@@ -6988,6 +7003,43 @@ mod coverage_paths {
             Ok(())
         );
         assert_inventory_transition_fence(&gate, transition_inventory);
+
+        assert_limit_aware_gate_installation(inventory, generation)?;
+        Ok(())
+    }
+
+    fn assert_limit_aware_gate_installation(
+        inventory: ErasureVerifiedInventoryV1,
+        generation: ErasureReferenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let limits = ErasureRecoveryLimitsV1::new(4, 2, 8)?;
+        let limit_gate = ErasureContainmentGateV1::new_fail_closed();
+        assert_eq!(
+            limit_gate.install_from_verified_inventory_query_with_limits(
+                &mut InventoryQuery(Some(inventory.clone())),
+                limits,
+            ),
+            Ok(generation)
+        );
+        let shared_gate = ErasureContainmentGateV1::new_fail_closed();
+        assert_eq!(
+            shared_gate.install_verified_inventory(Arc::new(inventory.clone()), limits),
+            Ok(generation)
+        );
+        let restricted = ErasureRecoveryLimitsV1::new(1, 1, 1)?;
+        assert_eq!(
+            ErasureContainmentGateV1::new_fail_closed()
+                .install_from_verified_inventory_query_with_limits(
+                    &mut InventoryQuery(Some(inventory.clone())),
+                    restricted,
+                ),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            ErasureContainmentGateV1::new_fail_closed()
+                .install_verified_inventory(Arc::new(inventory), restricted,),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
         Ok(())
     }
 
@@ -7266,6 +7318,82 @@ mod coverage_paths {
             ERASURE_MAX_INVENTORY_REQUESTS,
             ERASURE_MAX_INVENTORY_TIMELINES
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn limit_aware_inventory_queries_fail_closed_without_an_override() -> Result<(), ErasureErrorV1>
+    {
+        struct LegacyInventoryPersistencePort;
+
+        impl ErasureInventoryPersistencePortV1 for LegacyInventoryPersistencePort {
+            fn complete_erasure_inventory_snapshot(
+                &mut self,
+                _maximum_requests: usize,
+            ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+                ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
+            }
+        }
+
+        struct LegacyInventoryQuery(Option<ErasureVerifiedInventoryV1>);
+
+        impl ErasureVerifiedInventoryQueryV1 for LegacyInventoryQuery {
+            fn verified_inventory(
+                &mut self,
+                _maximum_requests: usize,
+            ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+                self.0.take().ok_or(ErasureErrorV1::ProvenanceMissing)
+            }
+        }
+
+        let allocation_error = match Vec::<u8>::new().try_reserve(usize::MAX) {
+            Err(error) => error,
+            Ok(()) => panic!("a maximum reservation must fail"),
+        };
+        assert_eq!(
+            allocation_failure(allocation_error),
+            ErasureErrorV1::ScopeInvalid
+        );
+
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+            Vec::new(),
+            vec![TimelineId::new()],
+            1,
+        )?;
+        let mut legacy = LegacyInventoryQuery(Some(inventory));
+        assert!(legacy
+            .verified_inventory_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+            .is_ok());
+
+        let mut unsupported = LegacyInventoryQuery(None);
+        assert_eq!(
+            unsupported.verified_inventory_with_limits(ErasureRecoveryLimitsV1::new(1, 1, 1)?),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+
+        let mut persistence = LegacyInventoryPersistencePort;
+        assert!(persistence
+            .complete_erasure_inventory_snapshot_with_limits(
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .is_ok());
+        assert_eq!(
+            persistence.complete_erasure_inventory_snapshot_with_limits(
+                ErasureRecoveryLimitsV1::new(1, 1, 1)?,
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+
+        let snapshot = ErasurePersistenceInventorySnapshotV1::new(
+            Vec::new(),
+            vec![TimelineId::new(), TimelineId::new()],
+            2,
+        )?;
+        let mut empty = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        assert_eq!(
+            empty.verified_inventory_with_limits(ErasureRecoveryLimitsV1::new(1, 1, 1)?),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
         Ok(())
     }
 
