@@ -126,6 +126,92 @@ pub const ERASURE_MAX_RECOVERY_ERRORS: usize = 4_096;
 pub const ERASURE_MAX_INVENTORY_REQUESTS: usize = 4_096;
 /// Largest complete Timeline/Fork topology admitted by the V1 host.
 pub const ERASURE_MAX_INVENTORY_TIMELINES: usize = 65_536;
+/// Largest request-by-Timeline classification matrix admitted by the V1 host.
+pub const ERASURE_MAX_INVENTORY_CLASSIFICATIONS: usize = 1_048_576;
+
+/// Deployment admission ceilings for one complete erasure recovery.
+///
+/// The three ceilings bound every collection allocated while converting an
+/// adapter observation into verified containment authority. They are bounded
+/// by V1's compiled maxima, but deployments should choose materially smaller
+/// values appropriate to their available recovery memory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureRecoveryLimitsV1 {
+    requests: usize,
+    timelines: usize,
+    classifications: usize,
+}
+
+impl ErasureRecoveryLimitsV1 {
+    /// Construct deployment-configured complete-recovery admission ceilings.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when a ceiling is zero or
+    /// exceeds its compiled V1 maximum.
+    pub const fn new(
+        maximum_requests: usize,
+        maximum_timelines: usize,
+        maximum_classifications: usize,
+    ) -> Result<Self, ErasureErrorV1> {
+        if maximum_requests == 0
+            || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS
+            || maximum_timelines == 0
+            || maximum_timelines > ERASURE_MAX_INVENTORY_TIMELINES
+            || maximum_classifications == 0
+            || maximum_classifications > ERASURE_MAX_INVENTORY_CLASSIFICATIONS
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        Ok(Self {
+            requests: maximum_requests,
+            timelines: maximum_timelines,
+            classifications: maximum_classifications,
+        })
+    }
+
+    /// Return the least restrictive ceilings compiled into V1.
+    #[must_use]
+    pub const fn compiled_maximum() -> Self {
+        Self {
+            requests: ERASURE_MAX_INVENTORY_REQUESTS,
+            timelines: ERASURE_MAX_INVENTORY_TIMELINES,
+            classifications: ERASURE_MAX_INVENTORY_CLASSIFICATIONS,
+        }
+    }
+
+    /// Convert the legacy request-only ceiling using V1's other maxima.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] for an invalid request limit.
+    pub const fn from_maximum_requests(maximum_requests: usize) -> Result<Self, ErasureErrorV1> {
+        Self::new(
+            maximum_requests,
+            ERASURE_MAX_INVENTORY_TIMELINES,
+            ERASURE_MAX_INVENTORY_CLASSIFICATIONS,
+        )
+    }
+
+    /// Return the configured request ceiling.
+    #[must_use]
+    pub const fn maximum_requests(self) -> usize {
+        self.requests
+    }
+
+    /// Return the configured Timeline/Fork ceiling.
+    #[must_use]
+    pub const fn maximum_timelines(self) -> usize {
+        self.timelines
+    }
+
+    /// Return whether the observed request and topology cardinalities fit all
+    /// configured recovery ceilings.
+    #[must_use]
+    pub const fn admits(self, requests: usize, timelines: usize) -> bool {
+        requests <= self.requests
+            && timelines <= self.timelines
+            && requests * timelines <= self.classifications
+    }
+}
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,7 +396,7 @@ pub struct ErasureContainmentGateV1 {
 
 #[derive(Clone, Default)]
 struct ErasureGateStateV1 {
-    inventory: Option<ErasureVerifiedInventoryV1>,
+    inventory: Option<Arc<ErasureVerifiedInventoryV1>>,
     timeline_scopes: BTreeMap<TimelineId, ErasureReferenceV1>,
     verified_unaffected: BTreeMap<TimelineId, ErasureReferenceV1>,
     states: BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
@@ -645,10 +731,48 @@ impl ErasureContainmentGateV1 {
         query: &mut Q,
         maximum_requests: usize,
     ) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        self.install_from_verified_inventory_query_with_limits(
+            query,
+            ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)
+                .map_err(containment_recovery_failure)?,
+        )
+    }
+
+    /// Replace the complete installed recovery generation using deployment
+    /// recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// gate is unavailable, the query fails, or its result exceeds a ceiling.
+    pub fn install_from_verified_inventory_query_with_limits<Q: ErasureVerifiedInventoryQueryV1>(
+        &self,
+        query: &mut Q,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
         self.ensure_available()?;
         let candidate = query
-            .verified_inventory(maximum_requests)
+            .verified_inventory_with_limits(limits)
             .map_err(containment_recovery_failure)?;
+        if !candidate.is_admitted_by(limits) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        self.install_verified_inventory(Arc::new(candidate), limits)
+    }
+
+    /// Install an already verified inventory while sharing its immutable
+    /// allocation with the single-owner execution host.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// candidate exceeds a ceiling or the gate cannot install it.
+    pub fn install_verified_inventory(
+        &self,
+        candidate: Arc<ErasureVerifiedInventoryV1>,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        if !candidate.is_admitted_by(limits) {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
         let generation = candidate.generation();
         let _fence = self
             .fence_lock
@@ -693,7 +817,7 @@ impl ErasureContainmentGateV1 {
         self.ensure_available()?;
         let (candidate, result) = transition().map_err(containment_recovery_failure)?;
         let replacement = ErasureGateStateV1 {
-            inventory: Some(candidate.clone()),
+            inventory: Some(Arc::new(candidate.clone())),
             ..ErasureGateStateV1::default()
         };
         *self
@@ -715,7 +839,7 @@ impl ErasureContainmentGateV1 {
             .map_err(containment_recovery_failure)?
             .inventory
             .as_ref()
-            .map(ErasureVerifiedInventoryV1::generation)
+            .map(|inventory| inventory.generation())
             .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)
     }
 
@@ -3895,11 +4019,23 @@ impl ErasurePersistenceInventorySnapshotV1 {
         topology: Vec<TimelineId>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureErrorV1> {
-        if maximum_requests == 0
-            || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS
-            || request_heads.len() > maximum_requests
-            || topology.len() > ERASURE_MAX_INVENTORY_TIMELINES
-        {
+        let limits = ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)?;
+        Self::new_with_limits(request_heads, topology, limits)
+    }
+
+    /// Validate and retain one complete adapter observation using deployment
+    /// recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when the snapshot exceeds an
+    /// admission ceiling, and [`ErasureErrorV1::ProvenanceMissing`] when its
+    /// ordering or uniqueness is not canonical.
+    pub fn new_with_limits(
+        request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
+        topology: Vec<TimelineId>,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        if !limits.admits(request_heads.len(), topology.len()) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         if request_heads.windows(2).any(|pair| pair[0].0 >= pair[1].0)
@@ -3976,6 +4112,29 @@ pub trait ErasureInventoryPersistencePortV1 {
         &mut self,
         maximum_requests: usize,
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1>;
+
+    /// Read every durable erasure head and Timeline/Fork ID using deployment
+    /// recovery ceilings.
+    ///
+    /// The compatibility method above uses compiled topology and matrix
+    /// ceilings; production hosts should call this method with their own
+    /// deployment configuration.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when non-legacy ceilings are
+    /// requested from an adapter that has not implemented this method.
+    fn complete_erasure_inventory_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+        if limits.maximum_timelines() == ERASURE_MAX_INVENTORY_TIMELINES
+            && limits.classifications == ERASURE_MAX_INVENTORY_CLASSIFICATIONS
+        {
+            self.complete_erasure_inventory_snapshot(limits.maximum_requests())
+        } else {
+            Err(ErasureErrorV1::ScopeInvalid)
+        }
+    }
 }
 
 /// Adapter capability for the single atomic `ERSE1` and child-Fork commit.
@@ -4131,31 +4290,40 @@ struct ErasureInventoryClassificationV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureVerifiedInventoryV1 {
     generation: ErasureReferenceV1,
+    limits: ErasureRecoveryLimitsV1,
     request_heads: Vec<(ErasureReferenceV1, ErasureReferenceV1)>,
     members: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
-    classifications: BTreeMap<TimelineId, Vec<ErasureInventoryClassificationV1>>,
+    classifications: Vec<(TimelineId, Vec<ErasureInventoryClassificationV1>)>,
 }
 
 impl ErasureVerifiedInventoryV1 {
-    fn from_verified_empty_snapshot(
-        snapshot: ErasurePersistenceInventorySnapshotV1,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureErrorV1> {
-        if !snapshot.request_heads.is_empty() {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        Self::from_verified_recovery(Vec::new(), snapshot.topology, maximum_requests)
+    fn is_admitted_by(&self, limits: ErasureRecoveryLimitsV1) -> bool {
+        limits.admits(self.request_heads.len(), self.classifications.len())
+            && self
+                .classifications
+                .iter()
+                .all(|(_, values)| values.len() == self.request_heads.len())
     }
 
+    #[cfg(test)]
     pub(crate) fn from_verified_recovery(
-        mut recovered: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
-        mut topology: Vec<TimelineId>,
+        recovered: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
+        topology: Vec<TimelineId>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureErrorV1> {
-        if maximum_requests == 0
-            || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS
-            || recovered.len() > maximum_requests
-        {
+        Self::from_verified_recovery_with_limits(
+            recovered,
+            topology,
+            ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)?,
+        )
+    }
+
+    pub(crate) fn from_verified_recovery_with_limits(
+        mut recovered: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
+        mut topology: Vec<TimelineId>,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        if !limits.admits(recovered.len(), topology.len()) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         topology.sort_unstable();
@@ -4174,11 +4342,17 @@ impl ErasureVerifiedInventoryV1 {
         request_heads
             .try_reserve(recovered.len())
             .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        let mut classifications = topology
-            .iter()
-            .copied()
-            .map(|timeline| (timeline, Vec::new()))
-            .collect::<BTreeMap<_, _>>();
+        let mut classifications = Vec::new();
+        classifications
+            .try_reserve(topology.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        for timeline in &topology {
+            let mut timeline_classifications = Vec::new();
+            timeline_classifications
+                .try_reserve(recovered.len())
+                .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+            classifications.push((*timeline, timeline_classifications));
+        }
         for (state, proof) in &recovered {
             Self::validate_member(state, proof, &topology)?;
             let request = state.request().reference();
@@ -4201,6 +4375,7 @@ impl ErasureVerifiedInventoryV1 {
         let generation = erasure_inventory_generation(&request_heads, &topology);
         Ok(Self {
             generation,
+            limits,
             request_heads,
             members: recovered,
             classifications,
@@ -4212,23 +4387,26 @@ impl ErasureVerifiedInventoryV1 {
         proof: &ErasureVerifiedTopologyProofV1,
         topology: &[TimelineId],
     ) -> Result<(), ErasureErrorV1> {
-        if proof.manifest_digest != state.manifest_digest() {
+        if proof.manifest_digest != state.manifest_digest()
+            || proof.bindings.len().checked_add(proof.unaffected.len()) != Some(topology.len())
+            || proof
+                .bindings
+                .iter()
+                .any(|(_, scope)| !state.scope_contains(*scope))
+        {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        let mut observed = BTreeSet::new();
-        for (timeline, scope) in &proof.bindings {
-            if !state.scope_contains(*scope) || !observed.insert(*timeline) {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
-        for timeline in &proof.unaffected {
-            if !observed.insert(*timeline) {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
-        (observed.iter().copied().eq(topology.iter().copied()))
-            .then_some(())
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
+        let mut observed = Vec::new();
+        observed
+            .try_reserve(topology.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        observed.extend(proof.bindings.iter().map(|(timeline, _)| *timeline));
+        observed.extend(proof.unaffected.iter().copied());
+        observed.sort_unstable();
+        (observed.windows(2).all(|pair| pair[0] != pair[1])
+            && observed.iter().copied().eq(topology.iter().copied()))
+        .then_some(())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
 
     /// Return the complete-inventory generation bound to cache and cursor use.
@@ -4258,8 +4436,7 @@ impl ErasureVerifiedInventoryV1 {
         parent: TimelineId,
     ) -> Result<Vec<ErasureForkScopeRequirementV1>, ErasureErrorV1> {
         let classifications = self
-            .classifications
-            .get(&parent)
+            .classification_for(parent)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         self.members
             .iter()
@@ -4311,36 +4488,42 @@ impl ErasureVerifiedInventoryV1 {
         };
         if input.child.mode != crate::TimelineMode::Historical
             || input.expected_inventory_generation != self.generation
-            || self.classifications.contains_key(&input.child.id)
+            || self.classification_for(input.child.id).is_some()
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let parent_classifications = self
+        let successor_timelines = self
             .classifications
-            .get(&parent)
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        admissions.sort_unstable_by_key(|admission| admission.mutation.request());
-        if admissions
-            .windows(2)
-            .any(|pair| pair[0].mutation.request() == pair[1].mutation.request())
-            || admissions.iter().any(|admission| {
-                admission.input != input
-                    || !self
-                        .request_heads
-                        .iter()
-                        .any(|(request, _)| *request == admission.mutation.request())
-            })
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
+            .len()
+            .checked_add(1)
+            .ok_or(ErasureErrorV1::ScopeInvalid)?;
+        if !self.limits.admits(self.members.len(), successor_timelines) {
+            return Err(ErasureErrorV1::ScopeInvalid);
         }
+        let parent_index = self
+            .classifications
+            .binary_search_by_key(&parent, |(timeline, _)| *timeline)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        self.validate_prepared_fork_admissions(&input, &mut admissions)?;
+
+        let Self {
+            members,
+            mut classifications,
+            limits,
+            ..
+        } = self;
+        if parent_index >= classifications.len() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let (parent_timeline, parent_classifications) = classifications.swap_remove(parent_index);
 
         let mut successor_members = Vec::new();
         successor_members
-            .try_reserve(self.members.len())
+            .try_reserve(members.len())
             .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
         let mut admission_index = 0;
         for ((mut state, mut proof), classification) in
-            self.members.into_iter().zip(parent_classifications.iter())
+            members.into_iter().zip(parent_classifications.iter())
         {
             let request = state.request().reference();
             if classification.request != request {
@@ -4360,6 +4543,14 @@ impl ErasureVerifiedInventoryV1 {
                         == Some(state.manifest_digest()) =>
                 {
                     state.manifest_digest = admission.mutation.next_manifest().digest();
+                    state
+                        .scope_extensions
+                        .try_reserve(1)
+                        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+                    proof
+                        .bindings
+                        .try_reserve(1)
+                        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
                     state.scope_extensions.push(admission.extension);
                     proof.manifest_digest = state.manifest_digest();
                     proof
@@ -4367,27 +4558,61 @@ impl ErasureVerifiedInventoryV1 {
                         .push((input.child.id, admission.child_scope()));
                     admission_index += 1;
                 }
-                (false, None) => proof.unaffected.push(input.child.id),
+                (false, None) => {
+                    proof
+                        .unaffected
+                        .try_reserve(1)
+                        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+                    proof.unaffected.push(input.child.id);
+                }
                 (true, None | Some(_)) | (false, Some(_)) => {
                     return Err(ErasureErrorV1::PolicyConflict)
                 }
             }
             successor_members.push((state, proof));
         }
-        let mut topology = self.classifications.into_keys().collect::<Vec<_>>();
+        let mut topology = Vec::new();
+        topology
+            .try_reserve(successor_timelines)
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        topology.extend(classifications.into_iter().map(|(timeline, _)| timeline));
+        topology.push(parent_timeline);
         topology.push(input.child.id);
-        let successor = Self::from_verified_recovery(
-            successor_members,
-            topology,
-            self.request_heads.len().max(1),
-        )?;
+        let successor =
+            Self::from_verified_recovery_with_limits(successor_members, topology, limits)?;
         PreparedErasureForkBatchV1::new(input, admissions, successor)
+    }
+
+    /// Order and verify one complete set of future-Fork admission mutations.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] when an admission has a
+    /// different input, duplicates a request, or targets an unknown request.
+    fn validate_prepared_fork_admissions(
+        &self,
+        input: &ErasureForkAdmissionInputV1,
+        admissions: &mut [PreparedErasureForkAdmissionV1],
+    ) -> Result<(), ErasureErrorV1> {
+        admissions.sort_unstable_by_key(|admission| admission.mutation.request());
+        if admissions
+            .windows(2)
+            .any(|pair| pair[0].mutation.request() == pair[1].mutation.request())
+            || admissions.iter().any(|admission| {
+                admission.input != *input
+                    || !self
+                        .request_heads
+                        .iter()
+                        .any(|(request, _)| *request == admission.mutation.request())
+            })
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Ok(())
     }
 
     fn authorize(&self, timeline: TimelineId) -> Result<(), ErasureContainmentErrorV1> {
         let classifications = self
-            .classifications
-            .get(&timeline)
+            .classification_for(timeline)
             .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)?;
         if classifications
             .iter()
@@ -4403,6 +4628,16 @@ impl ErasureVerifiedInventoryV1 {
         } else {
             Ok(())
         }
+    }
+
+    fn classification_for(
+        &self,
+        timeline: TimelineId,
+    ) -> Option<&[ErasureInventoryClassificationV1]> {
+        self.classifications
+            .binary_search_by_key(&timeline, |(candidate, _)| *candidate)
+            .ok()
+            .map(|index| self.classifications[index].1.as_slice())
     }
 }
 
@@ -4422,6 +4657,25 @@ pub trait ErasureVerifiedInventoryQueryV1 {
         &mut self,
         maximum_requests: usize,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1>;
+
+    /// Recover every durable request head and Timeline/Fork using deployment
+    /// recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when non-legacy ceilings are
+    /// requested from a verifier that has not implemented this method.
+    fn verified_inventory_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        if limits.maximum_timelines() == ERASURE_MAX_INVENTORY_TIMELINES
+            && limits.classifications == ERASURE_MAX_INVENTORY_CLASSIFICATIONS
+        {
+            self.verified_inventory(limits.maximum_requests())
+        } else {
+            Err(ErasureErrorV1::ScopeInvalid)
+        }
+    }
 }
 
 /// One-shot verifier for the positive empty-request recovery case.
@@ -4450,11 +4704,30 @@ impl ErasureVerifiedInventoryQueryV1 for ErasureVerifiedEmptyInventoryQueryV1 {
         &mut self,
         maximum_requests: usize,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        self.verified_inventory_with_limits(ErasureRecoveryLimitsV1::from_maximum_requests(
+            maximum_requests,
+        )?)
+    }
+
+    fn verified_inventory_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
         self.snapshot
             .take()
             .ok_or(ErasureErrorV1::ProvenanceMissing)
             .and_then(|snapshot| {
-                ErasureVerifiedInventoryV1::from_verified_empty_snapshot(snapshot, maximum_requests)
+                if !snapshot.request_heads.is_empty() {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
+                if !limits.admits(snapshot.request_heads.len(), snapshot.topology.len()) {
+                    return Err(ErasureErrorV1::ScopeInvalid);
+                }
+                ErasureVerifiedInventoryV1::from_verified_recovery_with_limits(
+                    Vec::new(),
+                    snapshot.topology,
+                    limits,
+                )
             })
     }
 }
@@ -5899,6 +6172,25 @@ pub trait ErasureCoordinatorPortV1:
         maximum_requests: usize,
     ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1>;
 
+    /// Observe every durable erasure head and Timeline/Fork classification
+    /// using deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when non-legacy ceilings are
+    /// requested from an adapter that has not implemented this method.
+    fn complete_erasure_inventory_observation_with_limits(
+        &self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
+        if limits.maximum_timelines() == ERASURE_MAX_INVENTORY_TIMELINES
+            && limits.classifications == ERASURE_MAX_INVENTORY_CLASSIFICATIONS
+        {
+            self.complete_erasure_inventory_observation(limits.maximum_requests())
+        } else {
+            Err(ErasureErrorV1::ScopeInvalid)
+        }
+    }
+
     /// Recover the complete Timeline/Fork topology observation for one pinned
     /// manifest revision.
     ///
@@ -6718,8 +7010,9 @@ mod coverage_paths {
         let mut mismatched_classification = inventory.clone();
         mismatched_classification
             .classifications
-            .get_mut(&parent)
-            .and_then(|classifications| classifications.first_mut())
+            .iter_mut()
+            .find(|(timeline, _)| *timeline == parent)
+            .and_then(|(_, classifications)| classifications.first_mut())
             .ok_or(ErasureErrorV1::ProvenanceMissing)?
             .request = reference(66);
         assert_eq!(
@@ -6849,6 +7142,78 @@ mod coverage_paths {
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_inventory_applies_deployment_recovery_matrix_ceiling() -> Result<(), ErasureErrorV1>
+    {
+        let limits = ErasureRecoveryLimitsV1::new(2, 2, 1)?;
+        let first = TimelineId::new();
+        let second = TimelineId::new();
+        assert_eq!(
+            ErasurePersistenceInventorySnapshotV1::new_with_limits(
+                vec![(reference(1), reference(2))],
+                vec![first, second],
+                limits,
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        let state = inventory_state(
+            reference(3),
+            reference(4),
+            reference(5),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(first, reference(5)), (second, reference(5))],
+            Vec::new(),
+        );
+        assert_eq!(
+            ErasureVerifiedInventoryV1::from_verified_recovery_with_limits(
+                vec![(state, proof)],
+                vec![first, second],
+                limits,
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasureRecoveryLimitsV1::new(ERASURE_MAX_INVENTORY_REQUESTS.saturating_add(1), 1, 1,),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_limits_cover_compiled_boundaries_and_overflow() -> Result<(), ErasureErrorV1> {
+        let limits = ErasureRecoveryLimitsV1::new(2, 3, 6)?;
+        assert_eq!(limits.maximum_requests(), 2);
+        assert_eq!(limits.maximum_timelines(), 3);
+        assert!(limits.admits(2, 3));
+        assert!(!limits.admits(3, 1));
+        assert!(!limits.admits(1, 4));
+        assert_eq!(
+            ErasureRecoveryLimitsV1::new(0, 1, 1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasureRecoveryLimitsV1::new(1, 0, 1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasureRecoveryLimitsV1::new(1, 1, 0),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            ErasureRecoveryLimitsV1::from_maximum_requests(0),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        let compiled = ErasureRecoveryLimitsV1::compiled_maximum();
+        assert!(!compiled.admits(
+            ERASURE_MAX_INVENTORY_REQUESTS,
+            ERASURE_MAX_INVENTORY_TIMELINES
+        ));
         Ok(())
     }
 

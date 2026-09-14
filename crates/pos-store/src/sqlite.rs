@@ -49,11 +49,11 @@ use pos_core::{
     ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
-    ErasureReferenceV1, ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -4804,14 +4804,20 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         &mut self,
         maximum_requests: usize,
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-        if maximum_requests == 0 || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
+        self.complete_erasure_inventory_snapshot_with_limits(
+            ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)?,
+        )
+    }
+
+    fn complete_erasure_inventory_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(map_erasure_receipt_failure)?;
-        let snapshot = sqlite_erasure_inventory_snapshot(&transaction, maximum_requests)?;
+        let snapshot = sqlite_erasure_inventory_snapshot(&transaction, limits)?;
         transaction.commit().map_err(map_erasure_receipt_failure)?;
         Ok(snapshot)
     }
@@ -4823,11 +4829,12 @@ fn map_erasure_receipt_failure(_error: rusqlite::Error) -> ErasureErrorV1 {
 
 fn sqlite_erasure_inventory_snapshot(
     conn: &Connection,
-    maximum_requests: usize,
+    limits: ErasureRecoveryLimitsV1,
 ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-    let request_limit = i64::try_from(maximum_requests.saturating_add(1)).unwrap_or(i64::MAX);
+    let request_limit =
+        i64::try_from(limits.maximum_requests().saturating_add(1)).unwrap_or(i64::MAX);
     let topology_limit =
-        i64::try_from(ERASURE_MAX_INVENTORY_TIMELINES.saturating_add(1)).unwrap_or(i64::MAX);
+        i64::try_from(limits.maximum_timelines().saturating_add(1)).unwrap_or(i64::MAX);
     let request_heads = {
         let mut statement = conn
             .prepare(
@@ -4840,15 +4847,17 @@ fn sqlite_erasure_inventory_snapshot(
                 Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
             })
             .map_err(map_erasure_receipt_failure)?;
-        rows.map(|row| {
-            row.map_err(map_erasure_receipt_failure)
-                .and_then(|(request, manifest)| {
-                    Ok((reference_from_sql(request)?, reference_from_sql(manifest)?))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?
+        let mut request_heads = Vec::new();
+        request_heads
+            .try_reserve(limits.maximum_requests().saturating_add(1))
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        for row in rows {
+            let (request, manifest) = row.map_err(map_erasure_receipt_failure)?;
+            request_heads.push((reference_from_sql(request)?, reference_from_sql(manifest)?));
+        }
+        request_heads
     };
-    if request_heads.len() > maximum_requests {
+    if request_heads.len() > limits.maximum_requests() {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     let topology = {
@@ -4858,17 +4867,20 @@ fn sqlite_erasure_inventory_snapshot(
         let rows = statement
             .query_map(params![topology_limit], |row| row.get::<_, String>(0))
             .map_err(map_erasure_receipt_failure)?;
-        rows.map(|row| {
-            row.map_err(map_erasure_receipt_failure).and_then(|id| {
-                parse_timeline_id(&id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?
+        let mut topology = Vec::new();
+        topology
+            .try_reserve(limits.maximum_timelines().saturating_add(1))
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        for row in rows {
+            let id = row.map_err(map_erasure_receipt_failure)?;
+            topology.push(parse_timeline_id(&id).map_err(|_| ErasureErrorV1::ProvenanceMissing)?);
+        }
+        topology
     };
-    if topology.len() > ERASURE_MAX_INVENTORY_TIMELINES {
+    if !limits.admits(request_heads.len(), topology.len()) {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
-    ErasurePersistenceInventorySnapshotV1::new(request_heads, topology, maximum_requests)
+    ErasurePersistenceInventorySnapshotV1::new_with_limits(request_heads, topology, limits)
 }
 
 impl ErasureForkPersistencePortV1 for SqliteStore {
@@ -4899,9 +4911,11 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                 .ok_or(ErasureErrorV1::PolicyConflict);
             }
 
-            let generation =
-                sqlite_erasure_inventory_snapshot(&self.conn, ERASURE_MAX_INVENTORY_REQUESTS)?
-                    .generation();
+            let generation = sqlite_erasure_inventory_snapshot(
+                &self.conn,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            )?
+            .generation();
             if (
                 generation == admission.expected_inventory_generation(),
                 sqlite_timeline_exists(&self.conn, child.id)?,
@@ -8761,6 +8775,31 @@ mod tests {
         }
         assert_eq!(
             store.complete_erasure_inventory_snapshot(1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    #[test]
+    fn complete_inventory_applies_deployment_recovery_topology_ceiling() {
+        let mut store = new_store();
+        let _first = store.create_timeline("inventory-limits-first").test_ok();
+        let _second = store.create_timeline("inventory-limits-second").test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_records (request_digest, manifest_digest, manifest_cbor)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    [1_u8; 32].as_slice(),
+                    [2_u8; 32].as_slice(),
+                    [3_u8].as_slice()
+                ],
+            )
+            .test_ok();
+        let limits = ErasureRecoveryLimitsV1::new(1, 2, 1).test_ok();
+
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot_with_limits(limits),
             Err(ErasureErrorV1::ScopeInvalid)
         );
     }

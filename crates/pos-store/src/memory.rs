@@ -49,10 +49,10 @@ use pos_core::{
     ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
-    ErasureProtectedOperationV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureStateResolverV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -1405,24 +1405,34 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         &mut self,
         maximum_requests: usize,
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-        if maximum_requests == 0 || maximum_requests > ERASURE_MAX_INVENTORY_REQUESTS {
+        self.complete_erasure_inventory_snapshot_with_limits(
+            ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)?,
+        )
+    }
+
+    fn complete_erasure_inventory_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+        if !limits.admits(self.erasure_records.len(), self.timelines.len()) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let request_heads = self
-            .erasure_records
-            .iter()
-            .take(maximum_requests.saturating_add(1))
-            .map(|(request, (manifest, _))| (*request, *manifest))
-            .collect::<Vec<_>>();
-        if request_heads.len() > maximum_requests {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        let mut topology = self.timelines.keys().copied().collect::<Vec<_>>();
-        if topology.len() > ERASURE_MAX_INVENTORY_TIMELINES {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
+        let mut request_heads = Vec::new();
+        request_heads
+            .try_reserve(self.erasure_records.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        request_heads.extend(
+            self.erasure_records
+                .iter()
+                .map(|(request, (manifest, _))| (*request, *manifest)),
+        );
+        let mut topology = Vec::new();
+        topology
+            .try_reserve(self.timelines.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        topology.extend(self.timelines.keys().copied());
         topology.sort_unstable();
-        ErasurePersistenceInventorySnapshotV1::new(request_heads, topology, maximum_requests)
+        ErasurePersistenceInventorySnapshotV1::new_with_limits(request_heads, topology, limits)
     }
 }
 
@@ -6151,7 +6161,10 @@ mod tests {
 mod coverage_entrypoints {
     use super::tests::new_store;
     use super::*;
-    use pos_core::{ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey};
+    use pos_core::{
+        ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey,
+        ERASURE_MAX_INVENTORY_TIMELINES,
+    };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
@@ -6277,6 +6290,23 @@ mod coverage_entrypoints {
         }
         assert_eq!(
             store.complete_erasure_inventory_snapshot(1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    #[test]
+    fn memory_erasure_inventory_applies_deployment_recovery_topology_ceiling() {
+        let mut store = new_store();
+        let _first = ok(store.create_timeline("inventory-limits-first"));
+        let _second = ok(store.create_timeline("inventory-limits-second"));
+        store.erasure_records.insert(
+            ErasureReferenceV1::from_digest([1; 32]),
+            (ErasureReferenceV1::from_digest([2; 32]), Vec::new()),
+        );
+        let limits = ok(ErasureRecoveryLimitsV1::new(1, 2, 1));
+
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot_with_limits(limits),
             Err(ErasureErrorV1::ScopeInvalid)
         );
     }

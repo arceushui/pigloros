@@ -18,8 +18,8 @@ use pos_core::{
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureGate,
     ErasureHostErrorV1, ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1,
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
-    ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedEmptyInventoryQueryV1,
     ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
     ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
@@ -71,7 +71,6 @@ struct IdentifiedForkTransitionInput<'a> {
     current_inventory: &'a ErasureVerifiedInventoryV1,
     authority: &'a dyn ErasureCoordinatorAuthorityV1,
     coordinator: ErasureReferenceV1,
-    maximum_requests: usize,
 }
 
 struct OneShotInventoryV1(Option<ErasureVerifiedInventoryV1>);
@@ -80,6 +79,15 @@ impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
     fn verified_inventory(
         &mut self,
         _maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, pos_core::ErasureErrorV1> {
+        self.0
+            .take()
+            .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn verified_inventory_with_limits(
+        &mut self,
+        _limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasureVerifiedInventoryV1, pos_core::ErasureErrorV1> {
         self.0
             .take()
@@ -586,23 +594,51 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         &self,
         maximum_requests: usize,
     ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
+        self.complete_erasure_inventory_observation_with_limits(
+            ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)?,
+        )
+    }
+
+    fn complete_erasure_inventory_observation_with_limits(
+        &self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
         let snapshot = self
             .store
             .borrow_mut()
-            .complete_erasure_inventory_snapshot(maximum_requests)?;
-        let request_topology = snapshot
-            .request_heads()
-            .iter()
-            .map(|(request, manifest)| {
-                self.authority
-                    .verified_topology_observation(*request, *manifest)?
-                    .map(|topology| (*request, topology))
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .complete_erasure_inventory_snapshot_with_limits(limits)?;
+        let mut request_heads = Vec::new();
+        request_heads
+            .try_reserve(snapshot.request_heads().len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        request_heads.extend_from_slice(snapshot.request_heads());
+        let mut topology = Vec::new();
+        topology
+            .try_reserve(snapshot.topology().len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        topology.extend_from_slice(snapshot.topology());
+        let mut request_topology = Vec::new();
+        request_topology
+            .try_reserve(request_heads.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        for (request, manifest) in &request_heads {
+            let topology_observation = self
+                .authority
+                .verified_topology_observation(*request, *manifest)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            if topology_observation
+                .bindings()
+                .len()
+                .checked_add(topology_observation.unaffected().len())
+                != Some(topology.len())
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            request_topology.push((*request, topology_observation));
+        }
         Ok(ErasureInventoryObservationV1::new(
-            snapshot.request_heads().to_vec(),
-            snapshot.topology().to_vec(),
+            request_heads,
+            topology,
             request_topology,
         ))
     }
@@ -954,13 +990,25 @@ pub struct ErasureExecutionHostV1 {
     gate: Arc<ErasureContainmentGateV1>,
     authority: Option<Arc<dyn ErasureCoordinatorAuthorityV1>>,
     coordinator: Option<ErasureReferenceV1>,
-    inventory: Option<ErasureVerifiedInventoryV1>,
+    inventory: Option<Arc<ErasureVerifiedInventoryV1>>,
+    recovery_limits: ErasureRecoveryLimitsV1,
     state: HostStateV1,
     #[cfg(test)]
     fail_inventory_publication: bool,
 }
 
 impl ErasureExecutionHostV1 {
+    /// Convert a legacy request-only ceiling into bounded recovery limits.
+    ///
+    /// # Errors
+    /// Returns [`ErasureHostErrorV1::RecoveryUnavailable`] for an invalid ceiling.
+    fn legacy_recovery_limits(
+        maximum_requests: usize,
+    ) -> Result<ErasureRecoveryLimitsV1, ErasureHostErrorV1> {
+        ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)
+            .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)
+    }
+
     fn poison(&mut self) {
         self.gate.poison();
         self.state = HostStateV1::Poisoned;
@@ -1011,6 +1059,7 @@ impl ErasureExecutionHostV1 {
             authority: None,
             coordinator: None,
             inventory: None,
+            recovery_limits: ErasureRecoveryLimitsV1::compiled_maximum(),
             state: HostStateV1::Closed,
             #[cfg(test)]
             fail_inventory_publication: false,
@@ -1029,8 +1078,22 @@ impl ErasureExecutionHostV1 {
         config: StoreConfig,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        Self::open_verified_empty_with_limits(
+            config,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
+    }
+
+    /// Open and recover an exclusively owned store with deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_verified_empty_with_limits(
+        config: StoreConfig,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_verified_empty(store, maximum_requests)
+        Self::recover_verified_empty_with_limits(store, limits)
     }
 
     /// Open an existing `SQLite` store read-only and recover it only when its
@@ -1045,7 +1108,24 @@ impl ErasureExecutionHostV1 {
         let store = pos_store::sqlite::SqliteStore::open_read_only(path)
             .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_verified_empty(store, maximum_requests)
+        Self::recover_verified_empty_with_limits(
+            store,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
+    }
+
+    /// Open a read-only `SQLite` store with deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_read_only_verified_empty_with_limits(
+        path: &str,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
+            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_verified_empty_with_limits(store, limits)
     }
 
     /// Open one store with an explicit authority composition.
@@ -1062,19 +1142,39 @@ impl ErasureExecutionHostV1 {
         composition: &ErasureCoordinatorCompositionV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_with_composition(store, composition, maximum_requests)
+        Self::open_with_authority_and_limits(
+            config,
+            composition,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
     }
 
+    /// Open one store with explicit authority and deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_with_authority_and_limits(
+        config: StoreConfig,
+        composition: &ErasureCoordinatorCompositionV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_with_composition(store, composition, limits)
+    }
+
+    /// Recover one store after installing its explicit authority composition.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before host publication.
     fn recover_with_composition(
         store: Box<dyn ErasureHostStore>,
         composition: &ErasureCoordinatorCompositionV1,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
         let mut host = Self::new_closed(store)?;
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
-        host.install_inventory_from_coordinator(maximum_requests)?;
+        host.install_inventory_from_coordinator_with_limits(limits)?;
         Ok(host)
     }
 
@@ -1091,7 +1191,26 @@ impl ErasureExecutionHostV1 {
         let store = pos_store::sqlite::SqliteStore::open_read_only(path)
             .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_with_composition(store, composition, maximum_requests)
+        Self::recover_with_composition(
+            store,
+            composition,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
+    }
+
+    /// Open a read-only `SQLite` store with authority and deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_read_only_with_authority_and_limits(
+        path: &str,
+        composition: &ErasureCoordinatorCompositionV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
+            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_with_composition(store, composition, limits)
     }
 
     /// Open and recover a Gateway-capable exclusively owned store only when
@@ -1103,9 +1222,23 @@ impl ErasureExecutionHostV1 {
         config: StoreConfig,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        Self::open_gateway_verified_empty_with_limits(
+            config,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
+    }
+
+    /// Open a Gateway-capable store with deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_gateway_verified_empty_with_limits(
+        config: StoreConfig,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let store =
             open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_verified_empty_gateway(store, maximum_requests)
+        Self::recover_verified_empty_gateway_with_limits(store, limits)
     }
 
     /// Open one Gateway-capable store with an explicit authority composition.
@@ -1118,20 +1251,40 @@ impl ErasureExecutionHostV1 {
         composition: &ErasureCoordinatorCompositionV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let store =
-            open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_gateway_with_composition(store, composition, maximum_requests)
+        Self::open_gateway_with_authority_and_limits(
+            config,
+            composition,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
     }
 
+    /// Open a Gateway-capable store with authority and deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_gateway_with_authority_and_limits(
+        config: StoreConfig,
+        composition: &ErasureCoordinatorCompositionV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        let store =
+            open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_gateway_with_composition(store, composition, limits)
+    }
+
+    /// Recover one Gateway store after installing its authority composition.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before host publication.
     fn recover_gateway_with_composition(
         store: Box<dyn ErasureGatewayHostStore>,
         composition: &ErasureCoordinatorCompositionV1,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
         let mut host = Self::new_gateway_closed(store)?;
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
-        host.install_inventory_from_coordinator(maximum_requests)?;
+        host.install_inventory_from_coordinator_with_limits(limits)?;
         Ok(host)
     }
 
@@ -1165,10 +1318,23 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed recovery error and leaves the host closed when the
     /// query fails or the candidate inventory cannot be published.
+    #[cfg(test)]
     fn install_inventory<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
         &mut self,
         query: &mut Q,
         maximum_requests: usize,
+    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        self.install_inventory_with_limits(query, Self::legacy_recovery_limits(maximum_requests)?)
+    }
+
+    /// Install one verified inventory with deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed recovery error when verification or publication fails.
+    fn install_inventory_with_limits<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+        &mut self,
+        query: &mut Q,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
         if self.state == HostStateV1::Poisoned {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
@@ -1176,18 +1342,32 @@ impl ErasureExecutionHostV1 {
         self.state = HostStateV1::Closed;
         self.inventory = None;
         let Ok(inventory) = query
-            .verified_inventory(maximum_requests)
-            .and_then(|inventory| self.verify_current_inventory(inventory, maximum_requests))
+            .verified_inventory_with_limits(limits)
+            .and_then(|inventory| self.verify_current_inventory(inventory, limits))
         else {
             self.poison();
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
-        self.publish_inventory(inventory, maximum_requests)
+        self.publish_inventory_with_limits(inventory, limits)
     }
 
+    #[cfg(test)]
     fn install_inventory_from_coordinator(
         &mut self,
         maximum_requests: usize,
+    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        self.install_inventory_from_coordinator_with_limits(Self::legacy_recovery_limits(
+            maximum_requests,
+        )?)
+    }
+
+    /// Install the coordinator-owned inventory with deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed recovery error when recovery or publication fails.
+    fn install_inventory_from_coordinator_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
         let authority = self
             .authority
@@ -1200,22 +1380,22 @@ impl ErasureExecutionHostV1 {
             let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
             let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
             state_machine
-                .verified_inventory(maximum_requests)
+                .verified_inventory_with_limits(limits)
                 .map_err(map_erasure_error)?
         };
         let mut query = OneShotInventoryV1(Some(inventory));
-        self.install_inventory(&mut query, maximum_requests)
+        self.install_inventory_with_limits(&mut query, limits)
     }
 
     fn verify_current_inventory(
         &mut self,
         inventory: ErasureVerifiedInventoryV1,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
         let snapshot = self
             .store
             .host_store()
-            .complete_erasure_inventory_snapshot(maximum_requests)?;
+            .complete_erasure_inventory_snapshot_with_limits(limits)?;
         if snapshot.generation() == inventory.generation() {
             Ok(inventory)
         } else {
@@ -1253,7 +1433,8 @@ impl ErasureExecutionHostV1 {
 
     fn ready_state(
         &self,
-    ) -> Result<(ErasureReferenceV1, usize, ErasureVerifiedInventoryV1), ErasureHostErrorV1> {
+    ) -> Result<(ErasureReferenceV1, usize, Arc<ErasureVerifiedInventoryV1>), ErasureHostErrorV1>
+    {
         let HostStateV1::Ready {
             generation,
             maximum_requests,
@@ -1309,17 +1490,20 @@ impl ErasureExecutionHostV1 {
         result.unwrap_or(Err(ErasureHostErrorV1::RecoveryUnavailable))
     }
 
-    fn publish_inventory(
+    /// Publish a verified inventory after enforcing deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed recovery error when the candidate cannot be published.
+    fn publish_inventory_with_limits(
         &mut self,
         inventory: ErasureVerifiedInventoryV1,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
         let request_count = inventory.request_count();
-        let retained_inventory = inventory.clone();
-        let mut query = OneShotInventoryV1(Some(inventory));
+        let retained_inventory = Arc::new(inventory);
         let publication = self
             .gate
-            .install_from_verified_inventory_query(&mut query, maximum_requests)
+            .install_verified_inventory(Arc::clone(&retained_inventory), limits)
             .map_err(ErasureHostErrorV1::from);
         #[cfg(test)]
         let publication = if self.fail_inventory_publication {
@@ -1335,9 +1519,10 @@ impl ErasureExecutionHostV1 {
             }
         };
         self.inventory = Some(retained_inventory);
+        self.recovery_limits = limits;
         self.state = HostStateV1::Ready {
             generation,
-            maximum_requests,
+            maximum_requests: limits.maximum_requests(),
             request_count,
         };
         Ok(generation)
@@ -1348,27 +1533,28 @@ impl ErasureExecutionHostV1 {
         change: impl FnOnce(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let HostStateV1::Ready {
-            maximum_requests,
+            maximum_requests: _maximum_requests,
             request_count: 0,
             ..
         } = self.state
         else {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
+        let limits = self.recovery_limits;
         let timeline = change(self.store.host_store()).map_store_error()?;
         let Ok(inventory) = self
             .store
             .host_store()
-            .complete_erasure_inventory_snapshot(maximum_requests)
+            .complete_erasure_inventory_snapshot_with_limits(limits)
             .and_then(|snapshot| {
                 ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
-                    .verified_inventory(maximum_requests)
+                    .verified_inventory_with_limits(limits)
             })
         else {
             self.poison();
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
-        self.publish_inventory(inventory, maximum_requests)
+        self.publish_inventory_with_limits(inventory, limits)
             .map(|generation| (timeline, generation))
     }
 
@@ -1378,7 +1564,8 @@ impl ErasureExecutionHostV1 {
         &mut self,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
-        let (current_generation, maximum_requests, _) = self.ready_state()?;
+        let (current_generation, _maximum_requests, _) = self.ready_state()?;
+        let limits = self.recovery_limits;
         let expected_generation = admission.expected_inventory_generation();
         let successor = admission.successor_inventory().clone();
         let successor_generation = successor.generation();
@@ -1393,7 +1580,7 @@ impl ErasureExecutionHostV1 {
             .map_err(map_erasure_error)?;
         match (current_generation == expected_generation, outcome) {
             (true, ErasureCasOutcomeV1::Applied) => self
-                .publish_inventory(successor, maximum_requests)
+                .publish_inventory_with_limits(successor, limits)
                 .map(|generation| (child, generation)),
             (false, ErasureCasOutcomeV1::ExactRetry) => Ok((child, current_generation)),
             (true, ErasureCasOutcomeV1::ExactRetry) | (false, ErasureCasOutcomeV1::Applied) => {
@@ -1427,12 +1614,11 @@ impl ErasureExecutionHostV1 {
             current_inventory: &current_inventory,
             authority: authority.as_ref(),
             coordinator,
-            maximum_requests,
         };
         let (inventory, timeline) = self.apply_identified_fork_transition(&transition)?;
         let generation = inventory.generation();
         let request_count = inventory.request_count();
-        self.inventory = Some(inventory);
+        self.inventory = Some(Arc::new(inventory));
         self.state = HostStateV1::Ready {
             generation,
             maximum_requests,
@@ -1519,7 +1705,7 @@ impl ErasureExecutionHostV1 {
             Err(error) => Err(self.handle_transition_failure(
                 transition_error,
                 error.into(),
-                input.maximum_requests,
+                self.recovery_limits,
             )),
         }
     }
@@ -1531,6 +1717,7 @@ impl ErasureExecutionHostV1 {
         ) -> Result<T, ErasureErrorV1>,
     ) -> Result<(T, ErasureReferenceV1), ErasureHostErrorV1> {
         let (_, maximum_requests, _) = self.ready_state()?;
+        let limits = self.recovery_limits;
         let authority = self
             .authority
             .clone()
@@ -1547,7 +1734,7 @@ impl ErasureExecutionHostV1 {
                 let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
                 match transition(&mut state_machine).and_then(|result| {
                     state_machine
-                        .verified_inventory(maximum_requests)
+                        .verified_inventory_with_limits(limits)
                         .map(|inventory| (result, inventory))
                 }) {
                     Ok((result, inventory)) => Ok((inventory, result)),
@@ -1562,16 +1749,12 @@ impl ErasureExecutionHostV1 {
         let (inventory, result) = match publication {
             Ok(publication) => publication,
             Err(error) => {
-                return Err(self.handle_transition_failure(
-                    transition_error,
-                    error.into(),
-                    maximum_requests,
-                ));
+                return Err(self.handle_transition_failure(transition_error, error.into(), limits));
             }
         };
         let generation = inventory.generation();
         let request_count = inventory.request_count();
-        self.inventory = Some(inventory);
+        self.inventory = Some(Arc::new(inventory));
         self.state = HostStateV1::Ready {
             generation,
             maximum_requests,
@@ -1584,12 +1767,12 @@ impl ErasureExecutionHostV1 {
         &mut self,
         transition_error: Option<ErasureErrorV1>,
         publication_error: ErasureHostErrorV1,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> ErasureHostErrorV1 {
         let mapped = transition_error.map_or(publication_error, map_erasure_error);
         if transition_error.is_some_and(is_non_poisoning_transition_error)
             && self
-                .install_inventory_from_coordinator(maximum_requests)
+                .install_inventory_from_coordinator_with_limits(limits)
                 .is_ok()
         {
             return mapped;
@@ -1621,19 +1804,34 @@ impl ErasureExecutionHostV1 {
     /// A non-empty request set, failed adapter snapshot, or rejected gate
     /// binding fails closed. Production recovery for a non-empty set enters
     /// through [`Self::open_with_authority`].
+    #[cfg(test)]
     fn recover_verified_empty(
-        mut store: Box<dyn ErasureHostStore>,
+        store: Box<dyn ErasureHostStore>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_verified_empty_with_limits(
+            store,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
+    }
+
+    /// Recover one exclusively owned store under deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before host publication.
+    fn recover_verified_empty_with_limits(
+        mut store: Box<dyn ErasureHostStore>,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let inventory = store
-            .complete_erasure_inventory_snapshot(maximum_requests)
+            .complete_erasure_inventory_snapshot_with_limits(limits)
             .and_then(|snapshot| {
                 ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
-                    .verified_inventory(maximum_requests)
+                    .verified_inventory_with_limits(limits)
             })
             .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
         let mut query = OneShotInventoryV1(Some(inventory));
-        Self::recover_from_verified_query(store, &mut query, maximum_requests)
+        Self::recover_from_verified_query_with_limits(store, &mut query, limits)
     }
 
     /// Recover a store from one complete, independently verified inventory.
@@ -1646,13 +1844,30 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed recovery or adapter error when gate binding, inventory
     /// verification, current-store matching, or publication fails.
+    #[cfg(test)]
     fn recover_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
         store: Box<dyn ErasureHostStore>,
         query: &mut Q,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_from_verified_query_with_limits(
+            store,
+            query,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
+    }
+
+    /// Recover one store from a verified query under deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before host publication.
+    fn recover_from_verified_query_with_limits<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
+        store: Box<dyn ErasureHostStore>,
+        query: &mut Q,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let mut host = Self::new_closed(store)?;
-        host.install_inventory(query, maximum_requests)?;
+        host.install_inventory_with_limits(query, limits)?;
         Ok(host)
     }
 
@@ -1661,19 +1876,34 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// A non-empty request set, failed adapter snapshot, or rejected gate
     /// binding fails closed.
+    #[cfg(test)]
     fn recover_verified_empty_gateway(
-        mut store: Box<dyn ErasureGatewayHostStore>,
+        store: Box<dyn ErasureGatewayHostStore>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_verified_empty_gateway_with_limits(
+            store,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
+    }
+
+    /// Recover one Gateway store under deployment recovery ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before host publication.
+    fn recover_verified_empty_gateway_with_limits(
+        mut store: Box<dyn ErasureGatewayHostStore>,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let inventory = store
-            .complete_erasure_inventory_snapshot(maximum_requests)
+            .complete_erasure_inventory_snapshot_with_limits(limits)
             .and_then(|snapshot| {
                 ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
-                    .verified_inventory(maximum_requests)
+                    .verified_inventory_with_limits(limits)
             })
             .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
         let mut query = OneShotInventoryV1(Some(inventory));
-        Self::recover_gateway_from_verified_query(store, &mut query, maximum_requests)
+        Self::recover_gateway_from_verified_query_with_limits(store, &mut query, limits)
     }
 
     /// Recover a Gateway-capable store from one complete verified inventory.
@@ -1681,13 +1911,32 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed recovery or adapter error under the same current-store
     /// generation checks as [`Self::open_with_authority`].
+    #[cfg(test)]
     fn recover_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
         store: Box<dyn ErasureGatewayHostStore>,
         query: &mut Q,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_gateway_from_verified_query_with_limits(
+            store,
+            query,
+            Self::legacy_recovery_limits(maximum_requests)?,
+        )
+    }
+
+    /// Recover one Gateway store from a verified query under deployment ceilings.
+    ///
+    /// # Errors
+    /// Returns a closed adapter or recovery error before host publication.
+    fn recover_gateway_from_verified_query_with_limits<
+        Q: ErasureVerifiedInventoryQueryV1 + ?Sized,
+    >(
+        store: Box<dyn ErasureGatewayHostStore>,
+        query: &mut Q,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let mut host = Self::new_gateway_closed(store)?;
-        host.install_inventory(query, maximum_requests)?;
+        host.install_inventory_with_limits(query, limits)?;
         Ok(host)
     }
 }
@@ -2639,7 +2888,7 @@ mod tests {
         ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
         ErasureCorrectionProvenanceInputV1, ErasureForkAdmissionInputV1,
         ErasurePersistenceInventorySnapshotV1, ErasureReceiptInventoriesV1,
-        ErasureRetryAdmissionInputV1, ErasureScopeExtensionInputV1, Kind, TimelineMeta,
+        ErasureRetryAdmissionInputV1, ErasureScopeExtensionInputV1, EventStore, Kind, TimelineMeta,
         TimelineMode, MODALITY_LOCATION,
     };
 
@@ -2942,6 +3191,33 @@ mod tests {
             let snapshot = self
                 .inner
                 .complete_erasure_inventory_snapshot(maximum_requests)?;
+            if self.fault == FaultModeV1::NonemptyInventory && !snapshot.topology().is_empty() {
+                Err(ErasureErrorV1::ProvenanceMissing)
+            } else {
+                Ok(snapshot)
+            }
+        }
+
+        fn complete_erasure_inventory_snapshot_with_limits(
+            &mut self,
+            limits: ErasureRecoveryLimitsV1,
+        ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+            if self.fault == FaultModeV1::InventorySnapshot {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            if self.fault == FaultModeV1::NonemptyRequestInventory {
+                return ErasurePersistenceInventorySnapshotV1::new_with_limits(
+                    vec![(
+                        ErasureReferenceV1::from_digest([34; 32]),
+                        ErasureReferenceV1::from_digest([35; 32]),
+                    )],
+                    Vec::new(),
+                    limits,
+                );
+            }
+            let snapshot = self
+                .inner
+                .complete_erasure_inventory_snapshot_with_limits(limits)?;
             if self.fault == FaultModeV1::NonemptyInventory && !snapshot.topology().is_empty() {
                 Err(ErasureErrorV1::ProvenanceMissing)
             } else {
@@ -3992,6 +4268,57 @@ mod tests {
     }
 
     #[test]
+    fn deployment_limits_open_each_empty_memory_composition_root(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let limits = ErasureRecoveryLimitsV1::new(1, 1, 1)?;
+        let composition = ErasureCoordinatorCompositionV1::closed();
+
+        ErasureExecutionHostV1::open_verified_empty_with_limits(StoreConfig::Memory, limits)?;
+        ErasureExecutionHostV1::open_with_authority_and_limits(
+            StoreConfig::Memory,
+            &composition,
+            limits,
+        )?;
+        ErasureExecutionHostV1::open_gateway_verified_empty_with_limits(
+            StoreConfig::Memory,
+            limits,
+        )?;
+        ErasureExecutionHostV1::open_gateway_with_authority_and_limits(
+            StoreConfig::Memory,
+            &composition,
+            limits,
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_limits_open_each_empty_read_only_sqlite_composition_root(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "pigloros-erasure-host-recovery-{}.sqlite",
+            std::process::id()
+        ));
+        let path = path.to_string_lossy().into_owned();
+        let store = pos_store::sqlite::SqliteStore::open(&path)?;
+        drop(store);
+
+        let limits = ErasureRecoveryLimitsV1::new(1, 1, 1)?;
+        let composition = ErasureCoordinatorCompositionV1::closed();
+        ErasureExecutionHostV1::open_read_only_verified_empty(&path, 1)?;
+        ErasureExecutionHostV1::open_read_only_verified_empty_with_limits(&path, limits)?;
+        ErasureExecutionHostV1::open_read_only_with_authority(&path, &composition, 1)?;
+        ErasureExecutionHostV1::open_read_only_with_authority_and_limits(
+            &path,
+            &composition,
+            limits,
+        )?;
+
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
     fn verified_query_recovery_helpers_fail_closed_when_the_query_fails() {
         assert_eq!(
             ErasureExecutionHostV1::recover_from_verified_query(
@@ -4271,6 +4598,23 @@ mod tests {
                 4,
             ),
             Err(ErasureHostErrorV1::AdapterFailure)
+        ));
+    }
+
+    #[test]
+    fn empty_recovery_applies_deployment_topology_ceiling_before_publication() {
+        let mut store = MemoryStore::new().without_erasure_gate();
+        assert!(store.create_timeline("recovery-limits-first").is_ok());
+        assert!(store.create_timeline("recovery-limits-second").is_ok());
+        let limits = ErasureRecoveryLimitsV1::new(1, 1, 1);
+        assert!(limits.is_ok());
+        let Ok(limits) = limits else {
+            return;
+        };
+
+        assert!(matches!(
+            ErasureExecutionHostV1::recover_verified_empty_with_limits(Box::new(store), limits),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
         ));
     }
 
@@ -5199,7 +5543,7 @@ mod tests {
             ),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
-        missing_inventory.inventory = Some(
+        missing_inventory.inventory = Some(Arc::new(
             verified_empty_inventory(
                 ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 4)
                     .unwrap_or_else(|error| {
@@ -5208,7 +5552,7 @@ mod tests {
                 4,
             )
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
-        );
+        ));
         missing_inventory.state = HostStateV1::Ready {
             generation,
             maximum_requests: 4,
