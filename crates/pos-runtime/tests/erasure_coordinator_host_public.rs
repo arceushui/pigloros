@@ -1551,6 +1551,18 @@ fn assert_configured_nonempty_recovery(
             reference(30),
         ),
     )?;
+    let writable_recovery = test_stage(
+        "reopen persistent configured coordinator host writable",
+        ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Sqlite {
+                path: path.to_owned(),
+            },
+            &composition,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(writable_recovery.status(), ErasureHostStatusV1::Ready);
+    drop(writable_recovery);
     let mut recovered = test_stage(
         "reopen persistent configured coordinator host",
         ErasureExecutionHostV1::open_read_only_with_authority(
