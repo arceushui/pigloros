@@ -1,6 +1,9 @@
 //! Canonical SLX1/SLY1 codec for the root selector boundary.
 
-use std::io::Write;
+use std::io::{Read, Write};
+
+#[cfg(test)]
+use std::io::Cursor;
 
 use ciborium::value::Value;
 
@@ -21,6 +24,7 @@ use crate::sandbox_provider_protocol::{
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const SELECTOR_INPUT_LIMIT: usize = 128 * 1024 * 1024;
 const INPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxInputBytes.v1\0";
+#[cfg(test)]
 const OUTPUT_DOMAIN: &[u8] = b"PiglorOS.SandboxOutputBytes.v1\0";
 
 fn protocol_failure<T>(_: T) -> AdapterError {
@@ -92,12 +96,20 @@ pub(crate) struct AuthenticatedSelectorReply<'a> {
 /// Closed terminal alternatives for the root-owned selector reply.
 #[derive(Clone, Copy)]
 pub(crate) enum SelectorProviderTerminal<'a> {
+    #[cfg(test)]
     Result {
         result: &'a [u8],
         grant: Option<&'a [u8]>,
         receipt: Option<&'a [u8]>,
         audit_records: &'a [Vec<u8>],
         output: Option<&'a [u8]>,
+    },
+    StagedResult {
+        result: &'a [u8],
+        grant: Option<&'a [u8]>,
+        receipt: Option<&'a [u8]>,
+        audit_records: &'a [Vec<u8>],
+        output: Option<&'a PayloadDescriptor>,
     },
     Error {
         error: &'a [u8],
@@ -171,11 +183,24 @@ pub(crate) fn encode_request(
 ///
 /// Every ID is recomputed from the authenticated EVR1 request, and the EAI1
 /// stream is bound by both its declared length and domain-separated digest.
+#[cfg(test)]
 pub(crate) fn decode_request(
     control: &[u8],
     trailing: &[u8],
 ) -> Result<DecodedSelectorRequest, AdapterError> {
-    validate_selector_input_size(trailing.len())?;
+    let length = trailing.len() as u64;
+    let digest = domain_digest(INPUT_DOMAIN, trailing);
+    decode_staged_request(control, Cursor::new(trailing), length, digest)
+}
+
+/// Decode SLX1 control against an incrementally staged EAI1 stream.
+pub(crate) fn decode_staged_request(
+    control: &[u8],
+    trailing: impl Read,
+    input_length: u64,
+    input_digest: [u8; 32],
+) -> Result<DecodedSelectorRequest, AdapterError> {
+    validate_selector_input_size(input_length)?;
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT).map_err(protocol_failure)?;
     let wrapper = array(&value, 2).map_err(protocol_failure)?;
     let fields = array(&wrapper[0], 6).map_err(protocol_failure)?;
@@ -199,8 +224,6 @@ pub(crate) fn decode_request(
     {
         return Err(AdapterError::ProtocolFailure);
     }
-    let input_length = u64::try_from(trailing.len()).map_err(protocol_failure)?;
-    let input_digest = domain_digest(INPUT_DOMAIN, trailing);
     let descriptor_fields = array(&fields[5], 2).map_err(protocol_failure)?;
     if uint(&descriptor_fields[0]).map_err(protocol_failure)? != input_length
         || fixed_bytes::<32>(&descriptor_fields[1]).map_err(protocol_failure)? != input_digest
@@ -219,8 +242,8 @@ pub(crate) fn decode_request(
     })
 }
 
-fn validate_selector_input_size(length: usize) -> Result<(), AdapterError> {
-    (length <= SELECTOR_INPUT_LIMIT)
+fn validate_selector_input_size(length: u64) -> Result<(), AdapterError> {
+    (length <= SELECTOR_INPUT_LIMIT as u64)
         .then_some(())
         .ok_or(AdapterError::ProtocolFailure)
 }
@@ -337,6 +360,13 @@ enum AdmittedOutputKind {
     Empty,
 }
 
+#[derive(Clone, Copy)]
+enum SelectorOutput<'a> {
+    #[cfg(test)]
+    Bytes(&'a [u8]),
+    Staged(&'a PayloadDescriptor),
+}
+
 const fn admitted_output_kind(
     outcome: SandboxTerminalOutcome,
 ) -> Result<AdmittedOutputKind, AdapterError> {
@@ -370,6 +400,7 @@ fn encode_terminal<'a>(
                 Value::Null,
             ))
         }
+        #[cfg(test)]
         SelectorProviderTerminal::Result {
             result,
             grant,
@@ -383,7 +414,22 @@ fn encode_terminal<'a>(
             grant,
             receipt,
             audit_records,
+            output.map(SelectorOutput::Bytes),
+        ),
+        SelectorProviderTerminal::StagedResult {
+            result,
+            grant,
+            receipt,
+            audit_records,
             output,
+        } => encode_result_terminal(
+            request,
+            execute_request,
+            result,
+            grant,
+            receipt,
+            audit_records,
+            output.map(SelectorOutput::Staged),
         ),
     }
 }
@@ -395,7 +441,7 @@ fn encode_result_terminal<'a>(
     grant_bytes: Option<&'a [u8]>,
     receipt_bytes: Option<&'a [u8]>,
     audit_records: &'a [Vec<u8>],
-    output: Option<&'a [u8]>,
+    output: Option<SelectorOutput<'a>>,
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
     let result =
         SandboxProviderResult::from_canonical_cbor(result_bytes).map_err(protocol_failure)?;
@@ -442,7 +488,7 @@ fn encode_admitted_result<'a>(
     grant_bytes: Option<&'a [u8]>,
     receipt_bytes: Option<&'a [u8]>,
     audit_records: &'a [Vec<u8>],
-    output: Option<&'a [u8]>,
+    output: Option<SelectorOutput<'a>>,
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
     let output_kind = admitted_output_kind(result.outcome)?;
     let grant_bytes = grant_bytes.ok_or(AdapterError::ProtocolFailure)?;
@@ -459,14 +505,28 @@ fn encode_admitted_result<'a>(
     let (trailing, output_descriptor) = match output_kind {
         AdmittedOutputKind::Completed => {
             let output = output.ok_or(AdapterError::ProtocolFailure)?;
-            let length = u64::try_from(output.len()).map_err(protocol_failure)?;
-            let digest = domain_digest(OUTPUT_DOMAIN, output);
-            if result.output.as_ref().is_none_or(|descriptor| {
-                descriptor.byte_length != length || descriptor.digest != digest
-            }) {
-                return Err(AdapterError::ProtocolFailure);
+            match output {
+                #[cfg(test)]
+                SelectorOutput::Bytes(output) => {
+                    let length = output.len() as u64;
+                    let digest = domain_digest(OUTPUT_DOMAIN, output);
+                    if result.output.as_ref().is_none_or(|descriptor| {
+                        descriptor.byte_length != length || descriptor.digest != digest
+                    }) {
+                        return Err(AdapterError::ProtocolFailure);
+                    }
+                    (output.to_vec(), descriptor_from_parts(length, digest))
+                }
+                SelectorOutput::Staged(output) => {
+                    if result.output.as_ref() != Some(output) {
+                        return Err(AdapterError::ProtocolFailure);
+                    }
+                    (
+                        Vec::new(),
+                        descriptor_from_parts(output.byte_length, output.digest),
+                    )
+                }
             }
-            (output.to_vec(), descriptor(output, digest))
         }
         AdmittedOutputKind::Empty => {
             if result.output.is_some() || output.is_some() {
@@ -507,6 +567,7 @@ const fn local_phase_code(phase: SandboxLocalErrorPhase) -> u64 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn decode_reply(
     control: &[u8],
     trailing: &[u8],
@@ -514,12 +575,43 @@ pub(crate) fn decode_reply(
     evr1_digest: [u8; 32],
     output_limit: u64,
 ) -> Result<DecodedSelectorReply, AdapterError> {
+    let length = trailing.len() as u64;
+    let digest = domain_digest(OUTPUT_DOMAIN, trailing);
+    decode_staged_reply(
+        control,
+        Cursor::new(trailing),
+        length,
+        digest,
+        request,
+        evr1_digest,
+        output_limit,
+    )
+}
+
+/// Decode SLY1 control against an incrementally staged EAO1 stream.
+pub(crate) fn decode_staged_reply(
+    control: &[u8],
+    trailing: impl Read,
+    trailing_length: u64,
+    trailing_digest: [u8; 32],
+    request: &EncodedSelectorRequest,
+    evr1_digest: [u8; 32],
+    output_limit: u64,
+) -> Result<DecodedSelectorReply, AdapterError> {
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
         .map_err(|_| AdapterError::ProtocolFailure)?;
     if is_magic(&value, "SLE1") {
-        return decode_local_reply(control, trailing);
+        return decode_local_reply(control, trailing_length);
     }
-    decode_authenticated_reply(&value, trailing, request, evr1_digest, output_limit)
+    decode_authenticated_reply(
+        &value,
+        trailing,
+        trailing_length,
+        trailing_digest,
+        request,
+        evr1_digest,
+        output_limit,
+    )
 }
 
 /// Whether a framed SLY1 reply carries admission evidence whose trailing bytes
@@ -539,9 +631,9 @@ pub(crate) fn reply_carries_admission_evidence(control: &[u8]) -> bool {
 
 fn decode_local_reply(
     control: &[u8],
-    trailing: &[u8],
+    trailing_length: u64,
 ) -> Result<DecodedSelectorReply, AdapterError> {
-    if !trailing.is_empty() {
+    if trailing_length != 0 {
         return Err(AdapterError::ProtocolFailure);
     }
     let local = SandboxLocalError::from_canonical_cbor(control)
@@ -559,7 +651,9 @@ fn decode_local_reply(
 
 fn decode_authenticated_reply(
     value: &Value,
-    trailing: &[u8],
+    mut trailing: impl Read,
+    trailing_length: u64,
+    trailing_digest: [u8; 32],
     request: &EncodedSelectorRequest,
     evr1_digest: [u8; 32],
     output_limit: u64,
@@ -568,28 +662,24 @@ fn decode_authenticated_reply(
     let fields = array(&wrapper[0], 12).map_err(|_| AdapterError::ProtocolFailure)?;
     let has_admission_evidence = fields_indicate_post_admission(fields);
     let decoded = (|| {
-        if text(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)? != "SLY1"
-            || uint(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)? != 1
-            || fixed_bytes::<16>(&fields[2]).map_err(|_| AdapterError::ProtocolFailure)?
+        if text(&fields[0]).map_err(protocol_failure)? != "SLY1"
+            || uint(&fields[1]).map_err(protocol_failure)? != 1
+            || fixed_bytes::<16>(&fields[2]).map_err(protocol_failure)?
                 != request.provider_request_id
-            || fixed_bytes::<16>(&fields[3]).map_err(|_| AdapterError::ProtocolFailure)?
-                != request.attempt_id
-            || fixed_bytes::<32>(&fields[4]).map_err(|_| AdapterError::ProtocolFailure)?
-                != request.digest
+            || fixed_bytes::<16>(&fields[3]).map_err(protocol_failure)? != request.attempt_id
+            || fixed_bytes::<32>(&fields[4]).map_err(protocol_failure)? != request.digest
         {
             return Err(AdapterError::ProtocolFailure);
         }
-        let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
-        if fixed_bytes::<32>(&wrapper[1]).map_err(|_| AdapterError::ProtocolFailure)?
+        let unsigned = encode_with_limit(&wrapper[0], CONTROL_LIMIT).map_err(protocol_failure)?;
+        if fixed_bytes::<32>(&wrapper[1]).map_err(protocol_failure)?
             != domain_digest(SLY1_DOMAIN, &unsigned)
         {
             return Err(AdapterError::ProtocolFailure);
         }
-        let attempt_stream_length = u64::try_from(request.attempt_stream.len())
-            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let attempt_stream_length = request.attempt_stream.len() as u64;
         let spx = SandboxExecuteRequest::from_canonical_cbor(bytes(&fields[5])?)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
+            .map_err(protocol_failure)?;
         if spx.request.request_id != request.provider_request_id
             || spx.attempt_id != request.attempt_id
             || spx.authority.evr1_digest != evr1_digest
@@ -599,7 +689,14 @@ fn decode_authenticated_reply(
             return Err(AdapterError::ProtocolFailure);
         }
         match uint(&fields[6]).map_err(|_| AdapterError::ProtocolFailure)? {
-            0 => decode_provider_result(fields, trailing, request, output_limit),
+            0 => decode_staged_provider_result(
+                fields,
+                &mut trailing,
+                trailing_length,
+                trailing_digest,
+                request,
+                output_limit,
+            ),
             1 => {
                 let error = SandboxProviderError::from_canonical_cbor(bytes(&fields[7])?)
                     .map_err(|_| AdapterError::ProtocolFailure)?;
@@ -614,7 +711,7 @@ fn decode_authenticated_reply(
                 {
                     return Err(AdapterError::ProtocolFailure);
                 }
-                require_absent_evidence(fields, trailing)?;
+                require_absent_evidence_length(fields, trailing_length)?;
                 Ok(DecodedSelectorReply {
                     observation: Err(AdapterError::ProtocolFailure),
                     provenance: None,
@@ -632,9 +729,11 @@ fn decode_authenticated_reply(
     })
 }
 
-fn decode_provider_result(
+fn decode_staged_provider_result(
     fields: &[Value],
-    trailing: &[u8],
+    trailing: &mut impl Read,
+    trailing_length: u64,
+    trailing_digest: [u8; 32],
     request: &EncodedSelectorRequest,
     output_limit: u64,
 ) -> Result<DecodedSelectorReply, AdapterError> {
@@ -677,14 +776,18 @@ fn decode_provider_result(
                 .map_err(|_| AdapterError::ProtocolFailure)?;
             validate_evidence(fields, &result, &grant, &receipt)?;
             let observation = if result.outcome == SandboxTerminalOutcome::Completed {
-                let descriptor = validate_output_descriptor(&fields[11], trailing)?;
+                let descriptor = validate_staged_output_descriptor(
+                    &fields[11],
+                    trailing_length,
+                    trailing_digest,
+                )?;
                 if result.output.as_ref() != Some(&descriptor) {
                     return Err(AdapterError::ProtocolFailure);
                 }
                 read_observation(trailing, output_limit)
                     .map_err(|_| AdapterError::ProtocolFailure)?
             } else {
-                if fields[11] != Value::Null || !trailing.is_empty() {
+                if fields[11] != Value::Null || trailing_length != 0 {
                     return Err(AdapterError::ProtocolFailure);
                 }
                 SubjectObservation {
@@ -698,7 +801,7 @@ fn decode_provider_result(
             })
         })(),
         SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected => {
-            require_absent_evidence(fields, trailing)?;
+            require_absent_evidence_length(fields, trailing_length)?;
             Ok(DecodedSelectorReply {
                 observation: Ok(SubjectObservation {
                     result: SubjectResult::Unavailable,
@@ -872,14 +975,15 @@ fn audit_authority_matches(record: &SandboxAuditRecord, receipt: &SandboxProvide
     expected.is_some_and(|expected| expected == record.authority_digests)
 }
 
-fn validate_output_descriptor(
+fn validate_staged_output_descriptor(
     value: &Value,
-    trailing: &[u8],
+    trailing_length: u64,
+    trailing_digest: [u8; 32],
 ) -> Result<PayloadDescriptor, AdapterError> {
     let fields = array(value, 2).map_err(|_| AdapterError::ProtocolFailure)?;
     let length = uint(&fields[0]).map_err(|_| AdapterError::ProtocolFailure)?;
     let digest = fixed_bytes::<32>(&fields[1]).map_err(|_| AdapterError::ProtocolFailure)?;
-    if length != trailing.len() as u64 || digest != domain_digest(OUTPUT_DOMAIN, trailing) {
+    if length != trailing_length || digest != trailing_digest {
         return Err(AdapterError::ProtocolFailure);
     }
     Ok(PayloadDescriptor {
@@ -888,19 +992,56 @@ fn validate_output_descriptor(
     })
 }
 
-fn require_absent_evidence(fields: &[Value], trailing: &[u8]) -> Result<(), AdapterError> {
+fn require_absent_evidence_length(
+    fields: &[Value],
+    trailing_length: u64,
+) -> Result<(), AdapterError> {
     if fields[8] != Value::Null
         || fields[9] != Value::Null
         || !array_values(&fields[10])
             .map_err(|_| AdapterError::ProtocolFailure)?
             .is_empty()
         || fields[11] != Value::Null
-        || !trailing.is_empty()
+        || trailing_length != 0
     {
         Err(AdapterError::ProtocolFailure)
     } else {
         Ok(())
     }
+}
+
+#[cfg(test)]
+fn decode_provider_result(
+    fields: &[Value],
+    trailing: &[u8],
+    request: &EncodedSelectorRequest,
+    output_limit: u64,
+) -> Result<DecodedSelectorReply, AdapterError> {
+    decode_staged_provider_result(
+        fields,
+        &mut Cursor::new(trailing),
+        trailing.len() as u64,
+        domain_digest(OUTPUT_DOMAIN, trailing),
+        request,
+        output_limit,
+    )
+}
+
+#[cfg(test)]
+fn validate_output_descriptor(
+    value: &Value,
+    trailing: &[u8],
+) -> Result<PayloadDescriptor, AdapterError> {
+    validate_staged_output_descriptor(
+        value,
+        trailing.len() as u64,
+        domain_digest(OUTPUT_DOMAIN, trailing),
+    )
+}
+
+#[cfg(test)]
+fn require_absent_evidence(fields: &[Value], trailing: &[u8]) -> Result<(), AdapterError> {
+    require_absent_evidence_length(fields, trailing.len() as u64)
 }
 
 fn derived_id(mut namespace: [u8; 16], ordinal: u16) -> [u8; 16] {
@@ -909,10 +1050,11 @@ fn derived_id(mut namespace: [u8; 16], ordinal: u16) -> [u8; 16] {
 }
 
 fn descriptor(payload: &[u8], digest: [u8; 32]) -> Value {
-    Value::Array(vec![
-        integer(payload.len() as u64),
-        Value::Bytes(digest.to_vec()),
-    ])
+    descriptor_from_parts(payload.len() as u64, digest)
+}
+
+fn descriptor_from_parts(length: u64, digest: [u8; 32]) -> Value {
+    Value::Array(vec![integer(length), Value::Bytes(digest.to_vec())])
 }
 
 struct SelectorInputWriter {
@@ -1166,9 +1308,10 @@ mod tests {
     #[test]
     fn server_decodes_only_the_exact_bound_slx1_request() -> Result<(), AdapterError> {
         assert_eq!(protocol_failure(()), AdapterError::ProtocolFailure);
-        assert_eq!(validate_selector_input_size(SELECTOR_INPUT_LIMIT), Ok(()));
+        let input_limit = u64::try_from(SELECTOR_INPUT_LIMIT).map_err(protocol_failure)?;
+        assert_eq!(validate_selector_input_size(input_limit), Ok(()));
         assert_eq!(
-            validate_selector_input_size(SELECTOR_INPUT_LIMIT + 1),
+            validate_selector_input_size(input_limit + 1),
             Err(AdapterError::ProtocolFailure)
         );
         let original_request = canonical_request()?;
@@ -1235,6 +1378,15 @@ mod tests {
 
     #[test]
     fn server_rejects_every_malformed_slx1_field_boundary() -> Result<(), AdapterError> {
+        assert_eq!(
+            decode_staged_request(
+                &[],
+                Cursor::new([]),
+                SELECTOR_INPUT_LIMIT as u64 + 1,
+                [0; 32],
+            ),
+            Err(AdapterError::ProtocolFailure)
+        );
         let evaluation_request = canonical_request()?;
         let request_bytes = evaluation_request
             .to_canonical_cbor()
@@ -1398,6 +1550,58 @@ mod tests {
                 Err(AdapterError::ProtocolFailure)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn server_encoder_binds_staged_output_descriptor() -> Result<(), AdapterError> {
+        let evaluation_request = canonical_request()?;
+        let request_bytes = evaluation_request
+            .to_canonical_cbor()
+            .map_err(protocol_failure)?;
+        let client_request = encode_request(&evaluation_request, &request_bytes, &attempt(), 0)?;
+        let server_request =
+            decode_request(&client_request.control, &client_request.attempt_stream)?;
+        let (control, trailing, _) =
+            admitted_reply(&client_request, evaluation_request.request_digest, 0)?;
+        let document =
+            decode_canonical_with_limit(&control, CONTROL_LIMIT).map_err(protocol_failure)?;
+        let wrapper = array_values(&document).map_err(protocol_failure)?;
+        let fields = array_values(&wrapper[0]).map_err(protocol_failure)?;
+        let audit_records = array_values(&fields[10])
+            .map_err(protocol_failure)?
+            .iter()
+            .map(|record| bytes(record).map(ToOwned::to_owned))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = PayloadDescriptor {
+            byte_length: trailing.len() as u64,
+            digest: domain_digest(OUTPUT_DOMAIN, &trailing),
+        };
+        let reply = |descriptor| -> Result<_, AdapterError> {
+            Ok(AuthenticatedSelectorReply {
+                execute_request: bytes(&fields[5])?,
+                terminal: SelectorProviderTerminal::StagedResult {
+                    result: bytes(&fields[7])?,
+                    grant: Some(required_bytes(&fields[8])?),
+                    receipt: Some(required_bytes(&fields[9])?),
+                    audit_records: &audit_records,
+                    output: Some(descriptor),
+                },
+            })
+        };
+        assert!(
+            encode_authenticated_reply(&server_request, reply(&output)?)?
+                .trailing
+                .is_empty()
+        );
+        let mismatched_output = PayloadDescriptor {
+            byte_length: output.byte_length + 1,
+            digest: output.digest,
+        };
+        assert_eq!(
+            encode_authenticated_reply(&server_request, reply(&mismatched_output)?).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
         Ok(())
     }
 

@@ -6,18 +6,21 @@
 //! deliberately exposes no runtime socket by itself.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 
 use crate::provider_transport::{
     AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
-    ProviderTransport, ProviderTransportError,
+    ProviderTransport, ProviderTransportError, ReadSeek,
 };
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, ExecuteAuthority, LaunchPolicy, RequestAuthority, SandboxExecuteRequest,
@@ -29,13 +32,16 @@ use crate::selector::installation::authority::{
 };
 use crate::selector::installation::{InstallationObjectKind, InstalledSelectorState};
 use crate::selector::SelectorBoundaryError;
+#[cfg(test)]
+use crate::selector_protocol::decode_request;
 use crate::selector_protocol::{
-    decode_request, encode_authenticated_reply, encode_local_error_reply,
+    decode_staged_request, encode_authenticated_reply, encode_local_error_reply,
     AuthenticatedSelectorReply, DecodedSelectorRequest, EncodedSelectorReply,
     SelectorProviderTerminal,
 };
 
 const CONTROL_LIMIT: u32 = 16 * 1024 * 1024;
+const CONTROL_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const SELECTOR_INPUT_LIMIT: u64 = 128 * 1024 * 1024;
 const CONTROL_ARTIFACT_LIMIT: u64 = 16 * 1024 * 1024;
 const IMAGE_ARTIFACT_LIMIT: u64 = 1024 * 1024 * 1024;
@@ -143,7 +149,7 @@ trait ProviderExecutor {
         admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
         spx1: &[u8],
-        input: &[u8],
+        input: &mut dyn ReadSeek,
         watchdog: Duration,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError>;
 }
@@ -154,10 +160,10 @@ impl ProviderExecutor for ProviderTransport {
         admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
         spx1: &[u8],
-        input: &[u8],
+        input: &mut dyn ReadSeek,
         watchdog: Duration,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
-        Self::execute(self, admitted, commitment, spx1, input, watchdog)
+        Self::execute_staged(self, admitted, commitment, spx1, input, watchdog)
     }
 }
 
@@ -168,6 +174,11 @@ struct RootSelectorService<T = ProviderTransport> {
     evaluation_namespaces: EvaluationNamespaceBindings,
 }
 
+struct StagedSelectorRequest {
+    decoded: DecodedSelectorRequest,
+    input: tempfile::NamedTempFile,
+}
+
 #[derive(Default)]
 struct EvaluationNamespaceBindings {
     // A namespace stays bound only while a matching request is live or the
@@ -175,6 +186,8 @@ struct EvaluationNamespaceBindings {
     // bindings after its durable attempt snapshot and reconciliation proof.
     states: Mutex<BTreeMap<[u8; 14], EvaluationNamespaceState>>,
     changed: Condvar,
+    #[cfg(test)]
+    waiting: AtomicUsize,
 }
 
 struct EvaluationNamespaceState {
@@ -238,7 +251,12 @@ impl EvaluationNamespaceBindings {
                     drop(states);
                     return Ok(lease);
                 }
-                states = self.changed.wait(states).map_err(selector_unavailable)?;
+                #[cfg(test)]
+                self.waiting.fetch_add(1, Ordering::Release);
+                let waited = self.changed.wait(states);
+                #[cfg(test)]
+                self.waiting.fetch_sub(1, Ordering::Release);
+                states = waited.map_err(selector_unavailable)?;
             } else {
                 if states.len() >= MAX_RETAINED_EVALUATION_NAMESPACES {
                     drop(states);
@@ -313,19 +331,22 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         }
         stream
             .set_read_timeout(Some(INITIAL_IO_TIMEOUT))
-            .and_then(|()| stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT)))
             .map_err(io_error)?;
-        let Ok((decoded, input)) = read_selector_request(&mut stream) else {
+        stream
+            .set_write_timeout(Some(INITIAL_IO_TIMEOUT))
+            .map_err(io_error)?;
+        let Ok(StagedSelectorRequest { decoded, mut input }) = read_selector_request(&mut stream)
+        else {
             return write_unidentified_request_error(&mut stream);
         };
-        self.handle_decoded_request(&mut stream, &decoded, &input)
+        self.handle_decoded_request(&mut stream, &decoded, input.as_file_mut())
     }
 
     fn handle_decoded_request(
         &self,
         stream: &mut UnixStream,
         decoded: &DecodedSelectorRequest,
-        input: &[u8],
+        input: &mut dyn ReadSeek,
     ) -> Result<(), SelectorBoundaryError> {
         let Some(requirement) = decoded.request.sandbox_requirement.as_ref() else {
             return write_policy_error(stream, decoded);
@@ -342,13 +363,9 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             Ok(resolved) if resolved.attempt() == &decoded.attempt => resolved,
             Ok(_) | Err(_) => return write_authority_mismatch(stream, decoded),
         };
-        stream
-            .set_read_timeout(Some(Duration::from_millis(resolved.attempt().watchdog_ms)))
-            .and_then(|()| {
-                stream
-                    .set_write_timeout(Some(Duration::from_millis(resolved.attempt().watchdog_ms)))
-            })
-            .map_err(io_error)?;
+        let io_timeout = Some(Duration::from_millis(resolved.attempt().watchdog_ms));
+        stream.set_read_timeout(io_timeout).map_err(io_error)?;
+        stream.set_write_timeout(io_timeout).map_err(io_error)?;
         let Ok((image, launch)) = selected_image_and_launch(&self.admitted, requirement) else {
             return write_policy_error(stream, decoded);
         };
@@ -428,8 +445,8 @@ fn write_provider_terminal(
     }
     match terminal {
         AuthenticatedProviderTerminal::Execution(mut execution) => {
-            match prepare_authenticated_execution(decoded, spx1, &mut execution) {
-                Ok(reply) => write_reply(stream, &reply),
+            match write_authenticated_execution(stream, decoded, spx1, &mut execution) {
+                Ok(()) => Ok(()),
                 Err(()) => write_post_admission_provider_failure(
                     stream,
                     decoded,
@@ -573,7 +590,7 @@ fn selector_execute_bytes(
         pcr1_digest: provider.conformance_report().report_digest,
         hcp1_digest: provider.host_profile().profile_digest,
     };
-    SandboxExecuteRequest::for_selector(
+    let request = SandboxExecuteRequest::for_selector(
         RequestAuthority {
             request_id: decoded.provider_request_id,
             apt1_digest: requirement.apt1_digest,
@@ -586,17 +603,17 @@ fn selector_execute_bytes(
         decoded.input_descriptor(),
         Vec::new(),
     )
-    .and_then(|request| request.to_canonical_cbor())
-    .map_err(artifact_invalid)
+    .map_err(artifact_invalid)?;
+    request.to_canonical_cbor().map_err(artifact_invalid)
 }
 
 fn fresh_nonce() -> Result<[u8; 16], SelectorBoundaryError> {
     let mut nonce = <[u8; 16]>::default();
     let mut remaining = nonce.as_mut_slice();
     while !remaining.is_empty() {
-        let received = getrandom(&mut *remaining, GetRandomFlags::empty())
-            .map_err(selector_unavailable)
-            .and_then(nonzero_random_count)?;
+        let received =
+            getrandom(&mut *remaining, GetRandomFlags::empty()).map_err(selector_unavailable)?;
+        let received = nonzero_random_count(received)?;
         remaining = &mut remaining[received..];
     }
     validate_nonce(nonce)
@@ -614,47 +631,51 @@ fn validate_nonce(nonce: [u8; 16]) -> Result<[u8; 16], SelectorBoundaryError> {
         .ok_or(SelectorBoundaryError::SelectorUnavailable)
 }
 
-fn prepare_authenticated_execution(
+fn write_authenticated_execution(
+    stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
     spx1: &[u8],
     execution: &mut AuthenticatedProviderExecution,
-) -> Result<EncodedSelectorReply, ()> {
-    let output = execution
-        .with_verified_output(|descriptor, reader| {
-            usize::try_from(descriptor.byte_length)
-                .map_err(artifact_invalid)
-                .and_then(|capacity| {
-                    let mut bytes = Vec::with_capacity(capacity);
-                    reader
-                        .take(descriptor.byte_length.saturating_add(1))
-                        .read_to_end(&mut bytes)
-                        .map_err(io_error)
-                        .and({
-                            if bytes.len() == capacity {
-                                Ok(bytes)
-                            } else {
-                                Err(SelectorBoundaryError::ArtifactInvalid)
-                            }
-                        })
-                })
-        })
-        .map_err(map_to_unit_error);
-    output.and_then(|output| {
-        encode_authenticated_reply(
+) -> Result<(), ()> {
+    let staged = execution.with_verified_reply_output(
+        |result, grant, receipt, audit_records, descriptor, reader| {
+            encode_authenticated_reply(
+                decoded,
+                AuthenticatedSelectorReply {
+                    execute_request: spx1,
+                    terminal: SelectorProviderTerminal::StagedResult {
+                        result,
+                        grant: Some(grant),
+                        receipt: Some(receipt),
+                        audit_records,
+                        output: Some(descriptor),
+                    },
+                },
+            )
+            .map_err(artifact_invalid)
+            .and_then(|reply| {
+                write_reply_with_trailing(stream, &reply, reader, descriptor.byte_length)
+            })
+        },
+    );
+    match staged.map_err(map_to_unit_error)? {
+        Some(()) => Ok(()),
+        None => encode_authenticated_reply(
             decoded,
             AuthenticatedSelectorReply {
                 execute_request: spx1,
-                terminal: SelectorProviderTerminal::Result {
+                terminal: SelectorProviderTerminal::StagedResult {
                     result: execution.spy1_bytes(),
                     grant: Some(execution.agr1_bytes()),
                     receipt: Some(execution.spr1_bytes()),
                     audit_records: execution.sau1_frames(),
-                    output: output.as_deref(),
+                    output: None,
                 },
             },
         )
         .map_err(map_to_unit_error)
-    })
+        .and_then(|reply| write_reply(stream, &reply).map_err(map_to_unit_error)),
+    }
 }
 
 fn write_authenticated_error(
@@ -793,21 +814,42 @@ fn write_local_error(
 }
 
 fn write_reply(
-    stream: &mut UnixStream,
+    stream: &mut impl Write,
     reply: &EncodedSelectorReply,
 ) -> Result<(), SelectorBoundaryError> {
-    u32::try_from(reply.control.len())
-        .map_err(io_error)
-        .and_then(|length| {
-            stream
-                .write_all(&length.to_be_bytes())
-                .and_then(|()| stream.write_all(&reply.control))
-                .and_then(|()| stream.write_all(&reply.trailing))
-                .map_err(io_error)
-        })
+    let length = framed_control_length(reply.control.len())?;
+    stream.write_all(&length.to_be_bytes()).map_err(io_error)?;
+    stream.write_all(&reply.control).map_err(io_error)?;
+    stream.write_all(&reply.trailing).map_err(io_error)
 }
 
-fn read_selector_request<R: Read>(stream: &mut R) -> Result<(DecodedSelectorRequest, Vec<u8>), ()> {
+fn write_reply_with_trailing(
+    stream: &mut impl Write,
+    reply: &EncodedSelectorReply,
+    trailing: &mut dyn Read,
+    expected_length: u64,
+) -> Result<(), SelectorBoundaryError> {
+    let length = framed_control_length(reply.control.len())?;
+    stream.write_all(&length.to_be_bytes()).map_err(io_error)?;
+    stream.write_all(&reply.control).map_err(io_error)?;
+    let copied = std::io::copy(
+        &mut trailing.take(expected_length.saturating_add(1)),
+        stream,
+    )
+    .map_err(io_error)?;
+    (copied == expected_length)
+        .then_some(())
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)
+}
+
+fn framed_control_length(length: usize) -> Result<u32, SelectorBoundaryError> {
+    if length > CONTROL_LIMIT_BYTES {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    u32::try_from(length).map_err(artifact_invalid)
+}
+
+fn read_selector_request<R: Read>(stream: &mut R) -> Result<StagedSelectorRequest, ()> {
     let mut prefix = [0_u8; 4];
     stream.read_exact(&mut prefix).map_err(map_to_unit_error)?;
     let length = u32::from_be_bytes(prefix);
@@ -817,21 +859,45 @@ fn read_selector_request<R: Read>(stream: &mut R) -> Result<(DecodedSelectorRequ
     let length = usize::try_from(length).unwrap_or_default();
     let mut control = vec![0_u8; length];
     stream.read_exact(&mut control).map_err(map_to_unit_error)?;
-    let mut input = Vec::new();
-    (&mut *stream)
-        .take(SELECTOR_INPUT_LIMIT.saturating_add(1))
-        .read_to_end(&mut input)
+    let mut input = tempfile::NamedTempFile::new().map_err(map_to_unit_error)?;
+    let (input_length, input_digest) = stage_selector_input(stream, input.as_file_mut())?;
+    input
+        .as_file_mut()
+        .seek(SeekFrom::Start(0))
         .map_err(map_to_unit_error)?;
-    validate_selector_input_length(input.len())?;
-    decode_request(&control, &input)
-        .map(|decoded| (decoded, input))
+    decode_staged_request(&control, input.as_file_mut(), input_length, input_digest)
+        .map(|decoded| StagedSelectorRequest { decoded, input })
         .map_err(map_to_unit_error)
 }
 
-fn validate_selector_input_length(length: usize) -> Result<(), ()> {
-    u64::try_from(length)
-        .map_err(map_to_unit_error)
-        .and_then(|length| (length <= SELECTOR_INPUT_LIMIT).then_some(()).ok_or(()))
+fn stage_selector_input(
+    input: &mut dyn Read,
+    staged: &mut dyn Write,
+) -> Result<(u64, [u8; 32]), ()> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.SandboxInputBytes.v1\0");
+    let mut length = 0_u64;
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let read = input.read(&mut buffer).map_err(map_to_unit_error)?;
+        if read == 0 {
+            return Ok((length, *hasher.finalize().as_bytes()));
+        }
+        length = checked_staged_input_length(length, read)?;
+        hasher.update(&buffer[..read]);
+        staged
+            .write_all(&buffer[..read])
+            .map_err(map_to_unit_error)?;
+    }
+}
+
+fn checked_staged_input_length(current: u64, read: usize) -> Result<u64, ()> {
+    let read = read as u64;
+    let length = current.checked_add(read).ok_or(())?;
+    if length > SELECTOR_INPUT_LIMIT {
+        return Err(());
+    }
+    Ok(length)
 }
 
 fn root_peer(stream: &UnixStream, expected_uid: u32) -> bool {
@@ -958,6 +1024,18 @@ mod tests {
         stream.write_all(&u32::try_from(frame.len())?.to_be_bytes())?;
         stream.write_all(frame)?;
         Ok(())
+    }
+
+    fn output_descriptor(
+        output: &[u8],
+    ) -> TestResult<crate::sandbox_provider_protocol::PayloadDescriptor> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.SandboxOutputBytes.v1\0");
+        hasher.update(output);
+        Ok(crate::sandbox_provider_protocol::PayloadDescriptor {
+            byte_length: u64::try_from(output.len())?,
+            digest: *hasher.finalize().as_bytes(),
+        })
     }
 
     fn evaluate_composition_request(
@@ -1171,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_helpers_cover_error_mapping_randomness_and_input_bounds() -> TestResult {
+    fn closed_helpers_cover_error_mapping_randomness_and_input_bounds() {
         assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
         assert_eq!(
             selector_unavailable(()),
@@ -1190,12 +1268,41 @@ mod tests {
         );
         let nonzero = std::array::from_fn(|_| 1);
         assert_eq!(validate_nonce(nonzero), Ok(nonzero));
-        assert_eq!(validate_selector_input_length(0), Ok(()));
+        assert_eq!(checked_staged_input_length(0, 0), Ok(0));
+        assert_eq!(framed_control_length(1), Ok(1));
         assert_eq!(
-            validate_selector_input_length(usize::try_from(SELECTOR_INPUT_LIMIT)? + 1),
+            framed_control_length(usize::MAX),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(checked_staged_input_length(u64::MAX, 1), Err(()));
+        assert_eq!(
+            checked_staged_input_length(SELECTOR_INPUT_LIMIT, 1),
             Err(())
         );
-        Ok(())
+
+        let bindings = EvaluationNamespaceBindings::default();
+        assert_eq!(
+            bindings.release(
+                EvaluationNamespaceLease {
+                    namespace: [0; 14],
+                    request_digest: [0; 32],
+                    conflict: true,
+                },
+                false,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            bindings.release(
+                EvaluationNamespaceLease {
+                    namespace: [0; 14],
+                    request_digest: [0; 32],
+                    conflict: false,
+                },
+                false,
+            ),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
     }
 
     #[test]
@@ -1244,6 +1351,74 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_namespace_binding_wakes_a_waiting_conflict() -> TestResult {
+        let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let bindings = std::sync::Arc::new(EvaluationNamespaceBindings::default());
+        let lease = bindings.acquire(&request)?;
+        let mut next_request = request;
+        next_request.implementation.organization_id = Some("next-owner".to_owned());
+        refresh_request_digest(&mut next_request)?;
+
+        let waiting_bindings = std::sync::Arc::clone(&bindings);
+        let waiter = std::thread::spawn(move || {
+            let lease = waiting_bindings.acquire(&next_request)?;
+            waiting_bindings.release(lease, false)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while bindings.waiting.load(Ordering::Acquire) == 0 {
+            if std::time::Instant::now() >= deadline {
+                return Err("namespace waiter did not block".into());
+            }
+            std::thread::yield_now();
+        }
+        bindings.release(lease, false)?;
+        waiter.join().map_err(|_| "namespace waiter panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn poisoned_namespace_state_fails_closed_on_acquire_and_release() -> TestResult {
+        let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let acquire_bindings = EvaluationNamespaceBindings::default();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = acquire_bindings
+                .states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert!(matches!(
+            acquire_bindings.acquire(&request),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        ));
+
+        let release_bindings = EvaluationNamespaceBindings::default();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = release_bindings
+                .states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        let mut namespace = [0; 14];
+        namespace.copy_from_slice(&request.request_id[..14]);
+        assert_eq!(
+            release_bindings.release(
+                EvaluationNamespaceLease {
+                    namespace,
+                    request_digest: request.request_digest,
+                    conflict: false,
+                },
+                false,
+            ),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn evaluation_namespace_binding_is_bounded() -> TestResult {
         let (mut request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
         request.request_id[..14].fill(u8::MAX);
@@ -1264,6 +1439,7 @@ mod tests {
         let bindings = EvaluationNamespaceBindings {
             states: Mutex::new(states),
             changed: Condvar::new(),
+            waiting: AtomicUsize::new(0),
         };
         assert!(matches!(
             bindings.execute_ordered(&request, || Err(ProviderTransportError::BeforeAdmission)),
@@ -1282,7 +1458,7 @@ mod tests {
             _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
             _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
             _spx1: &[u8],
-            _input: &[u8],
+            _input: &mut dyn ReadSeek,
             _watchdog: Duration,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
             self.0
@@ -1302,7 +1478,7 @@ mod tests {
             _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
             _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
             _spx1: &[u8],
-            _input: &[u8],
+            _input: &mut dyn ReadSeek,
             _watchdog: Duration,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
             self.0
@@ -1325,7 +1501,7 @@ mod tests {
             _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
             _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
             spx1: &[u8],
-            _input: &[u8],
+            _input: &mut dyn ReadSeek,
             _watchdog: Duration,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
             let request = SandboxExecuteRequest::from_canonical_cbor(spx1)
@@ -1390,9 +1566,13 @@ mod tests {
         client.write_all(&encoded.control)?;
         client.write_all(&encoded.attempt_stream)?;
         client.shutdown(std::net::Shutdown::Write)?;
-        let (decoded, input) = read_selector_request(&mut server).map_err(|()| "read failed")?;
+        let StagedSelectorRequest { decoded, mut input } =
+            read_selector_request(&mut server).map_err(|()| "read failed")?;
         assert_eq!(decoded.request.request_digest, request.request_digest);
-        assert_eq!(input, encoded.attempt_stream);
+        let mut staged = Vec::new();
+        input.as_file_mut().seek(SeekFrom::Start(0))?;
+        input.as_file_mut().read_to_end(&mut staged)?;
+        assert_eq!(staged, encoded.attempt_stream);
         Ok(())
     }
 
@@ -1820,10 +2000,7 @@ mod tests {
         );
         let mut file = tempfile::NamedTempFile::new()?;
         file.write_all(b"output")?;
-        let descriptor = crate::sandbox_provider_protocol::PayloadDescriptor {
-            byte_length: 6,
-            digest: [0; 32],
-        };
+        let descriptor = output_descriptor(b"output")?;
         let mut execution = AuthenticatedProviderExecution::from_test_frames(
             fixture.agr1.clone(),
             fixture.spr1.clone(),
@@ -1831,25 +2008,83 @@ mod tests {
             fixture.sau1.clone(),
             Some((file, descriptor)),
         );
-        let reply = prepare_authenticated_execution(&decoded, &fixture.spx1, &mut execution)
+        let (mut reply_reader, mut reply_writer) = UnixStream::pair()?;
+        write_authenticated_execution(&mut reply_writer, &decoded, &fixture.spx1, &mut execution)
             .map_err(|()| "authenticated result composition failed")?;
-        assert!(!reply.control.is_empty());
-        assert_eq!(reply.trailing, b"output");
+        reply_writer.shutdown(std::net::Shutdown::Write)?;
+        assert!(!read_frame(&mut reply_reader)?.is_empty());
+        let mut trailing = Vec::new();
+        reply_reader.read_to_end(&mut trailing)?;
+        assert_eq!(trailing, b"output");
 
-        let mut staged = tempfile::NamedTempFile::new()?;
-        staged.write_all(b"output")?;
-        let complete = AuthenticatedProviderExecution::from_test_frames(
+        let mut short_execution = AuthenticatedProviderExecution::from_test_frames(
             fixture.agr1.clone(),
             fixture.spr1.clone(),
             fixture.spy1.clone(),
             fixture.sau1.clone(),
             Some((
-                staged,
-                crate::sandbox_provider_protocol::PayloadDescriptor {
-                    byte_length: 6,
-                    digest: [0; 32],
-                },
+                tempfile::NamedTempFile::new()?,
+                output_descriptor(b"output")?,
             )),
+        );
+        let (_, mut short_writer) = UnixStream::pair()?;
+        assert!(write_authenticated_execution(
+            &mut short_writer,
+            &decoded,
+            &fixture.spx1,
+            &mut short_execution,
+        )
+        .is_err());
+
+        let mut no_output = AuthenticatedProviderExecution::from_test_frames(
+            fixture.agr1,
+            fixture.spr1,
+            fixture.spy1,
+            fixture.sau1,
+            None,
+        );
+        let (_, mut no_output_writer) = UnixStream::pair()?;
+        assert!(write_authenticated_execution(
+            &mut no_output_writer,
+            &decoded,
+            &fixture.spx1,
+            &mut no_output,
+        )
+        .is_err());
+
+        let (mut root, _) = UnixStream::pair()?;
+        assert!(
+            write_authenticated_error(&mut root, &decoded, &fixture.spx1, b"unsigned error")
+                .is_err()
+        );
+        let (mut root, mut client) = UnixStream::pair()?;
+        write_authenticated_error(&mut root, &decoded, &fixture.spx1, &fixture.spe1)?;
+        let mut prefix = [0; 4];
+        client.read_exact(&mut prefix)?;
+        let mut control = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
+        client.read_exact(&mut control)?;
+        assert!(!control.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_terminal_writes_authenticated_execution_and_error() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
+        let transport_request = SandboxExecuteRequest::from_canonical_cbor(&fixture.spx1)?;
+        let decoded = crate::selector_protocol::decoded_request_for_execute_test(
+            request,
+            resolved.attempt().clone(),
+            &transport_request,
+        );
+        let mut staged = tempfile::NamedTempFile::new()?;
+        staged.write_all(b"output")?;
+        let complete = AuthenticatedProviderExecution::from_test_frames(
+            fixture.agr1,
+            fixture.spr1,
+            fixture.spy1,
+            fixture.sau1,
+            Some((staged, output_descriptor(b"output")?)),
         );
         let (mut reply_reader, mut reply_writer) = UnixStream::pair()?;
         write_provider_terminal(
@@ -1868,50 +2103,11 @@ mod tests {
             &mut reply_writer,
             &decoded,
             &fixture.spx1,
-            AuthenticatedProviderTerminal::Error(fixture.spe1.clone()),
+            AuthenticatedProviderTerminal::Error(fixture.spe1),
             false,
         )?;
         reply_reader.read_exact(&mut length)?;
         assert_ne!(u32::from_be_bytes(length), 0);
-
-        let mut short_execution = AuthenticatedProviderExecution::from_test_frames(
-            fixture.agr1.clone(),
-            fixture.spr1.clone(),
-            fixture.spy1.clone(),
-            fixture.sau1.clone(),
-            Some((
-                tempfile::NamedTempFile::new()?,
-                crate::sandbox_provider_protocol::PayloadDescriptor {
-                    byte_length: 1,
-                    digest: [0; 32],
-                },
-            )),
-        );
-        assert!(
-            prepare_authenticated_execution(&decoded, &fixture.spx1, &mut short_execution).is_err()
-        );
-
-        let mut no_output = AuthenticatedProviderExecution::from_test_frames(
-            fixture.agr1,
-            fixture.spr1,
-            fixture.spy1,
-            fixture.sau1,
-            None,
-        );
-        assert!(prepare_authenticated_execution(&decoded, &fixture.spx1, &mut no_output).is_err());
-
-        let (mut root, _) = UnixStream::pair()?;
-        assert!(
-            write_authenticated_error(&mut root, &decoded, &fixture.spx1, b"unsigned error")
-                .is_err()
-        );
-        let (mut root, mut client) = UnixStream::pair()?;
-        write_authenticated_error(&mut root, &decoded, &fixture.spx1, &fixture.spe1)?;
-        let mut prefix = [0; 4];
-        client.read_exact(&mut prefix)?;
-        let mut control = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
-        client.read_exact(&mut control)?;
-        assert!(!control.is_empty());
         Ok(())
     }
 
@@ -2049,6 +2245,118 @@ mod tests {
         fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
             Err(std::io::Error::other("injected input read failure"))
         }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected input write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NthFailWriter {
+        writes: usize,
+        fail_at: usize,
+    }
+
+    impl Write for NthFailWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            if self.writes == self.fail_at {
+                Err(std::io::Error::other("injected reply write failure"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn selector_input_staging_covers_success_and_io_failures() {
+        assert!(stage_selector_input(&mut FailingReader, &mut Vec::new()).is_err());
+        assert!(
+            stage_selector_input(&mut std::io::Cursor::new(b"input"), &mut FailingWriter,).is_err()
+        );
+        let mut staged = Vec::new();
+        assert_eq!(
+            stage_selector_input(&mut std::io::Cursor::new(b"input"), &mut staged)
+                .map(|(length, _)| length),
+            Ok(5)
+        );
+        assert_eq!(staged, b"input");
+    }
+
+    #[test]
+    fn reply_writers_close_each_output_boundary() {
+        let reply = EncodedSelectorReply {
+            control: b"control".to_vec(),
+            trailing: b"trailing".to_vec(),
+        };
+        for fail_at in 1..=3 {
+            let mut writer = NthFailWriter { writes: 0, fail_at };
+            assert_eq!(
+                write_reply(&mut writer, &reply),
+                Err(SelectorBoundaryError::Io)
+            );
+        }
+        for fail_at in 1..=3 {
+            let mut writer = NthFailWriter { writes: 0, fail_at };
+            assert_eq!(
+                write_reply_with_trailing(
+                    &mut writer,
+                    &reply,
+                    &mut std::io::Cursor::new(b"output"),
+                    6,
+                ),
+                Err(SelectorBoundaryError::Io)
+            );
+        }
+
+        let mut exact = Vec::new();
+        assert_eq!(
+            write_reply_with_trailing(&mut exact, &reply, &mut std::io::Cursor::new(b"output"), 6,),
+            Ok(())
+        );
+        assert_eq!(&exact[4 + reply.control.len()..], b"output");
+        assert_eq!(
+            write_reply_with_trailing(
+                &mut Vec::new(),
+                &reply,
+                &mut std::io::Cursor::new(b"short"),
+                6,
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            write_reply_with_trailing(
+                &mut Vec::new(),
+                &reply,
+                &mut std::io::Cursor::new(b"output"),
+                5,
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        let oversized = EncodedSelectorReply {
+            control: vec![0; CONTROL_LIMIT_BYTES + 1],
+            trailing: Vec::new(),
+        };
+        assert_eq!(
+            write_reply(&mut Vec::new(), &oversized),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            write_reply_with_trailing(&mut Vec::new(), &oversized, &mut std::io::empty(), 0,),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
     }
 
     #[test]

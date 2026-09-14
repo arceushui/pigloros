@@ -1,7 +1,7 @@
 //! Root-owned immutable artifact and selector-socket boundary.
 
 use std::fs::Metadata;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFla
 use crate::evaluator::{AdapterError, CaseAttempt, SubjectAdapter, SubjectObservation};
 use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
 use crate::selector_protocol::{
-    decode_reply, encode_request, reply_carries_admission_evidence, EncodedSelectorRequest,
+    decode_staged_reply, encode_request, reply_carries_admission_evidence, EncodedSelectorRequest,
 };
 
 pub mod installation;
@@ -31,10 +31,10 @@ struct AttemptDeadline {
 
 impl AttemptDeadline {
     fn new(watchdog_ms: u64) -> Result<Self, AdapterError> {
-        Instant::now()
+        let expires_at = Instant::now()
             .checked_add(Duration::from_millis(watchdog_ms))
-            .map(|expires_at| Self { expires_at })
-            .ok_or(AdapterError::ProtocolFailure)
+            .ok_or(AdapterError::ProtocolFailure)?;
+        Ok(Self { expires_at })
     }
 
     fn remaining(&self) -> std::io::Result<Duration> {
@@ -57,7 +57,8 @@ impl AttemptDeadline {
         // including a selected listener whose accept queue is full.
         stream.set_write_timeout(Some(self.remaining()?))?;
         connect(&stream, &address)?;
-        self.remaining().map(|_| stream)
+        self.remaining()?;
+        Ok(stream)
     }
 }
 
@@ -71,7 +72,8 @@ impl Read for DeadlineStream {
         self.stream
             .set_read_timeout(Some(self.deadline.remaining()?))?;
         let read = self.stream.read(bytes)?;
-        self.deadline.remaining().map(|_| read)
+        self.deadline.remaining()?;
+        Ok(read)
     }
 }
 
@@ -80,11 +82,13 @@ impl Write for DeadlineStream {
         self.stream
             .set_write_timeout(Some(self.deadline.remaining()?))?;
         let written = self.stream.write(bytes)?;
-        self.deadline.remaining().map(|_| written)
+        self.deadline.remaining()?;
+        Ok(written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.deadline.remaining().and_then(|_| self.stream.flush())
+        self.deadline.remaining()?;
+        self.stream.flush()
     }
 }
 
@@ -95,6 +99,44 @@ fn transport_error(error: &std::io::Error) -> AdapterError {
         }
         _ => AdapterError::ProtocolFailure,
     }
+}
+
+fn close_transport<T>(result: std::io::Result<T>) -> Result<T, AdapterError> {
+    result.map_err(|error| transport_error(&error))
+}
+
+fn protocol_failure<T>(_: T) -> AdapterError {
+    AdapterError::ProtocolFailure
+}
+
+fn framed_control_length(length: usize) -> Result<u32, AdapterError> {
+    if length > 16 * 1024 * 1024 {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    u32::try_from(length).map_err(protocol_failure)
+}
+
+fn write_selector_request(
+    stream: &mut impl Write,
+    request: &EncodedSelectorRequest,
+) -> Result<(), AdapterError> {
+    let control_length = framed_control_length(request.control.len())?;
+    close_transport(stream.write_all(&control_length.to_be_bytes()))?;
+    close_transport(stream.write_all(&request.control))?;
+    close_transport(stream.write_all(&request.attempt_stream))?;
+    close_transport(stream.flush())
+}
+
+fn read_selector_control(stream: &mut impl Read) -> Result<Vec<u8>, AdapterError> {
+    let mut prefix = [0; 4];
+    close_transport(stream.read_exact(&mut prefix))?;
+    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(protocol_failure)?;
+    if length == 0 || length > 16 * 1024 * 1024 {
+        return Err(AdapterError::ProtocolFailure);
+    }
+    let mut control = vec![0; length];
+    close_transport(stream.read_exact(&mut control))?;
+    Ok(control)
 }
 
 /// Root-authenticated transport to the single selected provider.
@@ -115,9 +157,7 @@ impl SelectorAdapter {
     /// Returns a closed failure when the supplied request cannot produce a
     /// self-consistent canonical EVR1 representation.
     pub fn new(request: EvaluationRequest) -> Result<Self, AdapterError> {
-        let request_bytes = request
-            .to_canonical_cbor()
-            .map_err(|_| AdapterError::ProtocolFailure)?;
+        let request_bytes = request.to_canonical_cbor().map_err(protocol_failure)?;
         Ok(Self {
             kind: request.subject_adapter,
             subject_artifact_digest: request.subject_artifact_digest,
@@ -171,59 +211,89 @@ impl SelectorAdapter {
             stream: socket,
             deadline,
         };
-        let control_length =
-            u32::try_from(request.control.len()).map_err(|_| AdapterError::ProtocolFailure)?;
-        stream
-            .write_all(&control_length.to_be_bytes())
-            .and_then(|()| stream.write_all(&request.control))
-            .and_then(|()| stream.write_all(&request.attempt_stream))
-            .and_then(|()| stream.flush())
-            .map_err(|error| transport_error(&error))?;
+        write_selector_request(&mut stream, request)?;
         stream
             .stream
             .shutdown(std::net::Shutdown::Write)
-            .map_err(|_| AdapterError::ProtocolFailure)?;
-        let mut prefix = [0; 4];
-        stream
-            .read_exact(&mut prefix)
-            .map_err(|error| transport_error(&error))?;
-        let length = usize::try_from(u32::from_be_bytes(prefix))
-            .map_err(|_| AdapterError::ProtocolFailure)?;
-        if length == 0 || length > 16 * 1024 * 1024 {
-            return Err(AdapterError::ProtocolFailure);
-        }
-        let mut control = vec![0; length];
-        stream
-            .read_exact(&mut control)
-            .map_err(|error| transport_error(&error))?;
+            .map_err(protocol_failure)?;
+        let control = read_selector_control(&mut stream)?;
         let has_admission_evidence = reply_carries_admission_evidence(&control);
-        let mut trailing = Vec::new();
-        stream
-            .take(MAX_SELECTOR_TRAILING_BYTES + 1)
-            .read_to_end(&mut trailing)
-            .map_err(|error| {
-                if has_admission_evidence {
-                    AdapterError::AuthenticatedEvidenceFailure
-                } else {
-                    transport_error(&error)
-                }
-            })?;
-        // Read::take bounds the accumulated length to less than 2^28 bytes.
-        let trailing_length = trailing.len() as u64;
-        if trailing_length > MAX_SELECTOR_TRAILING_BYTES {
-            return Err(if has_admission_evidence {
+        let mut trailing = tempfile::NamedTempFile::new().map_err(|_| {
+            if has_admission_evidence {
                 AdapterError::AuthenticatedEvidenceFailure
             } else {
                 AdapterError::ProtocolFailure
-            });
-        }
-        decode_reply(
+            }
+        })?;
+        let (trailing_length, trailing_digest) =
+            stage_selector_reply(&mut stream, trailing.as_file_mut(), has_admission_evidence)?;
+        trailing
+            .as_file_mut()
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| close_staging_error(has_admission_evidence))?;
+        decode_staged_reply(
             &control,
-            &trailing,
+            trailing.as_file_mut(),
+            trailing_length,
+            trailing_digest,
             request,
             evr1_digest,
             attempt.budget.output_bytes,
         )
+    }
+}
+
+fn stage_selector_reply(
+    input: &mut dyn Read,
+    staged: &mut dyn Write,
+    authenticated: bool,
+) -> Result<(u64, [u8; 32]), AdapterError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.SandboxOutputBytes.v1\0");
+    let mut length = 0_u64;
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| close_staging_io_error(authenticated, &error))?;
+        if read == 0 {
+            return Ok((length, *hasher.finalize().as_bytes()));
+        }
+        length = checked_staged_reply_length(length, read, authenticated)?;
+        hasher.update(&buffer[..read]);
+        staged
+            .write_all(&buffer[..read])
+            .map_err(|_| close_staging_error(authenticated))?;
+    }
+}
+
+fn checked_staged_reply_length(
+    current: u64,
+    read: usize,
+    authenticated: bool,
+) -> Result<u64, AdapterError> {
+    let error = close_staging_error(authenticated);
+    let read = read as u64;
+    let length = current.checked_add(read).ok_or(error)?;
+    if length > MAX_SELECTOR_TRAILING_BYTES {
+        return Err(error);
+    }
+    Ok(length)
+}
+
+const fn close_staging_error(authenticated: bool) -> AdapterError {
+    if authenticated {
+        AdapterError::AuthenticatedEvidenceFailure
+    } else {
+        AdapterError::ProtocolFailure
+    }
+}
+
+fn close_staging_io_error(authenticated: bool, error: &std::io::Error) -> AdapterError {
+    if authenticated {
+        AdapterError::AuthenticatedEvidenceFailure
+    } else {
+        transport_error(error)
     }
 }
 
@@ -330,6 +400,51 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("read failed"))
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("write failed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NthFailWriter {
+        calls: usize,
+        fail_at: usize,
+    }
+
+    impl Write for NthFailWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.calls == self.fail_at {
+                Err(std::io::Error::other("write failed"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.calls += 1;
+            if self.calls == self.fail_at {
+                Err(std::io::Error::other("flush failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn selector_request() -> Result<EvaluationRequest, AdapterError> {
         use crate::evaluator_protocol::{
@@ -875,6 +990,20 @@ mod tests {
     #[test]
     fn selector_deadline_bounds_reads_writes_and_flush_after_expiry(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let (socket, mut peer) = UnixStream::pair()?;
+        peer.write_all(b"r")?;
+        let mut live = DeadlineStream {
+            stream: socket,
+            deadline: AttemptDeadline::new(1_000)?,
+        };
+        let mut byte = [0];
+        live.read_exact(&mut byte)?;
+        assert_eq!(byte, *b"r");
+        live.write_all(b"w")?;
+        live.flush()?;
+        peer.read_exact(&mut byte)?;
+        assert_eq!(byte, *b"w");
+
         let (socket, _peer) = UnixStream::pair()?;
         let mut stream = DeadlineStream {
             stream: socket,
@@ -1042,6 +1171,93 @@ mod tests {
                 MAX_SELECTOR_TRAILING_BYTES + 1
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn staged_reply_closes_io_and_length_failures_by_admission_phase() {
+        assert_eq!(framed_control_length(1), Ok(1));
+        assert_eq!(
+            framed_control_length(usize::MAX),
+            Err(AdapterError::ProtocolFailure)
+        );
+        for authenticated in [false, true] {
+            let expected = close_staging_error(authenticated);
+            assert_eq!(
+                stage_selector_reply(&mut FailingReader, &mut Vec::new(), authenticated),
+                Err(expected)
+            );
+            assert_eq!(
+                stage_selector_reply(
+                    &mut std::io::Cursor::new(b"output"),
+                    &mut FailingWriter,
+                    authenticated,
+                ),
+                Err(expected)
+            );
+            assert_eq!(
+                checked_staged_reply_length(MAX_SELECTOR_TRAILING_BYTES, 1, authenticated),
+                Err(expected)
+            );
+            assert_eq!(
+                checked_staged_reply_length(u64::MAX, 1, authenticated),
+                Err(expected)
+            );
+        }
+
+        let mut staged = Vec::new();
+        assert_eq!(
+            stage_selector_reply(&mut std::io::Cursor::new(b"output"), &mut staged, false,)
+                .map(|(length, _)| length),
+            Ok(6)
+        );
+        assert_eq!(staged, b"output");
+    }
+
+    #[test]
+    fn selector_control_io_closes_every_framing_boundary() -> Result<(), AdapterError> {
+        let request = selector_request()?;
+        let encoded = encode_request(&request, b"evr1", &selector_attempt(), 0)?;
+        let oversized = EncodedSelectorRequest {
+            control: vec![0; 16 * 1024 * 1024 + 1],
+            attempt_stream: Vec::new(),
+            provider_request_id: [1; 16],
+            attempt_id: [2; 16],
+            digest: [3; 32],
+        };
+        assert_eq!(
+            write_selector_request(&mut Vec::new(), &oversized),
+            Err(AdapterError::ProtocolFailure)
+        );
+        for fail_at in 1..=4 {
+            assert_eq!(
+                write_selector_request(&mut NthFailWriter { calls: 0, fail_at }, &encoded,),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        let mut framed = Vec::new();
+        write_selector_request(&mut framed, &encoded)?;
+
+        assert_eq!(
+            read_selector_control(&mut FailingReader),
+            Err(AdapterError::ProtocolFailure)
+        );
+        for prefix in [0_u32, 16 * 1024 * 1024 + 1] {
+            assert_eq!(
+                read_selector_control(&mut std::io::Cursor::new(prefix.to_be_bytes())),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
+        assert_eq!(
+            read_selector_control(&mut std::io::Cursor::new(1_u32.to_be_bytes())),
+            Err(AdapterError::ProtocolFailure)
+        );
+        let mut reply = 3_u32.to_be_bytes().to_vec();
+        reply.extend_from_slice(b"SLY");
+        assert_eq!(
+            read_selector_control(&mut std::io::Cursor::new(reply))?,
+            b"SLY"
+        );
         Ok(())
     }
 }

@@ -724,8 +724,7 @@ impl AdmittedSandboxProvider {
         if image.image_trust_epoch != self.trust.trust_epoch() {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        let image_length =
-            u64::try_from(root_image.len()).map_err(|_| SandboxAdmissionError::ArtifactMismatch)?;
+        let image_length = root_image.len() as u64;
         if image.root_image_length != image_length
             || image.root_image_blake3_digest != digest_bytes(root_image)
             || image.executable_blake3_digest != digest_bytes(executable)

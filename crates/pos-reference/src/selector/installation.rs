@@ -196,10 +196,7 @@ impl InstallationManifest {
     /// Returns an error for a malformed, noncanonical, inconsistent, or
     /// ambiguous bootstrap document.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        if bytes.is_empty()
-            || u64::try_from(bytes.len()).map_err(|_| ProtocolError::FieldOutOfBounds)?
-                > MANIFEST_LIMIT
-        {
+        if bytes.is_empty() || bytes.len() as u64 > MANIFEST_LIMIT {
             return Err(ProtocolError::FieldOutOfBounds);
         }
         let document = decode_canonical(bytes)?;
@@ -1595,6 +1592,13 @@ pub mod tests {
         invalid_root_key[3] = Value::Bytes(non_curve_point);
         assert!(
             InstallationManifest::from_canonical_cbor(&encode_manifest(invalid_root_key)?).is_err()
+        );
+        let mut weak_root_key = unsigned(valid_objects());
+        let mut identity_point = vec![0; 32];
+        identity_point[0] = 1;
+        weak_root_key[3] = Value::Bytes(identity_point);
+        assert!(
+            InstallationManifest::from_canonical_cbor(&encode_manifest(weak_root_key)?).is_err()
         );
         let mut duplicate = valid_objects();
         duplicate[1] = duplicate[0].clone();

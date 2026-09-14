@@ -34,6 +34,11 @@ const MAX_AUDIT_RECORDS: usize = 256;
 const MAX_AUDIT_BYTES: usize = CONTROL_LIMIT;
 const ROOT_UID: u32 = 0;
 
+/// Rewindable staged payload used across authenticated provider retries.
+pub(crate) trait ReadSeek: Read + Seek {}
+
+impl<T: Read + Seek> ReadSeek for T {}
+
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
 }
@@ -173,6 +178,8 @@ impl AuthenticatedProviderExecution {
     /// # Errors
     /// Returns a closed I/O failure when staging cannot be rewound or read, or when `compose`
     /// rejects the descriptor or output stream.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn with_verified_output<T>(
         &mut self,
         compose: impl FnOnce(&PayloadDescriptor, &mut dyn Read) -> Result<T, SelectorBoundaryError>,
@@ -180,6 +187,40 @@ impl AuthenticatedProviderExecution {
         self.output
             .as_mut()
             .map(|output| output.with_reader(compose))
+            .transpose()
+    }
+
+    /// Gives root composition authenticated evidence and its verified output stream together.
+    ///
+    /// # Errors
+    /// Returns a closed I/O failure when staging cannot be rewound or `compose` rejects the
+    /// authenticated evidence or output stream.
+    pub(crate) fn with_verified_reply_output<T>(
+        &mut self,
+        compose: impl FnOnce(
+            &[u8],
+            &[u8],
+            &[u8],
+            &[Vec<u8>],
+            &PayloadDescriptor,
+            &mut dyn Read,
+        ) -> Result<T, SelectorBoundaryError>,
+    ) -> Result<Option<T>, SelectorBoundaryError> {
+        let frames = &self.frames;
+        self.output
+            .as_mut()
+            .map(|output| {
+                output.with_reader(|descriptor, reader| {
+                    compose(
+                        frames.spy1(),
+                        frames.agr1(),
+                        frames.spr1(),
+                        frames.sau1(),
+                        descriptor,
+                        reader,
+                    )
+                })
+            })
             .transpose()
     }
 }
@@ -456,17 +497,17 @@ impl ProviderTransport {
     /// # Errors
     /// Returns whether the failure occurred before or after authentication of
     /// the one retained AGR1 grant.
-    pub(crate) fn execute(
+    pub(crate) fn execute_staged(
         &self,
         admitted: &AdmittedSandboxProvider,
         commitment: &SelectorGrantCommitment,
         spx1: &[u8],
-        input: &[u8],
+        input: &mut dyn ReadSeek,
         watchdog: Duration,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
         let request =
             SandboxExecuteRequest::from_canonical_cbor(spx1).map_err(transport_before_admission)?;
-        validate_input(&request.adapter_input, input).map_err(transport_before_admission)?;
+        validate_staged_input(&request.adapter_input, input).map_err(transport_before_admission)?;
         let deadline = Deadline::new(watchdog).map_err(transport_before_admission)?;
         let mut retained_grant = None;
         match self.execute_once(
@@ -508,13 +549,32 @@ impl ProviderTransport {
         }
     }
 
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn execute(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        commitment: &SelectorGrantCommitment,
+        spx1: &[u8],
+        input: &[u8],
+        watchdog: Duration,
+    ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+        self.execute_staged(
+            admitted,
+            commitment,
+            spx1,
+            &mut std::io::Cursor::new(input),
+            watchdog,
+        )
+    }
+
     fn execute_once(
         &self,
         admitted: &AdmittedSandboxProvider,
         commitment: &SelectorGrantCommitment,
         request: &SandboxExecuteRequest,
         spx1: &[u8],
-        input: &[u8],
+        input: &mut dyn ReadSeek,
         deadline: &Deadline,
         retained_grant: &mut Option<RetainedGrant>,
     ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
@@ -627,38 +687,57 @@ const fn ensure_connected_poll(
     Ok(())
 }
 
-fn validate_input(
+fn validate_staged_input(
     descriptor: &PayloadDescriptor,
-    input: &[u8],
+    input: &mut dyn ReadSeek,
 ) -> Result<(), SelectorBoundaryError> {
-    u64::try_from(input.len())
-        .map_err(artifact_invalid)
-        .and_then(|length| {
-            if length != descriptor.byte_length
-                || payload_digest(PayloadDirection::Input, input) != descriptor.digest
-            {
-                Err(SelectorBoundaryError::ArtifactInvalid)
-            } else {
-                Ok(())
-            }
-        })
+    input.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.SandboxInputBytes.v1\0");
+    let mut length = 0_u64;
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let read = input.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        length = length
+            .checked_add(read as u64)
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        if length > descriptor.byte_length {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    input.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    if length == descriptor.byte_length && hasher.finalize().as_bytes() == &descriptor.digest {
+        Ok(())
+    } else {
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    }
 }
 
 fn write_input(
     stream: &mut UnixStream,
     request: &SandboxExecuteRequest,
-    input: &[u8],
+    input: &mut dyn ReadSeek,
     deadline: &Deadline,
 ) -> Result<(), ReceiveFailure> {
-    input
-        .chunks(CHUNK_BYTES)
-        .enumerate()
-        .try_for_each(|(index, bytes)| {
-            u64::try_from(index)
-                .map_err(receive_invalid)
-                .and_then(|index| encode_input_chunk(request, index, bytes))
-                .and_then(|chunk| write_frame(stream, &chunk, deadline))
-        })
+    input.seek(SeekFrom::Start(0)).map_err(receive_incomplete)?;
+    let mut index = 0_usize;
+    loop {
+        let mut bytes = Vec::with_capacity(CHUNK_BYTES);
+        (&mut *input)
+            .take(CHUNK_BYTES as u64)
+            .read_to_end(&mut bytes)
+            .map_err(receive_incomplete)?;
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let chunk = encode_input_chunk(request, index as u64, &bytes)?;
+        write_frame(stream, &chunk, deadline)?;
+        index += 1;
+    }
 }
 
 fn encode_input_chunk(
@@ -666,13 +745,9 @@ fn encode_input_chunk(
     index: u64,
     bytes: &[u8],
 ) -> Result<Vec<u8>, ReceiveFailure> {
-    u64::try_from(CHUNK_BYTES)
-        .map_err(receive_invalid)
-        .and_then(|chunk_bytes| {
-            index
-                .checked_mul(chunk_bytes)
-                .ok_or(ReceiveFailure::Invalid)
-        })
+    index
+        .checked_mul(CHUNK_BYTES as u64)
+        .ok_or(ReceiveFailure::Invalid)
         .and_then(|offset| {
             let unsigned = Value::Array(vec![
                 Value::Text("SBC1".to_owned()),
@@ -1082,6 +1157,7 @@ fn record_digest(magic: &str, unsigned: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+#[cfg(test)]
 fn payload_digest(direction: PayloadDirection, bytes: &[u8]) -> [u8; 32] {
     let domain = match direction {
         PayloadDirection::Input => b"PiglorOS.SandboxInputBytes.v1\0".as_slice(),
@@ -1132,6 +1208,33 @@ mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    struct FaultingReadSeek {
+        seek_count: usize,
+        fail_seek_at: Option<usize>,
+        fail_read: bool,
+    }
+
+    impl Read for FaultingReadSeek {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            if self.fail_read {
+                Err(std::io::Error::other("injected read failure"))
+            } else {
+                Ok(0)
+            }
+        }
+    }
+
+    impl Seek for FaultingReadSeek {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            self.seek_count += 1;
+            if self.fail_seek_at == Some(self.seek_count) {
+                Err(std::io::Error::other("injected seek failure"))
+            } else {
+                Ok(0)
+            }
+        }
+    }
 
     fn synchronize_control_reply(
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
@@ -1548,16 +1651,63 @@ mod tests {
             byte_length: u64::try_from(input.len())?,
             digest: payload_digest(PayloadDirection::Input, input),
         };
-        assert!(validate_input(&descriptor, input).is_ok());
-        assert!(validate_input(&descriptor, b"other").is_err());
-        assert!(validate_input(
+        assert!(validate_staged_input(&descriptor, &mut std::io::Cursor::new(input)).is_ok());
+        assert!(validate_staged_input(&descriptor, &mut std::io::Cursor::new(b"other")).is_err());
+        assert!(validate_staged_input(
             &PayloadDescriptor {
                 byte_length: descriptor.byte_length + 1,
                 digest: descriptor.digest,
             },
-            input,
+            &mut std::io::Cursor::new(input),
         )
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn staged_input_validation_rejects_each_io_boundary() -> TestResult {
+        let descriptor = PayloadDescriptor {
+            byte_length: 0,
+            digest: payload_digest(PayloadDirection::Input, b""),
+        };
+        for (fail_seek_at, fail_read) in [(Some(1), false), (None, true), (Some(2), false)] {
+            let mut input = FaultingReadSeek {
+                seek_count: 0,
+                fail_seek_at,
+                fail_read,
+            };
+            assert_eq!(
+                validate_staged_input(&descriptor, &mut input),
+                Err(SelectorBoundaryError::Io)
+            );
+        }
+
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        for (fail_seek_at, fail_read) in [(Some(1), false), (None, true)] {
+            let (mut stream, _peer) = UnixStream::pair()?;
+            let mut input = FaultingReadSeek {
+                seek_count: 0,
+                fail_seek_at,
+                fail_read,
+            };
+            assert!(matches!(
+                write_input(&mut stream, &fixture.request, &mut input, &deadline),
+                Err(ReceiveFailure::Incomplete)
+            ));
+        }
+
+        let (mut stream, peer) = UnixStream::pair()?;
+        drop(peer);
+        assert!(matches!(
+            write_input(
+                &mut stream,
+                &fixture.request,
+                &mut std::io::Cursor::new(b"input"),
+                &deadline,
+            ),
+            Err(ReceiveFailure::Incomplete)
+        ));
         Ok(())
     }
 
@@ -2271,8 +2421,13 @@ mod tests {
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let deadline = Deadline::new(Duration::from_secs(1))?;
         let (mut root, mut provider) = UnixStream::pair()?;
-        write_input(&mut root, &fixture.request, b"input", &deadline)
-            .map_err(|error| format!("input write failed: {error:?}"))?;
+        write_input(
+            &mut root,
+            &fixture.request,
+            &mut std::io::Cursor::new(b"input"),
+            &deadline,
+        )
+        .map_err(|error| format!("input write failed: {error:?}"))?;
         root.shutdown(std::net::Shutdown::Write)?;
 
         let bytes = read_frame(&mut provider, &deadline)
