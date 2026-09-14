@@ -57,11 +57,15 @@ pub mod selector_test_support {
 pub mod selector_transport_test_fixture {
     use crate as pos_reference;
 
-    // The integration corpus is included only to reuse its independently
-    // signed provider fixture from crate-private transport tests.
+    macro_rules! public_admission_tests {
+        ($($tokens:tt)*) => {};
+    }
+
+    // Reuse only the independently signed fixture definitions. The public
+    // integration tests remain owned and executed by their integration target.
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/sandbox_admission_public.rs"
+        "/tests/support/sandbox_admission_fixture.rs"
     ));
 
     pub(crate) struct TransportAdmissionFixture {
@@ -91,12 +95,43 @@ pub mod selector_transport_test_fixture {
         ) -> TestResult<Vec<u8>> {
             resign_unsigned_field(&self.sdy1, "SDY1", field, replacement, &self.runtime)
         }
+
+        pub(crate) fn describe_response_for_provider(
+            &self,
+            request: &[u8],
+            provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        ) -> TestResult<Vec<u8>> {
+            let request =
+                crate::sandbox_provider_protocol::SandboxDescribeRequest::from_canonical_cbor(
+                    request,
+                )?;
+            sign_describe_response(
+                &self.runtime,
+                provider,
+                request.request.request_id,
+                request.request.apt1_digest,
+            )
+        }
     }
 
     fn describe_response(
         fixture: &Fixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         request_id: [u8; 16],
+    ) -> TestResult<Vec<u8>> {
+        sign_describe_response(
+            &fixture.authority.runtime,
+            provider,
+            request_id,
+            fixture.policy.policy_digest(),
+        )
+    }
+
+    fn sign_describe_response(
+        runtime: &SigningKey,
+        provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request_id: [u8; 16],
+        active_policy_digest: [u8; 32],
     ) -> TestResult<Vec<u8>> {
         sign_record(
             "SDY1",
@@ -107,10 +142,10 @@ pub mod selector_transport_test_fixture {
                 bytes(provider.manifest().manifest_digest),
                 bytes(provider.manifest().binary_digest),
                 bytes(provider.host_profile().profile_digest),
-                bytes(fixture.policy.policy_digest()),
+                bytes(active_policy_digest),
                 Value::Text(provider.manifest().runtime_attestation_key_id.clone()),
             ]),
-            &fixture.authority.runtime,
+            runtime,
         )
     }
 
@@ -174,8 +209,8 @@ pub mod selector_transport_test_fixture {
             ]),
             &fixture.authority.runtime,
         )?;
-        let describe_request_id = [91; 16];
-        let describe_nonce = [92; 16];
+        let describe_request_id = rand::random();
+        let describe_nonce = rand::random();
         let sdy1 = describe_response(&fixture, &provider, describe_request_id)?;
         let output = b"output";
         let output_chunk = self_digested_record(

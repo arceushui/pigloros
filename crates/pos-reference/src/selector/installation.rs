@@ -75,6 +75,15 @@ impl ResolvedInstalledCase {
 pub struct InstallationObjectKind(u8);
 
 impl InstallationObjectKind {
+    /// Installed LPS1 launch-policy role.
+    pub(crate) const LAUNCH_POLICY: Self = Self(8);
+    /// Installed SIM1 image-manifest role.
+    pub(crate) const IMAGE_MANIFEST: Self = Self(9);
+    /// Installed root-image role.
+    pub(crate) const ROOT_IMAGE: Self = Self(12);
+    /// Installed subject-executable role.
+    pub(crate) const SUBJECT_EXECUTABLE: Self = Self(13);
+
     /// Decodes one of the sixteen role codes defined by ADR-069.
     ///
     /// # Errors
@@ -1413,6 +1422,71 @@ pub mod tests {
             },
             artifacts: installed,
         })
+    }
+
+    pub(crate) fn materialize_admitted_state(root: &Path) -> TestResult<AdmittedSelectorProvider> {
+        let admitted = admitted_state()?
+            .authenticate_bootstrap()?
+            .admit_provider()?;
+        let installed = admitted.bootstrap().installed();
+        for directory in ["authority", "providers", "images"] {
+            let path = root.join(directory);
+            fs::create_dir(&path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        for object in installed.manifest().objects() {
+            let artifact = installed.artifact(object.kind(), object.identity())?;
+            let bytes = artifact.read_control(object.byte_length())?;
+            let path = root
+                .join(object.kind().directory())
+                .join(hex_name(object.content_digest()));
+            fs::write(&path, bytes)?;
+            fs::set_permissions(
+                path,
+                fs::Permissions::from_mode(object.kind().required_mode()),
+            )?;
+        }
+
+        let manifest = installed.manifest();
+        let (root_key_id, root_public_key) = manifest.offline_root();
+        let authority = manifest.authority_digests();
+        let (execute_socket, control_socket) = manifest.provider_sockets();
+        let objects = manifest
+            .objects()
+            .iter()
+            .map(|object| {
+                Value::Array(vec![
+                    integer(u64::from(object.kind().code())),
+                    digest(object.identity()),
+                    digest(object.content_digest()),
+                    integer(object.byte_length()),
+                ])
+            })
+            .collect();
+        let manifest_bytes = encode_manifest(vec![
+            Value::Text("SIC1".to_owned()),
+            integer(1),
+            Value::Text(root_key_id.to_owned()),
+            digest(root_public_key),
+            digest(authority[0]),
+            digest(authority[1]),
+            digest(authority[2]),
+            Value::Text(execute_socket.to_string_lossy().into_owned()),
+            Value::Text(control_socket.to_string_lossy().into_owned()),
+            Value::Array(
+                manifest
+                    .required_features()
+                    .iter()
+                    .cloned()
+                    .map(Value::Text)
+                    .collect(),
+            ),
+            Value::Array(objects),
+        ])?;
+        let manifest_path = root.join(MANIFEST_NAME);
+        fs::write(&manifest_path, manifest_bytes)?;
+        fs::set_permissions(manifest_path, fs::Permissions::from_mode(0o400))?;
+        Ok(admitted)
     }
 
     pub(crate) fn remove_artifact(

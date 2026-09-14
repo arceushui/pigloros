@@ -7,7 +7,7 @@ expected `PiglorOS.SandboxReadbackSet.v1\0` BLAKE3 digest.
 
 The input contract is ADR-069 v80, section 6 and its RBS1/ELM1/FDL1 record
 definitions.  Fixture inputs deliberately match
-`sandbox_admission_public.rs`: fixed signing seeds 1 through 6, the closed
+`sandbox_admission_contract_public.rs`: fixed signing seeds 1 through 6, the closed
 16-element host-feature list, `img` root-image bytes, `adapter executable`,
 and the stated BHC1 and attempt-limit values.
 

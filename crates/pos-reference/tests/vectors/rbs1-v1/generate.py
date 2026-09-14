@@ -44,27 +44,27 @@ arm = [
 ]
 
 
-def enc(x):
-    return cbor2.dumps(x, canonical=True)
+def encode_canonical(value):
+    return cbor2.dumps(value, canonical=True)
 
 
-def h(domain, x):
-    return blake3.blake3(domain + enc(x)).digest()
+def domain_digest(domain, value):
+    return blake3.blake3(domain + encode_canonical(value)).digest()
 
 
-def rec(magic, x):
-    return h(f"PiglorOS.{magic}.v1\0".encode(), x)
+def record_digest(magic, value):
+    return domain_digest(f"PiglorOS.{magic}.v1\0".encode(), value)
 
 
-def wrap(magic, x):
-    return [x, rec(magic, x), bytes(64)]
+def signed_record(magic, value):
+    return [value, record_digest(magic, value), bytes(64)]
 
 
 def ordered(values):
-    return sorted(values, key=enc)
+    return sorted(values, key=encode_canonical)
 
 
-def lim():
+def sandbox_limits():
     return [[i, 256 if i == 13 else 2000] for i in range(17)]
 
 
@@ -99,15 +99,15 @@ trust_u = [
     [[bytes([9]) * 32, 77, 2]],
     "root",
 ]
-trust = wrap("TRS1", trust_u)
+trust = signed_record("TRS1", trust_u)
 trustd = trust[1]
-rev = wrap("RVS1", ["RVS1", 1, trustd, 3, [], [], [], "policy"])
+rev = signed_record("RVS1", ["RVS1", 1, trustd, 3, [], [], [], "policy"])
 revd = rev[1]
 cap = [["execute", 1, 1]]
-capd = h(b"PiglorOS.ProviderCapabilitySet.v1\0", cap)
-featd = h(b"PiglorOS.RequiredHostFeatureSet.v1\0", features)
-bhc = ["BHC1", 1, lim()]
-bhcbytes = enc(bhc)
+capd = domain_digest(b"PiglorOS.ProviderCapabilitySet.v1\0", cap)
+featd = domain_digest(b"PiglorOS.RequiredHostFeatureSet.v1\0", features)
+bhc = ["BHC1", 1, sandbox_limits()]
+bhcbytes = encode_canonical(bhc)
 bhcd = blake3.blake3(bhcbytes).digest()
 binary = b"exact provider binary"
 bind = blake3.blake3(binary).digest()
@@ -132,10 +132,10 @@ for arch, name, parts in [(0, "x86_64", x86), (1, "aarch64", arm)]:
         featd,
         "release",
     ]
-    spm = wrap("SPM1", spmu)
+    spm = signed_record("SPM1", spmu)
     spmd = spm[1]
     scsu = ["SCS1", 1, arch, ["read"], ["read"]]
-    scs = [scsu, rec("SCS1", scsu)]
+    scs = [scsu, record_digest("SCS1", scsu)]
     scsd = scs[1]
     proofs = ordered([[f, 1, bytes([18]) * 32] for f in features])
     hcpu = [
@@ -149,7 +149,7 @@ for arch, name, parts in [(0, "x86_64", x86), (1, "aarch64", arm)]:
         bytes([21]) * 32,
         "runtime",
     ]
-    hcp = wrap("HCP1", hcpu)
+    hcp = signed_record("HCP1", hcpu)
     hcpd = hcp[1]
     pcru = [
         "PCR1",
@@ -164,7 +164,7 @@ for arch, name, parts in [(0, "x86_64", x86), (1, "aarch64", arm)]:
         0,
         "reviewer",
     ]
-    pcr = wrap("PCR1", pcru)
+    pcr = signed_record("PCR1", pcru)
     pcrd = pcr[1]
     sim_u = [
         "SIM1",
@@ -191,11 +191,11 @@ for arch, name, parts in [(0, "x86_64", x86), (1, "aarch64", arm)]:
         2,
         "image",
     ]
-    sim = wrap("SIM1", sim_u)
+    sim = signed_record("SIM1", sim_u)
     simd = sim[1]
     for mode, mn in enumerate(["local", "air_gapped", "replay", "fork"]):
-        lpsu = ["LPS1", 1, "air-gapped", mode, simd, lim(), []]
-        lps = [lpsu, rec("LPS1", lpsu)]
+        lpsu = ["LPS1", 1, "air-gapped", mode, simd, sandbox_limits(), []]
+        lps = [lpsu, record_digest("LPS1", lpsu)]
         lpsd = lps[1]
         aptu = [
             "APT1",
@@ -215,7 +215,7 @@ for arch, name, parts in [(0, "x86_64", x86), (1, "aarch64", arm)]:
             scsd,
             "policy",
         ]
-        apt = wrap("APT1", aptu)
+        apt = signed_record("APT1", aptu)
         aptd = apt[1]
         actual = [
             [i, 1 if i in (0, 4, 8, 9) else 256 if i == 13 else 2000] for i in range(17)
@@ -231,9 +231,9 @@ for arch, name, parts in [(0, "x86_64", x86), (1, "aarch64", arm)]:
             bytes([38]) * 32,
             "runtime",
         ]
-        elmd = rec("ELM1", elmu)
+        elmd = record_digest("ELM1", elmu)
         fdlu = ["FDL1", 1, mode, [[3, 0], [4, 1]] if mode == 0 else [[3, 1]]]
-        fdld = rec("FDL1", fdlu)
+        fdld = record_digest("FDL1", fdlu)
         rbsu = [
             "RBS1",
             1,
@@ -255,8 +255,8 @@ for arch, name, parts in [(0, "x86_64", x86), (1, "aarch64", arm)]:
             features,
             [],
         ]
-        rbsd = h(b"PiglorOS.SandboxReadbackSet.v1\0", rbsu)
-        out = enc([rbsu, rbsd])
+        rbsd = domain_digest(b"PiglorOS.SandboxReadbackSet.v1\0", rbsu)
+        out = encode_canonical([rbsu, rbsd])
         path = Path(__file__).parent / f"{name}-{mn}.cbor"
         with path.open("wb") as output:
             output.write(out)

@@ -25,9 +25,7 @@ use crate::sandbox_provider_protocol::{
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
     SignedImageManifest,
 };
-use crate::selector::installation::authority::{
-    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
-};
+use crate::selector::installation::authority::AdmittedSelectorProvider;
 use crate::selector::installation::{
     open_directory_chain, InstallationObjectKind, InstalledSelectorState, SANDBOX_ADMIN_SOCKET,
 };
@@ -58,7 +56,7 @@ fn io_error<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::Io
 }
 
-fn unit_error<T>(_: T) {}
+fn map_to_unit_error<T>(_: T) {}
 
 /// Run the normal (no pending SIR1) selector composition.
 ///
@@ -66,36 +64,25 @@ fn unit_error<T>(_: T) {}
 /// rejects it before any listener can be exposed, until #214 supplies the
 /// required lifecycle-backed recovery composition.
 pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
-    run_composition(
-        InstalledSelectorState::open,
-        InstalledSelectorState::authenticate_bootstrap,
-        bind_admin_listener,
-        AuthenticatedSelectorBootstrap::admit_provider,
-        connect_fixed_provider,
-        bind_evaluator_listener,
-        fixed_service,
-        RootSelectorService::serve,
-    )
-}
-
-fn run_composition<State, Bootstrap, Admitted, Transport, Listener, Service, Error>(
-    open: impl FnOnce() -> Result<State, Error>,
-    authenticate: impl FnOnce(State) -> Result<Bootstrap, Error>,
-    bind_admin: impl FnOnce() -> Result<Listener, Error>,
-    admit: impl FnOnce(Bootstrap) -> Result<Admitted, Error>,
-    connect: impl FnOnce(&Admitted) -> Result<Transport, Error>,
-    bind_evaluator: impl FnOnce() -> Result<Listener, Error>,
-    compose: impl FnOnce(Admitted, Transport, Listener, Listener) -> Service,
-    serve: impl FnOnce(&Service) -> Result<(), Error>,
-) -> Result<(), Error> {
-    let state = open()?;
-    let bootstrap = authenticate(state)?;
-    let admin_listener = bind_admin()?;
-    let admitted = admit(bootstrap)?;
-    let transport = connect(&admitted)?;
-    let evaluator_listener = bind_evaluator()?;
-    let service = compose(admitted, transport, admin_listener, evaluator_listener);
-    serve(&service)
+    InstalledSelectorState::open()
+        .and_then(InstalledSelectorState::authenticate_bootstrap)
+        .and_then(|bootstrap| {
+            bind_admin_listener().map(|admin_listener| (bootstrap, admin_listener))
+        })
+        .and_then(|(bootstrap, admin_listener)| {
+            bootstrap
+                .admit_provider()
+                .map(|admitted| (admitted, admin_listener))
+        })
+        .and_then(|(admitted, admin_listener)| {
+            connect_fixed_provider(&admitted).map(|transport| (admitted, transport, admin_listener))
+        })
+        .and_then(|(admitted, transport, admin_listener)| {
+            bind_evaluator_listener().map(|evaluator_listener| {
+                fixed_service(admitted, transport, admin_listener, evaluator_listener)
+            })
+        })
+        .and_then(|service| service.serve())
 }
 
 fn bind_listener(path: &Path, owner: u32) -> Result<FixedListener, SelectorBoundaryError> {
@@ -326,7 +313,7 @@ fn selected_image_and_launch(
     let installed = admitted.bootstrap().installed();
     read_installed(
         installed,
-        9,
+        InstallationObjectKind::IMAGE_MANIFEST,
         requirement.sim1_digest,
         CONTROL_ARTIFACT_LIMIT,
     )
@@ -338,7 +325,7 @@ fn selected_image_and_launch(
     .and_then(|(sim1, manifest)| {
         read_installed(
             installed,
-            12,
+            InstallationObjectKind::ROOT_IMAGE,
             manifest.root_image_blake3_digest,
             IMAGE_ARTIFACT_LIMIT,
         )
@@ -347,7 +334,7 @@ fn selected_image_and_launch(
     .and_then(|(sim1, manifest, root_image)| {
         read_installed(
             installed,
-            13,
+            InstallationObjectKind::SUBJECT_EXECUTABLE,
             manifest.executable_blake3_digest,
             IMAGE_ARTIFACT_LIMIT,
         )
@@ -362,7 +349,7 @@ fn selected_image_and_launch(
     .and_then(|image| {
         read_installed(
             installed,
-            8,
+            InstallationObjectKind::LAUNCH_POLICY,
             requirement.lps1_digest,
             CONTROL_ARTIFACT_LIMIT,
         )
@@ -379,11 +366,10 @@ fn selected_image_and_launch(
 
 fn read_installed(
     installed: &InstalledSelectorState,
-    kind: u8,
+    kind: InstallationObjectKind,
     identity: [u8; 32],
     limit: u64,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let kind = InstallationObjectKind::from_code(kind).map_err(artifact_invalid)?;
     installed.artifact(kind, identity)?.read_control(limit)
 }
 
@@ -477,7 +463,7 @@ fn prepare_authenticated_execution(
                         })
                 })
         })
-        .map_err(unit_error);
+        .map_err(map_to_unit_error);
     output.and_then(|output| {
         encode_authenticated_reply(
             decoded,
@@ -492,7 +478,7 @@ fn prepare_authenticated_execution(
                 },
             },
         )
-        .map_err(unit_error)
+        .map_err(map_to_unit_error)
     })
 }
 
@@ -648,28 +634,28 @@ fn write_reply(
 
 fn read_selector_request<R: Read>(stream: &mut R) -> Result<(DecodedSelectorRequest, Vec<u8>), ()> {
     let mut prefix = [0_u8; 4];
-    stream.read_exact(&mut prefix).map_err(unit_error)?;
+    stream.read_exact(&mut prefix).map_err(map_to_unit_error)?;
     let length = u32::from_be_bytes(prefix);
     if length == 0 || length > CONTROL_LIMIT {
         return Err(());
     }
     let length = usize::try_from(length).unwrap_or_default();
     let mut control = vec![0_u8; length];
-    stream.read_exact(&mut control).map_err(unit_error)?;
+    stream.read_exact(&mut control).map_err(map_to_unit_error)?;
     let mut input = Vec::new();
     (&mut *stream)
         .take(SELECTOR_INPUT_LIMIT.saturating_add(1))
         .read_to_end(&mut input)
-        .map_err(unit_error)?;
+        .map_err(map_to_unit_error)?;
     validate_selector_input_length(input.len())?;
     decode_request(&control, &input)
         .map(|decoded| (decoded, input))
-        .map_err(unit_error)
+        .map_err(map_to_unit_error)
 }
 
 fn validate_selector_input_length(length: usize) -> Result<(), ()> {
     u64::try_from(length)
-        .map_err(unit_error)
+        .map_err(map_to_unit_error)
         .and_then(|length| (length <= SELECTOR_INPUT_LIMIT).then_some(()).ok_or(()))
 }
 
@@ -794,62 +780,175 @@ mod tests {
     use std::cell::RefCell;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
+    use std::process::Command;
+    use std::time::Instant;
 
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
+    const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
+    const RUNTIME_DIRECTORY: &str = "/run/pigloros";
 
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum CompositionStage {
-        Open,
-        Authenticate,
-        BindAdmin,
-        Admit,
-        Connect,
-        Synchronize,
-        BindEvaluator,
-        Serve,
-    }
+    struct FixedCompositionFixture;
 
-    fn composition_step(
-        failure: Option<CompositionStage>,
-        stage: CompositionStage,
-        value: u8,
-    ) -> Result<u8, ()> {
-        (failure != Some(stage)).then_some(value).ok_or(())
-    }
-
-    #[test]
-    fn composition_propagates_every_stage_failure_and_serves_success() {
-        for failure in [
-            None,
-            Some(CompositionStage::Open),
-            Some(CompositionStage::Authenticate),
-            Some(CompositionStage::BindAdmin),
-            Some(CompositionStage::Admit),
-            Some(CompositionStage::Connect),
-            Some(CompositionStage::Synchronize),
-            Some(CompositionStage::BindEvaluator),
-            Some(CompositionStage::Serve),
-        ] {
-            let result = run_composition(
-                || composition_step(failure, CompositionStage::Open, 1),
-                |_| composition_step(failure, CompositionStage::Authenticate, 2),
-                || composition_step(failure, CompositionStage::BindAdmin, 3),
-                |_| composition_step(failure, CompositionStage::Admit, 4),
-                |_| {
-                    let transport = composition_step(failure, CompositionStage::Connect, 5)?;
-                    composition_step(failure, CompositionStage::Synchronize, 0).map(|_| transport)
-                },
-                || composition_step(failure, CompositionStage::BindEvaluator, 6),
-                |admitted, transport, admin, evaluator| admitted + transport + admin + evaluator,
-                |service| {
-                    assert_eq!(*service, 18);
-                    composition_step(failure, CompositionStage::Serve, 0).map(drop)
-                },
-            );
-            assert_eq!(result, failure.map_or(Ok(()), |_| Err(())));
+    impl FixedCompositionFixture {
+        fn create() -> TestResult<Self> {
+            if Path::new(INSTALLATION_PARENT).exists() || Path::new(RUNTIME_DIRECTORY).exists() {
+                return Err("fixed selector test paths already exist".into());
+            }
+            fs::create_dir(INSTALLATION_PARENT)?;
+            let fixture = Self;
+            fs::set_permissions(INSTALLATION_PARENT, fs::Permissions::from_mode(0o700))?;
+            fs::create_dir(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)?;
+            fs::set_permissions(
+                crate::selector::installation::SANDBOX_ARTIFACT_ROOT,
+                fs::Permissions::from_mode(0o700),
+            )?;
+            fs::create_dir(RUNTIME_DIRECTORY)?;
+            fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o700))?;
+            Ok(fixture)
         }
+    }
+
+    impl Drop for FixedCompositionFixture {
+        fn drop(&mut self) {
+            for socket in [
+                "/run/pigloros/provider-execute.sock",
+                "/run/pigloros/provider-control.sock",
+                SANDBOX_ADMIN_SOCKET,
+                SANDBOX_SELECTOR_SOCKET,
+            ] {
+                drop(fs::remove_file(socket));
+            }
+            drop(fs::remove_dir_all(INSTALLATION_PARENT));
+            drop(fs::remove_dir_all(RUNTIME_DIRECTORY));
+        }
+    }
+
+    fn privileged_composition_child() -> TestResult<bool> {
+        if rustix::process::geteuid().as_raw() == ROOT_UID {
+            return Ok(false);
+        }
+        let mut command = Command::new("sudo");
+        command.args(["-n", "env"]);
+        command.arg(format!("{PRIVILEGED_COMPOSITION_TEST}=1"));
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.arg(format!("LLVM_PROFILE_FILE={}", profile.to_string_lossy()));
+        }
+        let output = command
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "root_selector::tests::fixed_public_entrypoint_composes_the_normal_service",
+                "--nocapture",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "privileged selector composition failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(true)
+    }
+
+    fn serve_describe_response(
+        listener: &UnixListener,
+        fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
+        provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+    ) -> TestResult {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix)?;
+        let length = usize::try_from(u32::from_be_bytes(prefix))?;
+        let mut request = vec![0; length];
+        stream.read_exact(&mut request)?;
+        let mut trailing = Vec::new();
+        stream.read_to_end(&mut trailing)?;
+        if !trailing.is_empty() {
+            return Err("describe request contained trailing bytes".into());
+        }
+        let response = fixture.describe_response_for_provider(&request, provider)?;
+        stream.write_all(&u32::try_from(response.len())?.to_be_bytes())?;
+        stream.write_all(&response)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        Ok(())
+    }
+
+    fn wait_for_selector_socket(
+        selector: &std::thread::JoinHandle<Result<(), SelectorBoundaryError>>,
+    ) -> TestResult {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !Path::new(SANDBOX_SELECTOR_SOCKET).exists() {
+            if selector.is_finished() {
+                return Err("selector exited before exposing its fixed socket".into());
+            }
+            if Instant::now() >= deadline {
+                return Err("selector did not expose its fixed socket before the deadline".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fixed_public_entrypoint_composes_the_normal_service() -> TestResult {
+        if privileged_composition_child()? {
+            return Ok(());
+        }
+        if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none()
+            && rustix::process::geteuid().as_raw() != ROOT_UID
+        {
+            return Err("privileged selector composition did not start".into());
+        }
+
+        let _paths = FixedCompositionFixture::create()?;
+        assert!(crate::run_fixed_root_selector().is_err());
+        let admitted = crate::selector::installation::tests::materialize_admitted_state(
+            Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
+        )?;
+        let transport_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+
+        let execute_listener = UnixListener::bind("/run/pigloros/provider-execute.sock")?;
+        fs::set_permissions(
+            "/run/pigloros/provider-execute.sock",
+            fs::Permissions::from_mode(SOCKET_MODE),
+        )?;
+        let control_listener = UnixListener::bind("/run/pigloros/provider-control.sock")?;
+        fs::set_permissions(
+            "/run/pigloros/provider-control.sock",
+            fs::Permissions::from_mode(SOCKET_MODE),
+        )?;
+        let provider = std::thread::spawn(move || {
+            serve_describe_response(&control_listener, &transport_fixture, admitted.provider())
+                .map_err(|error| error.to_string())
+        });
+        let selector = std::thread::spawn(crate::run_fixed_root_selector);
+        wait_for_selector_socket(&selector)?;
+        assert!(Path::new(SANDBOX_ADMIN_SOCKET).exists());
+
+        let client = UnixStream::connect(SANDBOX_SELECTOR_SOCKET)?;
+        fs::remove_file(SANDBOX_SELECTOR_SOCKET)?;
+        client.shutdown(std::net::Shutdown::Write)?;
+        drop(client);
+        assert_eq!(
+            selector
+                .join()
+                .map_err(|_| "selector composition thread panicked")?,
+            Err(SelectorBoundaryError::Io)
+        );
+        provider
+            .join()
+            .map_err(|_| "provider control thread panicked")??;
+        drop(execute_listener);
+        Ok(())
     }
 
     #[test]
@@ -912,7 +1011,7 @@ mod tests {
             SelectorBoundaryError::SelectorUnavailable
         );
         assert_eq!(io_error(()), SelectorBoundaryError::Io);
-        unit_error(());
+        map_to_unit_error(());
         assert_eq!(
             nonzero_random_count(0),
             Err(SelectorBoundaryError::SelectorUnavailable)
@@ -933,16 +1032,6 @@ mod tests {
             bind_listener(Path::new("relative.sock"), ROOT_UID).err(),
             Some(SelectorBoundaryError::ArtifactInvalid)
         );
-        if let Ok(listener) = bind_admin_listener() {
-            let path = listener.path.clone();
-            drop(listener);
-            fs::remove_file(path)?;
-        }
-        if let Ok(listener) = bind_evaluator_listener() {
-            let path = listener.path.clone();
-            drop(listener);
-            fs::remove_file(path)?;
-        }
         Ok(())
     }
 
@@ -993,10 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_process_composition_and_listener_loop_fail_closed_without_host_state() -> TestResult {
-        assert!(run_fixed().is_err());
-        assert!(crate::run_fixed_root_selector().is_err());
-
+    fn listener_loop_fails_closed_when_host_state_is_lost() -> TestResult {
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         assert!(connect_fixed_provider(&admitted).is_err());
         let sync_directory = tempfile::tempdir()?;
@@ -1009,7 +1095,13 @@ mod tests {
             Ok(())
         });
         let sync_transport = ProviderTransport::from_path_for_test(&sync_path)?;
-        assert!(synchronize_fixed_provider(&sync_transport, &admitted, [1; 16], [2; 16]).is_err());
+        assert!(synchronize_fixed_provider(
+            &sync_transport,
+            &admitted,
+            rand::random(),
+            rand::random(),
+        )
+        .is_err());
         sync_provider
             .join()
             .map_err(|_| "provider synchronization thread panicked")??;
@@ -1159,7 +1251,6 @@ mod tests {
             selected.0.manifest().manifest_digest,
             requirement.sim1_digest
         );
-        assert!(read_installed(admitted.bootstrap().installed(), u8::MAX, [0; 32], 1).is_err());
         assert_ne!(fresh_nonce()?, [0; 16]);
 
         let mut missing_image = requirement.clone();
