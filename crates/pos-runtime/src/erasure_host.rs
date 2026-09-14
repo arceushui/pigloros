@@ -1048,28 +1048,6 @@ impl ErasureExecutionHostV1 {
         Self::recover_verified_empty(store, maximum_requests)
     }
 
-    /// Open and recover an exclusively owned store with one replaceable
-    /// coordinator authority Plugin.
-    ///
-    /// Unlike the verified-empty bootstrap, this constructor creates the core
-    /// coordinator over the exact adapter retained by this host. It can recover
-    /// a non-empty durable request set without accepting an inventory assembled
-    /// by a different composition root.
-    ///
-    /// # Errors
-    /// Returns a closed adapter, authority, topology, or recovery error before
-    /// any protected sender is issued.
-    pub fn open_with_coordinator_authority(
-        config: StoreConfig,
-        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
-        coordinator: ErasureReferenceV1,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator)
-            .map_err(map_erasure_error)?;
-        Self::open_with_authority(config, &composition, maximum_requests)
-    }
-
     /// Open one store with an explicit authority composition.
     ///
     /// This is the required production composition-root entry point. The
@@ -1100,23 +1078,6 @@ impl ErasureExecutionHostV1 {
         Ok(host)
     }
 
-    /// Open an existing read-only `SQLite` store with one replaceable
-    /// coordinator authority Plugin.
-    ///
-    /// # Errors
-    /// Returns a closed adapter, authority, topology, or recovery error before
-    /// any protected sender is issued.
-    pub fn open_read_only_with_coordinator_authority(
-        path: &str,
-        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
-        coordinator: ErasureReferenceV1,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator)
-            .map_err(map_erasure_error)?;
-        Self::open_read_only_with_authority(path, &composition, maximum_requests)
-    }
-
     /// Open one read-only `SQLite` store with an explicit authority
     /// composition. Production roots must use this entry point.
     ///
@@ -1145,23 +1106,6 @@ impl ErasureExecutionHostV1 {
         let store =
             open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         Self::recover_verified_empty_gateway(store, maximum_requests)
-    }
-
-    /// Open and recover a Gateway-capable store with one replaceable
-    /// coordinator authority Plugin composed over the same owned adapter.
-    ///
-    /// # Errors
-    /// Returns a closed adapter, authority, topology, or recovery error before
-    /// any protected sender is issued.
-    pub fn open_gateway_with_coordinator_authority(
-        config: StoreConfig,
-        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
-        coordinator: ErasureReferenceV1,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator)
-            .map_err(map_erasure_error)?;
-        Self::open_gateway_with_authority(config, &composition, maximum_requests)
     }
 
     /// Open one Gateway-capable store with an explicit authority composition.
@@ -1676,7 +1620,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// A non-empty request set, failed adapter snapshot, or rejected gate
     /// binding fails closed. Production recovery for a non-empty set enters
-    /// through [`Self::open_with_coordinator_authority`].
+    /// through [`Self::open_with_authority`].
     fn recover_verified_empty(
         mut store: Box<dyn ErasureHostStore>,
         maximum_requests: usize,
@@ -1736,7 +1680,7 @@ impl ErasureExecutionHostV1 {
     ///
     /// # Errors
     /// Returns a closed recovery or adapter error under the same current-store
-    /// generation checks as [`Self::open_with_coordinator_authority`].
+    /// generation checks as [`Self::open_with_authority`].
     fn recover_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
         store: Box<dyn ErasureGatewayHostStore>,
         query: &mut Q,
@@ -4045,103 +3989,6 @@ mod tests {
         assert_eq!(ready.status(), ErasureHostStatusV1::Ready);
         ready.poison();
         assert_eq!(ready.status(), ErasureHostStatusV1::Poisoned);
-    }
-
-    #[test]
-    fn coordinator_constructors_reject_invalid_inventory_and_store_paths() {
-        let authority = Arc::new(UnusedCoordinatorAuthorityV1);
-        let coordinator = ErasureReferenceV1::from_digest([101; 32]);
-        assert_eq!(
-            ErasureExecutionHostV1::open_with_coordinator_authority(
-                StoreConfig::Memory,
-                authority.clone(),
-                coordinator,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::Conflict)
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
-                StoreConfig::Memory,
-                authority.clone(),
-                coordinator,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::Conflict)
-        );
-        let missing_path = format!(
-            "/tmp/pigloros-ticket-186-missing-parent-{}/store.db",
-            std::process::id()
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_with_coordinator_authority(
-                StoreConfig::Sqlite {
-                    path: missing_path.clone(),
-                },
-                authority.clone(),
-                coordinator,
-                4,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::AdapterFailure)
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
-                StoreConfig::Sqlite { path: missing_path },
-                authority.clone(),
-                coordinator,
-                4,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::AdapterFailure)
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
-                "/tmp/pigloros-ticket-186-no-read-only-store.db",
-                authority,
-                coordinator,
-                4,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::AdapterFailure)
-        );
-    }
-
-    #[test]
-    fn coordinator_constructors_bind_valid_sqlite_adapters_before_rejecting_invalid_inventory() {
-        let path = format!(
-            "/tmp/pigloros-ticket-186-valid-coordinator-{}.db",
-            std::process::id()
-        );
-        let authority = Arc::new(UnusedCoordinatorAuthorityV1);
-        let coordinator = ErasureReferenceV1::from_digest([102; 32]);
-        let store = pos_store::sqlite::SqliteStore::open(&path)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        drop(store);
-
-        assert_eq!(
-            ErasureExecutionHostV1::open_with_coordinator_authority(
-                StoreConfig::Sqlite { path: path.clone() },
-                authority.clone(),
-                coordinator,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::Conflict)
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
-                &path,
-                authority,
-                coordinator,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::Conflict)
-        );
-        drop(std::fs::remove_file(path));
     }
 
     #[test]

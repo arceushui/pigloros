@@ -39,6 +39,44 @@ use erasure_support::{
     retry_admission, FreezeEvidenceFixtureInput, RetryAdmissionFixture,
 };
 
+fn authority_composition(
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+) -> Result<ErasureCoordinatorCompositionV1, ErasureHostErrorV1> {
+    ErasureCoordinatorCompositionV1::new(authority, coordinator)
+        .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)
+}
+
+fn open_with_authority(
+    config: StoreConfig,
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+    maximum_requests: usize,
+) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
+    let composition = authority_composition(authority, coordinator)?;
+    ErasureExecutionHostV1::open_with_authority(config, &composition, maximum_requests)
+}
+
+fn open_read_only_with_authority(
+    path: &str,
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+    maximum_requests: usize,
+) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
+    let composition = authority_composition(authority, coordinator)?;
+    ErasureExecutionHostV1::open_read_only_with_authority(path, &composition, maximum_requests)
+}
+
+fn open_gateway_with_authority(
+    config: StoreConfig,
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+    maximum_requests: usize,
+) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
+    let composition = authority_composition(authority, coordinator)?;
+    ErasureExecutionHostV1::open_gateway_with_authority(config, &composition, maximum_requests)
+}
+
 #[test]
 fn coordinator_composition_rejects_zero_identity_at_every_public_entry() {
     let zero = ErasureReferenceV1::from_digest([0; 32]);
@@ -48,19 +86,19 @@ fn coordinator_composition_rejects_zero_identity_at_every_public_entry() {
         Err(ErasureErrorV1::ProvenanceMissing)
     ));
     for result in [
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             Arc::clone(&authority),
             zero,
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
-        ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+        open_read_only_with_authority(
             "unused.db",
             Arc::clone(&authority),
             zero,
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
-        ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
+        open_gateway_with_authority(
             StoreConfig::Memory,
             Arc::clone(&authority),
             zero,
@@ -541,7 +579,7 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open coordinator host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             config,
             authority_plugin,
             reference(30),
@@ -631,7 +669,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open lifecycle host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -721,7 +759,7 @@ fn delivery_denial_keeps_the_durable_attempt_retryable_without_poisoning_host(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open retryable-denial host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -801,7 +839,7 @@ fn public_sender_reaches_rejected_lifecycle_before_containment(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open rejected-lifecycle host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -838,7 +876,7 @@ fn public_sender_reaches_corrected_submission_after_rejection(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open corrected-submission host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -903,7 +941,7 @@ fn public_read_sender_reports_missing_request_and_missing_authority(
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
         "open read-contract host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority,
             reference(30),
@@ -940,7 +978,7 @@ fn public_sender_reaches_administrative_resolution() -> Result<(), Box<dyn std::
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open resolution host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -1028,7 +1066,7 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open partial-failure host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::SqliteInMemory,
             authority_plugin,
             reference(30),
@@ -1095,7 +1133,7 @@ fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open fork failure host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -1161,7 +1199,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
         let mut host = test_stage(
             "open persistent coordinator host",
-            ErasureExecutionHostV1::open_with_coordinator_authority(
+            open_with_authority(
                 StoreConfig::Sqlite {
                     path: path_text.clone(),
                 },
@@ -1210,7 +1248,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
     };
     let original_authority_recovery = test_stage(
         "reopen persistent coordinator host with the original authority",
-        ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+        open_read_only_with_authority(
             &path_text,
             authority.clone(),
             reference(30),
@@ -1223,7 +1261,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
     );
     drop(original_authority_recovery);
     authority.deny_topology.store(true, Ordering::Release);
-    let denied_recovery = ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+    let denied_recovery = open_read_only_with_authority(
         &path_text,
         authority,
         reference(30),
@@ -1251,7 +1289,7 @@ fn gateway_host_uses_the_same_coordinator_authority_boundary(
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
         "open gateway coordinator host",
-        ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
+        open_gateway_with_authority(
             StoreConfig::Memory,
             authority,
             reference(30),
@@ -1570,9 +1608,11 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
 
     let path = std::env::temp_dir().join(format!(
         "pigloros-runtime-recovery-{}.db",
-        std::process::id()
+        TimelineId::new()
     ));
-    drop(std::fs::remove_file(&path));
+    if path.exists() {
+        return Err(format!("recovery fixture already exists: {}", path.display()).into());
+    }
     let path_text = path.to_string_lossy().into_owned();
     drop(test_stage(
         "create compatibility read-only database",
@@ -1640,7 +1680,7 @@ fn authentication_denial_preserves_a_recovered_host() -> Result<(), Box<dyn std:
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open rejected-command host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -1668,7 +1708,7 @@ fn stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventor
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
         "open stale-fork host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority,
             reference(30),
