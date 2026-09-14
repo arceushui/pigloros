@@ -571,6 +571,22 @@ fn assert_empty_backend<S: ErasurePersistencePortV1 + ErasureInventoryPersistenc
     Ok(())
 }
 
+fn two_request_inventory_generation<S>(store: S) -> Result<ErasureReferenceV1, ErasureErrorV1>
+where
+    S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
+    let shared = Rc::new(RefCell::new(store));
+    let first_request = request()?;
+    let second_request = overlapping_request()?;
+    let required_target = target();
+    let _first = frozen_coordinator(Rc::clone(&shared), &first_request, required_target)?;
+    let _second = frozen_coordinator(Rc::clone(&shared), &second_request, required_target)?;
+    Ok(shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .generation())
+}
+
 fn prepared_fork<S>(mut store: S) -> Result<PreparedFork<S>, Box<dyn std::error::Error>>
 where
     S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
@@ -887,6 +903,17 @@ fn memory_manifest_cas_rejects_a_stale_head() -> Result<(), Box<dyn std::error::
 fn memory_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn std::error::Error>>
 {
     assert_empty_backend(&MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn memory_and_sqlite_match_nonempty_complete_inventory_generations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        two_request_inventory_generation(MemoryStore::new())?,
+        two_request_inventory_generation(SqliteStore::open_in_memory()?)?,
+    );
+    Ok(())
 }
 
 #[test]
