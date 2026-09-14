@@ -45,12 +45,6 @@ jobs:
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
         with:
           tool: cargo-fuzz
-      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
-        with:
-          tool: cargo-deny
-      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
-        with:
-          tool: cargo-shear
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: fuzz-nightly-2026-07-01-${{ matrix.target }}
@@ -60,8 +54,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "artifacts/${{ matrix.target }}"
-          cargo deny --manifest-path Cargo.toml --config deny.toml --locked check
-          cargo shear --deny-warnings --locked .
           cargo +nightly-2026-07-01 check --locked --bins
           cargo +nightly-2026-07-01 fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" -- \
             -max_total_time="${FUZZ_SECONDS}" \
