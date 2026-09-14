@@ -2,7 +2,7 @@
 
 use pos_core::{ErasurePersistenceInventorySnapshotV1, ErasureReferenceV1, TimelineId};
 
-fn reference(value: u8) -> ErasureReferenceV1 {
+const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
