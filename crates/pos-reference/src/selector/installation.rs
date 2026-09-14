@@ -1424,10 +1424,25 @@ pub mod tests {
         })
     }
 
-    pub(crate) fn materialize_admitted_state(root: &Path) -> TestResult<AdmittedSelectorProvider> {
-        let admitted = admitted_state()?
-            .authenticate_bootstrap()?
-            .admit_provider()?;
+    pub(crate) fn materialize_root_selector_state(
+        root: &Path,
+    ) -> TestResult<AdmittedSelectorProvider> {
+        let corpus = crate::selector_test_support::air_gapped_corpus()?;
+        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+        let mut state = admitted_state()?;
+        retain_case_artifact(
+            &mut state,
+            14,
+            request.fixture_bundle_digest,
+            &corpus.archive,
+        )?;
+        retain_case_artifact(
+            &mut state,
+            15,
+            request.trust_policy_snapshot_digest,
+            &corpus.trust_policy,
+        )?;
+        let admitted = state.authenticate_bootstrap()?.admit_provider()?;
         let installed = admitted.bootstrap().installed();
         for directory in ["authority", "providers", "images"] {
             let path = root.join(directory);

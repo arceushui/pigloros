@@ -790,7 +790,7 @@ mod tests {
         assert!(RootSelectorComposition::open().is_err());
         let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
         let encoded = encoded_request(&request, resolved.attempt())?;
-        let admitted = crate::selector::installation::tests::materialize_admitted_state(
+        let admitted = crate::selector::installation::tests::materialize_root_selector_state(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
         )?;
         let control_fixture =
