@@ -156,6 +156,13 @@ assert_wasm_getrandom_dependency() {
 
 assert_wasm_getrandom_dependency '' '^0.4.3'
 assert_wasm_getrandom_dependency 'getrandom03' '^0.3.4'
+wasm_pack_release_metadata="$(awk '
+  /^\[package\.metadata\.wasm-pack\.profile\.release\]$/ { in_section = 1; next }
+  /^\[/ { in_section = 0 }
+  in_section { print }
+' "$manifest")"
+grep -Fq 'wasm-opt = false' <<<"$wasm_pack_release_metadata" \
+  || fail 'world-client release packaging must disable the runtime wasm-opt download'
 grep -Fq 'getrandom_backend="wasm_js"' "$script" \
   || fail 'WASM script does not select the getrandom wasm_js backend'
 grep -Fq 'crate-type = ["cdylib", "rlib"]' "$manifest" \
