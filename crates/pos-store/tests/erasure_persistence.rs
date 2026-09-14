@@ -26,6 +26,7 @@ use pos_core::{
     ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
+use ulid::Ulid;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
 pub mod erasure_support;
@@ -571,6 +572,36 @@ fn assert_empty_backend<S: ErasurePersistencePortV1 + ErasureInventoryPersistenc
     Ok(())
 }
 
+fn two_request_inventory_generation<S>(
+    store: S,
+) -> Result<ErasureReferenceV1, Box<dyn std::error::Error>>
+where
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
+    let mut store = store;
+    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
+    for (id, name) in [(1_u128, "first"), (2_u128, "second")] {
+        store.create_timeline_with_meta(TimelineMeta {
+            id: TimelineId::from_ulid(Ulid::from(id)),
+            mode: TimelineMode::Live,
+            name: Some(name.to_owned()),
+            owner: None,
+            fork_point: None,
+        })?;
+    }
+    let shared = Rc::new(RefCell::new(store));
+    let first_request = request()?;
+    let second_request = overlapping_request()?;
+    let required_target = target();
+    let _first = frozen_coordinator(Rc::clone(&shared), &first_request, required_target)?;
+    let _second = frozen_coordinator(Rc::clone(&shared), &second_request, required_target)?;
+    let generation = shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .generation();
+    Ok(generation)
+}
+
 fn prepared_fork<S>(mut store: S) -> Result<PreparedFork<S>, Box<dyn std::error::Error>>
 where
     S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
@@ -887,6 +918,17 @@ fn memory_manifest_cas_rejects_a_stale_head() -> Result<(), Box<dyn std::error::
 fn memory_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn std::error::Error>>
 {
     assert_empty_backend(&MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn memory_and_sqlite_match_nonempty_complete_inventory_generations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        two_request_inventory_generation(MemoryStore::new())?,
+        two_request_inventory_generation(SqliteStore::open_in_memory()?)?,
+    );
+    Ok(())
 }
 
 #[test]
