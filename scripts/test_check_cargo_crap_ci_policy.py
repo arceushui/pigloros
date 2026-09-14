@@ -343,6 +343,17 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_cargo_crap_ignores_accepted_skipped_ancestors(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["cargo-crap"].update(
+                {
+                    "if": workflow["jobs"]["cargo-crap"]["if"].replace(
+                        "always() && ", ""
+                    )
+                }
+            )
+        )
+
     def test_requires_successful_coverage_for_cargo_crap(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"].update(

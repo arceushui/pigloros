@@ -20,7 +20,7 @@ SCOPED_JOB_IF = (
     "github.event_name != 'pull_request') }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
-    "${{ needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "${{ always() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
 GENERATE_BASELINE_COMMAND = (

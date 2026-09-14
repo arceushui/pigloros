@@ -485,7 +485,9 @@ jobs:
       - ci_change_scope
       - coverage
       - core-gate
-    if: ${{ needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
+    # explicit direct dependencies instead of inheriting that skipped state.
+    if: ${{ always() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
