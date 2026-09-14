@@ -3,7 +3,7 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, Kind, SchemaVersion},
     ids::{EntityId, EventId, PluginId, TimelineId},
-    Capability, Plugin,
+    Capability, ErasureContainmentGateV1, Plugin,
 };
 use pos_runtime::{
     Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry, ProjectionKey, RuntimeError,
@@ -50,6 +50,10 @@ impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
             Err(error) => error,
         }
     }
+}
+
+fn gated_registry() -> PluginRegistry {
+    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
 }
 
 fn event(seq: u64, entity: EntityId, event_type: &str, payload: Vec<u8>) -> Event {
@@ -190,7 +194,7 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
     ];
     let observed = Arc::new(Mutex::new(None));
 
-    let mut registry = PluginRegistry::new();
+    let mut registry = gated_registry();
     registry.register_driver(Box::new(DefaultRecoveryDriver));
     registry.register_driver(Box::new(InspectingRecoveryDriver {
         selected_entity: selected,
@@ -204,7 +208,7 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
     assert_eq!(actual_segments[0].through(), Seq::from_u64(2));
     assert_eq!(payloads, vec![Some(vec![1]), None]);
 
-    let mut rejected = PluginRegistry::new();
+    let mut rejected = gated_registry();
     rejected.register_driver(Box::new(DefaultRecoveryDriver));
     rejected.register_driver(Box::new(RejectingRecoveryDriver));
     assert!(rejected.restore_driver_state(&segments, &events).is_err());
@@ -233,7 +237,7 @@ fn replay_rejects_driver_recovery_before_invocation() {
 fn registry_rejects_incomplete_recovery_before_any_driver_is_staged() {
     let timeline = TimelineId::new();
     let observed = Arc::new(Mutex::new(None));
-    let mut registry = PluginRegistry::new();
+    let mut registry = gated_registry();
     registry.register_driver(Box::new(InspectingRecoveryDriver {
         selected_entity: EntityId::new(),
         observed: Arc::clone(&observed),
@@ -292,7 +296,7 @@ fn registry_recovery_boundary_rejects_each_invalid_source_shape() {
     ];
 
     for (segments, events) in cases {
-        let mut registry = PluginRegistry::new();
+        let mut registry = gated_registry();
         registry.register_driver(Box::new(DefaultRecoveryDriver));
         assert!(matches!(
             registry.restore_driver_state(&segments, &events),
@@ -305,14 +309,14 @@ fn registry_recovery_boundary_rejects_each_invalid_source_shape() {
 fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
     let timeline = TimelineId::new();
     let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];
-    let mut driverless = PluginRegistry::new();
+    let mut driverless = gated_registry();
     let plugin = MetadataOnlyPlugin {
         id: PluginId::new(),
     };
     driverless.register(&plugin, None, None).test_ok();
     driverless.restore_driver_state(&segments, &[]).test_ok();
 
-    let mut pending = PluginRegistry::new();
+    let mut pending = gated_registry();
     pending.register_driver(Box::new(DefaultRecoveryDriver));
     pending.step_all_anchored(timeline, Seq::ZERO).test_ok();
     assert!(matches!(
@@ -325,7 +329,7 @@ fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
 #[test]
 fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     let timeline = TimelineId::new();
-    let mut registry = PluginRegistry::new();
+    let mut registry = gated_registry();
     let plugin = MetadataOnlyPlugin {
         id: PluginId::new(),
     };
@@ -335,7 +339,7 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     registry.commit_step_at(Seq::ZERO, 0).test_ok();
     registry.commit_step_at(Seq::ZERO, 0).test_ok();
 
-    let mut cadenced = PluginRegistry::new();
+    let mut cadenced = gated_registry();
     let key = ProjectionKey::new(EntityId::new());
     let authority = pos_core::ConsentAuthority::new();
     let grant = pos_core::ConsentGrantedV1 {

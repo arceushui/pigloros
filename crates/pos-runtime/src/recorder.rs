@@ -176,8 +176,25 @@ impl Recorder {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use pos_core::ids::EntityId;
+    use pos_core::{ids::EntityId, ErasureContainmentGateV1};
     use pos_store::{open_store, StoreConfig};
+    use std::sync::Arc;
+
+    fn gated_store() -> Box<dyn pos_core::store::EventStore> {
+        let mut store = open_store(StoreConfig::Memory).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "opening the in-memory store failed: {error:?}"
+            )))
+        });
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "binding the in-memory erasure gate failed: {error:?}"
+                )))
+            });
+        store
+    }
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -277,7 +294,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn prepare_replay_loads_recorder_events_from_store() {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = gated_store();
         let tl = store.create_timeline("t").test_ok();
         let entity = EntityId::new();
 

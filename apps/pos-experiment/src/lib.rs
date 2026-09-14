@@ -9,18 +9,227 @@
 //! projections on each tick until a [`StopCondition`] is met.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+include!("host_store.rs");
+
+#[cfg(test)]
+use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::WallTime,
     crypto::Hash,
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, ReproManifest, Timeline,
+    store::{EventReadBounds, EventStore, SeqRange},
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureGate,
+    ErasureHostErrorV1, Event, ReproManifest, Seq, Timeline,
 };
 use pos_runtime::PluginRegistry;
-use pos_store::{open_store, StoreConfig};
+use pos_store::StoreConfig;
 use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn bind_test_erasure_gate(registry: &mut PluginRegistry) {
+    if !registry.erasure_gate_is_bound() {
+        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn bind_test_store_gate(
+    store: &mut dyn pos_core::store::EventStore,
+) -> Result<(), pos_core::CoreError> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_memory_store() -> pos_store::memory::MemoryStore {
+    let mut store = pos_store::memory::MemoryStore::new();
+    bind_test_store_gate(&mut store).unwrap_or_else(|error| {
+        std::panic::resume_unwind(Box::new(format!(
+            "test MemoryStore must accept the erasure gate: {error}"
+        )))
+    });
+    store
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_registry() -> PluginRegistry {
+    let mut registry = PluginRegistry::new();
+    bind_test_erasure_gate(&mut registry);
+    registry
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn backtest_runner(
+    config: BacktestConfig,
+    registry_factory: impl Fn() -> PluginRegistry + Send + 'static,
+) -> BacktestRunner {
+    BacktestRunner::new(config, registry_factory)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn backtest_runner_on_store(
+    config: BacktestConfig,
+    registry_factory: impl Fn() -> PluginRegistry + Send + 'static,
+) -> BacktestRunner {
+    backtest_runner(config, registry_factory)
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn start_with_fixture_store(
+    experiment: Experiment,
+    store: Box<dyn pos_core::store::EventStore>,
+) -> Result<ExperimentSession, ExperimentError> {
+    let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    experiment.with_erasure_gate(gate).start_with_store(store)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn open_store(
+    config: StoreConfig,
+) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    open_store_with_gate(config, Some(Arc::new(ErasureContainmentGateV1::new())))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn open_store_with_gate(
+    config: StoreConfig,
+    gate: Option<Arc<dyn ErasureGate>>,
+) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    let mut store = pos_store::open_store(config)?;
+    if let Some(gate) = gate {
+        store.bind_erasure_gate(gate)?;
+    }
+    Ok(store)
+}
+
+fn bind_registry_erasure_gate(
+    store: &mut dyn pos_core::store::EventStore,
+    registry: &PluginRegistry,
+) -> Result<(), pos_core::CoreError> {
+    if !registry.erasure_gate_is_bound() {
+        return Err(pos_core::CoreError::ErasureContainmentUnavailable);
+    }
+    let gate = registry
+        .clone_erasure_gate()
+        .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+    store.bind_erasure_gate(gate)
+}
+
+fn bind_registry_to_host_gate(
+    registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<(), ExperimentError> {
+    if !registry.erasure_gate_is_bound() {
+        registry.bind_erasure_gate(gate);
+        return Ok(());
+    }
+    let Some(existing) = registry.clone_erasure_gate() else {
+        return Err(ExperimentError::Store(
+            pos_core::CoreError::ErasureContainmentUnavailable,
+        ));
+    };
+    if !Arc::ptr_eq(&existing, &gate) {
+        return Err(ExperimentError::Store(
+            pos_core::CoreError::ErasureContainmentUnavailable,
+        ));
+    }
+    Ok(())
+}
+
+fn hosted_store_error(error: pos_core::ErasureHostErrorV1) -> ExperimentError {
+    let error = match error {
+        pos_core::ErasureHostErrorV1::AccessFrozen => pos_core::CoreError::ErasureAccessFrozen,
+        pos_core::ErasureHostErrorV1::RecoveryUnavailable
+        | pos_core::ErasureHostErrorV1::StaleGeneration => {
+            pos_core::CoreError::ErasureContainmentUnavailable
+        }
+        pos_core::ErasureHostErrorV1::AuthorizationDenied
+        | pos_core::ErasureHostErrorV1::Conflict
+        | pos_core::ErasureHostErrorV1::AdapterFailure => {
+            pos_core::CoreError::Storage("erasure host rejected experiment startup".to_owned())
+        }
+    };
+    ExperimentError::Store(error)
+}
+
+fn bind_fork_registry_erasure_gate(
+    registry: &mut PluginRegistry,
+    parent: &PluginRegistry,
+) -> Result<(), ExperimentError> {
+    if registry.erasure_gate_is_bound() {
+        return Err(ExperimentError::IncompatibleForkRegistry);
+    }
+    if let Some(gate) = parent.clone_erasure_gate() {
+        registry.bind_erasure_gate(gate);
+    }
+    Ok(())
+}
+
+fn bind_backtest_erasure_gate(
+    store: &mut dyn pos_core::store::EventStore,
+    registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<Arc<dyn ErasureGate>, pos_core::CoreError> {
+    if registry.erasure_gate_is_bound() {
+        let existing = registry
+            .clone_erasure_gate()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        if !Arc::ptr_eq(&existing, &gate) {
+            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
+        }
+    } else {
+        registry.bind_erasure_gate(Arc::clone(&gate));
+    }
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    Ok(gate)
+}
+
+fn inherit_backtest_erasure_gate(
+    registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<(), pos_core::CoreError> {
+    if registry.erasure_gate_is_bound() {
+        let existing = registry
+            .clone_erasure_gate()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        if !Arc::ptr_eq(&existing, &gate) {
+            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
+        }
+    } else {
+        registry.bind_erasure_gate(gate);
+    }
+    Ok(())
+}
+
+fn require_backtest_erasure_gate(
+    gate: Option<Arc<dyn ErasureGate>>,
+) -> Result<Arc<dyn ErasureGate>, pos_core::CoreError> {
+    gate.ok_or(pos_core::CoreError::ErasureContainmentUnavailable)
+}
+
+fn start_backtest_train(
+    store: &mut dyn pos_core::store::EventStore,
+    registry: &mut PluginRegistry,
+    gate: Option<Arc<dyn ErasureGate>>,
+    name: &str,
+) -> Result<(Arc<dyn ErasureGate>, Timeline), pos_core::CoreError> {
+    let gate = require_backtest_erasure_gate(gate)?;
+    let gate = bind_backtest_erasure_gate(store, registry, gate)?;
+    let timeline = store.create_timeline(name)?;
+    Ok((gate, timeline))
+}
 
 // Experiment hosts may close their own session, but they are not a Gateway
 // consent issuer.  Keep this durable lifecycle marker outside the canonical
@@ -187,7 +396,7 @@ impl RunResult {
         self.store_config
             .clone()
             .ok_or(ExperimentError::MissingStoreRecoveryRecipe)
-            .and_then(|config| open_store(config).map_err(ExperimentError::from))
+            .and_then(|config| HostedExperimentStore::open(config).map_err(hosted_store_error))
             .and_then(|store| {
                 store
                     .logical_head(self.timeline_id)
@@ -226,7 +435,7 @@ impl RunResult {
             .store_config
             .clone()
             .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
-        let mut store = open_store(store_config)?;
+        let mut store = HostedExperimentStore::open(store_config).map_err(hosted_store_error)?;
         let timelines = store.list_timelines()?;
         let timeline = timelines
             .iter()
@@ -267,7 +476,7 @@ impl RunResult {
                 return Err(pos_runtime::RuntimeError::ConsentOperationUnavailable.into());
             }
             (None, None) => {
-                reject_protected_history(store.as_ref(), timeline.id(), current_head)?;
+                reject_protected_history(&store, timeline.id(), current_head)?;
                 fork_result = store
                     .fork(timeline.id(), current_head, name)
                     .map_err(ExperimentError::from);
@@ -293,7 +502,7 @@ impl RunResult {
                 .store_config
                 .clone()
                 .ok_or(ExperimentError::MissingStoreRecoveryRecipe)?;
-            let store = open_store(config)?;
+            let store = HostedExperimentStore::open(config).map_err(hosted_store_error)?;
             Some(store.logical_head(self.timeline_id)?.as_u64())
         } else {
             None
@@ -778,6 +987,17 @@ fn restore_inherited_eval_events(
         })
 }
 
+fn prepare_backtest_eval_registry(
+    store: &dyn pos_core::store::EventStore,
+    timeline: pos_core::ids::TimelineId,
+    train_head: pos_core::clock::Seq,
+    registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<Vec<pos_core::Event>, ExperimentError> {
+    inherit_backtest_erasure_gate(registry, gate)?;
+    restore_inherited_eval_events(store, timeline, train_head, registry)
+}
+
 /// Run the tick loop on the given store and timeline.
 ///
 /// Returns `(ticks, total_events, chain_head_hash)`.
@@ -835,9 +1055,10 @@ fn fork_eval_timeline(
 impl Experiment {
     #[must_use]
     pub fn new(config: ExperimentConfig) -> Self {
+        let registry = PluginRegistry::new();
         Self {
             config,
-            registry: PluginRegistry::new(),
+            registry,
             fork_registry_factory: None,
         }
     }
@@ -868,6 +1089,15 @@ impl Experiment {
     #[must_use]
     pub fn with_consent_authority(mut self, authority: ConsentAuthority) -> Self {
         self.registry = self.registry.with_consent_authority(authority);
+        self
+    }
+
+    /// Bind the host-owned erasure gate used by every
+    /// [`pos_core::store::EventStore`] and runtime
+    /// Tick Boundary created by this experiment.
+    #[must_use]
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
+        self.registry = self.registry.with_erasure_gate(gate);
         self
     }
 
@@ -921,8 +1151,9 @@ impl Experiment {
     /// opened or cannot create the Timeline.
     pub fn start(self) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let store = open_store(store_config.clone())?;
-        self.start_with_store_and_recipe(store, Some(store_config))
+        let store =
+            HostedExperimentStore::open(store_config.clone()).map_err(hosted_store_error)?;
+        self.start_with_hosted_store_and_recipe(store, Some(store_config))
     }
 
     /// Create the experiment Timeline in a host-supplied `EventStore` adapter.
@@ -930,7 +1161,9 @@ impl Experiment {
     /// This is the production composition seam for decorators such as bounded,
     /// fault-reporting, or observability adapters. Because the supplied adapter
     /// cannot be reconstructed from [`ExperimentConfig::store_config`], results
-    /// from this session do not advertise a recovery recipe.
+    /// from this session do not advertise a recovery recipe. The experiment
+    /// must carry an explicit host-owned erasure gate; unbound composition is
+    /// rejected before Timeline creation.
     ///
     /// # Errors
     /// Returns [`ExperimentError::Store`] if the supplied store cannot create
@@ -947,11 +1180,13 @@ impl Experiment {
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
-        let parent_composition = self.registry.composition();
-        let timeline = store.create_timeline(&self.config.name)?;
+        let registry = self.registry;
+        let parent_composition = registry.composition();
+        let timeline = bind_registry_erasure_gate(store.as_mut(), &registry)
+            .and_then(|()| store.create_timeline(&self.config.name))?;
         Ok(ExperimentSession {
             config: self.config,
-            registry: self.registry,
+            registry,
             parent_composition,
             store: Arc::new(Mutex::new(store)),
             recovery_store_config,
@@ -973,6 +1208,15 @@ impl Experiment {
         })
     }
 
+    fn start_with_hosted_store_and_recipe(
+        mut self,
+        store: HostedExperimentStore,
+        recovery_store_config: Option<StoreConfig>,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        bind_registry_to_host_gate(&mut self.registry, store.containment_gate())?;
+        self.start_with_store_and_recipe(Box::new(store), recovery_store_config)
+    }
+
     /// Resume an existing durable Timeline with a fresh Driver registry.
     ///
     /// Persisted Events are validated and folded in logical sequence order.
@@ -991,15 +1235,27 @@ impl Experiment {
         timeline_id: pos_core::ids::TimelineId,
     ) -> Result<ExperimentSession, ExperimentError> {
         let store_config = self.config.store_config.clone();
-        let store = open_store(store_config.clone())?;
-        self.resume_with_store_and_recipe(timeline_id, store, Some(store_config))
+        HostedExperimentStore::open(store_config.clone())
+            .map_err(hosted_store_error)
+            .and_then(|store| self.resume_with_hosted_store(timeline_id, store, store_config))
+    }
+
+    fn resume_with_hosted_store(
+        mut self,
+        timeline_id: pos_core::ids::TimelineId,
+        store: HostedExperimentStore,
+        store_config: StoreConfig,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        bind_registry_to_host_gate(&mut self.registry, store.containment_gate())?;
+        self.resume_with_store_and_recipe(timeline_id, Box::new(store), Some(store_config))
     }
 
     /// Resume a durable Timeline through a host-supplied `EventStore` adapter.
     ///
     /// Persisted Events are validated and folded exactly as in [`Self::resume`].
     /// This variant keeps host decorators in the recovery path instead of
-    /// reconstructing an adapter from [`ExperimentConfig::store_config`].
+    /// reconstructing an adapter from [`ExperimentConfig::store_config`]. The
+    /// experiment must carry an explicit host-owned erasure gate.
     ///
     /// # Errors
     /// Returns a store error when the Timeline cannot be opened or its logical
@@ -1018,13 +1274,15 @@ impl Experiment {
     fn resume_with_store_and_recipe(
         mut self,
         timeline_id: pos_core::ids::TimelineId,
-        store: Box<dyn pos_core::store::EventStore>,
+        mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
-        let timeline = store
-            .get_timeline(timeline_id)?
-            .ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))?;
+        let timeline = bind_registry_erasure_gate(store.as_mut(), &self.registry)
+            .and_then(|()| store.get_timeline(timeline_id))
+            .and_then(|timeline| {
+                timeline.ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))
+            })?;
         if timeline.id() != timeline_id {
             return Err(pos_core::CoreError::Storage(
                 "EventStore returned mismatched resume Timeline metadata".to_owned(),
@@ -1181,15 +1439,14 @@ impl Experiment {
                 .fork(timeline.id(), current_head, name)
                 .map_err(ExperimentError::from);
         };
-        if let Err(error) = gate.with_token_fence(
+        gate.with_token_fence(
             timeline.id(),
             token,
             current_head.as_u64(),
             now_secs,
             &mut append,
-        ) {
-            return Err(map_runtime_error(pos_runtime::RuntimeError::Consent(error)));
-        }
+        )
+        .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))?;
         fork_result
     }
 }
@@ -1398,7 +1655,20 @@ impl ExperimentSession {
         &mut self,
         proposal: &pos_core::ProposedAction,
     ) -> Result<u64, ExperimentError> {
-        let draft = self.registry.submit_action(proposal)?;
+        let draft = self
+            .registry
+            .submit_action(self.timeline.id(), proposal)
+            .map_err(|error| match error {
+                pos_runtime::ActionSubmissionError::Rejected(error) => {
+                    ExperimentError::ActionRejected(error)
+                }
+                pos_runtime::ActionSubmissionError::ErasureOperationUnavailable => {
+                    ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureOperationUnavailable)
+                }
+                pos_runtime::ActionSubmissionError::ErasureContainment(error) => {
+                    ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureContainment(error))
+                }
+            })?;
         let Some(token) = self.operation_token.clone() else {
             return self.append_events(std::slice::from_ref(&draft));
         };
@@ -1837,7 +2107,11 @@ impl ExperimentSession {
             .fork_registry_factory
             .as_ref()
             .ok_or(ExperimentError::MissingForkRegistryFactory)?;
-        let mut registry = factory()?;
+        let mut registry = factory()
+            .map_err(ExperimentError::from)
+            .and_then(|mut registry| {
+                bind_fork_registry_erasure_gate(&mut registry, &self.registry).map(|()| registry)
+            })?;
         if let Some(gate) = self.registry.clone_consent_gate() {
             registry = registry.with_consent_gate(gate);
         }
@@ -2033,6 +2307,7 @@ pub struct BacktestResult {
 /// persistence baseline (events-per-tick ratio).
 pub struct BacktestRunner {
     config: BacktestConfig,
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
     /// Factory callable that produces a fresh, pre-registered `PluginRegistry`
     /// (or just an empty one — callers may register plugins after calling
     /// [`BacktestRunner::run`] if they prefer to use the returned `Experiment`).
@@ -2147,8 +2422,17 @@ impl BacktestRunner {
     ) -> Self {
         Self {
             config,
+            erasure_gate: None,
             registry_factory: Box::new(registry_factory),
         }
+    }
+
+    /// Bind the one host-owned erasure gate shared by both registries and the
+    /// `EventStore` for the complete backtest.
+    #[must_use]
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
+        self.erasure_gate = Some(gate);
+        self
     }
 
     /// Run the backtest: train phase then eval phase.
@@ -2159,8 +2443,27 @@ impl BacktestRunner {
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] or [`ExperimentError::Store`] on failure.
     pub fn run(self) -> Result<BacktestResult, ExperimentError> {
-        let mut store = open_store(self.config.store_config.clone())?;
-        self.run_on_store(store.as_mut())
+        HostedExperimentStore::open(self.config.store_config.clone())
+            .map_err(hosted_store_error)
+            .and_then(|store| self.run_with_hosted_store(store))
+    }
+
+    fn run_with_hosted_store(
+        mut self,
+        mut store: HostedExperimentStore,
+    ) -> Result<BacktestResult, ExperimentError> {
+        let host_gate = store.containment_gate();
+        if self
+            .erasure_gate
+            .as_ref()
+            .is_some_and(|configured| !Arc::ptr_eq(configured, &host_gate))
+        {
+            return Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable,
+            ));
+        }
+        self.erasure_gate = Some(host_gate);
+        self.run_on_store(&mut store)
     }
 
     /// Run backtest phases on an already-opened store (test seam for fault injection).
@@ -2172,10 +2475,14 @@ impl BacktestRunner {
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
-        let train_tl = store.create_timeline(&train_name)?;
-        let train_tl_id = train_tl.id();
-
         let mut train_registry = (self.registry_factory)();
+        let (erasure_gate, train_tl) = start_backtest_train(
+            store,
+            &mut train_registry,
+            self.erasure_gate.clone(),
+            &train_name,
+        )?;
+        let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
             store,
@@ -2194,8 +2501,13 @@ impl BacktestRunner {
 
         // --- Eval phase (same store, forked timeline) ---
         let mut eval_registry = (self.registry_factory)();
-        let inherited =
-            restore_inherited_eval_events(store, eval_tl_id, train_head_seq, &mut eval_registry)?;
+        let inherited = prepare_backtest_eval_registry(
+            store,
+            eval_tl_id,
+            train_head_seq,
+            &mut eval_registry,
+            erasure_gate,
+        )?;
         hydrate_projections(&mut eval_registry, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
@@ -2260,21 +2572,28 @@ impl BacktestRunner {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    fn fail_test(message: String) -> ! {
+        use std::io::Write as _;
+
+        let mut stderr = std::io::stderr().lock();
+        drop(stderr.write_all(message.as_bytes()));
+        drop(stderr.write_all(b"\n"));
+        std::panic::resume_unwind(Box::new(message))
+    }
+
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
 
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
-            self.unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
-            })
+            self.unwrap_or_else(|error| fail_test(format!("unexpected test error: {error:?}")))
         }
     }
 
     impl<T> TestValueExt<T> for Option<T> {
         fn test_ok(self) -> T {
-            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected test value")))
+            self.unwrap_or_else(|| fail_test("expected test value".to_owned()))
         }
     }
 
@@ -2397,7 +2716,7 @@ mod tests {
         let store_config = StoreConfig::Sqlite {
             path: database.path().to_str().test_ok().to_owned(),
         };
-        let mut store = pos_store::open_store(store_config.clone()).test_ok();
+        let mut store = open_store(store_config.clone()).test_ok();
         let timeline_id = store.create_timeline("run-result-policy").test_ok().id();
         let subject_id = EntityId::new();
         let authority = ConsentAuthority::new();
@@ -2690,6 +3009,27 @@ mod tests {
         }
     }
 
+    struct RejectingActionGate(pos_core::ErasureContainmentErrorV1);
+
+    impl ErasureGate for RejectingActionGate {
+        fn authorize(
+            &self,
+            _: TimelineId,
+            _: pos_core::ErasureProtectedOperationV1,
+        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+            Err(self.0)
+        }
+
+        fn with_fence(
+            &self,
+            timeline: TimelineId,
+            operation: pos_core::ErasureProtectedOperationV1,
+            _: &mut dyn FnMut(),
+        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
+            self.authorize(timeline, operation)
+        }
+    }
+
     #[test]
     fn experiment_register_with_approver_forwards_the_full_registration() {
         let plugin = CompositionPlugin(CompositionPluginSpec {
@@ -2765,6 +3105,70 @@ mod tests {
         assert_eq!(session.source_events().test_ok().len(), 1);
     }
 
+    fn action_session_with_erasure_gate(gate: Arc<dyn ErasureGate>) -> ExperimentSession {
+        let plugin = CompositionPlugin(CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "erasure-action-plugin",
+            version: "1",
+            event_type: "erasure.submit.event",
+        });
+        let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+        registry
+            .register_with_approver(
+                &plugin,
+                None,
+                None,
+                Some(Box::new(AcceptingApprover)),
+                [Kind::new("erasure.submit.event")],
+            )
+            .test_ok();
+        Experiment {
+            config: ExperimentConfig {
+                name: "erasure-submit-action".to_owned(),
+                stop: StopCondition::MaxTicks(1),
+                store_config: StoreConfig::Memory,
+            },
+            registry,
+            fork_registry_factory: None,
+        }
+        .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
+        .test_ok()
+    }
+
+    #[test]
+    fn session_submit_action_maps_closed_erasure_gates() {
+        let proposal = ProposedAction::new(
+            Kind::new("erasure.submit.event"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"blocked"),
+            Kind::new("erasure.submit.event.submit"),
+        );
+        let mut missing =
+            action_session_with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        missing.registry = std::mem::take(&mut missing.registry).without_erasure_gate();
+        assert!(matches!(
+            missing.submit_action(&proposal),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::ErasureOperationUnavailable
+            ))
+        ));
+        drop(missing);
+
+        for reason in [
+            pos_core::ErasureContainmentErrorV1::AccessFrozen,
+            pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
+        ] {
+            let mut session =
+                action_session_with_erasure_gate(Arc::new(RejectingActionGate(reason)));
+            assert!(matches!(
+                session.submit_action(&proposal),
+                Err(ExperimentError::Runtime(
+                    pos_runtime::RuntimeError::ErasureContainment(error)
+                )) if error == reason
+            ));
+        }
+    }
+
     #[test]
     fn protected_session_submit_action_holds_the_token_fence() {
         let plugin = CompositionPlugin(CompositionPluginSpec {
@@ -2822,7 +3226,7 @@ mod tests {
 
     #[test]
     fn fold_captured_range_advances_the_boundary() {
-        let mut store = pos_store::memory::MemoryStore::new();
+        let mut store = test_memory_store();
         let timeline = store.create_timeline("fold-boundary").test_ok();
         let mut boundary = TickBoundaryCoordinator {
             folded_through: pos_core::clock::Seq::ZERO,
@@ -2843,12 +3247,12 @@ mod tests {
 
     #[test]
     fn advance_tick_distinguishes_empty_and_folded_ranges() {
-        let mut empty_store = pos_store::memory::MemoryStore::new();
+        let mut empty_store = test_memory_store();
         let empty_timeline = empty_store.create_timeline("empty-range").test_ok();
         let empty = advance_tick(
             &mut empty_store,
             empty_timeline.id(),
-            &mut PluginRegistry::new(),
+            &mut test_registry(),
             &mut TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
@@ -2856,7 +3260,7 @@ mod tests {
         .test_ok();
         assert!(matches!(empty.0, TickAdvance::Quiescent));
 
-        let mut folded_store = pos_store::memory::MemoryStore::new();
+        let mut folded_store = test_memory_store();
         let folded_timeline = folded_store.create_timeline("folded-range").test_ok();
         folded_store
             .append(
@@ -2871,7 +3275,7 @@ mod tests {
         let folded = advance_tick(
             &mut folded_store,
             folded_timeline.id(),
-            &mut PluginRegistry::new(),
+            &mut test_registry(),
             &mut TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
@@ -2938,14 +3342,16 @@ mod tests {
                 [Kind::new("submit.event")],
             )
             .test_ok();
-        let mut session = experiment
-            .start_with_store(Box::new(CaptureAwareStore {
+        let mut session = start_with_fixture_store(
+            experiment,
+            Box::new(CaptureAwareStore {
                 base: Box::new(pos_store::memory::MemoryStore::new()),
                 state: Arc::new(Mutex::new(HostTransactionState::default())),
                 fail_append: true,
                 fail_post_step_capture: false,
-            }))
-            .test_ok();
+            }),
+        )
+        .test_ok();
         let proposal = ProposedAction::new(
             Kind::new("submit.event"),
             EntityId::new(),
@@ -3063,6 +3469,10 @@ mod tests {
     }
 
     impl EventStore for CaptureAwareStore {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.base.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.base.create_timeline(name)
         }
@@ -3159,7 +3569,7 @@ mod tests {
 
         let store_state = Arc::new(Mutex::new(HostTransactionState::default()));
         let mut store = CaptureAwareStore {
-            base: Box::new(pos_store::memory::MemoryStore::new()),
+            base: Box::new(test_memory_store()),
             state: Arc::clone(&store_state),
             fail_append: false,
             fail_post_step_capture: false,
@@ -3268,6 +3678,10 @@ mod tests {
     }
 
     impl EventStore for FailLogicalHeadStore {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
@@ -3472,6 +3886,7 @@ mod tests {
             self.injected = true;
             let mut gateway_store =
                 pos_store::sqlite::SqliteStore::open(&self.path).map_err(RuntimeError::Store)?;
+            bind_test_store_gate(&mut gateway_store).map_err(RuntimeError::Store)?;
             let mut human = EventDraft::new(
                 self.entity,
                 Kind::new("world.action"),
@@ -3967,34 +4382,7 @@ mod tests {
         );
         let mut replayed = pos_state::ProjectionRegistry::new();
         replayed.register("interleaving", Box::new(CountReducer));
-        let replay_digest = pos_core::ErasureReferenceV1::from_digest(
-            *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-        );
-        let replay_evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
-            pos_core::ErasureReplayClaimV1::Exact,
-            &[pos_core::ArtifactClaimInputV1 {
-                registration: pos_core::RegisteredArtifactV1::new(
-                    pos_core::ErasureArtifactClassV1::TimelineReplay,
-                    replay_digest,
-                    pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-                    None,
-                    pos_core::ErasureReferenceV1::from_digest([244; 32]),
-                    pos_core::ArtifactOptionalityV1::Required,
-                    pos_core::ArtifactTransitionRuleV1::PreserveExact,
-                ),
-                current_claim: pos_core::ErasureReplayClaimV1::Exact,
-                state: pos_core::ArtifactStateV1::Retained,
-            }],
-        )
-        .test_ok();
-        pos_time::replay(
-            store.as_ref(),
-            timeline,
-            &mut replayed,
-            replay_digest,
-            &replay_evaluation,
-        )
-        .test_ok();
+        replayed.fold_events(&events);
         drop(store);
         assert!(replayed.state_for(&entity).is_some());
     }
@@ -4220,6 +4608,7 @@ mod tests {
         let head_path = head_database.path().to_str().test_ok().to_owned();
         let malformed_head_timeline = {
             let mut store = pos_store::sqlite::SqliteStore::open(&head_path).test_ok();
+            bind_test_store_gate(&mut store).test_ok();
             let root = store.create_timeline("resume-head-root").test_ok();
             store
                 .append(
@@ -4295,6 +4684,10 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     impl EventStore for CaptureFaultStore {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.base.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.base.create_timeline(name)
         }
@@ -4399,7 +4792,7 @@ mod tests {
             CaptureFault::EmptyRead,
         ] {
             let mut store = CaptureFaultStore {
-                base: pos_store::memory::MemoryStore::new(),
+                base: test_memory_store(),
                 fault,
                 head_calls: std::cell::Cell::new(0),
             };
@@ -4425,7 +4818,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_pipeline_and_branch_propagate_each_boundary_failure() {
         let mut first_capture_store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
+            base: test_memory_store(),
             fault: CaptureFault::LogicalHead,
             head_calls: std::cell::Cell::new(0),
         };
@@ -4435,7 +4828,7 @@ mod tests {
         assert!(advance_tick(
             &mut first_capture_store,
             first_timeline.id(),
-            &mut PluginRegistry::new(),
+            &mut test_registry(),
             &mut TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
@@ -4443,7 +4836,7 @@ mod tests {
         .is_err());
 
         let mut second_capture_store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
+            base: test_memory_store(),
             fault: CaptureFault::SecondLogicalHead,
             head_calls: std::cell::Cell::new(0),
         };
@@ -4453,16 +4846,16 @@ mod tests {
         assert!(advance_tick(
             &mut second_capture_store,
             second_timeline.id(),
-            &mut PluginRegistry::new(),
+            &mut test_registry(),
             &mut TickBoundaryCoordinator {
                 folded_through: pos_core::clock::Seq::ZERO,
             },
         )
         .is_err());
 
-        let mut driver_store = pos_store::memory::MemoryStore::new();
+        let mut driver_store = test_memory_store();
         let driver_timeline = driver_store.create_timeline("driver-failure").test_ok();
-        let mut registry = PluginRegistry::new();
+        let mut registry = test_registry();
         registry
             .register(
                 &make_plugin("capture-fail", &[]),
@@ -4479,7 +4872,7 @@ mod tests {
         .is_err());
 
         let mut branch_store = CaptureFaultStore {
-            base: pos_store::memory::MemoryStore::new(),
+            base: test_memory_store(),
             fault: CaptureFault::LogicalHead,
             head_calls: std::cell::Cell::new(0),
         };
@@ -4510,6 +4903,7 @@ mod tests {
     }
 
     fn transaction_registry(
+        path: TransactionHostPath,
         case: TransactionCase,
         state: &Arc<Mutex<HostTransactionState>>,
         failing_state: &Arc<Mutex<HostTransactionState>>,
@@ -4527,6 +4921,9 @@ mod tests {
             }
         };
         let mut registry = PluginRegistry::new();
+        if matches!(path, TransactionHostPath::AdvanceTick) {
+            bind_test_erasure_gate(&mut registry);
+        }
         registry
             .register(
                 &make_plugin("host-transaction", owned_event_types),
@@ -4595,11 +4992,11 @@ mod tests {
     ) -> HostCaseResult {
         let state = Arc::new(Mutex::new(HostTransactionState::default()));
         let failing_state = Arc::new(Mutex::new(HostTransactionState::default()));
-        let registry = transaction_registry(case, &state, &failing_state);
+        let registry = transaction_registry(path, case, &state, &failing_state);
 
         let (timeline, result) = match path {
             TransactionHostPath::AdvanceTick => {
-                let mut base: Box<dyn EventStore> = Box::new(pos_store::memory::MemoryStore::new());
+                let mut base: Box<dyn EventStore> = Box::new(test_memory_store());
                 let timeline = base.create_timeline("transaction-advance").test_ok().id();
                 seed_external_event(base.as_mut(), timeline);
                 let mut store = capture_aware_store(base, case, &state);
@@ -4627,10 +5024,7 @@ mod tests {
                 {
                     let mut store = session.store.lock().test_ok();
                     seed_external_event(store.as_mut(), timeline);
-                    let base = std::mem::replace(
-                        &mut *store,
-                        Box::new(pos_store::memory::MemoryStore::new()),
-                    );
+                    let base = std::mem::replace(&mut *store, Box::new(test_memory_store()));
                     *store = Box::new(capture_aware_store(base, case, &state));
                 }
                 (timeline, session.step_tick().map(|_| ()))
@@ -4752,7 +5146,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn captured_ranges_fail_before_fold_when_length_order_or_cursor_is_invalid() {
-        let mut store = pos_store::memory::MemoryStore::new();
+        let mut store = test_memory_store();
         let timeline = store.create_timeline("range-validation").test_ok();
         let mut event = store
             .append(
@@ -5237,6 +5631,72 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_fork_rejects_prebound_factory_erasure_gate() {
+        let plugin = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "composition",
+            version: "1.0.0",
+            event_type: "composition.event",
+        };
+        let foreign_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "prebound-factory-gate".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .with_fork_registry_factory(move || {
+            let mut registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&foreign_gate));
+            registry.register(&CompositionPlugin(plugin), None, None)?;
+            Ok(registry)
+        });
+        experiment
+            .register(&CompositionPlugin(plugin), None, None)
+            .test_ok();
+
+        assert_incompatible_fork(
+            experiment
+                .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
+                .test_ok(),
+        );
+    }
+
+    #[test]
+    fn backtest_rejects_a_bound_but_unavailable_registry_gate() {
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::clone(&gate))
+            .without_erasure_gate();
+        let mut store = pos_store::memory::MemoryStore::new();
+        assert!(matches!(
+            bind_backtest_erasure_gate(&mut store, &mut registry, Arc::clone(&gate)),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+        assert!(matches!(
+            inherit_backtest_erasure_gate(&mut registry, gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+    }
+
+    #[test]
+    fn backtest_rejects_a_different_prebound_registry_gate() {
+        let host_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let foreign_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let mut registry = PluginRegistry::new().with_erasure_gate(foreign_gate);
+        let mut store = pos_store::memory::MemoryStore::new();
+
+        assert!(matches!(
+            bind_backtest_erasure_gate(&mut store, &mut registry, Arc::clone(&host_gate)),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+        assert!(matches!(
+            inherit_backtest_erasure_gate(&mut registry, host_gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_fork_propagates_runtime_factory_failure() {
         let mut session = Experiment::new(ExperimentConfig {
             name: "factory-failure".to_owned(),
@@ -5333,7 +5793,7 @@ mod tests {
 
         // Consume the experiment and get a store back via run, then re-use the
         // branch logic through a manual store path.
-        let mut store2 = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store2 = open_store(StoreConfig::Memory).test_ok();
         store2.create_timeline("branch-seed").test_ok();
         let forked = exp2_mut.branch("branch-seed", store2.as_mut()).test_ok();
         assert!(!forked.id().to_string().is_empty());
@@ -5347,7 +5807,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let err = exp.branch("nonexistent", store.as_mut());
         assert!(err.is_err());
     }
@@ -5360,7 +5820,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let timeline = store.create_timeline("protected-branch").test_ok();
         store
             .append(
@@ -5453,7 +5913,7 @@ mod tests {
                 Ok(StepOutput::empty())
             }
         }
-        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("idle2-test").test_ok();
         let mut d = IdleDriver2;
         assert_eq!(d.name(), "idle2");
@@ -5485,7 +5945,7 @@ mod tests {
                 Ok(StepOutput::new(vec![draft]))
             }
         }
-        let mut store = pos_store::open_store(StoreConfig::Memory).test_ok();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("bad2-test").test_ok();
         let entity = EntityId::new();
         let mut d = BadDriver2 { entity };
@@ -5653,7 +6113,7 @@ mod tests {
 
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok().to_owned();
-        let result = BacktestRunner::new(
+        let result = backtest_runner(
             BacktestConfig {
                 experiment_name: "nested-result-branch".to_owned(),
                 train_ticks: 2,
@@ -5673,7 +6133,7 @@ mod tests {
                 pos_core::clock::Seq::from_u64(3)
             ))
         );
-        let store = pos_store::sqlite::SqliteStore::open(&path).test_ok();
+        let store = open_store(StoreConfig::Sqlite { path }).test_ok();
         assert_eq!(store.logical_head(branch.id()).test_ok().as_u64(), 3);
     }
 
@@ -5728,9 +6188,9 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        let session = experiment
-            .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
-            .test_ok();
+        let session =
+            start_with_fixture_store(experiment, Box::new(pos_store::memory::MemoryStore::new()))
+                .test_ok();
         assert!(session.source_events().test_ok().is_empty());
         let result = session.run_to_completion().test_ok();
         assert!(result.store_config.is_none());
@@ -6104,7 +6564,7 @@ mod tests {
     #[test]
     fn nonempty_backtest_builds_durable_run_results_in_the_unit_seam() {
         let entity = EntityId::new();
-        let runner = BacktestRunner::new(
+        let runner = backtest_runner(
             BacktestConfig {
                 experiment_name: "unit-backtest".to_owned(),
                 train_ticks: 1,
@@ -6489,7 +6949,7 @@ mod coverage_entrypoints {
     fn backtest_builds_train_and_eval_results_through_public_runner() {
         let plugin_id = PluginId::new();
         let entity = EntityId::new();
-        let runner = BacktestRunner::new(
+        let runner = backtest_runner(
             BacktestConfig {
                 experiment_name: "coverage-nonempty-backtest".to_owned(),
                 train_ticks: 1,
@@ -6808,7 +7268,7 @@ mod coverage_entrypoints {
             "coverage-experiment-branch",
             StopCondition::MaxTicks(1),
         ));
-        let mut store = pos_store::memory::MemoryStore::new();
+        let mut store = test_memory_store();
         let timeline = ok(store.create_timeline("coverage-experiment-branch"));
         ok(store.append(
             timeline.id(),
@@ -7293,7 +7753,10 @@ mod coverage_entrypoints {
         expect_err(&session.fork("missing-factory"));
 
         let experiment = Experiment::new(config("supplied-store", StopCondition::MaxTicks(1)));
-        let _ = ok(experiment.start_with_store(Box::new(pos_store::memory::MemoryStore::new())));
+        let _ = ok(start_with_fixture_store(
+            experiment,
+            Box::new(pos_store::memory::MemoryStore::new()),
+        ));
 
         let config = BacktestConfig {
             experiment_name: "empty-backtest".to_owned(),
@@ -7301,8 +7764,121 @@ mod coverage_entrypoints {
             eval_ticks: 1,
             store_config: StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, pos_runtime::PluginRegistry::new);
+        let runner = backtest_runner(config, pos_runtime::PluginRegistry::new);
         let _ = ok(runner.run());
+    }
+
+    #[test]
+    fn production_experiment_hosts_own_the_store_gate() {
+        let database = ok(tempfile::NamedTempFile::new());
+        let sqlite = StoreConfig::Sqlite {
+            path: database.path().to_string_lossy().into_owned(),
+        };
+        for store_config in [StoreConfig::Memory, sqlite] {
+            let session = ok(Experiment::new(ExperimentConfig {
+                name: "host-owned-start".to_owned(),
+                stop: StopCondition::MaxTicks(0),
+                store_config,
+            })
+            .start());
+            assert!(session.registry.erasure_gate_is_bound());
+        }
+
+        let foreign_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let rejected = Experiment::new(config("foreign-gate", StopCondition::MaxTicks(0)))
+            .with_erasure_gate(Arc::clone(&foreign_gate))
+            .start();
+        assert!(matches!(
+            rejected,
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
+        let rejected = BacktestRunner::new(
+            BacktestConfig {
+                experiment_name: "foreign-backtest-gate".to_owned(),
+                train_ticks: 0,
+                eval_ticks: 0,
+                store_config: StoreConfig::Memory,
+            },
+            PluginRegistry::new,
+        )
+        .with_erasure_gate(foreign_gate)
+        .run();
+        assert!(matches!(
+            rejected,
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+    }
+
+    #[test]
+    fn host_gate_binding_and_startup_errors_are_closed() {
+        let unbound_store = ok(open_store_with_gate(StoreConfig::Memory, None));
+        assert!(matches!(
+            unbound_store.get_timeline(TimelineId::new()),
+            Err(pos_core::CoreError::ErasureContainmentUnavailable)
+        ));
+        assert!(matches!(
+            Experiment::new(config("unbound-host-store", StopCondition::MaxTicks(0)))
+                .start_with_store(Box::new(pos_store::memory::MemoryStore::new())),
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let mut registry = PluginRegistry::new();
+        ok(bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)));
+        ok(bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)));
+        assert!(bind_registry_to_host_gate(
+            &mut registry,
+            Arc::new(ErasureContainmentGateV1::new())
+        )
+        .is_err());
+
+        let mut missing_bound_gate = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .without_erasure_gate();
+        let mut store = pos_store::memory::MemoryStore::new();
+        assert!(matches!(
+            bind_registry_erasure_gate(&mut store, &missing_bound_gate),
+            Err(pos_core::CoreError::ErasureContainmentUnavailable)
+        ));
+        assert!(bind_registry_to_host_gate(&mut missing_bound_gate, Arc::clone(&gate)).is_err());
+
+        let mut fork_registry = PluginRegistry::new();
+        ok(bind_fork_registry_erasure_gate(
+            &mut fork_registry,
+            &missing_bound_gate,
+        ));
+        assert!(!fork_registry.erasure_gate_is_bound());
+
+        assert!(matches!(
+            hosted_store_error(pos_core::ErasureHostErrorV1::AccessFrozen),
+            ExperimentError::Store(pos_core::CoreError::ErasureAccessFrozen)
+        ));
+        for error in [
+            pos_core::ErasureHostErrorV1::RecoveryUnavailable,
+            pos_core::ErasureHostErrorV1::StaleGeneration,
+        ] {
+            assert!(matches!(
+                hosted_store_error(error),
+                ExperimentError::Store(pos_core::CoreError::ErasureContainmentUnavailable)
+            ));
+        }
+        for error in [
+            pos_core::ErasureHostErrorV1::AuthorizationDenied,
+            pos_core::ErasureHostErrorV1::Conflict,
+            pos_core::ErasureHostErrorV1::AdapterFailure,
+        ] {
+            assert!(matches!(
+                hosted_store_error(error),
+                ExperimentError::Store(pos_core::CoreError::Storage(_))
+            ));
+        }
     }
 }
 
@@ -7490,7 +8066,7 @@ mod backtest_tests {
             store_config: pos_store::StoreConfig::Memory,
         };
 
-        let runner = BacktestRunner::new(config, make_registry);
+        let runner = backtest_runner(config, make_registry);
         let result = runner.run().test_ok();
 
         assert_eq!(result.train_result.ticks, 3);
@@ -7509,7 +8085,7 @@ mod backtest_tests {
 
     #[test]
     fn backtest_eval_hydrates_a_non_empty_training_history() {
-        let result = BacktestRunner::new(
+        let result = backtest_runner(
             BacktestConfig {
                 experiment_name: "bt-coverage-history".to_owned(),
                 train_ticks: 1,
@@ -7534,7 +8110,7 @@ mod backtest_tests {
             store_config: pos_store::StoreConfig::Memory,
         };
 
-        let runner = BacktestRunner::new(config, make_registry);
+        let runner = backtest_runner(config, make_registry);
         let result = runner.run().test_ok();
         assert_eq!(result.train_events, 2);
         assert_eq!(result.eval_events, 0);
@@ -7553,7 +8129,7 @@ mod backtest_tests {
             eval_ticks: 1,
             store_config: pos_store::StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, || {
+        let runner = backtest_runner(config, || {
             let plugin = BtPlugin {
                 id: pos_core::ids::PluginId::new(),
             };
@@ -7601,7 +8177,7 @@ mod backtest_tests {
             eval_ticks: 0,
             store_config: pos_store::StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, || {
+        let runner = backtest_runner(config, || {
             let plugin = EmptyPlugin {
                 id: pos_core::ids::PluginId::new(),
             };
@@ -7631,7 +8207,7 @@ mod backtest_tests {
             store_config: pos_store::StoreConfig::Memory,
         };
 
-        let runner = BacktestRunner::new(config, make_registry);
+        let runner = backtest_runner(config, make_registry);
         let result = runner.run().test_ok();
 
         assert_eq!(result.train_events, 4);
@@ -7729,7 +8305,7 @@ mod backtest_tests {
         assert_eq!(BadEvalDriver { entity }.name(), "bad-eval-driver");
 
         // Also cover GoodBtDriver::step by calling it directly.
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).test_ok();
+        let mut store = open_store(pos_store::StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("good-step-test").test_ok();
         let out = GoodBtDriver
             .step(tl.id(), pos_runtime::ObservationView::empty())
@@ -7749,7 +8325,7 @@ mod backtest_tests {
             eval_ticks: 1,
             store_config: pos_store::StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, move || {
+        let runner = backtest_runner(config, move || {
             let plugin = BtPlugin {
                 id: pos_core::ids::PluginId::new(),
             };
@@ -7784,7 +8360,7 @@ mod backtest_tests {
             eval_ticks: 1,
             store_config: pos_store::StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, move || {
+        let runner = backtest_runner(config, move || {
             let n = call_count.fetch_add(1, Ordering::SeqCst);
             let plugin = BtPlugin {
                 id: pos_core::ids::PluginId::new(),
@@ -7833,7 +8409,7 @@ mod fault_injection_tests {
         Capability, ConsentGrantedV1, CoreError, Plugin,
     };
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::StoreConfig;
     use rusqlite::Connection;
     use std::cell::Cell;
 
@@ -7867,6 +8443,10 @@ mod fault_injection_tests {
     }
 
     impl EventStore for FailLogicalHeadStore {
+        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
             self.inner.create_timeline(name)
         }
@@ -8100,7 +8680,7 @@ mod fault_injection_tests {
                 calls: Cell::new(0),
                 fail_on_call,
             };
-            let runner = BacktestRunner::new(
+            let runner = backtest_runner_on_store(
                 BacktestConfig {
                     experiment_name: format!("bt-result-error-{fail_on_call}"),
                     train_ticks: 0,
@@ -8123,9 +8703,11 @@ mod fault_injection_tests {
             calls: Cell::new(0),
             fail_on_call: 1,
         };
-        let session = Experiment::new(config("projection-head-error", StopCondition::MaxTicks(1)))
-            .start_with_store(Box::new(failing_store))
-            .test_ok();
+        let session = start_with_fixture_store(
+            Experiment::new(config("projection-head-error", StopCondition::MaxTicks(1))),
+            Box::new(failing_store),
+        )
+        .test_ok();
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(session.timeline().id(), &export_grant(0));
         assert!(session
@@ -8246,9 +8828,11 @@ mod fault_injection_tests {
             calls: Cell::new(0),
             fail_on_call: 1,
         };
-        let session = Experiment::new(config("fork-head-error", StopCondition::MaxTicks(1)))
-            .start_with_store(Box::new(failing_store))
-            .test_ok();
+        let session = start_with_fixture_store(
+            Experiment::new(config("fork-head-error", StopCondition::MaxTicks(1))),
+            Box::new(failing_store),
+        )
+        .test_ok();
         assert!(session
             .fork_timeline_at("child", pos_core::clock::Seq::ZERO)
             .is_err());
@@ -8258,12 +8842,14 @@ mod fault_injection_tests {
             calls: Cell::new(0),
             fail_on_call: 1,
         };
-        let mut session = Experiment::new(config(
-            "fork-initial-head-error",
-            StopCondition::MaxTicks(1),
-        ))
-        .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
-        .start_with_store(Box::new(failing_store))
+        let mut session = start_with_fixture_store(
+            Experiment::new(config(
+                "fork-initial-head-error",
+                StopCondition::MaxTicks(1),
+            ))
+            .with_fork_registry_factory(|| Ok(PluginRegistry::new())),
+            Box::new(failing_store),
+        )
         .test_ok();
         assert!(session.fork("child").is_err());
     }
@@ -8483,7 +9069,7 @@ mod fault_injection_tests {
             .is_err());
 
         let authority = ConsentAuthority::new();
-        let mut expired_store = pos_store::memory::MemoryStore::new();
+        let mut expired_store = open_store(StoreConfig::Memory).test_ok();
         let timeline = expired_store
             .create_timeline("branch-token-expired")
             .test_ok();
@@ -8492,7 +9078,7 @@ mod fault_injection_tests {
             Experiment::new(config("branch-token-expired", StopCondition::MaxTicks(1)))
                 .with_consent_authority(authority);
         assert!(experiment
-            .branch_with_token("child", &mut expired_store, &token, 2)
+            .branch_with_token("child", expired_store.as_mut(), &token, 2)
             .is_err());
     }
 
@@ -8993,7 +9579,7 @@ mod fault_injection_tests {
                 path: dir.path().to_str().test_ok().to_owned(),
             },
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner(config, registry_with_emit_driver);
         assert!(runner.run().is_err());
     }
 
@@ -9014,7 +9600,7 @@ mod fault_injection_tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner(config, registry_with_emit_driver);
         let result = runner.run();
         set_writable(&path);
         assert!(result.is_err());
@@ -9034,7 +9620,7 @@ mod fault_injection_tests {
                 path: path_str.clone(),
             },
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner(config, registry_with_emit_driver);
         let _ = runner.run().test_ok();
         let conn = Connection::open(&path).test_ok();
         conn.execute(
@@ -9048,7 +9634,7 @@ mod fault_injection_tests {
             eval_ticks: 0,
             store_config: StoreConfig::Sqlite { path: path_str },
         };
-        let runner2 = BacktestRunner::new(config2, registry_with_emit_driver);
+        let runner2 = backtest_runner(config2, registry_with_emit_driver);
         assert!(runner2.run().is_ok());
     }
 
@@ -9070,6 +9656,10 @@ mod fault_injection_tests {
         }
 
         impl EventStore for FaultyForkerStore {
+            fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+                self.base.bind_erasure_gate(gate)
+            }
+
             fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
                 self.base.create_timeline(name)
             }
@@ -9125,7 +9715,7 @@ mod fault_injection_tests {
             eval_ticks: 0,
             store_config: StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner_on_store(config, registry_with_emit_driver);
         let result = runner.run_on_store(&mut store);
         assert!(matches!(
             result,
@@ -9146,7 +9736,7 @@ mod fault_injection_tests {
             eval_ticks: 0,
             store_config: StoreConfig::Memory,
         };
-        let runner = BacktestRunner::new(config, registry_with_emit_driver);
+        let runner = backtest_runner_on_store(config, registry_with_emit_driver);
         let result = runner.run_on_store(&mut store);
         assert!(matches!(
             result,

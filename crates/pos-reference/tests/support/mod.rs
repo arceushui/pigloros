@@ -954,6 +954,7 @@ fn evaluation_request(
         },
         evaluator_protocol_digest,
         evaluator_hard_caps_digest: hard_caps_digest,
+        sandbox_requirement: None,
         request_digest: [1; 32],
     };
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;

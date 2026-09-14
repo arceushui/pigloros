@@ -327,7 +327,7 @@ mod tests {
     use pos_core::{
         event::EventDraft,
         timeline::{Timeline, TimelineMeta},
-        KeyRegistrationV1, KeyRoleV1, SeqRange,
+        ErasureContainmentGateV1, KeyRegistrationV1, KeyRoleV1, SeqRange,
     };
     use pos_crypto::{
         chain::{hash_payload, Blake3Hasher},
@@ -336,10 +336,24 @@ mod tests {
     };
     use pos_store::memory::MemoryStore;
 
+    fn gated_memory_store() -> MemoryStore {
+        let mut store = MemoryStore::new();
+        assert!(store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .is_ok());
+        store
+    }
+
+    fn open_store(config: pos_store::StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
+        let mut store = pos_store::open_store(config)?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        Ok(store)
+    }
+
     fn make_store() -> Result<EventLedgerStore, Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&sk)?;
-        let mut mem = MemoryStore::new();
+        let mut mem = gated_memory_store();
         let tl = mem.create_timeline("ledger")?;
         Ok(EventLedgerStore::new(
             Box::new(mem),
@@ -495,7 +509,7 @@ mod tests {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let error = EventLedgerStore::new(
-            Box::new(MemoryStore::new()),
+            Box::new(gated_memory_store()),
             pos_core::ids::TimelineId::new(),
             EntityId::new(),
             signing_key,
@@ -541,7 +555,7 @@ mod tests {
             let (signing_key, _) = pos_crypto::signing::generate_keypair();
             let (registry, _) = registry_for(&signing_key)?;
             let error = EventLedgerStore::new(
-                Box::new(MemoryStore::new()),
+                Box::new(gated_memory_store()),
                 pos_core::ids::TimelineId::new(),
                 EntityId::new(),
                 signing_key,
@@ -567,7 +581,7 @@ mod tests {
             .lock()
             .map_err(|_| "registry lock poisoned")?
             .clone();
-        let mut memory = MemoryStore::new();
+        let mut memory = gated_memory_store();
         memory.save_key_registry(&persisted_state)?;
         let persisted_error = EventLedgerStore::new(
             Box::new(memory),
@@ -585,7 +599,7 @@ mod tests {
             .contains("registry is unavailable"));
 
         let missing_error = EventLedgerStore::new(
-            Box::new(MemoryStore::new()),
+            Box::new(gated_memory_store()),
             pos_core::ids::TimelineId::new(),
             EntityId::new(),
             signing_key,
@@ -654,7 +668,7 @@ mod tests {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&signing_key)?;
         let material_digest = key_material_digest(&signing_key.to_bytes());
-        let mut mem = MemoryStore::new();
+        let mut mem = gated_memory_store();
         let timeline = mem.create_timeline("ledger")?;
         let mut store = EventLedgerStore::new(
             Box::new(mem),
@@ -692,7 +706,7 @@ mod tests {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&signing_key)?;
         let material_digest = key_material_digest(&signing_key.to_bytes());
-        let mut mem = MemoryStore::new();
+        let mut mem = gated_memory_store();
         let timeline = mem.create_timeline("ledger")?;
         let mut store = EventLedgerStore::new(
             Box::new(mem),
@@ -767,7 +781,7 @@ mod tests {
             .contains("ledger signing authorization"));
 
         let (registry, identity) = registry_for(&signing_key)?;
-        let mut memory = MemoryStore::new();
+        let mut memory = gated_memory_store();
         let timeline = memory.create_timeline("ledger")?;
         let mut poisoned = EventLedgerStore::new(
             Box::new(memory),
@@ -802,7 +816,7 @@ mod tests {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&signing_key)?;
         let material_digest = key_material_digest(&signing_key.to_bytes());
-        let mut memory = MemoryStore::new();
+        let mut memory = gated_memory_store();
         let timeline = memory.create_timeline("ledger")?;
         let mut store = EventLedgerStore::new(
             Box::new(memory),
@@ -837,7 +851,7 @@ mod tests {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&signing_key)?;
         let material_digest = key_material_digest(&signing_key.to_bytes());
-        let mut raw_store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        let mut raw_store = open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })?;
         let timeline = raw_store.create_timeline("ledger")?;
@@ -857,7 +871,7 @@ mod tests {
         ))?;
         drop(store);
 
-        let reopened = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        let reopened = open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })?;
         let persisted = reopened
@@ -887,7 +901,7 @@ mod tests {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&signing_key)?;
         let material_digest = key_material_digest(&signing_key.to_bytes());
-        let mut raw_store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        let mut raw_store = open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })?;
         let timeline = raw_store.create_timeline("ledger")?;
@@ -908,7 +922,7 @@ mod tests {
         ))?;
         drop(store);
 
-        let reopened = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        let reopened = open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })?;
         let persisted = reopened
@@ -937,7 +951,7 @@ mod tests {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&signing_key)?;
         let material_digest = key_material_digest(&signing_key.to_bytes());
-        let mut first_raw = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        let mut first_raw = open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })?;
         let timeline = first_raw.create_timeline("ledger")?;
@@ -950,7 +964,7 @@ mod tests {
             identity,
             Box::new(Blake3Hasher),
         )?;
-        let second_raw = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        let second_raw = open_store(pos_store::StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
         })?;
         let mut second = EventLedgerStore::new(
@@ -985,7 +999,7 @@ mod tests {
             .lock()
             .map_err(|_| "registry lock poisoned")?
             .clone();
-        let mut store = MemoryStore::new();
+        let mut store = gated_memory_store();
         store.save_key_registry(&persisted)?;
         let expected = KeyRegistryStateV1::new();
         let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
@@ -1305,7 +1319,7 @@ mod tests {
     fn load_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&sk)?;
-        let mem = MemoryStore::new();
+        let mem = gated_memory_store();
         let tl_id = pos_core::ids::TimelineId::new();
         let store = EventLedgerStore::new(
             Box::new(mem),
@@ -1325,7 +1339,7 @@ mod tests {
     fn resolve_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&sk)?;
-        let mem = MemoryStore::new();
+        let mem = gated_memory_store();
         let tl_id = pos_core::ids::TimelineId::new();
         let mut store = EventLedgerStore::new(
             Box::new(mem),
@@ -1360,7 +1374,7 @@ mod tests {
     fn register_fails_on_missing_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (sk, _vk) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&sk)?;
-        let mem = MemoryStore::new();
+        let mem = gated_memory_store();
         let tl_id = pos_core::ids::TimelineId::new();
         let mut store = EventLedgerStore::new(
             Box::new(mem),

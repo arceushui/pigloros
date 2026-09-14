@@ -13,12 +13,14 @@ use super::{
     ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1, ErasureCasEffectV1,
     ErasureCoordinator, ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1,
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
-    ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
-    ErasureIndexInsertV1, ErasureLifecycleV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
-    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorQueryV1,
-    ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedStateQueryV1,
-    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
+    ErasureForkAdmissionInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
+    ErasureFreezeProvenanceV1, ErasureIndexInsertV1, ErasureLifecycleV1, ErasurePersistedStateV1,
+    ErasurePersistenceObjectV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
+    ErasureRecoveryErrorQueryV1, ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
+    ErasureVerifiedTopologyProofV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
 };
 use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
@@ -1201,6 +1203,54 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 )
             })
     }
+
+    /// Prepare one atomic ERSE1 and child-Timeline admission without committing it.
+    ///
+    /// The returned capability is bound to the recovered manifest predecessor,
+    /// current inventory generation, stable operation identity, and preallocated
+    /// child. Only the owning adapter may consume it in one atomic transaction.
+    ///
+    /// # Errors
+    /// Returns a closed recovery, lineage, authorization, or preparation error.
+    pub fn prepare_fork_admission(
+        &mut self,
+        request: ErasureReferenceV1,
+        extension: ErasureScopeExtensionV1,
+        input: ErasureForkAdmissionInputV1,
+    ) -> Result<PreparedErasureForkAdmissionV1, ErasureErrorV1> {
+        let mut record = self.record(request)?;
+        let scope = record
+            .scope
+            .as_ref()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let lineage_rule = scope.lineage_rule().ok_or(ErasureErrorV1::PolicyConflict)?;
+        if (
+            extension.request(),
+            extension.scope_commitment(),
+            extension.lineage_rule(),
+            extension.predecessor_extension(),
+        ) != (
+            request,
+            scope.reference(),
+            lineage_rule,
+            record.scope_head.map(|head| head.extension),
+        ) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.port.admit_fork_scope_extension(&extension, &input)?;
+        let expected = record.manifest_digest;
+        let (extension_object, node_object, index) = record.append_scope_extension(extension)?;
+        record.scope_extensions.push(extension);
+        let state = record.state_object()?;
+        let mutation = record.prepare(
+            Some(expected),
+            vec![extension_object, node_object],
+            vec![state],
+            vec![index],
+            ErasureCasEffectV1::None,
+        )?;
+        PreparedErasureForkAdmissionV1::new(input, extension, mutation)
+    }
     /// Append one authorized administrative recovery resolution.
     ///
     /// # Errors
@@ -1257,6 +1307,62 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     }
 }
 
+impl<P: ErasureCoordinatorPortV1> ErasureVerifiedInventoryQueryV1
+    for ErasureCoordinatorStateMachineV1<P>
+{
+    fn verified_inventory(
+        &mut self,
+        maximum_requests: usize,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        let observation = self
+            .port
+            .complete_erasure_inventory_observation(maximum_requests)?;
+        let (request_heads, topology, request_topology) = observation.into_parts();
+        if (
+            maximum_requests != 0,
+            maximum_requests <= super::ERASURE_MAX_INVENTORY_REQUESTS,
+            request_heads.len() <= maximum_requests,
+            request_heads.len() == request_topology.len(),
+            request_heads.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            request_topology
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0),
+        ) != (true, true, true, true, true, true)
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+
+        let mut recovered = Vec::new();
+        recovered
+            .try_reserve(request_heads.len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        for ((request, expected_head), (topology_request, topology_observation)) in
+            request_heads.into_iter().zip(request_topology)
+        {
+            if request != topology_request
+                || topology_observation.manifest_digest() != expected_head
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let record = self
+                .recover(request)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let state = record.verified_state();
+            if state.manifest_digest() != expected_head {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                expected_head,
+                topology_observation.bindings().to_vec(),
+                topology_observation.unaffected().to_vec(),
+            );
+            self.cache(record);
+            recovered.push((state, proof));
+        }
+        ErasureVerifiedInventoryV1::from_verified_recovery(recovered, topology, maximum_requests)
+    }
+}
+
 impl<P: ErasureCoordinatorPortV1> ErasureVerifiedStateQueryV1
     for ErasureCoordinatorStateMachineV1<P>
 {
@@ -1265,6 +1371,56 @@ impl<P: ErasureCoordinatorPortV1> ErasureVerifiedStateQueryV1
         request: ErasureReferenceV1,
     ) -> Result<Option<super::ErasureVerifiedStateV1>, ErasureErrorV1> {
         Self::verified_state(self, request)
+    }
+
+    fn verified_state_with_topology(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<
+        Option<(
+            super::ErasureVerifiedStateV1,
+            ErasureVerifiedTopologyProofV1,
+        )>,
+        ErasureErrorV1,
+    > {
+        let Some(record) = self.recover(request)? else {
+            return Ok(None);
+        };
+        let state = record.verified_state();
+        let proof = if state.scope().is_none() {
+            Some(ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                state.manifest_digest(),
+                Vec::new(),
+                Vec::new(),
+            ))
+        } else {
+            let Some(observation) = self
+                .port
+                .verified_topology_observation(request, state.manifest_digest())?
+            else {
+                self.cache(record);
+                return Ok(None);
+            };
+            if observation.manifest_digest() != state.manifest_digest() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            Some(ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                observation.manifest_digest(),
+                observation.bindings().to_vec(),
+                observation.unaffected().to_vec(),
+            ))
+        };
+        self.cache(record);
+        Ok(proof.map(|proof| (state, proof)))
+    }
+
+    fn verified_topology(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyProofV1>, ErasureErrorV1> {
+        Ok(self
+            .verified_state_with_topology(request)?
+            .map(|(_, proof)| proof))
     }
 }
 

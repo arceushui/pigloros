@@ -442,13 +442,14 @@ mod tests {
     use pos_core::{
         clock::Seq,
         ids::{EntityId, PluginId, TimelineId},
+        ErasureContainmentGateV1,
     };
     use pos_runtime::recorder::RECORDER_EVENT_TYPE;
     use pos_runtime::{
         Driver, ObservationView, PluginRegistry, Recorder, RuntimeError, SnapshotAnchor,
         TimelineHistorySegment,
     };
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     const PLUGIN_HASH: [u8; 32] = [3; 32];
     const PROVIDER_HASH: [u8; 32] = [4; 32];
@@ -515,6 +516,7 @@ mod tests {
         let driver =
             ProviderBackedAgentDriver::new(entity, catalogue, provenance, Box::new(provider));
         let mut registry = PluginRegistry::new();
+        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         registry.register_driver(Box::new(driver));
         DriverFixture {
             registry,

@@ -324,7 +324,9 @@ mod tests {
         crypto::Hash,
         event::SchemaVersion,
         ids::EventId,
+        ErasureContainmentGateV1,
     };
+    use std::sync::Arc;
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -865,6 +867,9 @@ mod tests {
         assert_eq!(driver.name(), "persona-eval");
 
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
         let tl = store.create_timeline("persona-eval").test_ok();
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
 
@@ -890,6 +895,9 @@ mod tests {
         let entity = EntityId::new();
 
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
         let tl = store.create_timeline("loop").test_ok();
         let authority = pos_core::ConsentAuthority::new();
         let grant = pos_core::ConsentGrantedV1 {
@@ -905,7 +913,9 @@ mod tests {
             grant_seq: 1,
         };
         let token = authority.record_grant_on_timeline(tl.id(), &grant);
-        let mut registry = PluginRegistry::new().with_consent_authority(authority);
+        let mut registry = PluginRegistry::new()
+            .with_consent_authority(authority)
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         let persona = PersonaPlugin::new();
         registry
             .register(

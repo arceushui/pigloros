@@ -2968,6 +2968,51 @@ fn coordinator_persists_canonical_mixed_acknowledgement_order() -> Result<(), Er
     Ok(())
 }
 
+fn receipt_for_acknowledgement_order(order: &[usize]) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+    let request = coordinator_request()?;
+    let mut targets = vec![target(30), target(10), target(20)];
+    targets.sort_unstable();
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(coordinator_port(targets.clone(), None), COORDINATOR);
+    submit_authorize_and_freeze(&mut coordinator, &request)?;
+    coordinator.dispatch_attempt(
+        request.reference(),
+        &coordinator_admission_for_targets(request.reference(), &targets)?,
+    )?;
+    let outcomes = [
+        (ErasureAcknowledgementOutcomeV1::Acknowledged, 171),
+        (ErasureAcknowledgementOutcomeV1::Negative, 172),
+        (ErasureAcknowledgementOutcomeV1::Stale, 173),
+    ];
+    for &index in order {
+        let (outcome, evidence) = outcomes[index];
+        coordinator.acknowledge(
+            request.reference(),
+            coordinator_acknowledgement(
+                request.reference(),
+                targets[index],
+                reference(evidence),
+                outcome,
+            )?,
+        )?;
+    }
+    coordinator.finalize(
+        request.reference(),
+        coordinator_receipt_input_for_targets(&targets),
+    )
+}
+
+#[test]
+fn coordinator_delayed_and_reordered_acknowledgements_have_one_receipt(
+) -> Result<(), ErasureErrorV1> {
+    let canonical = receipt_for_acknowledgement_order(&[0, 1, 2])?;
+    let delayed = receipt_for_acknowledgement_order(&[2, 0, 1])?;
+    assert_eq!(delayed.to_canonical_cbor()?, canonical.to_canonical_cbor()?);
+    assert_eq!(delayed.receipt_digest(), canonical.receipt_digest());
+    assert_eq!(delayed.replay_claim(), canonical.replay_claim());
+    Ok(())
+}
+
 #[test]
 fn coordinator_exact_retry_rejects_a_readdressed_receipt_object() -> Result<(), ErasureErrorV1> {
     let target = target(10);

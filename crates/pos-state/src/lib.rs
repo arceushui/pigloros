@@ -12,12 +12,16 @@
 //! No I/O, no async.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use pos_core::{
     AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
     CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
-    Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
+    Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
     Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
@@ -36,11 +40,16 @@ pub struct AuthorizationCacheKeyV1 {
     consent_policy_revision: Hash,
     capability_policy_revision: Hash,
     revocation_epoch: u64,
+    inventory_generation: [u8; 32],
 }
 
 impl AuthorizationCacheKeyV1 {
     #[must_use]
-    pub fn from_decision(decision: &AuthorizationDecisionV1, revocation_epoch: u64) -> Self {
+    pub fn from_decision(
+        decision: &AuthorizationDecisionV1,
+        revocation_epoch: u64,
+        inventory_generation: ErasureReferenceV1,
+    ) -> Self {
         Self {
             request_digest: decision.request_digest(),
             authority_timeline: decision.authority_timeline(),
@@ -48,6 +57,7 @@ impl AuthorizationCacheKeyV1 {
             consent_policy_revision: decision.consent_policy_revision(),
             capability_policy_revision: decision.capability_policy_revision(),
             revocation_epoch,
+            inventory_generation: inventory_generation.digest(),
         }
     }
 
@@ -60,6 +70,11 @@ impl AuthorizationCacheKeyV1 {
     pub const fn revocation_epoch(&self) -> u64 {
         self.revocation_epoch
     }
+
+    #[must_use]
+    pub const fn inventory_generation(&self) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest(self.inventory_generation)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +84,20 @@ struct AuthorizationCacheEntryV1 {
     valid_until_position: Seq,
     grant_ids: BTreeSet<Hash>,
     consent_references: BTreeSet<Hash>,
+    inventory_generation: ErasureReferenceV1,
+}
+
+impl AuthorizationCacheEntryV1 {
+    fn is_current(
+        &self,
+        at_time: WallTime,
+        at_position: Seq,
+        inventory_generation: ErasureReferenceV1,
+    ) -> bool {
+        at_time < self.expires_at
+            && at_position < self.valid_until_position
+            && self.inventory_generation == inventory_generation
+    }
 }
 
 /// Current authorized-decision projection with explicit expiry and revocation indexes.
@@ -88,7 +117,8 @@ impl AuthorizationCacheV1 {
         Self::default()
     }
 
-    /// Cache an active decision until its derived shortest expiry.
+    /// Cache an active decision until its derived shortest expiry, bound to
+    /// the exact installed erasure inventory generation.
     ///
     /// Returns the exact cache key, or `None` when the decision is denied, the
     /// request does not match the persisted authority state, an expiry is not in
@@ -98,6 +128,7 @@ impl AuthorizationCacheV1 {
         decision: AuthorizationDecisionV1,
         request: &AuthorizationRequestV1,
         authority: &PersistedAuthorityV1,
+        inventory_generation: ErasureReferenceV1,
     ) -> Option<AuthorizationCacheKeyV1> {
         let grants = authority.chain().grants();
         let grant_ids = grants
@@ -124,13 +155,11 @@ impl AuthorizationCacheV1 {
         };
         let authentication_expiry = request.authenticated().expires_at();
         let expires_at = match request.consent() {
-            ConsentEvidenceV1::Resolved { grants } => grants
-                .iter()
-                .map(pos_core::ConsentGrantRefV1::valid_until)
-                .min()
-                .map_or(authentication_expiry, |consent_expiry| {
-                    consent_expiry.min(authentication_expiry)
-                }),
+            ConsentEvidenceV1::Resolved { grants } => {
+                grants.iter().fold(authentication_expiry, |expiry, grant| {
+                    expiry.min(grant.valid_until())
+                })
+            }
             _ => authentication_expiry,
         };
         let digest_matches = decision.request_digest() == request.binding_digest();
@@ -149,7 +178,11 @@ impl AuthorizationCacheV1 {
         {
             return None;
         }
-        let key = AuthorizationCacheKeyV1::from_decision(&decision, authority.revocation_epoch());
+        let key = AuthorizationCacheKeyV1::from_decision(
+            &decision,
+            authority.revocation_epoch(),
+            inventory_generation,
+        );
         self.entries.insert(
             key.clone(),
             AuthorizationCacheEntryV1 {
@@ -158,20 +191,24 @@ impl AuthorizationCacheV1 {
                 valid_until_position,
                 grant_ids,
                 consent_references,
+                inventory_generation,
             },
         );
         Some(key)
     }
 
-    /// Read an unexpired decision through its complete invalidation identity.
+    /// Read an unexpired decision only for the exact installed erasure
+    /// inventory generation. A generation mismatch evicts the stale entry.
     pub fn get(
         &mut self,
         key: &AuthorizationCacheKeyV1,
         at_time: WallTime,
         at_position: Seq,
+        inventory_generation: ErasureReferenceV1,
     ) -> Option<&AuthorizationDecisionV1> {
         let expired = self.entries.get(key).is_some_and(|entry| {
-            at_time >= entry.expires_at || at_position >= entry.valid_until_position
+            key.inventory_generation() != inventory_generation
+                || !entry.is_current(at_time, at_position, inventory_generation)
         });
         if expired {
             self.entries.remove(key);
@@ -272,10 +309,24 @@ struct Slot {
 ///
 /// Plugins register reducers during Wave 3 initialisation; the registry then
 /// applies every incoming event to every registered reducer in insertion order.
-#[derive(Default)]
 pub struct ProjectionRegistry {
     /// Ordered list so iteration is deterministic.
     slots: Vec<(String, Slot)>,
+    /// Host-owned erasure gate for protected projection materialization.
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
+    /// Whether the current gate was supplied by the host composition root.
+    /// The constructor's fail-closed gate can be replaced exactly once.
+    erasure_gate_bound: bool,
+}
+
+impl Default for ProjectionRegistry {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
+            erasure_gate_bound: false,
+        }
+    }
 }
 
 impl std::fmt::Debug for ProjectionRegistry {
@@ -286,7 +337,7 @@ impl std::fmt::Debug for ProjectionRegistry {
         }
         f.debug_struct("ProjectionRegistry")
             .field("reducers", &names)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -295,6 +346,55 @@ impl ProjectionRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind the host-owned erasure gate used by protected observations.
+    #[must_use]
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
+        self.bind_erasure_gate(gate);
+        self
+    }
+
+    /// Bind the host-owned erasure gate in place.
+    pub fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) {
+        if self.erasure_gate_bound {
+            return;
+        }
+        self.erasure_gate = Some(gate);
+        self.erasure_gate_bound = true;
+    }
+
+    /// Return the host-bound erasure gate, when this registry has one.
+    #[must_use]
+    pub fn clone_erasure_gate(&self) -> Option<Arc<dyn ErasureGate>> {
+        self.erasure_gate_bound
+            .then_some(self.erasure_gate.clone())
+            .flatten()
+    }
+
+    /// Remove the erasure gate so protected observations fail closed.
+    #[must_use]
+    pub fn without_erasure_gate(mut self) -> Self {
+        self.erasure_gate = None;
+        self
+    }
+
+    fn with_erasure_fence<T>(
+        &self,
+        timeline: TimelineId,
+        mut effect: impl FnMut(&Self) -> Result<T, AuthorityErrorV1>,
+    ) -> Result<T, AuthorityErrorV1> {
+        let gate = self
+            .erasure_gate
+            .as_ref()
+            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        let mut result = Err(AuthorityErrorV1::SourceUnavailable);
+        let mut run = || {
+            result = effect(self);
+        };
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut run)
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        result
     }
 
     /// Register a named reducer.
@@ -408,23 +508,27 @@ impl ProjectionRegistry {
         authority_position: Seq,
         context: &ProjectionObservationContextV1,
     ) -> Result<AuthorizedObservationV1, AuthorityErrorV1> {
-        authority
-            .validate_observation_authorization(
-                request,
-                decision,
-                authority_registry,
-                authority_position,
-            )
-            .and_then(|()| self.materialize_authorized_projection(request, decision, context))
-            .map(|snapshot| {
-                let artifact_digest = snapshot.provenance_digest();
-                AuthorizedObservationV1 {
-                    snapshot,
-                    artifact_digest,
-                    request: request.clone(),
-                    decision: decision.clone(),
-                }
-            })
+        self.with_erasure_fence(context.timeline_id, |registry| {
+            authority
+                .validate_observation_authorization(
+                    request,
+                    decision,
+                    authority_registry,
+                    authority_position,
+                )
+                .and_then(|()| {
+                    registry.materialize_authorized_projection(request, decision, context)
+                })
+                .map(|snapshot| {
+                    let artifact_digest = snapshot.provenance_digest();
+                    AuthorizedObservationV1 {
+                        snapshot,
+                        artifact_digest,
+                        request: request.clone(),
+                        decision: decision.clone(),
+                    }
+                })
+        })
     }
 
     fn materialize_authorized_projection(
@@ -446,10 +550,8 @@ impl ProjectionRegistry {
         let Some(participant_id) = request.participant_id() else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
-        let Some(plugin_id) = request.plugin_id() else {
-            return Err(AuthorityErrorV1::UnauthorizedSource);
-        };
-        let Some(installation_id) = request.installation_id() else {
+        let Some((plugin_id, installation_id)) = request.plugin_id().zip(request.installation_id())
+        else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
         let Some(slot) = self
@@ -581,13 +683,24 @@ impl ProjectionRegistry {
         }
     }
 
-    /// Extract a snapshot of all per-reducer state as a serialisable map.
+    /// Materialize a snapshot of all per-reducer state inside the current
+    /// Timeline containment fence.
     ///
     /// The returned map is keyed by reducer name and contains each reducer's
     /// accumulated [`StateRegistry`]. This is used by `pos-time` snapshot
     /// capture and consistency verification.
-    #[must_use]
-    pub fn state_snapshot(&self) -> std::collections::HashMap<String, StateRegistry> {
+    ///
+    /// # Errors
+    /// Returns a closed source error when the host-owned gate is absent,
+    /// poisoned, stale, or denies snapshot materialization for `timeline`.
+    pub fn state_snapshot(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<std::collections::HashMap<String, StateRegistry>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| Ok(registry.snapshot_unfenced()))
+    }
+
+    fn snapshot_unfenced(&self) -> std::collections::HashMap<String, StateRegistry> {
         let mut snapshot = std::collections::HashMap::new();
         for (name, slot) in &self.slots {
             snapshot.insert(name.clone(), slot.registry.clone());
@@ -975,6 +1088,7 @@ impl RelationshipIndex {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pos_core::PluginId;
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
@@ -986,7 +1100,8 @@ mod tests {
         AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
         AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1,
         CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
-        DelegateClassV1, DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
+        ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1,
+        DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
     };
     use proptest::prelude::*;
 
@@ -1023,6 +1138,10 @@ mod tests {
 
     const fn test_hash(value: u8) -> Hash {
         Hash::from_bytes([value; 32])
+    }
+
+    const fn cache_generation(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
     }
 
     struct CacheFixture {
@@ -1120,6 +1239,69 @@ mod tests {
                 environment_constraints: vec!["local-only".to_owned()],
             },
         ))
+    }
+
+    fn projection_request(
+        base: &AuthorizationRequestV1,
+        subject_id: Option<EntityId>,
+        participant_id: Option<EntityId>,
+        plugin_context: Option<(PluginId, [u8; 16])>,
+        consent: ConsentEvidenceV1,
+    ) -> AuthorizationRequestV1 {
+        let (plugin_id, installation_id) = plugin_context.unzip();
+        test_ok(AuthorizationRequestV1::try_from_draft(
+            AuthorizationRequestDraftV1 {
+                authenticated: base.authenticated().clone(),
+                actor_entity_id: base.actor_entity_id(),
+                subject_id,
+                participant_id,
+                plugin_id,
+                installation_id,
+                principal_role: base.principal_role(),
+                resource: "projection.missing-reducer".to_owned(),
+                data_category: base.data_category().to_owned(),
+                action: base.action().to_owned(),
+                purpose: base.purpose().to_owned(),
+                audience: base.audience().to_owned(),
+                at_time: base.at_time(),
+                authority_timeline: base.authority_timeline(),
+                at_position: base.at_position(),
+                consent_timeline: subject_id.map(|_| base.authority_timeline()),
+                consent_at_position: subject_id.map(|_| base.at_position()),
+                use_count: base.use_count(),
+                budget: base.budget(),
+                consent_policy_revision: base.consent_policy_revision(),
+                capability_policy_revision: base.capability_policy_revision(),
+                revocation_epoch: base.revocation_epoch(),
+                revocation_state_current: base.revocation_state_current(),
+                authority_registry_digest: base.authority_registry_digest(),
+                consent,
+                environment_constraints: base.environment_constraints().to_vec(),
+            },
+        ))
+    }
+
+    fn cache_consent_grant(valid_until: u64) -> ConsentGrantRefV1 {
+        test_ok(ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+            consent_id: test_hash(61),
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            data_categories: vec!["private".to_owned()],
+            purposes: vec!["planning".to_owned()],
+            audiences: vec!["local-host".to_owned()],
+            action_classes: vec!["read".to_owned()],
+            valid_from: WallTime::from_micros(1),
+            valid_until: WallTime::from_micros(valid_until),
+            withdrawal_retention_policy: "erase".to_owned(),
+            policy_revision: test_hash(62),
+            issuer: test_ok(PrincipalRefV1::try_new([63; 16], "local.test")),
+            issuer_evidence: test_hash(64),
+            consent_timeline: TimelineId::new(),
+            grant_position: Seq::from_u64(1),
+            status: ConsentGrantStatusV1::Active,
+            revocation_fence: None,
+            authority_registry_digest: test_hash(65),
+        }))
     }
 
     fn decision_with_capability_trust(
@@ -1386,23 +1568,94 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                cache_generation(1),
             )
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
         assert!(by_time
-            .get(&key, WallTime::from_micros(99), Seq::from_u64(79))
+            .get(
+                &key,
+                WallTime::from_micros(99),
+                Seq::from_u64(79),
+                cache_generation(1),
+            )
             .is_some());
         assert!(by_time
-            .get(&key, WallTime::from_micros(100), Seq::from_u64(79))
+            .get(
+                &key,
+                WallTime::from_micros(100),
+                Seq::from_u64(79),
+                cache_generation(1),
+            )
             .is_none());
         assert!(by_time.is_empty());
 
         let mut by_position = AuthorizationCacheV1::new();
         let key = by_position
-            .insert_active(fixture.decision, &fixture.request, &fixture.authority)
+            .insert_active(
+                fixture.decision,
+                &fixture.request,
+                &fixture.authority,
+                cache_generation(1),
+            )
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
         assert!(by_position
-            .get(&key, WallTime::from_micros(99), Seq::from_u64(80))
+            .get(
+                &key,
+                WallTime::from_micros(99),
+                Seq::from_u64(80),
+                cache_generation(1),
+            )
             .is_none());
+    }
+
+    #[test]
+    fn authorization_cache_uses_resolved_consent_expiry() {
+        let fixture = active_decision(TimelineId::new());
+        let request = projection_request(
+            &fixture.request,
+            Some(EntityId::new()),
+            Some(EntityId::new()),
+            None,
+            ConsentEvidenceV1::Resolved {
+                grants: vec![cache_consent_grant(50)],
+            },
+        );
+        let mut cache = AuthorizationCacheV1::new();
+        assert!(cache
+            .insert_active(
+                fixture.decision,
+                &request,
+                &fixture.authority,
+                cache_generation(1),
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn authorization_cache_rejects_a_pre_freeze_generation_hit() {
+        let fixture = active_decision(TimelineId::new());
+        let installed = cache_generation(1);
+        let successor = cache_generation(2);
+        let mut cache = AuthorizationCacheV1::new();
+        let key = cache
+            .insert_active(
+                fixture.decision,
+                &fixture.request,
+                &fixture.authority,
+                installed,
+            )
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+
+        assert_eq!(key.inventory_generation(), installed);
+        assert!(cache
+            .get(
+                &key,
+                WallTime::from_micros(99),
+                Seq::from_u64(79),
+                successor,
+            )
+            .is_none());
+        assert!(cache.is_empty());
     }
 
     #[test]
@@ -1419,6 +1672,7 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                cache_generation(1),
             )
             .is_some());
         assert_eq!(grant_cache.invalidate_grant(fixture.parent_grant_id), 1);
@@ -1430,6 +1684,7 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                cache_generation(1),
             )
             .is_some());
         assert_eq!(
@@ -1439,10 +1694,20 @@ mod tests {
 
         let mut epoch_cache = AuthorizationCacheV1::new();
         assert!(epoch_cache
-            .insert_active(fixture.decision, &fixture.request, &fixture.authority,)
+            .insert_active(
+                fixture.decision,
+                &fixture.request,
+                &fixture.authority,
+                cache_generation(1),
+            )
             .is_some());
         assert!(epoch_cache
-            .insert_active(other.decision, &other.request, &other.authority,)
+            .insert_active(
+                other.decision,
+                &other.request,
+                &other.authority,
+                cache_generation(1),
+            )
             .is_some());
         assert_eq!(epoch_cache.len(), 2);
         assert_eq!(epoch_cache.retain_revocation_epoch(timeline, 1), 1);
@@ -1462,6 +1727,7 @@ mod tests {
                 fixture.decision.clone(),
                 &mismatched.request,
                 &fixture.authority,
+                cache_generation(1),
             )
             .is_none());
         assert!(cache
@@ -1469,13 +1735,19 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &mismatched_chain.authority,
+                cache_generation(1),
             )
             .is_none());
 
         let denied = decision_with_capability_trust(timeline, test_hash(5), false);
         assert!(!denied.decision.is_allowed());
         assert!(cache
-            .insert_active(denied.decision, &denied.request, &denied.authority,)
+            .insert_active(
+                denied.decision,
+                &denied.request,
+                &denied.authority,
+                cache_generation(1),
+            )
             .is_none());
     }
 
@@ -1502,11 +1774,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_loads_matching_reducer() {
-        let mut registry = ProjectionRegistry::new();
+        let timeline = TimelineId::new();
+        let mut registry =
+            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
         registry.apply_event(&make_event(entity));
-        let snapshot = registry.state_snapshot();
+        let snapshot = test_ok(registry.state_snapshot(timeline));
 
         let mut restored = ProjectionRegistry::new();
         restored.register("registered", Box::new(EntityStateProjection));
@@ -1518,6 +1792,25 @@ mod tests {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn public_state_snapshot_fails_closed_without_timeline_access() {
+        let timeline = TimelineId::new();
+        let unbound = ProjectionRegistry::new();
+        assert_eq!(
+            unbound.state_snapshot(timeline).map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+
+        let blocked_gate = Arc::new(ErasureContainmentGateV1::new());
+        blocked_gate.block_timeline(timeline);
+        let blocked = ProjectionRegistry::new().with_erasure_gate(blocked_gate);
+        assert_eq!(
+            blocked.state_snapshot(timeline).map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
     }
 
     #[test]
@@ -1716,6 +2009,132 @@ mod tests {
             prop_assert_eq!(count1, n_events as u64);
         }
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn public_observation_path_enters_the_erasure_fence() {
+        let timeline = TimelineId::new();
+        let fixture = active_decision(timeline);
+        let authority_registry = test_ok(AuthorityRegistrySnapshotV1::try_new(
+            test_hash(7),
+            vec![fixture.request.authenticated().registry_binding_digest()],
+            Vec::new(),
+            Vec::new(),
+        ));
+        let context = ProjectionObservationContextV1 {
+            timeline_id: timeline,
+            observed_through: Seq::ZERO,
+            reducer: "missing-reducer".to_owned(),
+            prior_snapshot_digest: None,
+        };
+        let mut registry = ProjectionRegistry::new();
+        assert_eq!(
+            registry
+                .materialize_authorized_observation(
+                    &fixture.request,
+                    &fixture.decision,
+                    &fixture.authority,
+                    &authority_registry,
+                    Seq::ZERO,
+                    &context,
+                )
+                .map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+
+        let blocked_gate = Arc::new(ErasureContainmentGateV1::new());
+        blocked_gate.block_timeline(timeline);
+        registry.bind_erasure_gate(blocked_gate);
+        // A second binding cannot replace the host gate with a permissive one.
+        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        assert_eq!(
+            registry.materialize_authorized_observation(
+                &fixture.request,
+                &fixture.decision,
+                &fixture.authority,
+                &authority_registry,
+                Seq::ZERO,
+                &context,
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+
+        let unbound = ProjectionRegistry::new().without_erasure_gate();
+        assert_eq!(
+            unbound.materialize_authorized_observation(
+                &fixture.request,
+                &fixture.decision,
+                &fixture.authority,
+                &authority_registry,
+                Seq::ZERO,
+                &context,
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    #[test]
+    fn projection_materialization_requires_every_subject_and_plugin_binding() {
+        let fixture = active_decision(TimelineId::new());
+        let context = ProjectionObservationContextV1 {
+            timeline_id: fixture.request.authority_timeline(),
+            observed_through: Seq::ZERO,
+            reducer: "missing-reducer".to_owned(),
+            prior_snapshot_digest: None,
+        };
+        let registry = ProjectionRegistry::new();
+        let subject = EntityId::new();
+        let participant = EntityId::new();
+        let plugin = PluginId::new();
+
+        let missing_subject = projection_request(
+            &fixture.request,
+            None,
+            Some(participant),
+            Some((plugin, [1; 16])),
+            fixture.request.consent().clone(),
+        );
+        assert_eq!(
+            registry.materialize_authorized_projection(
+                &missing_subject,
+                &fixture.decision,
+                &context,
+            ),
+            Err(AuthorityErrorV1::ConsentMissing)
+        );
+
+        let missing_participant = projection_request(
+            &fixture.request,
+            Some(subject),
+            None,
+            Some((plugin, [1; 16])),
+            fixture.request.consent().clone(),
+        );
+        assert_eq!(
+            registry.materialize_authorized_projection(
+                &missing_participant,
+                &fixture.decision,
+                &context,
+            ),
+            Err(AuthorityErrorV1::UnauthorizedSource)
+        );
+
+        let missing_plugin = projection_request(
+            &fixture.request,
+            Some(subject),
+            Some(participant),
+            None,
+            fixture.request.consent().clone(),
+        );
+        assert_eq!(
+            registry.materialize_authorized_projection(
+                &missing_plugin,
+                &fixture.decision,
+                &context,
+            ),
+            Err(AuthorityErrorV1::UnauthorizedSource)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1798,7 +2217,7 @@ mod wave3_tests {
         reg.register("r", Box::new(TR));
         reg.apply_event(&ev(entity));
 
-        let snap = reg.state_snapshot();
+        let snap = reg.snapshot_unfenced();
         let diff = reg.diff_against_snapshot(&snap, &[entity]);
         assert!(diff.is_none());
     }
@@ -1811,7 +2230,7 @@ mod wave3_tests {
         reg.register("r", Box::new(TR));
         reg.apply_event(&ev(entity));
 
-        let snap = reg.state_snapshot();
+        let snap = reg.snapshot_unfenced();
         // Apply another event — now reg diverges from the snapshot
         reg.apply_event(&ev(entity));
         let diff = reg.diff_against_snapshot(&snap, &[entity]);
@@ -1833,5 +2252,21 @@ mod wave3_tests {
         let empty_snap = std::collections::HashMap::new();
         let diff = reg.diff_against_snapshot(&empty_snap, &[entity]);
         assert!(diff.is_some());
+    }
+
+    #[test]
+    fn cloned_erasure_gate_exists_only_after_an_explicit_host_binding() {
+        let mut registry = ProjectionRegistry::new();
+        assert!(registry.clone_erasure_gate().is_none());
+
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        registry.bind_erasure_gate(Arc::clone(&gate));
+        let cloned = registry.clone_erasure_gate();
+        assert!(cloned
+            .as_ref()
+            .is_some_and(|candidate| Arc::ptr_eq(candidate, &gate)));
+
+        let registry = registry.without_erasure_gate();
+        assert!(registry.clone_erasure_gate().is_none());
     }
 }

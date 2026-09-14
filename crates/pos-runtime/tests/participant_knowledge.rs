@@ -7,11 +7,11 @@ use pos_core::{
     Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
     CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
     ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
-    ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, Hash,
-    Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
-    ObservationSnapshotV1, PersistedAuthorityV1, Plugin, PluginId, PrincipalRefV1, Reducer,
-    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange, State,
-    TimelineId, WallTime,
+    ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    Event, EventDraft, Hash, Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1,
+    MemoryPolicyRevisionV1, ObservationSnapshotV1, PersistedAuthorityV1, Plugin, PluginId,
+    PrincipalRefV1, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+    Seq, SeqRange, State, TimelineId, WallTime,
 };
 use pos_runtime::{
     AuthorizedDriverTargetV1, Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput,
@@ -272,7 +272,8 @@ fn fixture() -> Fixture {
 }
 
 fn empty_profile_projections() -> ProjectionRegistry {
-    let mut projections = ProjectionRegistry::new();
+    let mut projections =
+        ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
     projections
         .register_observable(
             "profile",
@@ -378,6 +379,26 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
         plugin_id: ids.plugin_id,
         timeline_id: ids.timeline_id,
     }
+}
+
+fn gated_registry() -> PluginRegistry {
+    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
+fn gated_store() -> Box<dyn pos_core::store::EventStore> {
+    let mut store = open_store(StoreConfig::Memory).unwrap_or_else(|error| {
+        std::panic::resume_unwind(Box::new(format!(
+            "opening the in-memory store failed: {error:?}"
+        )))
+    });
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "binding the in-memory erasure gate failed: {error:?}"
+            )))
+        });
+    store
 }
 
 struct EmptyReducer;
@@ -586,7 +607,7 @@ fn registry_with_mode(
 }
 
 fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
-    registry_with_mode(fixture, ambient, PluginRegistry::new())
+    registry_with_mode(fixture, ambient, gated_registry())
 }
 
 fn current_authority(fixture: &Fixture) -> PersistedAuthorityV1 {
@@ -776,7 +797,7 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
         )
         .test_ok();
     let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
-    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let mut store = gated_store();
 
     assert_eq!(
         authority_error(registry.append_and_commit_authorized_step_at(
@@ -831,7 +852,7 @@ fn consent_revocation_after_staging_aborts_before_append() {
     let fixture = fixture();
     let (mut registry, state) = registry(&fixture, false);
     let drafts = stage_current(&mut registry, &fixture).test_ok();
-    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let mut store = gated_store();
 
     assert_eq!(
         authority_error(registry.append_and_commit_authorized_step_at(
@@ -856,7 +877,7 @@ fn consent_revocation_after_staging_aborts_before_append() {
 
 #[test]
 fn capability_removal_after_staging_aborts_without_append() {
-    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let mut store = gated_store();
     let timeline = store
         .create_timeline("authorized-capability-loss")
         .test_ok();
@@ -940,7 +961,7 @@ fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
     let fixture = fixture();
     let (mut legacy, legacy_state) = registry(&fixture, false);
     let legacy_drafts = stage_current(&mut legacy, &fixture).test_ok();
-    let mut legacy_store = open_store(StoreConfig::Memory).test_ok();
+    let mut legacy_store = gated_store();
     assert!(error_text(legacy.append_and_commit_step_at(
         legacy_store.as_mut(),
         Seq::from_u64(12),
@@ -960,7 +981,7 @@ fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
     let mut changed_drafts = stage_current(&mut substituted, &fixture).test_ok();
     changed_drafts[0].payload = CanonicalBytes::from_static(b"substituted");
     let authority = fixture.state.resolve(fixture.grant.grant_id()).test_ok();
-    let mut substituted_store = open_store(StoreConfig::Memory).test_ok();
+    let mut substituted_store = gated_store();
     assert!(error_text(substituted.append_and_commit_authorized_step_at(
         substituted_store.as_mut(),
         &changed_drafts,
@@ -981,7 +1002,7 @@ fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
 
 #[test]
 fn current_authority_fence_appends_then_commits_the_driver() {
-    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let mut store = gated_store();
     let timeline = store.create_timeline("authorized-participant").test_ok();
     let fixture = fixture_with_timeline(timeline.id());
     let (mut registry, state) = registry(&fixture, false);
@@ -1011,7 +1032,7 @@ fn current_authority_fence_appends_then_commits_the_driver() {
 
 #[test]
 fn erased_observation_between_stage_and_commit_aborts_without_appending() {
-    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let mut store = gated_store();
     let timeline = store
         .create_timeline("erased-authorized-participant")
         .test_ok();
@@ -1053,7 +1074,7 @@ fn erased_observation_between_stage_and_commit_aborts_without_appending() {
 fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     let fixture = fixture();
     let authority = current_authority(&fixture);
-    let mut missing = PluginRegistry::new();
+    let mut missing = gated_registry();
     assert!(error_text(missing.stage_authorized_driver(
         AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
         fixture.observation.clone(),
@@ -1065,7 +1086,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
     ))
     .contains("has no driver"));
 
-    let mut driverless = PluginRegistry::new();
+    let mut driverless = gated_registry();
     driverless
         .register(
             &DriverlessPlugin {
@@ -1109,7 +1130,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
 
     let (mut registry, state) = registry(&fixture, false);
     let drafts = stage_current(&mut registry, &fixture).test_ok();
-    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let mut store = gated_store();
     assert!(error_text(registry.append_and_commit_authorized_step_at(
         store.as_mut(),
         &drafts,
@@ -1151,7 +1172,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
             entity: EntityId::new(),
             fail_step,
         };
-        let mut registry = PluginRegistry::new();
+        let mut registry = gated_registry();
         registry
             .register(
                 &TestPlugin {
@@ -1192,7 +1213,7 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
         event_type: Kind::new("foreign.owned"),
         ambient_subscription: None,
     };
-    let mut registry = PluginRegistry::new();
+    let mut registry = gated_registry();
     registry
         .register(
             &TestPlugin {
@@ -1259,7 +1280,7 @@ fn authorized_commit_rejects_a_legacy_pending_step() {
     let drafts = registry
         .step_all_anchored(fixture.timeline_id, Seq::from_u64(12))
         .test_ok();
-    let mut store = open_store(StoreConfig::Memory).test_ok();
+    let mut store = gated_store();
 
     let error = registry.append_and_commit_authorized_step_at(
         store.as_mut(),

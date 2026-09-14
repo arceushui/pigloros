@@ -11,7 +11,6 @@ pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-store = { path = "../../crates/pos-store" }
 pos-state = { path = "../../crates/pos-state" }
-pos-time = { path = "../../crates/pos-time" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-conformance = { path = "../../crates/pos-conformance" }
 pos-reference = { path = "../../crates/pos-reference" }

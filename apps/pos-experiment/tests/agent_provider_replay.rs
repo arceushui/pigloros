@@ -22,7 +22,7 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{ActionApprover, ActionRejected, Capability, Plugin, ProposedAction},
     store::EventStore,
-    ConsentAuthority, ConsentGrantedV1, CoreError, Timeline,
+    ConsentAuthority, ConsentGrantedV1, CoreError, ErasureContainmentGateV1, Timeline,
 };
 use pos_experiment::{
     BacktestConfig, BacktestRunner, Experiment, ExperimentConfig, ExperimentError,
@@ -55,6 +55,29 @@ const PROVIDER_VERSION: &str = "fixture-v1";
 const PLUGIN_HASH: [u8; 32] = [0x31; 32];
 const PROVIDER_HASH: [u8; 32] = [0x32; 32];
 const CONFIDENCE: u32 = 750_000;
+
+fn gated_experiment(config: ExperimentConfig) -> Experiment {
+    Experiment::new(config).with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+}
+
+fn hosted_experiment(config: ExperimentConfig) -> Experiment {
+    Experiment::new(config)
+}
+
+fn gated_memory_store() -> MemoryStore {
+    let mut store = MemoryStore::new();
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok();
+    store
+}
+
+fn backtest_runner(
+    config: BacktestConfig,
+    registry_factory: impl Fn() -> PluginRegistry + Send + 'static,
+) -> BacktestRunner {
+    BacktestRunner::new(config, registry_factory)
+}
 
 struct TickRecordingProvider {
     response: BoundedProviderBytes,
@@ -141,7 +164,7 @@ impl HostFixture {
             committed_tick: committed_tick.clone(),
         };
         let plugin = AgentPlugin::new();
-        let mut experiment = Experiment::new(ExperimentConfig {
+        let mut experiment = hosted_experiment(ExperimentConfig {
             name: name.to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config,
@@ -212,7 +235,7 @@ impl HostFixture {
         let plugin = Arc::new(AgentPlugin::new());
         let child_plugin = Arc::clone(&plugin);
         let child_host = self.clone();
-        let mut experiment = Experiment::new(ExperimentConfig {
+        let mut experiment = hosted_experiment(ExperimentConfig {
             name: name.to_owned(),
             stop: StopCondition::MaxTicks(2),
             store_config,
@@ -346,6 +369,7 @@ enum ExpectedResult {
 #[derive(Default)]
 struct AdapterControl {
     append_batch_sizes: Vec<usize>,
+    erasure_gate_bound: bool,
     fail_next_append: bool,
     next_read_fault: Option<ReadFault>,
     logical_head_reads: usize,
@@ -434,6 +458,7 @@ impl Driver for BoundaryDriver {
 struct SharedMemoryAdapter {
     store: Arc<Mutex<MemoryStore>>,
     control: Arc<Mutex<AdapterControl>>,
+    erasure_gate: Arc<dyn pos_core::ErasureGate>,
 }
 
 impl SharedMemoryAdapter {
@@ -441,7 +466,12 @@ impl SharedMemoryAdapter {
         Self {
             store: Arc::new(Mutex::new(MemoryStore::new())),
             control: Arc::new(Mutex::new(AdapterControl::default())),
+            erasure_gate: Arc::new(ErasureContainmentGateV1::new()),
         }
+    }
+
+    fn gate_experiment(&self, experiment: Experiment) -> Experiment {
+        experiment.with_erasure_gate(Arc::clone(&self.erasure_gate))
     }
 
     fn fail_next_append(&self) {
@@ -504,6 +534,18 @@ impl SharedMemoryAdapter {
 }
 
 impl EventStore for SharedMemoryAdapter {
+    fn bind_erasure_gate(&mut self, gate: Arc<dyn pos_core::ErasureGate>) -> Result<(), CoreError> {
+        if !Arc::ptr_eq(&self.erasure_gate, &gate) {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        }
+        if self.control().erasure_gate_bound {
+            return Ok(());
+        }
+        self.store().bind_erasure_gate(gate)?;
+        self.control().erasure_gate_bound = true;
+        Ok(())
+    }
+
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         self.store().create_timeline(name)
     }
@@ -628,7 +670,7 @@ fn assert_supplied_store_has_no_recovery_recipe(
 
 fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
     let plugin = AgentPlugin::new();
-    let mut experiment = Experiment::new(ExperimentConfig {
+    let mut experiment = hosted_experiment(ExperimentConfig {
         name: name.to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config: StoreConfig::Memory,
@@ -644,8 +686,125 @@ fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
 }
 
 #[test]
-fn backtest_runner_completes_both_empty_phases() {
+fn backtest_runner_creates_one_host_owned_erasure_gate() {
     let result = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "missing-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        PluginRegistry::new,
+    )
+    .run()
+    .test_ok();
+    assert_eq!(result.train_events, 0);
+    assert_eq!(result.eval_events, 0);
+}
+
+#[test]
+fn backtest_runner_rejects_a_caller_supplied_gate() {
+    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let factory_gate = Arc::clone(&host);
+    let error = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "shared-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        move || PluginRegistry::new().with_erasure_gate(Arc::clone(&factory_gate)),
+    )
+    .with_erasure_gate(host)
+    .run()
+    .err()
+    .test_ok();
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
+}
+
+#[test]
+fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
+    let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let error = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "foreign-train-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        move || PluginRegistry::new().with_erasure_gate(Arc::clone(&foreign)),
+    )
+    .run()
+    .err()
+    .test_ok();
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
+}
+
+#[test]
+fn backtest_runner_rejects_a_removed_bound_train_gate() {
+    let removed: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let error = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "removed-train-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        move || {
+            PluginRegistry::new()
+                .with_erasure_gate(Arc::clone(&removed))
+                .without_erasure_gate()
+        },
+    )
+    .run()
+    .err()
+    .test_ok();
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
+}
+
+#[test]
+fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let error = BacktestRunner::new(
+        BacktestConfig {
+            experiment_name: "foreign-eval-erasure-host".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        },
+        {
+            let calls = Arc::clone(&calls);
+            move || {
+                let mut registry = PluginRegistry::new();
+                if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    registry.bind_erasure_gate(Arc::clone(&foreign));
+                }
+                registry
+            }
+        },
+    )
+    .run()
+    .err()
+    .test_ok();
+    assert!(matches!(
+        error,
+        ExperimentError::Store(CoreError::ErasureContainmentUnavailable)
+    ));
+}
+
+#[test]
+fn backtest_runner_completes_both_empty_phases() {
+    let result = backtest_runner(
         BacktestConfig {
             experiment_name: "agent-provider-backtest".to_owned(),
             train_ticks: 1,
@@ -675,7 +834,7 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
     let accepted = accepted_response_bytes(0, CONFIDENCE);
     let runner_host = host;
     let runner_plugin = Arc::clone(&plugin);
-    let result = BacktestRunner::new(
+    let result = backtest_runner(
         BacktestConfig {
             experiment_name: "agent-provider-backtest-non-empty".to_owned(),
             train_ticks: 1,
@@ -716,7 +875,7 @@ fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
     let train_ticks = Arc::new(Mutex::new(Vec::new()));
     let eval_ticks = Arc::new(Mutex::new(Vec::new()));
     let factory_calls = Arc::new(AtomicU64::new(0));
-    let result = BacktestRunner::new(
+    let result = backtest_runner(
         BacktestConfig {
             experiment_name: "agent-provider-backtest-tick-continuity".to_owned(),
             train_ticks: 1,
@@ -808,7 +967,7 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
     };
 
     let protected_name = "public-branch-protected";
-    let mut protected_store = MemoryStore::new();
+    let mut protected_store = gated_memory_store();
     let protected_timeline = protected_store.create_timeline(protected_name).test_ok();
     protected_store
         .append(
@@ -821,7 +980,7 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
         )
         .test_ok();
     assert!(matches!(
-        Experiment::new(config(protected_name)).branch("protected-child", &mut protected_store),
+        gated_experiment(config(protected_name)).branch("protected-child", &mut protected_store),
         Err(ExperimentError::Runtime(
             RuntimeError::ConsentOperationUnavailable
         ))
@@ -829,9 +988,9 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
 
     let authority = ConsentAuthority::new();
     let protected_token = authority.record_grant_on_timeline(protected_timeline.id(), &grant(true));
-    let mut missing_timeline_store = MemoryStore::new();
+    let mut missing_timeline_store = gated_memory_store();
     assert!(matches!(
-        Experiment::new(config(protected_name)).branch_with_token(
+        gated_experiment(config(protected_name)).branch_with_token(
             "missing-child",
             &mut missing_timeline_store,
             &protected_token,
@@ -841,11 +1000,11 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
     ));
 
     let no_gate_name = "public-branch-no-gate";
-    let mut no_gate_store = MemoryStore::new();
+    let mut no_gate_store = gated_memory_store();
     let no_gate_timeline = no_gate_store.create_timeline(no_gate_name).test_ok();
     let no_gate_token = authority.record_grant_on_timeline(no_gate_timeline.id(), &grant(true));
     assert!(matches!(
-        Experiment::new(config(no_gate_name))
+        gated_experiment(config(no_gate_name))
             .without_consent_gate()
             .branch_with_token("no-gate-child", &mut no_gate_store, &no_gate_token, 0),
         Err(ExperimentError::Runtime(
@@ -854,11 +1013,11 @@ fn public_branch_guards_reject_protected_history_and_invalid_capabilities() {
     ));
 
     let denied_name = "public-branch-denied";
-    let mut denied_store = MemoryStore::new();
+    let mut denied_store = gated_memory_store();
     let denied_timeline = denied_store.create_timeline(denied_name).test_ok();
     let denied_token = authority.record_grant_on_timeline(denied_timeline.id(), &grant(false));
     assert!(matches!(
-        Experiment::new(config(denied_name)).branch_with_token(
+        gated_experiment(config(denied_name)).branch_with_token(
             "denied-child",
             &mut denied_store,
             &denied_token,
@@ -881,7 +1040,7 @@ fn protected_result_export_and_faulted_projection_fail_closed() {
             .to_string_lossy()
             .into_owned(),
     };
-    let experiment = Experiment::new(ExperimentConfig {
+    let experiment = hosted_experiment(ExperimentConfig {
         name: "protected-result-export".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config,
@@ -956,7 +1115,7 @@ fn protected_result_export_succeeds_with_a_durable_authority() {
             .into_owned(),
     };
     let authority = ConsentAuthority::new();
-    let experiment = Experiment::new(ExperimentConfig {
+    let experiment = hosted_experiment(ExperimentConfig {
         name: "protected-result-export-success".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config,
@@ -1033,7 +1192,7 @@ fn protected_session_fork_succeeds_from_a_durable_timeline() {
 #[test]
 fn public_branch_with_token_and_durable_session_boundaries_are_reachable() {
     let authority = ConsentAuthority::new();
-    let mut store = MemoryStore::new();
+    let mut store = gated_memory_store();
     let timeline = store.create_timeline("public-branch-success").test_ok();
     let token = authority.record_grant_on_timeline(
         timeline.id(),
@@ -1050,7 +1209,7 @@ fn public_branch_with_token_and_durable_session_boundaries_are_reachable() {
             grant_seq: 1,
         },
     );
-    let experiment = Experiment::new(ExperimentConfig {
+    let experiment = hosted_experiment(ExperimentConfig {
         name: "public-branch-success".to_owned(),
         stop: StopCondition::MaxTicks(1),
         store_config: StoreConfig::Memory,
@@ -1077,7 +1236,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
     };
     let authority = ConsentAuthority::new();
     let subject = EntityId::new();
-    let mut experiment = Experiment::new(ExperimentConfig {
+    let mut experiment = hosted_experiment(ExperimentConfig {
         name: "durable-session-boundaries".to_owned(),
         stop: StopCondition::MaxTicks(3),
         store_config,
@@ -1143,7 +1302,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
 #[test]
 fn durable_backtest_builds_public_run_results() {
     let directory = tempfile::tempdir().test_ok();
-    let result = BacktestRunner::new(
+    let result = backtest_runner(
         BacktestConfig {
             experiment_name: "durable-backtest-results".to_owned(),
             train_ticks: 1,
@@ -1174,7 +1333,10 @@ fn post_append_capture_failure_faults_the_session() {
     );
     let adapter = SharedMemoryAdapter::new();
     adapter.fail_after_first_logical_head();
-    let mut session = experiment.start_with_store(Box::new(adapter)).test_ok();
+    let mut session = adapter
+        .gate_experiment(experiment)
+        .start_with_store(Box::new(adapter))
+        .test_ok();
     assert!(matches!(
         session.step_tick(),
         Err(ExperimentError::Store(_))
@@ -1195,14 +1357,16 @@ fn resume_rejects_mismatched_ancestry_metadata() {
         vec![response_attempt(&accepted)],
         vec![],
     );
-    let mut parent = experiment
+    let mut parent = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     parent.step_tick().test_ok();
     let child = parent.fork("child").test_ok();
     adapter.return_wrong_timeline_on_second_get();
     let fresh = host.experiment("agent-provider-ancestry-resume", vec![]).0;
-    assert!(fresh
+    assert!(adapter
+        .gate_experiment(fresh)
         .resume_with_store(child.timeline().id(), Box::new(adapter))
         .is_err());
 }
@@ -1218,14 +1382,16 @@ fn resume_rejects_cyclic_ancestry_metadata() {
             vec![response_attempt(&accepted)],
         )
         .0;
-    let mut original = experiment
+    let mut original = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     original.step_tick().test_ok();
     let timeline = original.timeline().id();
     adapter.return_cycle_on_second_get();
     let fresh = host.experiment("agent-provider-cyclic-resume", vec![]).0;
-    assert!(fresh
+    assert!(adapter
+        .gate_experiment(fresh)
         .resume_with_store(timeline, Box::new(adapter))
         .is_err());
 }
@@ -1244,8 +1410,8 @@ fn live_boundaries_are_atomic_byte_stable_and_provider_free_on_replay() {
     );
     let adapter = SharedMemoryAdapter::new();
     let authority = ConsentAuthority::new();
-    let mut session = experiment
-        .with_consent_authority(authority.clone())
+    let mut session = adapter
+        .gate_experiment(experiment.with_consent_authority(authority.clone()))
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = session.timeline().id();
@@ -1386,8 +1552,8 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
         "agent-provider-replay-fault",
         vec![response_attempt(&accepted_response)],
     );
-    let mut failed_session = experiment
-        .with_consent_authority(authority.clone())
+    let mut failed_session = adapter
+        .gate_experiment(experiment.with_consent_authority(authority.clone()))
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = failed_session.timeline().id();
@@ -1421,8 +1587,8 @@ fn append_fault_commits_neither_pair_nor_tick_and_fresh_session_recovers() {
         "agent-provider-replay-recovery",
         vec![response_attempt(&accepted_response)],
     );
-    let mut recovered = recovery
-        .with_consent_authority(authority)
+    let mut recovered = adapter
+        .gate_experiment(recovery.with_consent_authority(authority))
         .resume_with_store(timeline, Box::new(adapter.clone()))
         .test_ok();
     assert_eq!(
@@ -1489,7 +1655,8 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
         "agent-provider-resume-tick",
         vec![response_attempt(&accepted)],
     );
-    let mut original = experiment
+    let mut original = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = original.timeline().id();
@@ -1499,7 +1666,8 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
         "agent-provider-resumed-tick",
         vec![response_attempt(&no_action)],
     );
-    let mut resumed = resume
+    let mut resumed = adapter
+        .gate_experiment(resume)
         .resume_with_store(timeline, Box::new(adapter))
         .test_ok();
     assert_eq!(resumed_tick.load(), 1);
@@ -1521,7 +1689,10 @@ fn committed_history_restores_driver_tick_for_resume_and_fork() {
         vec![response_attempt(&accepted)],
         vec![response_attempt(&no_action)],
     );
-    let mut parent = forkable.start_with_store(Box::new(fork_adapter)).test_ok();
+    let mut parent = fork_adapter
+        .gate_experiment(forkable)
+        .start_with_store(Box::new(fork_adapter))
+        .test_ok();
     parent.step_tick().test_ok();
     let parent_timeline = parent.timeline().id();
     let mut child = parent.fork("agent-provider-child").test_ok();
@@ -1558,7 +1729,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
         vec![response_attempt(&accepted)],
         vec![],
     );
-    let mut prefix_parent = prefix_experiment
+    let mut prefix_parent = prefix_adapter
+        .gate_experiment(prefix_experiment)
         .start_with_store(Box::new(prefix_adapter.clone()))
         .test_ok();
     prefix_parent.step_tick().test_ok();
@@ -1574,7 +1746,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
         vec![response_attempt(&accepted)],
         vec![],
     );
-    let mut ancestry_parent = ancestry_experiment
+    let mut ancestry_parent = ancestry_adapter
+        .gate_experiment(ancestry_experiment)
         .start_with_store(Box::new(ancestry_adapter.clone()))
         .test_ok();
     ancestry_parent.step_tick().test_ok();
@@ -1590,7 +1763,8 @@ fn fork_recovery_fails_closed_when_prefix_or_ancestry_read_is_untrustworthy() {
         vec![response_attempt(&accepted)],
         vec![],
     );
-    let mut cycle_parent = cycle_experiment
+    let mut cycle_parent = cycle_adapter
+        .gate_experiment(cycle_experiment)
         .start_with_store(Box::new(cycle_adapter.clone()))
         .test_ok();
     cycle_parent.step_tick().test_ok();
@@ -1610,7 +1784,8 @@ fn supplied_store_read_failure_prevents_driver_restore() {
         "agent-provider-supplied-store-read-source",
         vec![response_attempt(&accepted)],
     );
-    let mut original = experiment
+    let mut original = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     original.step_tick().test_ok();
@@ -1622,7 +1797,9 @@ fn supplied_store_read_failure_prevents_driver_restore() {
         "agent-provider-supplied-store-read-recovery",
         vec![ProviderAttempt::NoResponse],
     );
-    let result = recovery.resume_with_store(timeline, Box::new(adapter));
+    let result = adapter
+        .gate_experiment(recovery)
+        .resume_with_store(timeline, Box::new(adapter));
 
     assert!(matches!(
         result,
@@ -1639,7 +1816,8 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     let host = HostFixture::new();
     let adapter = SharedMemoryAdapter::new();
     let (experiment, _, _) = host.experiment("agent-provider-source-validation", vec![]);
-    let mut session = experiment
+    let mut session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
 
@@ -1655,7 +1833,8 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     assert!(session.source_events().is_err());
 
     let (experiment, _, _) = host.experiment("agent-provider-capture-regression", vec![]);
-    let mut session = experiment
+    let mut session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     session.step_tick().test_ok();
@@ -1663,7 +1842,8 @@ fn source_events_validates_empty_metadata_and_completed_head() {
     assert!(session.step_tick().is_err());
 
     let (experiment, _, _) = host.experiment("agent-provider-capture-gap", vec![]);
-    let mut session = experiment
+    let mut session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = session.timeline().id();
@@ -1687,7 +1867,8 @@ fn resume_rejects_mismatched_initial_timeline_metadata() {
     let host = HostFixture::new();
     let adapter = SharedMemoryAdapter::new();
     let (experiment, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
-    let session = experiment
+    let session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     let timeline = session.timeline().id();
@@ -1695,7 +1876,8 @@ fn resume_rejects_mismatched_initial_timeline_metadata() {
 
     adapter.return_wrong_timeline_on_next_get();
     let (resume, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
-    assert!(resume
+    assert!(adapter
+        .gate_experiment(resume)
         .resume_with_store(timeline, Box::new(adapter))
         .is_err());
 }
@@ -1708,7 +1890,8 @@ fn resume_fails_closed_when_the_durable_prefix_or_metadata_is_untrustworthy() {
         "agent-provider-resume-fail-closed",
         vec![ProviderAttempt::NoResponse],
     );
-    let mut session = experiment
+    let mut session = adapter
+        .gate_experiment(experiment)
         .start_with_store(Box::new(adapter.clone()))
         .test_ok();
     session.step_tick().test_ok();
@@ -1717,13 +1900,15 @@ fn resume_fails_closed_when_the_durable_prefix_or_metadata_is_untrustworthy() {
 
     adapter.drop_first_on_next_read();
     let (resume, _, _) = host.experiment("agent-provider-resume-corrupt", vec![]);
-    assert!(resume
+    assert!(adapter
+        .gate_experiment(resume)
         .resume_with_store(timeline, Box::new(adapter.clone()))
         .is_err());
 
     adapter.fail_next_get_timeline();
     let (resume, _, _) = host.experiment("agent-provider-resume-metadata", vec![]);
-    assert!(resume
+    assert!(adapter
+        .gate_experiment(resume)
         .resume_with_store(timeline, Box::new(adapter))
         .is_err());
 }

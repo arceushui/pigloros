@@ -50,13 +50,43 @@ use pos_experiment::{
     Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
     StopCondition,
 };
-use pos_store::{open_store, StoreConfig};
+use pos_store::StoreConfig;
 use ulid::Ulid;
+
+include!("host_store.rs");
 
 const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
+
+struct OpenedCliStore {
+    store: HostedCliStore,
+    erasure_gate: std::sync::Arc<dyn pos_core::ErasureGate>,
+}
+
+/// Open a store through the CLI composition seam.
+///
+/// The concrete adapter remains exclusively owned by the recovered erasure
+/// host in production and tests.
+fn open_store(
+    config: StoreConfig,
+) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+    open_store_with_gate(config)
+        .map(|opened| Box::new(opened.store) as Box<dyn pos_core::store::EventStore>)
+}
+
+fn open_store_with_gate(config: StoreConfig) -> Result<OpenedCliStore, pos_core::CoreError> {
+    HostedCliStore::open(config)
+        .map(|store| {
+            let erasure_gate = store.containment_gate();
+            OpenedCliStore {
+                store,
+                erasure_gate,
+            }
+        })
+        .map_err(hosted_cli_store_error)
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -342,13 +372,16 @@ fn cmd_timeline_fork(
 
 fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tl_id = parse_timeline_id(tl_id_str)?;
-    let store = open_store(StoreConfig::Sqlite {
+    let OpenedCliStore {
+        store,
+        erasure_gate,
+    } = open_store_with_gate(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
 
-    let mut registry = pos_state::ProjectionRegistry::new();
+    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    let events = replay_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
+    let events = replay_retained_timeline(&store, tl_id, &mut registry)?;
     let entity_count = events
         .iter()
         .map(|e| e.entity)
@@ -362,14 +395,17 @@ fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::e
 
 fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tl_id = parse_timeline_id(tl_id_str)?;
-    let store = open_store(StoreConfig::Sqlite {
+    let OpenedCliStore {
+        store,
+        erasure_gate,
+    } = open_store_with_gate(StoreConfig::Sqlite {
         path: path.to_owned(),
     })?;
 
-    let mut registry = pos_state::ProjectionRegistry::new();
+    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
-    let snapshot = snapshot_retained_timeline(store.as_ref(), tl_id, &mut registry)?;
+    let snapshot = snapshot_retained_timeline(&store, tl_id, &mut registry)?;
 
     let entity_count = count_snapshot_entities(&snapshot);
 
@@ -413,7 +449,7 @@ fn retained_timeline_artifact(
 }
 
 fn replay_retained_timeline(
-    store: &dyn pos_core::store::EventStore,
+    store: &HostedCliStore,
     timeline: TimelineId,
     registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
@@ -422,11 +458,15 @@ fn replay_retained_timeline(
         pos_core::ErasureArtifactClassV1::TimelineReplay,
         b"pos-cli/timeline-replay",
     )?;
-    pos_time::replay(store, timeline, registry, artifact_digest, &evaluation).map_err(Into::into)
+    store
+        .with_read_sender(|sender| {
+            pos_time::replay(sender, timeline, registry, artifact_digest, &evaluation)
+        })
+        .map_err(Into::into)
 }
 
 fn snapshot_retained_timeline(
-    store: &dyn pos_core::store::EventStore,
+    store: &HostedCliStore,
     timeline: TimelineId,
     registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
@@ -435,7 +475,44 @@ fn snapshot_retained_timeline(
         pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
         b"pos-cli/timeline-snapshot",
     )?;
-    pos_time::snapshot(store, timeline, registry, artifact_digest, &evaluation).map_err(Into::into)
+    store
+        .with_read_sender(|sender| {
+            pos_time::snapshot(sender, timeline, registry, artifact_digest, &evaluation)
+        })
+        .map_err(Into::into)
+}
+
+fn retained_comparison_artifacts(
+    timelines: [TimelineId; 2],
+) -> Result<
+    (
+        [pos_core::ErasureReferenceV1; 2],
+        pos_core::ReplayClaimEvaluationV1,
+    ),
+    pos_core::ErasureErrorV1,
+> {
+    let digests = timelines.map(|timeline| {
+        pos_core::ErasureReferenceV1::from_digest(
+            *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
+        )
+    });
+    let claims = digests.map(|digest| pos_core::ArtifactClaimInputV1 {
+        registration: pos_core::RegisteredArtifactV1::new(
+            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
+            digest,
+            pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+            None,
+            pos_core::ErasureReferenceV1::from_digest(
+                *blake3::hash(b"pos-cli/timeline-compare").as_bytes(),
+            ),
+            pos_core::ArtifactOptionalityV1::Required,
+            pos_core::ArtifactTransitionRuleV1::PreserveExact,
+        ),
+        current_claim: pos_core::ErasureReplayClaimV1::Exact,
+        state: pos_core::ArtifactStateV1::Retained,
+    });
+    pos_core::ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &claims)
+        .map(|evaluation| (digests, evaluation))
 }
 
 fn cmd_timeline_compare(
@@ -444,34 +521,52 @@ fn cmd_timeline_compare(
     second_timeline_str: &str,
     fork_seq_str: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let timeline_a = parse_timeline_id(first_timeline_str)?;
-    let timeline_b = parse_timeline_id(second_timeline_str)?;
-    let fork_seq = parse_seq(fork_seq_str)?;
-
-    let store = open_store(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut reg_a = pos_state::ProjectionRegistry::new();
-    reg_a.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let mut reg_b = pos_state::ProjectionRegistry::new();
-    reg_b.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let diff = pos_time::compare(
-        store.as_ref(),
-        timeline_a,
-        timeline_b,
-        fork_seq,
-        &mut reg_a,
-        &mut reg_b,
-    )?;
+    let diff = run_timeline_compare(path, first_timeline_str, second_timeline_str, fork_seq_str)?;
 
     output_stdout!("only_in_a: {}", diff.only_in_a.len());
     output_stdout!("only_in_b: {}", diff.only_in_b.len());
     output_stdout!("diverged_entities: {}", diff.diverged_entities.len());
 
     Ok(())
+}
+
+fn run_timeline_compare(
+    path: &str,
+    first_timeline_str: &str,
+    second_timeline_str: &str,
+    fork_seq_str: &str,
+) -> Result<pos_time::ForkDiff, Box<dyn std::error::Error>> {
+    let timeline_a = parse_timeline_id(first_timeline_str)?;
+    let timeline_b = parse_timeline_id(second_timeline_str)?;
+    let fork_seq = parse_seq(fork_seq_str)?;
+
+    let OpenedCliStore {
+        store,
+        erasure_gate,
+    } = open_store_with_gate(StoreConfig::Sqlite {
+        path: path.to_owned(),
+    })?;
+
+    let mut reg_a = pos_state::ProjectionRegistry::new()
+        .with_erasure_gate(std::sync::Arc::clone(&erasure_gate));
+    reg_a.register("entity_state", Box::new(pos_state::EntityStateProjection));
+
+    let mut reg_b = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
+    reg_b.register("entity_state", Box::new(pos_state::EntityStateProjection));
+
+    let (artifact_digests, evaluation) = retained_comparison_artifacts([timeline_a, timeline_b])?;
+    let diff = store.with_read_sender(|sender| {
+        pos_time::compare(
+            sender,
+            [timeline_a, timeline_b],
+            fork_seq,
+            [&mut reg_a, &mut reg_b],
+            artifact_digests,
+            &evaluation,
+        )
+    })?;
+
+    Ok(diff)
 }
 
 fn parse_merge_strategy_flag(
@@ -1314,7 +1409,7 @@ mod tests {
     fn cmd_experiment_verify_with_companion_db() {
         // Cover the "if path.exists()" SQLite branch in cmd_experiment_verify.
         // Also covers the `if matched { Ok(()) }` path when head_hash matches.
-        use pos_store::{open_store, StoreConfig};
+        use pos_store::StoreConfig;
 
         let dir = tempfile::tempdir().test_ok();
         let db_path = dir.path().join("test.db").to_str().test_ok().to_owned();
@@ -1821,7 +1916,7 @@ mod store_info_coverage {
     use super::*;
 
     #[test]
-    fn list_failure_retains_operation_and_root_cause() {
+    fn list_failure_retains_operation_and_sanitizes_root_cause() {
         let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("corrupt.db");
         let path = path.to_str().test_ok();
@@ -1834,11 +1929,12 @@ mod store_info_coverage {
 
         let error = cmd_store_info(path).test_err().to_string();
         assert!(error.contains("failed to list Timelines"));
-        assert!(error.contains("Invalid column type"));
+        assert!(error.contains("erasure host rejected CLI operation"));
+        assert!(!error.contains("Invalid column type"));
     }
 
     #[test]
-    fn read_failure_retains_timeline_and_root_cause() {
+    fn read_failure_retains_timeline_and_sanitizes_root_cause() {
         let directory = tempfile::tempdir().test_ok();
         let path = directory.path().join("corrupt.db");
         let path = path.to_str().test_ok();
@@ -1868,7 +1964,8 @@ mod store_info_coverage {
 
         let error = cmd_store_info(path).test_err().to_string();
         assert!(error.contains(&format!("failed to read Timeline {timeline_id}")));
-        assert!(error.contains("serialization error: bad hash"));
+        assert!(error.contains("erasure host rejected CLI operation"));
+        assert!(!error.contains("serialization error: bad hash"));
     }
 }
 
@@ -1920,7 +2017,7 @@ mod main_coverage {
         // So if manifest.head_hash = Hash::zero() and the store has the same timeline
         // with no events after it, matched = (zero == zero) = true.
         use pos_core::clock::WallTime;
-        use pos_store::{open_store, StoreConfig};
+        use pos_store::StoreConfig;
         use tempfile::NamedTempFile;
 
         // Create a SQLite store, create a timeline in it
@@ -1994,7 +2091,7 @@ mod final_coverage {
     }
 
     use super::*;
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::StoreConfig;
 
     #[test]
     fn verify_manifest_ok_path_when_hash_matches() {
@@ -2054,7 +2151,7 @@ mod final_coverage {
     fn verify_manifest_against_store_timeline_not_found() {
         // Cover the `else { false }` branch (line 248): store exists but timeline_id is absent.
         use pos_core::ids::TimelineId;
-        use pos_store::{open_store, StoreConfig};
+        use pos_store::StoreConfig;
 
         let store = open_store(StoreConfig::Memory).test_ok();
         // Manifest points at a timeline that was never created in this store.

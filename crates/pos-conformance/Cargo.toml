@@ -23,6 +23,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 
+[dev-dependencies]
+pos-reference = { path = "../pos-reference" }
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

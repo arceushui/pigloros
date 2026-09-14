@@ -280,9 +280,10 @@ mod tests {
     use pos_core::{
         clock::WallTime,
         event::{CanonicalBytes, Kind},
-        EventDraft,
+        ErasureContainmentGateV1, EventDraft,
     };
     use pos_store::memory::MemoryStore;
+    use std::sync::Arc;
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FailOp {
@@ -306,8 +307,12 @@ mod tests {
 
     impl FailStore {
         fn new() -> Self {
+            let mut inner = MemoryStore::new();
+            inner
+                .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+                .test_ok();
             Self {
-                inner: MemoryStore::new(),
+                inner,
                 fail_on: None,
                 get_timeline_calls: std::cell::Cell::new(0),
                 read_calls: std::cell::Cell::new(0),
@@ -400,7 +405,11 @@ mod tests {
     }
 
     fn setup_store() -> MemoryStore {
-        MemoryStore::new()
+        let mut store = MemoryStore::new();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .test_ok();
+        store
     }
 
     fn make_draft(entity: EntityId, event_type: &str, payload: &[u8]) -> EventDraft {

@@ -80,6 +80,24 @@ pub struct OutputCapability {
     pub diagnostic_bytes_limit: u64,
 }
 
+/// Provider-neutral capability required by one sandboxed evaluator request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequiredProviderCapability {
+    pub capability_id: String,
+    pub capability_version: u64,
+    pub minimum_strength: u64,
+}
+
+/// Exact provider authority embedded in the replacement EVR1 layout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxRequirement {
+    pub lps1_digest: [u8; 32],
+    pub sim1_digest: [u8; 32],
+    pub required_provider_capability: RequiredProviderCapability,
+    pub apt1_digest: [u8; 32],
+    pub policy_epoch: u64,
+}
+
 /// Exact public EVR1 request consumed by the standalone evaluator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationRequest {
@@ -94,6 +112,7 @@ pub struct EvaluationRequest {
     pub output_capability: OutputCapability,
     pub evaluator_protocol_digest: [u8; 32],
     pub evaluator_hard_caps_digest: [u8; 32],
+    pub sandbox_requirement: Option<SandboxRequirement>,
     pub request_digest: [u8; 32],
 }
 
@@ -105,24 +124,11 @@ impl EvaluationRequest {
     /// self-inconsistent input.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let value = decode_canonical(bytes)?;
-        let fields = array(&value, 14)?;
+        let fields = array(&value, 15)?;
         if text(&fields[0])? != "EVR1" || uint(&fields[1])? != 1 {
             return Err(ProtocolError::UnsupportedVersion);
         }
-        let request = Self {
-            request_id: fixed_bytes(&fields[2])?,
-            profile_digest: fixed_bytes(&fields[3])?,
-            fixture_bundle_digest: fixed_bytes(&fields[4])?,
-            subject_adapter: SubjectAdapterKind::from_code(uint(&fields[5])?)?,
-            subject_artifact_digest: fixed_bytes(&fields[6])?,
-            implementation: decode_identity(&fields[7])?,
-            execution_profile_digest: fixed_bytes(&fields[8])?,
-            trust_policy_snapshot_digest: fixed_bytes(&fields[9])?,
-            output_capability: decode_output_capability(&fields[10])?,
-            evaluator_protocol_digest: fixed_bytes(&fields[11])?,
-            evaluator_hard_caps_digest: fixed_bytes(&fields[12])?,
-            request_digest: fixed_bytes(&fields[13])?,
-        };
+        let request = decode_evaluation_request(fields)?;
         request.validate().map(|()| request)
     }
 
@@ -161,6 +167,9 @@ impl EvaluationRequest {
             bytes(&self.trust_policy_snapshot_digest),
             bytes(&self.evaluator_protocol_digest),
             bytes(&self.evaluator_hard_caps_digest),
+            self.sandbox_requirement
+                .as_ref()
+                .map_or(Value::Null, sandbox_requirement_value),
         ]);
         Ok(domain_digest(
             b"PiglorOS.EvaluatorOutputCapability.v1",
@@ -170,23 +179,7 @@ impl EvaluationRequest {
 
     fn validate(&self) -> Result<(), ProtocolError> {
         validate_identity(&self.implementation)?;
-        let digests = [
-            self.profile_digest,
-            self.fixture_bundle_digest,
-            self.subject_artifact_digest,
-            self.execution_profile_digest,
-            self.trust_policy_snapshot_digest,
-            self.output_capability.capability_digest,
-            self.evaluator_protocol_digest,
-            self.evaluator_hard_caps_digest,
-            self.request_digest,
-        ];
-        if self.request_id == [0; 16]
-            || digests.contains(&[0; 32])
-            || self.output_capability.report_bytes_limit == 0
-            || self.output_capability.report_bytes_limit > 16 * 1024 * 1024
-            || self.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
-        {
+        if evaluation_request_fields_out_of_bounds(self) {
             return Err(ProtocolError::FieldOutOfBounds);
         }
         if self.output_capability.capability_digest != self.expected_output_capability_digest()?
@@ -196,6 +189,47 @@ impl EvaluationRequest {
         }
         Ok(())
     }
+}
+
+fn decode_evaluation_request(fields: &[Value]) -> Result<EvaluationRequest, ProtocolError> {
+    Ok(EvaluationRequest {
+        request_id: fixed_bytes(&fields[2])?,
+        profile_digest: fixed_bytes(&fields[3])?,
+        fixture_bundle_digest: fixed_bytes(&fields[4])?,
+        subject_adapter: SubjectAdapterKind::from_code(uint(&fields[5])?)?,
+        subject_artifact_digest: fixed_bytes(&fields[6])?,
+        implementation: decode_identity(&fields[7])?,
+        execution_profile_digest: fixed_bytes(&fields[8])?,
+        trust_policy_snapshot_digest: fixed_bytes(&fields[9])?,
+        output_capability: decode_output_capability(&fields[10])?,
+        evaluator_protocol_digest: fixed_bytes(&fields[11])?,
+        evaluator_hard_caps_digest: fixed_bytes(&fields[12])?,
+        sandbox_requirement: decode_sandbox_requirement(&fields[13])?,
+        request_digest: fixed_bytes(&fields[14])?,
+    })
+}
+
+fn evaluation_request_fields_out_of_bounds(request: &EvaluationRequest) -> bool {
+    let digests = [
+        request.profile_digest,
+        request.fixture_bundle_digest,
+        request.subject_artifact_digest,
+        request.execution_profile_digest,
+        request.trust_policy_snapshot_digest,
+        request.output_capability.capability_digest,
+        request.evaluator_protocol_digest,
+        request.evaluator_hard_caps_digest,
+        request.request_digest,
+    ];
+    request.request_id == [0; 16]
+        || digests.contains(&[0; 32])
+        || request.output_capability.report_bytes_limit == 0
+        || request.output_capability.report_bytes_limit > 16 * 1024 * 1024
+        || request.output_capability.diagnostic_bytes_limit > MAX_DIAGNOSTIC_BYTES
+        || request
+            .sandbox_requirement
+            .as_ref()
+            .is_some_and(|requirement| !valid_sandbox_requirement(requirement))
 }
 
 /// Independently declared evaluator/reviewer separation evidence.
@@ -634,12 +668,56 @@ fn request_value(value: &EvaluationRequest, include_digest: bool) -> Value {
         ]),
         bytes(&value.evaluator_protocol_digest),
         bytes(&value.evaluator_hard_caps_digest),
+        value
+            .sandbox_requirement
+            .as_ref()
+            .map_or(Value::Null, sandbox_requirement_value),
         if include_digest {
             bytes(&value.request_digest)
         } else {
             Value::Null
         },
     ])
+}
+
+fn sandbox_requirement_value(value: &SandboxRequirement) -> Value {
+    Value::Array(vec![
+        bytes(&value.lps1_digest),
+        bytes(&value.sim1_digest),
+        Value::Array(vec![
+            Value::Text(value.required_provider_capability.capability_id.clone()),
+            unsigned(value.required_provider_capability.capability_version),
+            unsigned(value.required_provider_capability.minimum_strength),
+        ]),
+        bytes(&value.apt1_digest),
+        unsigned(value.policy_epoch),
+    ])
+}
+
+fn decode_sandbox_requirement(value: &Value) -> Result<Option<SandboxRequirement>, ProtocolError> {
+    if value == &Value::Null {
+        return Ok(None);
+    }
+    let fields = array(value, 5)?;
+    let capability = array(&fields[2], 3)?;
+    Ok(Some(SandboxRequirement {
+        lps1_digest: fixed_bytes(&fields[0])?,
+        sim1_digest: fixed_bytes(&fields[1])?,
+        required_provider_capability: RequiredProviderCapability {
+            capability_id: text(&capability[0])?.to_owned(),
+            capability_version: uint(&capability[1])?,
+            minimum_strength: uint(&capability[2])?,
+        },
+        apt1_digest: fixed_bytes(&fields[3])?,
+        policy_epoch: uint(&fields[4])?,
+    }))
+}
+
+fn valid_sandbox_requirement(value: &SandboxRequirement) -> bool {
+    value.lps1_digest != [0; 32]
+        && value.sim1_digest != [0; 32]
+        && value.apt1_digest != [0; 32]
+        && validate_provider_identifier(&value.required_provider_capability.capability_id).is_ok()
 }
 
 fn report_value(value: &ConformanceReport, include_digest: bool) -> Value {
@@ -931,6 +1009,25 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
 
 const fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
     if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+        Err(ProtocolError::FieldOutOfBounds)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_provider_identifier(value: &str) -> Result<(), ProtocolError> {
+    let Some(first) = value.as_bytes().first() else {
+        return Err(ProtocolError::FieldOutOfBounds);
+    };
+    if value.len() > MAX_IDENTIFIER_BYTES
+        || !value.is_ascii()
+        || !(first.is_ascii_lowercase() || first.is_ascii_digit())
+        || !value.as_bytes().iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'/' | b'-')
+        })
+    {
         Err(ProtocolError::FieldOutOfBounds)
     } else {
         Ok(())

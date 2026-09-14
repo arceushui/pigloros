@@ -36,7 +36,6 @@ toml = { workspace = true }
 pos-experiment = { path = "../pos-experiment" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-state = { path = "../../crates/pos-state" }
-pos-time = { path = "../../crates/pos-time" }
 pos-plugin-agent = { path = "../../plugins/agent" }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }

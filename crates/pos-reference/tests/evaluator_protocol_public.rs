@@ -9,12 +9,14 @@ use pos_reference::evaluator::{
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_protocol::{
-    CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError, SubjectAdapterKind,
+    CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError, RequiredProviderCapability,
+    SandboxRequirement, SubjectAdapterKind,
 };
 use pos_reference::profile::ProfileError;
 use pos_reference::signed_bundle::BundleError;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+type RequirementMutation = fn(&mut SandboxRequirement);
 
 #[test]
 fn public_error_boundaries_preserve_closed_failure_classes() {
@@ -103,6 +105,20 @@ fn evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentity> {
 fn valid_request() -> TestResult<EvaluationRequest> {
     let corpus = support::corpus()?;
     Ok(EvaluationRequest::from_canonical_cbor(&corpus.request)?)
+}
+
+fn sandbox_requirement() -> SandboxRequirement {
+    SandboxRequirement {
+        lps1_digest: [31; 32],
+        sim1_digest: [32; 32],
+        required_provider_capability: RequiredProviderCapability {
+            capability_id: "managed-attempt-exec".to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        apt1_digest: [33; 32],
+        policy_epoch: 7,
+    }
 }
 
 fn valid_report() -> TestResult<ConformanceReport> {
@@ -272,6 +288,142 @@ fn request_round_trips_every_adapter_and_optional_identity_shape() -> TestResult
 }
 
 #[test]
+fn request_round_trips_sandbox_requirement_and_rejects_old_layout() -> TestResult {
+    let mut request = valid_request()?;
+    let unsandboxed_capability = request.output_capability.capability_digest;
+    request.sandbox_requirement = Some(sandbox_requirement());
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    assert_ne!(
+        request.output_capability.capability_digest,
+        unsandboxed_capability
+    );
+    request.request_digest = request.digest()?;
+    let encoded = request.to_canonical_cbor()?;
+    assert_eq!(EvaluationRequest::from_canonical_cbor(&encoded)?, request);
+
+    let mut old_layout = decoded_value(&encoded)?;
+    let Value::Array(fields) = &mut old_layout else {
+        return Err("EVR1 must be an array".into());
+    };
+    fields.remove(13);
+    assert_eq!(
+        EvaluationRequest::from_canonical_cbor(&canonical(&old_layout)?),
+        Err(ProtocolError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn sandbox_authority_fields_change_independent_capability_identity() -> TestResult {
+    let mut request = valid_request()?;
+    request.sandbox_requirement = Some(sandbox_requirement());
+    let expected = request.expected_output_capability_digest()?;
+    let mutations: [(&str, RequirementMutation); 6] = [
+        ("LPS1 digest", |value| value.lps1_digest = [41; 32]),
+        ("SIM1 digest", |value| value.sim1_digest = [42; 32]),
+        ("capability ID", |value| {
+            value.required_provider_capability.capability_id.push('2');
+        }),
+        ("capability version", |value| {
+            value.required_provider_capability.capability_version += 1;
+        }),
+        ("minimum strength", |value| {
+            value.required_provider_capability.minimum_strength += 1;
+        }),
+        ("APT1 digest", |value| value.apt1_digest = [43; 32]),
+    ];
+    for (field, mutate) in mutations {
+        let mut changed = request.clone();
+        let requirement = changed
+            .sandbox_requirement
+            .as_mut()
+            .ok_or("sandbox requirement must exist")?;
+        mutate(requirement);
+        assert_ne!(
+            changed.expected_output_capability_digest()?,
+            expected,
+            "{field} must change output-capability identity"
+        );
+    }
+    let mut changed_epoch = request;
+    changed_epoch
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .policy_epoch += 1;
+    assert_ne!(changed_epoch.expected_output_capability_digest()?, expected);
+    Ok(())
+}
+
+#[test]
+fn request_rejects_every_malformed_sandbox_requirement_field() -> TestResult {
+    let mut request = valid_request()?;
+    request.sandbox_requirement = Some(sandbox_requirement());
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    let valid = decoded_value(&request.to_canonical_cbor()?)?;
+    let valid_requirement = match &valid {
+        Value::Array(fields) => fields[13].clone(),
+        _ => return Err("EVR1 must be an array".into()),
+    };
+
+    let malformed_fields = [
+        (vec![13], Value::Bool(false)),
+        (vec![13], Value::Array(Vec::new())),
+        (vec![13, 0], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 1], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 2], Value::Bool(false)),
+        (vec![13, 2], Value::Array(Vec::new())),
+        (vec![13, 2, 0], Value::Bool(false)),
+        (vec![13, 2, 1], Value::Bool(false)),
+        (vec![13, 2, 2], Value::Bool(false)),
+        (vec![13, 3], Value::Text("not-a-digest".to_owned())),
+        (vec![13, 4], Value::Bool(false)),
+    ];
+
+    for (path, replacement) in malformed_fields {
+        let mut malformed = valid.clone();
+        replace_path(&mut malformed, &path, replacement)?;
+        assert_eq!(
+            EvaluationRequest::from_canonical_cbor(&canonical(&malformed)?),
+            Err(ProtocolError::InvalidEncoding),
+            "malformed path {path:?}"
+        );
+    }
+
+    let mut restored = valid;
+    replace_path(&mut restored, &[13], valid_requirement)?;
+    assert!(EvaluationRequest::from_canonical_cbor(&canonical(&restored)?).is_ok());
+
+    let mut invalid = request;
+    invalid
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .required_provider_capability
+        .capability_id
+        .clear();
+    assert_eq!(
+        invalid.to_canonical_cbor(),
+        Err(ProtocolError::FieldOutOfBounds)
+    );
+
+    let mut invalid = valid_request()?;
+    invalid.sandbox_requirement = Some(sandbox_requirement());
+    invalid
+        .sandbox_requirement
+        .as_mut()
+        .ok_or("sandbox requirement must exist")?
+        .required_provider_capability
+        .capability_id = "Invalid".to_owned();
+    assert_eq!(
+        invalid.to_canonical_cbor(),
+        Err(ProtocolError::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
 fn request_rejects_each_identifier_boundary() -> TestResult {
     for identifier in [String::new(), "a".repeat(129)] {
         let mut request = valid_request()?;
@@ -388,7 +540,8 @@ fn public_decoders_reject_each_canonical_cbor_framing_boundary() {
 fn request_and_report_decoders_reject_wrong_types_at_every_required_field() -> TestResult {
     let request_bytes = valid_request()?.to_canonical_cbor()?;
     let request = decoded_value(&request_bytes)?;
-    for path in (0..14)
+    for path in (0..15)
+        .filter(|index| *index != 13)
         .map(|index| vec![index])
         .chain((0..5).map(|index| vec![7, index]))
         .chain((0..3).map(|index| vec![10, index]))

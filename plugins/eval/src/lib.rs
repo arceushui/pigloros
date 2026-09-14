@@ -586,10 +586,18 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
+        CoreError, ErasureContainmentGateV1,
     };
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::{open_store as open_unbound_store, StoreConfig};
+    use std::sync::Arc;
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
+        let mut store = open_unbound_store(config)?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        Ok(store)
+    }
 
     fn encode_prediction(entity_id: &str, predicted_prob: f64, prediction_id: &str) -> Vec<u8> {
         let p = PredictionPayload {

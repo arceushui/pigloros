@@ -10,11 +10,14 @@ use pos_core::{
         GeographicAdmissionOutcome, GeographicAdmissionStore, GeographicObservationV1,
         GeographicReplayEvidenceV1, GeographicReplayVerifier, ValidatedGeoCellV1,
     },
-    CanonicalBytes, EntityId, EventStore, Hash, Hasher, TimelineId, WallTime,
-    GEOGRAPHIC_CELL_EVENT_TYPE,
+    CanonicalBytes, EntityId, ErasureContainmentGateV1, EventStore, Hash, Hasher, TimelineId,
+    WallTime, GEOGRAPHIC_CELL_EVENT_TYPE,
 };
 use pos_store::memory::MemoryStore;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
@@ -677,6 +680,9 @@ fn sqlite_geo_cell_identical_admissions_are_unique_across_store_handles() {
 #[test]
 fn generic_event_append_cannot_admit_geo_cell() {
     let mut store = MemoryStore::new();
+    store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .test_ok();
     let timeline = store.create_timeline("generic-boundary").test_ok();
     let result = store.append(
         timeline.id(),

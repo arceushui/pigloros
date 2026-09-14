@@ -1,6 +1,20 @@
 use pos_core::ids::{PluginId, TimelineId};
-use pos_core::ConsentError;
+use pos_core::{ActionRejected, ConsentError, ErasureContainmentErrorV1};
 use thiserror::Error;
+
+/// Closed result of one Timeline-bound proposed-action admission.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ActionSubmissionError {
+    /// The capability, payload, ownership, or Plugin domain policy rejected the action.
+    #[error(transparent)]
+    Rejected(#[from] ActionRejected),
+    /// No host-owned erasure gate was installed for the action boundary.
+    #[error("proposed action requires a host-bound erasure containment gate")]
+    ErasureOperationUnavailable,
+    /// The installed erasure fence rejected the action before Plugin invocation.
+    #[error(transparent)]
+    ErasureContainment(#[from] ErasureContainmentErrorV1),
+}
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -58,8 +72,14 @@ pub enum RuntimeError {
     #[error("protected operation requires a host-bound consent authority")]
     ConsentOperationUnavailable,
 
+    #[error("protected operation requires a host-bound erasure containment gate")]
+    ErasureOperationUnavailable,
+
     #[error("protected operation failed its consent fence: {0}")]
     Consent(ConsentError),
+
+    #[error("protected operation failed its erasure containment fence: {0}")]
+    ErasureContainment(ErasureContainmentErrorV1),
 
     #[error("participant observation authority failed closed: {0}")]
     Authority(#[from] pos_core::AuthorityErrorV1),

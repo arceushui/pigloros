@@ -24,7 +24,9 @@ use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
-use pos_store::{open_store, StoreConfig};
+use pos_core::{ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
+use pos_runtime::ErasureExecutionHostV1;
+use pos_store::StoreConfig;
 use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -192,6 +194,36 @@ where
     drop(signal.await);
 }
 
+fn gateway_for_startup(
+    sqlite_path: Option<&str>,
+    config: StoreConfig,
+    owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
+    match (owntracks_owner_key, sqlite_path) {
+        (Some(owner_key), Some(path)) => {
+            let host = ErasureExecutionHostV1::open_gateway_verified_empty(
+                StoreConfig::Sqlite {
+                    path: path.to_owned(),
+                },
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            )
+            .map_err(erasure_host_recovery_error)?;
+            Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
+        }
+        (None, _) => {
+            let host =
+                ErasureExecutionHostV1::open_verified_empty(config, ERASURE_MAX_INVENTORY_REQUESTS)
+                    .map_err(erasure_host_recovery_error)?;
+            Gateway::new_with_erasure_host(host).map_err(Into::into)
+        }
+        (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
+    }
+}
+
+fn erasure_host_recovery_error(error: ErasureHostErrorV1) -> std::io::Error {
+    std::io::Error::other(format!("erasure host recovery failed ({})", error.code()))
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 async fn serve(
     addr: SocketAddr,
@@ -221,14 +253,7 @@ async fn serve_with_owntracks(
             .map(OwnTracksOwnerKey::load)
             .transpose()?
     };
-    let gateway = match (owntracks_owner_key.as_ref(), sqlite_path) {
-        (Some(owner_key), Some(path)) => Gateway::new_with_owntracks_ingress(
-            pos_store::sqlite::SqliteStore::open(path)?,
-            owner_key,
-        ),
-        (None, _) => Gateway::new(open_store(config)?),
-        (Some(_), None) => return Err("OwnTracks ingress requires an SQLite path".into()),
-    };
+    let gateway = gateway_for_startup(sqlite_path, config, owntracks_owner_key.as_ref())?;
     let app = router_for_addr(
         addr,
         AppState {
@@ -360,6 +385,15 @@ mod coverage_tests {
         .test_err()?;
         assert!(!ledger_error.to_string().is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn startup_recovery_error_is_payload_free() {
+        assert_eq!(
+            super::erasure_host_recovery_error(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
+                .to_string(),
+            "erasure host recovery failed (0)"
+        );
     }
 }
 
@@ -1054,5 +1088,155 @@ mod shutdown_signal_tests {
     #[tokio::test]
     async fn completed_signal_is_observed_without_process_signals() {
         super::shutdown_signal_from(async { Ok(()) }).await;
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[test]
+    fn serve_startup_covers_memory_and_owntracks_gate_bindings(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let owner_key = directory.path().join("owner.key");
+        owntracks::create_or_load_owner_key(&owner_key)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        runtime.block_on(serve_with_owntracks(
+            "127.0.0.1:0".parse()?,
+            Some(database.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "database path is not UTF-8",
+                )
+            })?),
+            Some(&owner_key),
+            async {},
+            LedgerView::default(),
+            LedgerWriteMode::Disabled,
+        ))?;
+        runtime.block_on(serve_with_owntracks(
+            "127.0.0.1:0".parse()?,
+            None,
+            None,
+            async {},
+            LedgerView::default(),
+            LedgerWriteMode::Disabled,
+        ))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod erasure_gate_coverage_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn startup_gateway_constructors_cover_memory_and_sqlite_paths(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let memory = gateway_for_startup(None, StoreConfig::Memory, None)?;
+        let timeline = memory.create_timeline("host-owned-startup").await?;
+        assert!(memory
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await?
+            .events
+            .is_empty());
+        memory
+            .purge_expired_ingress_identities(std::num::NonZeroUsize::MIN)
+            .await?;
+        memory.shutdown().await?;
+        drop(memory);
+
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let owner_key_path = directory.path().join("owner.key");
+        owntracks::create_or_load_owner_key(&owner_key_path)?;
+        let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
+        let sqlite = gateway_for_startup(
+            database.to_str(),
+            StoreConfig::Sqlite {
+                path: database.to_string_lossy().into_owned(),
+            },
+            Some(&owner_key),
+        )?;
+        let timeline = sqlite.create_timeline("host-owned-owntracks").await?;
+        assert!(sqlite
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await?
+            .events
+            .is_empty());
+        sqlite.shutdown().await?;
+        drop(sqlite);
+
+        let invalid_path = directory.path().to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "directory path is not UTF-8",
+            )
+        })?;
+        assert!(gateway_for_startup(
+            Some(invalid_path),
+            StoreConfig::Sqlite {
+                path: invalid_path.to_owned(),
+            },
+            Some(&owner_key),
+        )
+        .is_err());
+        assert!(gateway_for_startup(
+            Some(invalid_path),
+            StoreConfig::Sqlite {
+                path: invalid_path.to_owned(),
+            },
+            None,
+        )
+        .is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_startup_error_paths {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owner_key_fixture() -> (tempfile::TempDir, OwnTracksOwnerKey) {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("temporary directory failed: {error}")))
+        });
+        let path = directory.path().join("owner.key");
+        owntracks::create_or_load_owner_key(&path).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("owner key creation failed: {error}")))
+        });
+        let owner_key = OwnTracksOwnerKey::load(&path).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("owner key loading failed: {error}")))
+        });
+        (directory, owner_key)
+    }
+
+    #[test]
+    fn startup_gateway_reports_store_open_failures() {
+        let (_directory, owner_key) = owner_key_fixture();
+        assert!(gateway_for_startup(
+            Some("/dev/null/cannot/create/this/path"),
+            StoreConfig::Sqlite {
+                path: "/dev/null/cannot/create/this/path".to_owned(),
+            },
+            Some(&owner_key),
+        )
+        .is_err());
+        assert!(gateway_for_startup(
+            Some("/dev/null/cannot/create/this/path"),
+            StoreConfig::Sqlite {
+                path: "/dev/null/cannot/create/this/path".to_owned(),
+            },
+            None,
+        )
+        .is_err());
     }
 }

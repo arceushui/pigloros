@@ -8,13 +8,13 @@
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 use pos_conformance::{
     compare, compare_authoritative_outputs, schema_id_for_event_type, verify_counterfactual_fork,
-    verify_evidence, wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
-    CausalTraceEntryV1, ComparisonV1, CounterfactualContractV1, DependencyClassV1,
-    DependencyNodeV1, DivergenceClassV1, ExecutionModeV1, FixtureAuthorizationDecisionV1,
-    FixtureCapabilityGrantV1, FixturePrincipalRefV1, HostClosureAuditV1, InputDependencyV1,
-    InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
-    ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1,
-    ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
+    verify_evidence, wave8_plugin_boundary, AuthoritativeEventV1, CausalTraceEntryV1, ComparisonV1,
+    CounterfactualContractV1, DependencyClassV1, DependencyNodeV1, DivergenceClassV1,
+    ExecutionModeV1, FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1,
+    FixturePrincipalRefV1, HostClosureAuditV1, InputDependencyV1, InterventionV1,
+    InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
+    NonInterferenceExecutionStatusV1, ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1,
+    PluginFailureV1, ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
     ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
     SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
     Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
@@ -663,7 +663,6 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
         host_closure: host_closure.clone(),
         contract,
     })
-    .map_err(MoatProofError::from)
 }
 
 fn causal_trace(events: &[Event], ids: &HashMap<EventId, u64>) -> Vec<CausalTraceEntryV1> {
@@ -1315,7 +1314,7 @@ fn build_wave8_contract(
     events: &[AuthoritativeEventV1],
     factual_events: &[AuthoritativeEventV1],
     participant_views: &[ParticipantViewV1],
-) -> Result<Wave8ProofContractV1, pos_core::CoreError> {
+) -> Result<Wave8ProofContractV1, MoatProofError> {
     let policy_digest = profile_digest();
     let room_parts = build_room_parts(
         context.input,
@@ -1339,6 +1338,7 @@ fn build_wave8_contract(
         policy_digest,
         room_parts.exogenous_digest,
     )
+    .map_err(MoatProofError::from)
     .map(|counterfactual| {
         let atomicity = build_atomicity(
             context.input,
@@ -1354,9 +1354,9 @@ fn build_wave8_contract(
             authorization_decisions,
             counterfactual,
             atomicity,
-            non_interference: wave8_non_interference_matrix(
-                context.input.digest().unwrap_or([0; 32]),
-            ),
+            non_interference_status:
+                NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable,
+            non_interference: Vec::new(),
         }
     })
 }
@@ -2110,6 +2110,11 @@ mod tests {
             DivergenceClassV1::AuthoritativeEvents
         );
         assert!(!report.baseline.causal_trace.is_empty());
+        assert_eq!(
+            report.baseline.contract.non_interference_status,
+            NonInterferenceExecutionStatusV1::NotExecutedCaptureUnavailable
+        );
+        assert!(report.baseline.contract.non_interference.is_empty());
     }
 
     #[test]

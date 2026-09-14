@@ -168,8 +168,10 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
 fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
     let supplied_public_keys = parse_supplied_public_keys(pubkey_hex)?;
 
-    let store = pos_store::open_store_read_only(&db.to_string_lossy())
-        .map_err(|e| CliError::BadSource(e.to_string()))?;
+    let store: Box<dyn pos_core::store::EventStore> = Box::new(
+        crate::HostedLedgerStore::open_read_only(&db.to_string_lossy())
+            .map_err(|error| CliError::BadSource(error.to_string()))?,
+    );
     let registry = store
         .load_key_registry()
         .map_err(|e| CliError::BadSource(e.to_string()))?;
@@ -361,6 +363,12 @@ mod tests {
         format!("piglor-ledger/2/1={public_key}")
     }
 
+    fn assert_host_rejection(error: &crate::CliError) {
+        assert!(error
+            .to_string()
+            .contains("erasure host rejected ledger operation"));
+    }
+
     #[test]
     fn verify_store_requires_identity_qualified_trust_anchor(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -380,9 +388,12 @@ mod tests {
     ) -> Result<Result<VerifyReport, crate::CliError>, Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         let timeline = store.create_timeline("ledger").test_ok()?;
         store.append_committed(timeline.id(), &[event]).test_ok()?;
@@ -735,9 +746,12 @@ mod tests {
     fn verify_store_rejects_an_empty_ledger() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("empty-ledger.db");
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         store.create_timeline("ledger").test_ok()?;
         store
@@ -917,9 +931,12 @@ mod tests {
     fn verify_store_handles_missing_ledger_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("novelty.db");
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         store
             .save_key_registry(&pos_core::KeyRegistryStateV1::new())
@@ -964,7 +981,7 @@ mod tests {
 
         let trust_anchor = ledger_trust_anchor(&"aa".repeat(32));
         let error = run(&Source::Store(db), Some(&trust_anchor), None).test_err()?;
-        assert!(error.to_string().contains("serialization error"), "{error}");
+        assert_host_rejection(&error);
         Ok(())
     }
 
@@ -1122,9 +1139,12 @@ mod tests {
 
         // Write a prediction event but strip the signature directly via
         // the raw store so the event is unsigned.
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         let tl = store.create_timeline("ledger").test_ok()?;
 
@@ -1197,9 +1217,12 @@ mod tests {
         let sk_text = std::fs::read_to_string(&key_path).test_ok()?;
         let pubkey = crate::test_helpers::derive_pubkey_hex(sk_text.trim());
 
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
+        let mut store = crate::bind_test_store_gate(
+            pos_store::open_store(pos_store::StoreConfig::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            })
+            .test_ok()?,
+        )
         .test_ok()?;
         let tl = store.create_timeline("ledger").test_ok()?;
         let payload = CanonicalBytes::from_vec(b"irrelevant".to_vec());
@@ -1297,7 +1320,7 @@ mod tests {
             true,
         )?
         .test_err()?;
-        assert!(wrong_role.to_string().contains("signed event"));
+        assert_host_rejection(&wrong_role);
 
         let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
         let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
