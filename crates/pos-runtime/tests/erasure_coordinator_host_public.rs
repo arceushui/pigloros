@@ -574,6 +574,20 @@ fn test_stage<T, E: std::fmt::Debug>(
     result.map_err(|error| std::io::Error::other(format!("{stage}: {error:?}")).into())
 }
 
+fn assert_recovered_fork_is_frozen(
+    host: &mut ErasureExecutionHostV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reads = test_stage("open recovered persistent read sender", host.read_sender())?;
+    assert_eq!(
+        reads.timeline(parent),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
+    Ok(())
+}
+
 fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
@@ -1259,17 +1273,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         original_authority_recovery.status(),
         ErasureHostStatusV1::Ready
     );
-    {
-        let mut reads = test_stage(
-            "open recovered persistent read sender",
-            original_authority_recovery.read_sender(),
-        )?;
-        assert_eq!(
-            reads.timeline(parent),
-            Err(ErasureHostErrorV1::AccessFrozen)
-        );
-        assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
-    }
+    assert_recovered_fork_is_frozen(&mut original_authority_recovery, parent, child)?;
     drop(original_authority_recovery);
     authority.deny_topology.store(true, Ordering::Release);
     let denied_recovery = open_read_only_with_authority(
