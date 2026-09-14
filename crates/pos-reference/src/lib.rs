@@ -180,6 +180,31 @@ pub mod selector_transport_test_fixture {
                 .chain([receipt_bytes, terminal_result_bytes])
                 .collect())
         }
+
+        pub(crate) fn request_identity_conflict_for(
+            &self,
+            execute_request_bytes: &[u8],
+        ) -> TestResult<Vec<u8>> {
+            let request =
+                crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
+                    execute_request_bytes,
+                )?;
+            sign_record(
+                "SPE1",
+                Value::Array(vec![
+                    Value::Text("SPE1".to_owned()),
+                    integer(1),
+                    integer(1),
+                    Value::Bytes(request.request.request_id.to_vec()),
+                    Value::Bytes(request.request_digest.to_vec()),
+                    Value::Bytes(request.attempt_id.to_vec()),
+                    integer(16),
+                    Value::Null,
+                    Value::Text("runtime".to_owned()),
+                ]),
+                &self.fixture.authority.runtime,
+            )
+        }
     }
 
     fn describe_response(

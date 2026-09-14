@@ -5,9 +5,11 @@
 //! both fixed listeners and final production activation to #359, so this module
 //! deliberately exposes no runtime socket by itself.
 
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rustix::net::sockopt::socket_peercred;
@@ -19,8 +21,8 @@ use crate::provider_transport::{
 };
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, ExecuteAuthority, LaunchPolicy, RequestAuthority, SandboxExecuteRequest,
-    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
-    SignedImageManifest,
+    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderError,
+    SandboxProviderErrorCode, SandboxProviderOperation, SignedImageManifest,
 };
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
@@ -80,6 +82,7 @@ impl RootSelectorComposition {
                         admitted,
                         transport,
                         peer_uid: ROOT_UID,
+                        evaluation_namespaces: EvaluationNamespaceBindings::default(),
                     },
                 })
             })
@@ -161,6 +164,33 @@ struct RootSelectorService<T = ProviderTransport> {
     admitted: AdmittedSelectorProvider,
     transport: T,
     peer_uid: u32,
+    evaluation_namespaces: EvaluationNamespaceBindings,
+}
+
+#[derive(Default)]
+struct EvaluationNamespaceBindings {
+    // Retain bindings for this composition's lifetime. #359 may release them
+    // only after its durable attempt snapshot proves every derived provider
+    // request has left retained and live state.
+    retained: Mutex<BTreeMap<[u8; 14], [u8; 32]>>,
+}
+
+impl EvaluationNamespaceBindings {
+    fn conflicts_with_retained(
+        &self,
+        request: &crate::evaluator_protocol::EvaluationRequest,
+    ) -> Result<bool, SelectorBoundaryError> {
+        let mut namespace = [0; 14];
+        namespace.copy_from_slice(&request.request_id[..14]);
+        let mut retained = self.retained.lock().map_err(selector_unavailable)?;
+        Ok(match retained.entry(namespace) {
+            Entry::Occupied(binding) => binding.get() != &request.request_digest,
+            Entry::Vacant(binding) => {
+                binding.insert(request.request_digest);
+                false
+            }
+        })
+    }
 }
 
 impl<T: ProviderExecutor> RootSelectorService<T> {
@@ -222,6 +252,12 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         else {
             return write_authority_mismatch(stream, decoded);
         };
+        // The same EVR1 legitimately derives one ID per selected case and exact
+        // retries remain provider-idempotent. Only a namespace bound to another
+        // EVR1 digest is a conflict.
+        let namespace_conflict = self
+            .evaluation_namespaces
+            .conflicts_with_retained(&decoded.request)?;
         let terminal = match self.transport.execute(
             self.admitted.provider(),
             &commitment,
@@ -232,6 +268,16 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             Ok(terminal) => terminal,
             Err(ProviderTransportError::BeforeAdmission) => {
                 return write_provider_unavailable(stream, decoded);
+            }
+            Err(ProviderTransportError::AfterAdmission { agr1_digest, .. })
+                if namespace_conflict =>
+            {
+                return write_post_admission_provider_failure(
+                    stream,
+                    decoded,
+                    agr1_digest,
+                    PostAdmissionProviderFailure::EvidenceInvalid,
+                );
             }
             Err(ProviderTransportError::AfterAdmission {
                 agr1_digest,
@@ -245,7 +291,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
                 );
             }
         };
-        write_provider_terminal(stream, decoded, &spx1, terminal)
+        write_provider_terminal(stream, decoded, &spx1, terminal, namespace_conflict)
     }
 }
 
@@ -254,7 +300,11 @@ fn write_provider_terminal(
     decoded: &DecodedSelectorRequest,
     spx1: &[u8],
     terminal: AuthenticatedProviderTerminal,
+    namespace_conflict: bool,
 ) -> Result<(), SelectorBoundaryError> {
+    if namespace_conflict {
+        return write_namespace_conflict_terminal(stream, decoded, spx1, terminal);
+    }
     match terminal {
         AuthenticatedProviderTerminal::Execution(mut execution) => {
             match prepare_authenticated_execution(decoded, spx1, &mut execution) {
@@ -269,6 +319,43 @@ fn write_provider_terminal(
         }
         AuthenticatedProviderTerminal::Error(error) => {
             write_authenticated_error(stream, decoded, spx1, &error)
+        }
+    }
+}
+
+fn write_namespace_conflict_terminal(
+    stream: &mut UnixStream,
+    decoded: &DecodedSelectorRequest,
+    spx1: &[u8],
+    terminal: AuthenticatedProviderTerminal,
+) -> Result<(), SelectorBoundaryError> {
+    match terminal {
+        AuthenticatedProviderTerminal::Error(error)
+            if SandboxProviderError::from_canonical_cbor(&error).is_ok_and(|error| {
+                error.code == SandboxProviderErrorCode::RequestIdentityConflict
+            }) =>
+        {
+            write_authenticated_error(stream, decoded, spx1, &error)
+        }
+        AuthenticatedProviderTerminal::Error(_) => write_local_error(
+            stream,
+            &SandboxLocalError {
+                phase: SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+                operation: Some(SandboxProviderOperation::Execute),
+                request_id: Some(decoded.provider_request_id),
+                attempt_id: Some(decoded.attempt_id),
+                agr1_digest: None,
+                code: SandboxLocalErrorCode::ProviderEvidenceInvalid,
+                safe_detail: None,
+            },
+        ),
+        AuthenticatedProviderTerminal::Execution(execution) => {
+            write_post_admission_provider_failure(
+                stream,
+                decoded,
+                execution.agr1_digest(),
+                PostAdmissionProviderFailure::EvidenceInvalid,
+            )
         }
     }
 }
@@ -751,26 +838,63 @@ mod tests {
         Ok(())
     }
 
-    fn serve_execution_response(
+    fn evaluate_composition_request(
+        composition: &RootSelectorComposition,
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        attempt: &crate::evaluator::CaseAttempt,
+    ) -> TestResult<(
+        crate::selector_protocol::EncodedSelectorRequest,
+        crate::selector_protocol::DecodedSelectorReply,
+    )> {
+        let encoded = encoded_request(request, attempt)?;
+        let (mut client, server) = UnixStream::pair()?;
+        write_frame(&mut client, &encoded.control)?;
+        client.write_all(&encoded.attempt_stream)?;
+        client.shutdown(std::net::Shutdown::Write)?;
+        composition.evaluate_root_connection(server)?;
+        let control = read_frame(&mut client)?;
+        let mut trailing = Vec::new();
+        client.read_to_end(&mut trailing)?;
+        if let Ok(local) = SandboxLocalError::from_canonical_cbor(&control) {
+            return Err(format!("composition returned local selector failure: {local:?}").into());
+        }
+        let reply = crate::selector_protocol::decode_reply(
+            &control,
+            &trailing,
+            &encoded,
+            request.request_digest,
+            SELECTOR_INPUT_LIMIT,
+        )?;
+        Ok((encoded, reply))
+    }
+
+    fn serve_execution_responses(
         listener: &UnixListener,
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
         epochs: [u64; 3],
     ) -> TestResult {
-        let (mut stream, _) = listener.accept()?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let spx1 = read_frame(&mut stream)?;
-        let mut input_frames = Vec::new();
-        stream.read_to_end(&mut input_frames)?;
-        if input_frames.is_empty() {
-            return Err("provider input frames missing".into());
+        for identity_conflict in [false, true] {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            let spx1 = read_frame(&mut stream)?;
+            let mut input_frames = Vec::new();
+            stream.read_to_end(&mut input_frames)?;
+            if input_frames.is_empty() {
+                return Err("provider input frames missing".into());
+            }
+            let responses = if identity_conflict {
+                vec![fixture.request_identity_conflict_for(&spx1)?]
+            } else {
+                fixture.execution_response_for(provider, &spx1, commitment, epochs)?
+            };
+            for response in responses {
+                write_frame(&mut stream, &response)?;
+            }
+            stream.shutdown(std::net::Shutdown::Write)?;
         }
-        for response in fixture.execution_response_for(provider, &spx1, commitment, epochs)? {
-            write_frame(&mut stream, &response)?;
-        }
-        stream.shutdown(std::net::Shutdown::Write)?;
         Ok(())
     }
 
@@ -789,7 +913,6 @@ mod tests {
         let _paths = FixedCompositionFixture::create()?;
         assert!(RootSelectorComposition::open().is_err());
         let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
-        let encoded = encoded_request(&request, resolved.attempt())?;
         let admitted = crate::selector::installation::tests::materialize_root_selector_state(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
         )?;
@@ -831,7 +954,7 @@ mod tests {
                 .map_err(|error| error.to_string())
         });
         let execute_provider = std::thread::spawn(move || {
-            serve_execution_response(
+            serve_execution_responses(
                 &execute_listener,
                 &execute_fixture,
                 &execute_provider_identity,
@@ -844,24 +967,7 @@ mod tests {
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
 
-        let (mut client, server) = UnixStream::pair()?;
-        write_frame(&mut client, &encoded.control)?;
-        client.write_all(&encoded.attempt_stream)?;
-        client.shutdown(std::net::Shutdown::Write)?;
-        composition.evaluate_root_connection(server)?;
-        let control = read_frame(&mut client)?;
-        let mut trailing = Vec::new();
-        client.read_to_end(&mut trailing)?;
-        if let Ok(local) = SandboxLocalError::from_canonical_cbor(&control) {
-            return Err(format!("composition returned local selector failure: {local:?}").into());
-        }
-        let reply = crate::selector_protocol::decode_reply(
-            &control,
-            &trailing,
-            &encoded,
-            request.request_digest,
-            SELECTOR_INPUT_LIMIT,
-        )?;
+        let (_, reply) = evaluate_composition_request(&composition, &request, resolved.attempt())?;
         assert_eq!(
             reply.observation,
             Ok(crate::evaluator::SubjectObservation {
@@ -870,6 +976,17 @@ mod tests {
             })
         );
         assert!(reply.provenance.is_some());
+
+        let mut conflicting_request = request.clone();
+        conflicting_request.implementation.organization_id = Some("conflicting-owner".to_owned());
+        refresh_request_digest(&mut conflicting_request)?;
+        let (_, reply) =
+            evaluate_composition_request(&composition, &conflicting_request, resolved.attempt())?;
+        assert_eq!(
+            reply.observation,
+            Err(crate::evaluator::AdapterError::ProtocolFailure)
+        );
+        assert_eq!(reply.provenance, None);
         control_provider
             .join()
             .map_err(|_| "provider control thread panicked")??;
@@ -956,6 +1073,38 @@ mod tests {
             validate_selector_input_length(usize::try_from(SELECTOR_INPUT_LIMIT)? + 1),
             Err(())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn evaluation_namespace_binding_allows_one_evaluation_and_rejects_competitors() -> TestResult {
+        let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let bindings = EvaluationNamespaceBindings::default();
+        assert!(!bindings.conflicts_with_retained(&request)?);
+        assert!(!bindings.conflicts_with_retained(&request)?);
+
+        let mut conflicting = request.clone();
+        conflicting.implementation.organization_id = Some("conflicting-owner".to_owned());
+        refresh_request_digest(&mut conflicting)?;
+        assert!(bindings.conflicts_with_retained(&conflicting)?);
+
+        let concurrent = std::sync::Arc::new(EvaluationNamespaceBindings::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads = [request, conflicting].map(|request| {
+            let bindings = std::sync::Arc::clone(&concurrent);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                bindings.conflicts_with_retained(&request)
+            })
+        });
+        let outcomes = threads
+            .into_iter()
+            .map(|thread| thread.join().map_err(|_| "namespace thread panicked"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(outcomes.iter().filter(|conflict| **conflict).count(), 1);
         Ok(())
     }
 
@@ -1110,6 +1259,7 @@ mod tests {
             admitted,
             transport,
             peer_uid: fs::metadata(".")?.uid(),
+            evaluation_namespaces: EvaluationNamespaceBindings::default(),
         };
 
         let mut without_requirement = request.clone();
@@ -1202,9 +1352,39 @@ mod tests {
                 admitted,
                 transport: FixedProviderExecutor(RefCell::new(Some(result))),
                 peer_uid: fs::metadata(".")?.uid(),
+                evaluation_namespaces: EvaluationNamespaceBindings::default(),
             };
             assert_service_error(&service, &request, resolved.attempt(), expected)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_conflict_rejects_provider_admission_as_invalid_evidence() -> TestResult {
+        let (request, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let evaluation_namespaces = EvaluationNamespaceBindings::default();
+        assert!(!evaluation_namespaces.conflicts_with_retained(&request)?);
+        let mut conflicting = request;
+        conflicting.implementation.organization_id = Some("conflicting-owner".to_owned());
+        refresh_request_digest(&mut conflicting)?;
+        let service = RootSelectorService {
+            admitted,
+            transport: FixedProviderExecutor(RefCell::new(Some(Err(
+                ProviderTransportError::AfterAdmission {
+                    agr1_digest: [94; 32],
+                    failure: PostAdmissionProviderFailure::TerminalUnavailable,
+                },
+            )))),
+            peer_uid: fs::metadata(".")?.uid(),
+            evaluation_namespaces,
+        };
+        assert_service_error(
+            &service,
+            &conflicting,
+            resolved.attempt(),
+            SandboxLocalErrorCode::ProviderEvidenceInvalid,
+        )?;
         Ok(())
     }
 
@@ -1226,6 +1406,7 @@ mod tests {
                 AuthenticatedProviderTerminal::Execution(execution),
             )))),
             peer_uid: fs::metadata(".")?.uid(),
+            evaluation_namespaces: EvaluationNamespaceBindings::default(),
         };
         assert_service_error(
             &service,
@@ -1247,6 +1428,7 @@ mod tests {
                 AuthenticatedProviderTerminal::Error(fixture.spe1),
             )))),
             peer_uid: fs::metadata(".")?.uid(),
+            evaluation_namespaces: EvaluationNamespaceBindings::default(),
         };
         let encoded = encoded_request(&request, resolved.attempt())?;
         let (mut client, server) = UnixStream::pair()?;
@@ -1274,6 +1456,7 @@ mod tests {
             admitted,
             transport: ProviderTransport::from_path_for_test(&provider_path)?,
             peer_uid: owner ^ 1,
+            evaluation_namespaces: EvaluationNamespaceBindings::default(),
         };
 
         let (client, server) = UnixStream::pair()?;
@@ -1340,6 +1523,7 @@ mod tests {
             &decoded,
             &fixture.spx1,
             AuthenticatedProviderTerminal::Execution(complete),
+            false,
         )?;
         let mut length = [0; 4];
         reply_reader.read_exact(&mut length)?;
@@ -1351,6 +1535,7 @@ mod tests {
             &decoded,
             &fixture.spx1,
             AuthenticatedProviderTerminal::Error(fixture.spe1.clone()),
+            false,
         )?;
         reply_reader.read_exact(&mut length)?;
         assert_ne!(u32::from_be_bytes(length), 0);
@@ -1393,6 +1578,64 @@ mod tests {
         let mut control = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
         client.read_exact(&mut control)?;
         assert!(!control.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_conflict_requires_the_authenticated_provider_rejection() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let required_error = fixture.request_identity_conflict_for(&fixture.spx1)?;
+        let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
+        let transport_request = SandboxExecuteRequest::from_canonical_cbor(&fixture.spx1)?;
+        let decoded = crate::selector_protocol::decoded_request_for_execute_test(
+            request,
+            resolved.attempt().clone(),
+            &transport_request,
+        );
+
+        let (mut reply_reader, mut reply_writer) = UnixStream::pair()?;
+        write_provider_terminal(
+            &mut reply_writer,
+            &decoded,
+            &fixture.spx1,
+            AuthenticatedProviderTerminal::Error(required_error),
+            true,
+        )?;
+        let mut length = [0; 4];
+        reply_reader.read_exact(&mut length)?;
+        assert_ne!(u32::from_be_bytes(length), 0);
+
+        let (mut reply_reader, mut reply_writer) = UnixStream::pair()?;
+        write_provider_terminal(
+            &mut reply_writer,
+            &decoded,
+            &fixture.spx1,
+            AuthenticatedProviderTerminal::Error(fixture.spe1.clone()),
+            true,
+        )?;
+        assert_eq!(
+            read_local_error(&mut reply_reader)?.code,
+            SandboxLocalErrorCode::ProviderEvidenceInvalid
+        );
+
+        let unexpected_execution = AuthenticatedProviderExecution::from_test_frames(
+            fixture.agr1,
+            fixture.spr1,
+            fixture.spy1,
+            fixture.sau1,
+            None,
+        );
+        let (mut reply_reader, mut reply_writer) = UnixStream::pair()?;
+        write_provider_terminal(
+            &mut reply_writer,
+            &decoded,
+            &fixture.spx1,
+            AuthenticatedProviderTerminal::Execution(unexpected_execution),
+            true,
+        )?;
+        let local = read_local_error(&mut reply_reader)?;
+        assert_eq!(local.phase, SandboxLocalErrorPhase::AfterAdmission);
+        assert_eq!(local.code, SandboxLocalErrorCode::ProviderEvidenceInvalid);
         Ok(())
     }
 
