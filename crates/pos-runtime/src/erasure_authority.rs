@@ -516,6 +516,10 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
         for category in ErasureInventoryCategoryV1::CANONICAL {
             let owner = category_owner(binding.freeze.owners, category);
             for (target_index, target) in targets.iter().copied().enumerate() {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "the validated freeze profile guarantees each derived obligation"
+                )]
                 obligations.push(
                     ErasureObligationV1::new(ErasureObligationInputV1 {
                         category,
@@ -525,6 +529,10 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
                     })
                     .expect("validated freeze profile yields a valid obligation"),
                 );
+                #[expect(
+                    clippy::expect_used,
+                    reason = "the validated freeze profile guarantees each applicability row"
+                )]
                 applicability_matrix.push(
                     ErasureFreezeApplicabilityRowV1::new(
                         category,
@@ -541,6 +549,10 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
             .iter()
             .map(ErasureObligationV1::reference)
             .collect::<Vec<_>>();
+        #[expect(
+            clippy::expect_used,
+            reason = "the validated freeze profile guarantees the complete obligation set"
+        )]
         let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
             request,
             obligations: obligation_references,
@@ -554,6 +566,10 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
             target_closure,
             lineage_rule: binding.freeze.lineage_rule,
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "the validated freeze profile guarantees the derived scope"
+        )]
         let scope_reference = pos_core::ErasureScopeCommitmentV1::new(scope.clone())
             .expect("validated freeze profile yields a valid scope")
             .reference();
