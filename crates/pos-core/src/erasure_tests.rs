@@ -8,6 +8,22 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
+#[test]
+fn canonical_inventory_lengths_use_shortest_definite_cbor_headers() {
+    let cases: &[(usize, &[u8])] = &[
+        (23, &[0x97]),
+        (24, &[0x98, 24]),
+        (256, &[0x99, 1, 0]),
+        (65_536, &[0x9a, 0, 1, 0, 0]),
+        (4_294_967_296, &[0x9b, 0, 0, 0, 1, 0, 0, 0, 0]),
+    ];
+
+    for (length, expected) in cases {
+        let (actual, actual_length) = canonical_cbor_major_length(0x80, *length);
+        assert_eq!(&actual[..actual_length], *expected);
+    }
+}
+
 enum TestStateResolver {
     Missing,
     Error(ErasureErrorV1),

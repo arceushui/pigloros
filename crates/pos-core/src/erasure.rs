@@ -3940,29 +3940,81 @@ fn erasure_inventory_generation(
     request_heads: &[(ErasureReferenceV1, ErasureReferenceV1)],
     topology: &[TimelineId],
 ) -> ErasureReferenceV1 {
-    let mut topology_hasher = blake3::Hasher::new();
-    topology_hasher.update(b"pigloros/erasure-inventory-topology/v1");
-    topology_hasher.update(
-        &u64::try_from(topology.len())
-            .unwrap_or(u64::MAX)
-            .to_be_bytes(),
-    );
+    let mut topology_hasher = erasure_inventory_hasher("pigloros/erasure-inventory-topology/v1");
+    update_canonical_definite_array_header(&mut topology_hasher, topology.len());
     for timeline in topology {
-        topology_hasher.update(&timeline.inner().to_bytes());
+        update_canonical_byte_string(&mut topology_hasher, &timeline.inner().to_bytes());
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pigloros/erasure-verified-inventory/v1");
-    hasher.update(
-        &u64::try_from(request_heads.len())
-            .unwrap_or(u64::MAX)
-            .to_be_bytes(),
-    );
+    let topology_digest = topology_hasher.finalize();
+
+    let mut hasher = erasure_inventory_hasher("pigloros/erasure-verified-inventory/v1");
+    update_canonical_definite_array_header(&mut hasher, 2);
+    update_canonical_definite_array_header(&mut hasher, request_heads.len());
     for (request, head) in request_heads {
-        hasher.update(&request.digest());
-        hasher.update(&head.digest());
+        update_canonical_definite_array_header(&mut hasher, 2);
+        update_canonical_byte_string(&mut hasher, &request.digest());
+        update_canonical_byte_string(&mut hasher, &head.digest());
     }
-    hasher.update(topology_hasher.finalize().as_bytes());
+    update_canonical_byte_string(&mut hasher, topology_digest.as_bytes());
     ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+}
+
+fn erasure_inventory_hasher(domain: &str) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
+    hasher
+}
+
+fn update_canonical_definite_array_header(hasher: &mut blake3::Hasher, length: usize) {
+    update_canonical_cbor_major_length(hasher, 0x80, length);
+}
+
+fn update_canonical_byte_string(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    update_canonical_cbor_major_length(hasher, 0x40, bytes.len());
+    hasher.update(bytes);
+}
+
+fn update_canonical_cbor_major_length(hasher: &mut blake3::Hasher, major: u8, length: usize) {
+    let (header, header_length) = canonical_cbor_major_length(major, length);
+    hasher.update(&header[..header_length]);
+}
+
+fn canonical_cbor_major_length(major: u8, length: usize) -> ([u8; 9], usize) {
+    let bytes = u64::try_from(length).unwrap_or(u64::MAX).to_be_bytes();
+    match length {
+        0..=23 => ([major | bytes[7], 0, 0, 0, 0, 0, 0, 0, 0], 1),
+        24..=255 => ([major | 24, bytes[7], 0, 0, 0, 0, 0, 0, 0], 2),
+        256..=65_535 => ([major | 25, bytes[6], bytes[7], 0, 0, 0, 0, 0, 0], 3),
+        65_536..=4_294_967_295 => (
+            [
+                major | 26,
+                bytes[4],
+                bytes[5],
+                bytes[6],
+                bytes[7],
+                0,
+                0,
+                0,
+                0,
+            ],
+            5,
+        ),
+        _ => (
+            [
+                major | 27,
+                bytes[0],
+                bytes[1],
+                bytes[2],
+                bytes[3],
+                bytes[4],
+                bytes[5],
+                bytes[6],
+                bytes[7],
+            ],
+            9,
+        ),
+    }
 }
 
 /// Adapter capability for one bounded, complete inventory read snapshot.
