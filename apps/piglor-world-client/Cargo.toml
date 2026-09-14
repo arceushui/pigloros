@@ -54,6 +54,11 @@ getrandom03 = { package = "getrandom", version = "0.3.4", default-features = fal
   "wasm_js",
 ] }
 
+[package.metadata.wasm-pack.profile.release]
+# The release package remains valid without optional wasm-opt optimization. Keeping
+# Binaryen out of the package path avoids an unpinned runtime download in CI.
+wasm-opt = false
+
 [package.metadata.cargo-shear]
 ignored = ["getrandom"]
 
