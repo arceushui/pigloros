@@ -119,9 +119,14 @@ pub mod selector_transport_test_fixture {
             )
         }
 
-        pub(crate) fn execution_response_for(&self, spx1: &[u8]) -> TestResult<Vec<Vec<u8>>> {
+        pub(crate) fn execution_response_for(
+            &self,
+            execute_request_bytes: &[u8],
+        ) -> TestResult<Vec<Vec<u8>>> {
             let request =
-                crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(spx1)?;
+                crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
+                    execute_request_bytes,
+                )?;
             let image = self.provider.admit_image(
                 &self.fixture.sim1,
                 &self.fixture.root_image,
@@ -140,14 +145,14 @@ pub mod selector_transport_test_fixture {
             let grant = AdmissionGrant::from_canonical_cbor(&agr1)?;
             let audit = audit_chain_for_events(&self.fixture, &grant, &[0])?;
             let audit_digest = wrapped_digest(audit.last().ok_or("audit chain is empty")?)?;
-            let spr1 =
+            let receipt_bytes =
                 provider_receipt_for_lifecycle(&self.fixture, &grant, audit_digest, None, None)?;
-            let receipt = SandboxProviderReceipt::from_canonical_cbor(&spr1)?;
-            let spy1 =
+            let receipt = SandboxProviderReceipt::from_canonical_cbor(&receipt_bytes)?;
+            let terminal_result_bytes =
                 terminal_result_for_outcome(&self.fixture, &request, &grant, &receipt, 4, &[0])?;
             Ok(std::iter::once(agr1)
                 .chain(audit)
-                .chain([spr1, spy1])
+                .chain([receipt_bytes, terminal_result_bytes])
                 .collect())
         }
     }

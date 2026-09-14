@@ -22,7 +22,9 @@ use crate::sandbox_provider_protocol::{
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderOperation,
     SignedImageManifest,
 };
-use crate::selector::installation::authority::AdmittedSelectorProvider;
+use crate::selector::installation::authority::{
+    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
+};
 use crate::selector::installation::{InstallationObjectKind, InstalledSelectorState};
 use crate::selector::SelectorBoundaryError;
 use crate::selector_protocol::{
@@ -71,7 +73,7 @@ impl RootSelectorComposition {
     pub fn open() -> Result<Self, SelectorBoundaryError> {
         InstalledSelectorState::open()
             .and_then(InstalledSelectorState::authenticate_bootstrap)
-            .and_then(|bootstrap| bootstrap.admit_provider())
+            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
             .and_then(|admitted| {
                 connect_fixed_provider(&admitted).map(|transport| Self {
                     service: RootSelectorService {
@@ -634,7 +636,7 @@ fn root_peer(stream: &UnixStream, expected_uid: u32) -> bool {
 mod tests {
     use std::cell::RefCell;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
     use std::path::Path;
     use std::process::Command;
