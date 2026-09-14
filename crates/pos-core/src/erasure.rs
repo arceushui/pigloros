@@ -3984,11 +3984,11 @@ fn canonical_cbor_major_length(major: u8, length: usize) -> ([u8; 9], usize) {
     let bytes = u64::try_from(length).unwrap_or(u64::MAX).to_be_bytes();
     match length {
         0..=23 => ([major | bytes[7], 0, 0, 0, 0, 0, 0, 0, 0], 1),
-        24..=255 => ([major | 24, bytes[7], 0, 0, 0, 0, 0, 0, 0], 2),
-        256..=65_535 => ([major | 25, bytes[6], bytes[7], 0, 0, 0, 0, 0, 0], 3),
+        24..=255 => ([major | 0x18, bytes[7], 0, 0, 0, 0, 0, 0, 0], 2),
+        256..=65_535 => ([major | 0x19, bytes[6], bytes[7], 0, 0, 0, 0, 0, 0], 3),
         65_536..=4_294_967_295 => (
             [
-                major | 26,
+                major | 0x1a,
                 bytes[4],
                 bytes[5],
                 bytes[6],
@@ -4002,7 +4002,7 @@ fn canonical_cbor_major_length(major: u8, length: usize) -> ([u8; 9], usize) {
         ),
         _ => (
             [
-                major | 27,
+                major | 0x1b,
                 bytes[0],
                 bytes[1],
                 bytes[2],
