@@ -1529,7 +1529,7 @@ fn assert_configured_nonempty_recovery(
     parent: TimelineId,
     child: TimelineId,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let evidence = request.provenance().digest().to_vec();
+    let evidence = freeze_transition().provenance.digest().to_vec();
     let configured_authority = test_stage(
         "construct configured recovery authority",
         configured_fork_authority(
