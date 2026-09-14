@@ -8,7 +8,6 @@ name: trunk-check
 on:
   push:
     branches: [main]
-  pull_request:
   schedule:
     - cron: 17 2 * * *
   workflow_dispatch:
@@ -36,6 +35,6 @@ jobs:
       - name: Trunk Check
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
         with:
-          # Pull requests use Trunk's diff mode; pushes to main and the daily
-          # scheduled run perform the full repository check.
-          check-mode: ${{ (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'all' || '' }}
+          # Pull-request diff checks run as the first stage of ci.yml. This
+          # workflow keeps the full repository audit on main and its schedule.
+          check-mode: all

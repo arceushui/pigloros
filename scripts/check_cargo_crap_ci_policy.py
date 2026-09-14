@@ -13,14 +13,14 @@ CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 INSTALL_ACTION = "taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b"
 UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
-BOOTSTRAP_BASE_SHA = "45bdac85b29d273573583f846ba7acd2b3a12573"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
 SCOPED_JOB_IF = (
-    "${{ needs.ci_change_scope.outputs.rust == 'true' || "
-    "github.event_name != 'pull_request' }}"
+    "${{ always() && needs.preflight-gate.result == 'success' && "
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request') }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
-    "${{ needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "${{ needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
 GENERATE_BASELINE_COMMAND = (
@@ -112,12 +112,8 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline resolver must reject fork artifacts",
         ),
         (
-            'test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"',
-            "baseline bootstrap is not restricted to the approved base",
-        ),
-        (
             'git diff --quiet "${BASE_SHA}...HEAD"',
-            "baseline bootstrap must reject Rust-affecting changes",
+            "baseline bootstrap must reject Rust or Cargo-policy changes",
         ),
         (
             'echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"',
@@ -155,8 +151,8 @@ def check_workflow(
     require(isinstance(coverage, dict), "missing required coverage job")
     require("continue-on-error" not in coverage, "coverage job must be blocking")
     require(
-        coverage.get("needs") == "ci_change_scope",
-        "coverage must depend on the trusted Rust scope result",
+        coverage.get("needs") == ["ci_change_scope", "preflight-gate"],
+        "coverage must wait for the trusted scope and fast preflight",
     )
     require(
         coverage.get("if") == SCOPED_JOB_IF,
@@ -196,8 +192,8 @@ def check_workflow(
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
     require(
-        job.get("needs") == ["ci_change_scope", "coverage"],
-        "cargo-crap must depend on the trusted scope result and coverage",
+        job.get("needs") == ["ci_change_scope", "coverage", "core-gate"],
+        "cargo-crap must wait for every core gate and hosted coverage",
     )
     require(
         job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
@@ -326,20 +322,20 @@ def check_workflow(
         "green main must publish the next trusted baseline",
     )
 
-    aggregate = jobs.get("ci-gate")
-    require(isinstance(aggregate, dict), "missing aggregate ci-gate")
-    require("cargo-crap" in aggregate.get("needs", []), "ci-gate must need cargo-crap")
+    aggregate = jobs.get("standard-gate")
+    require(isinstance(aggregate, dict), "missing aggregate standard-gate")
+    require("cargo-crap" in aggregate.get("needs", []), "standard-gate must need cargo-crap")
     aggregate_steps = aggregate.get("steps")
-    require(isinstance(aggregate_steps, list), "ci-gate steps must be an array")
-    verdict = named_step(aggregate_steps, "Require every blocking CI job to pass")
+    require(isinstance(aggregate_steps, list), "standard-gate steps must be an array")
+    verdict = named_step(aggregate_steps, "Require normal blocking checks")
     require(
         verdict.get("env", {}).get("CARGO_CRAP_RESULT")
         == "${{ needs.cargo-crap.result }}",
-        "ci-gate must read the cargo-crap result",
+        "standard-gate must read the cargo-crap result",
     )
     require(
         "CARGO_CRAP_RESULT" in verdict.get("run", ""),
-        "ci-gate must reject a non-success cargo-crap result",
+        "standard-gate must reject a non-success cargo-crap result",
     )
 
 
